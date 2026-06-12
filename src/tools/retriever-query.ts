@@ -26,7 +26,7 @@
  */
 
 import { z } from 'zod';
-import { selectRollups, type RollupBasis } from '../lib/retriever-rollups.js';
+import { selectRollups, computeSummaryRollups, type RollupBasis } from '../lib/retriever-rollups.js';
 import type { EnvConfig } from '../lib/environments.js';
 import {
   runRetrieverQuery,
@@ -137,6 +137,20 @@ interface RetrieverQuerySummary {
   filters: string[];
   format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
   events_matched: number;
+  /**
+   * Where events_matched came from:
+   *  - 'events_downloaded' — count of the (full) qr/ download.
+   *  - 'qrs_summaries_nondropped' — whole-match volume from the engine
+   *    summaries because the qr/ download was capped; EXCLUDES engine-dropped
+   *    events (the summaries aggregator filters !isDropped).
+   */
+  events_matched_basis?: 'events_downloaded' | 'qrs_summaries_nondropped';
+  /** How events_preview was selected: earliest-by-timestamp, a sampled subset (download capped), or none (count). */
+  preview_basis?: 'earliest_sorted' | 'sampled' | 'none';
+  /** True when the qr/ download was capped because summaries served the rollups. */
+  download_capped?: boolean;
+  /** Total qr/ worker files for the query (vs how many were downloaded). */
+  total_worker_files?: number;
   events_returned: number;
   worker_files: number;
   wall_time_ms: number;
@@ -423,7 +437,8 @@ export async function executeRetrieverQuery(
   const perfCaveat = d.wall_time_ms > 30000
     ? `, slow scan — consider narrowing search or window`
     : '';
-  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
+  const matchedQual = d.events_matched_basis === 'qrs_summaries_nondropped' ? ' (engine summaries, excludes dropped)' : '';
+  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched${matchedQual}, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (d.partial_results) {
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
@@ -504,6 +519,10 @@ function buildRetrieverQueryHumanSummary(s: {
   /** Scan/dispatch stats from the _DONE.json equivalent (diagnostics object). */
   diagnosticsScanned?: number;
   diagnosticsSubmittedTasks?: number;
+  /** Part A: eventsMatched came from engine summaries (excludes dropped). */
+  countFromSummaries?: boolean;
+  /** Part A: the preview/return is a sampled subset (download capped). */
+  sampledPreview?: boolean;
 }): string {
   const scope = s.pattern
     ? `pattern ${s.pattern}`
@@ -530,7 +549,13 @@ function buildRetrieverQueryHumanSummary(s: {
     const reason = s.zeroReason ? ` ${s.zeroReason}` : '';
     return `Retriever returned zero events for ${scope} over ${s.from} to ${s.to} on target ${s.target} (${s.wallTimeMs}ms).${reason} Widen the window or relax the filter before declaring the pattern absent.`;
   }
-  const first = `Retriever matched ${fmtCount(s.eventsMatched)} events for ${scope} over ${s.from} to ${s.to} on target ${s.target}; returned ${fmtCount(s.eventsReturned)} in ${s.wallTimeMs}ms.`;
+  const countQual = s.countFromSummaries
+    ? ' (from engine summaries; excludes dropped events — run an uncapped query to include the dropped cohort)'
+    : '';
+  const returnedQual = s.sampledPreview
+    ? ` ${fmtCount(s.eventsReturned)} sampled (not earliest)`
+    : `returned ${fmtCount(s.eventsReturned)}`;
+  const first = `Retriever matched ${fmtCount(s.eventsMatched)} events${countQual} for ${scope} over ${s.from} to ${s.to} on target ${s.target}; ${returnedQual} in ${s.wallTimeMs}ms.`;
   const flags: string[] = [];
   if (s.truncated) flags.push('result set was truncated at the per-worker cap');
   if (s.partialResults) flags.push('one or more workers were partial');
@@ -592,11 +617,14 @@ async function executeRetrieverQueryInner(
     logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
     // Per-slice summaries cost almost nothing to write/read and give the
     // rollups whole-match correctness (see lib/retriever-rollups.ts).
-    // NOTE: count mode deliberately KEEPS writeResults:true — on engines
-    // that write no qrs/ summaries (the demo's does not), count derives
-    // from events; writeResults:false there would return zeros. Revisit
-    // when summaries are verified present in the field.
     writeSummaries: true,
+    // Part A download cap (only engages when the engine actually wrote qrs/):
+    //  - count: pull NO qr/ events — summaries supply count + rollups.
+    //  - events/aggregated/ephemeral_series: pull only enough to fill the
+    //    returned/previewed set (limit), not the whole match.
+    // The engine always WROTE the full set; results_location carries the
+    // bulk. With no summaries the full set is downloaded regardless.
+    maxDownloadEvents: args.format === 'count' ? 0 : (args.limit ?? 10_000),
   };
 
   const resp = await runRetrieverQuery(env, req);
@@ -843,6 +871,30 @@ async function executeRetrieverQueryInner(
     const byService = sel.by_service;
     const byDay = sel.by_day;
     const rollupBasis: RollupBasis = sel.rollup_basis;
+
+    // events_matched provenance. When the qr/ download was capped (Part A),
+    // resp.execution.eventsMatched is only the downloaded subset — the true
+    // whole-match count comes from the summaries' summed volume. Stamp which.
+    // Defensive: never source the count from summaries under filters[] — the
+    // summary writer's filter behavior is unverified (the same guard
+    // selectRollups uses). With the API-layer cap also gated on !filtersActive
+    // this is belt-and-suspenders, but keeps the invariant local.
+    const filtersActiveForCount = Array.isArray(args.filters) && args.filters.length > 0;
+    const downloadWasCapped = resp.execution.downloadCapped === true;
+    const summaryTotalVolume =
+      !filtersActiveForCount && resp.summaries && resp.summaries.length > 0
+        ? computeSummaryRollups(resp.summaries).total_volume
+        : 0;
+    const eventsMatched =
+      downloadWasCapped && summaryTotalVolume > 0
+        ? summaryTotalVolume
+        : resp.execution.eventsMatched;
+    // Non-dropped caveat: summary volume excludes engine-dropped events,
+    // while a full qr/ download includes them — disclose the basis.
+    const eventsMatchedBasis: 'qrs_summaries_nondropped' | 'events_downloaded' =
+      downloadWasCapped && summaryTotalVolume > 0 ? 'qrs_summaries_nondropped' : 'events_downloaded';
+    const previewBasis: 'earliest_sorted' | 'sampled' | 'none' =
+      args.format === 'count' ? 'none' : downloadWasCapped ? 'sampled' : 'earliest_sorted';
     // When the caller asked for `count`, they wanted aggregates, not bodies.
     // Returning events_preview from a count call ships event payloads the
     // caller didn't ask for (bandwidth waste, and confusing in the envelope
@@ -867,7 +919,7 @@ async function executeRetrieverQueryInner(
       ? Object.values(offloadByHash).filter((s) => s.is_offloaded).length
       : 0;
     const human_summary = buildRetrieverQueryHumanSummary({
-      eventsMatched: resp.execution.eventsMatched,
+      eventsMatched,
       eventsReturned: resp.events.length,
       from: args.from,
       to: args.to,
@@ -878,7 +930,11 @@ async function executeRetrieverQueryInner(
       search: effectiveSearch,
       wallTimeMs: resp.execution.wallTimeMs,
       offloadedHashCount,
-      zeroReason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      countFromSummaries: eventsMatchedBasis === 'qrs_summaries_nondropped',
+      sampledPreview: previewBasis === 'sampled',
+      // Zero-reason only when the WHOLE-MATCH count (not the skipped download)
+      // is zero — a capped count with 167 matched is not "no signal".
+      zeroReason: eventsMatched === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
       queryId: resp.queryId,
       diagnosticsScanned: resp.diagnostics?.scanStats?.scanned,
       diagnosticsSubmittedTasks: (resp.diagnostics?.streamDispatch?.requests !== undefined)
@@ -886,7 +942,7 @@ async function executeRetrieverQueryInner(
         : undefined,
     });
     sumOut.data = {
-      status: resp.events.length === 0 ? 'no_signal' : 'success',
+      status: eventsMatched === 0 ? 'no_signal' : 'success',
       human_summary,
       query_id: resp.queryId,
       target: resp.target,
@@ -896,14 +952,17 @@ async function executeRetrieverQueryInner(
       pattern: args.pattern,
       filters: args.filters ?? [],
       format: args.format ?? 'events',
-      events_matched: resp.execution.eventsMatched,
+      events_matched: eventsMatched,
+      events_matched_basis: eventsMatchedBasis,
+      preview_basis: previewBasis,
+      ...(downloadWasCapped ? { download_capped: true, total_worker_files: resp.execution.totalWorkerFiles } : {}),
       events_returned: resp.events.length,
       worker_files: resp.execution.workerFiles,
       wall_time_ms: resp.execution.wallTimeMs,
       truncated: !!resp.execution.truncated,
       partial_results: partialResults,
       results_location: resultsLoc,
-      diagnostics_zero_reason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      diagnostics_zero_reason: eventsMatched === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
       rollup_basis: rollupBasis,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
       by_service: Object.keys(byService).length > 0 ? byService : undefined,

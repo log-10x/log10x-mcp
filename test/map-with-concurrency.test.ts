@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mapWithConcurrency } from '../src/lib/retriever-api.js';
+import { mapWithConcurrency, downloadEventsUntilBudget } from '../src/lib/retriever-api.js';
 
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -68,4 +68,37 @@ test('empty input returns empty array without spawning workers', async () => {
   });
   assert.deepEqual(out, []);
   assert.equal(calls, 0);
+});
+
+// ── downloadEventsUntilBudget (Part A download cap) ──
+
+test('budget cap: stops after budget reached, reports stoppedEarly', async () => {
+  // 5 files, 2 events each; budget 5 -> stops after 3 files (6 >= 5).
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  const fetched: string[] = [];
+  const r = await downloadEventsUntilBudget(keys, 5, 2, async (k) => {
+    fetched.push(k);
+    return [{ text: k + '1' } as any, { text: k + '2' } as any];
+  });
+  assert.equal(r.events.length >= 5, true);
+  assert.equal(r.stoppedEarly, true);
+  assert.ok(fetched.length < keys.length, `pulled ${fetched.length} of ${keys.length}, should stop early`);
+});
+
+test('budget cap: small match fits, no early stop', async () => {
+  const keys = ['a', 'b'];
+  const r = await downloadEventsUntilBudget(keys, 100, 8, async () => [{ text: 'x' } as any]);
+  assert.equal(r.events.length, 2);
+  assert.equal(r.stoppedEarly, false);
+  assert.equal(r.filesDownloaded, 2);
+});
+
+test('budget cap: failed files counted, do not abort', async () => {
+  const keys = ['a', 'b', 'c'];
+  const r = await downloadEventsUntilBudget(keys, 100, 8, async (k) => {
+    if (k === 'b') throw new Error('boom');
+    return [{ text: k } as any];
+  });
+  assert.equal(r.failures, 1);
+  assert.equal(r.events.length, 2);
 });

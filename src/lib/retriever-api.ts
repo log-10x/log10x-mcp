@@ -115,6 +115,18 @@ export interface RetrieverQueryRequest {
    * record.
    */
   writeSummaries?: boolean;
+  /**
+   * Caps the per-worker qr/ event DOWNLOAD (not the engine write — the engine
+   * always writes the full set; results_location carries it). Only takes
+   * effect when qrs/ summaries are present (they supply the whole-match count
+   * + rollups, so the client doesn't need the bulk):
+   *   - 0          → download NO qr/ events (count/aggregate served by summaries)
+   *   - N (> 0)    → download worker files until ~N events accumulate, then stop
+   *   - undefined  → download everything (legacy)
+   * With NO summaries the full set is always downloaded regardless, so the
+   * true count + rollups are never lost.
+   */
+  maxDownloadEvents?: number;
 }
 
 /**
@@ -340,6 +352,10 @@ export interface RetrieverQueryResponse {
      * partial caveat; the full set is still intact in S3.
      */
     failedWorkerFiles?: number;
+    /** True when the qr/ download was capped (summaries served the rollups). */
+    downloadCapped?: boolean;
+    /** Total qr/ worker files that exist for this query (vs downloaded). */
+    totalWorkerFiles?: number;
     /** Per-slice summary record count when summaries were requested. */
     summariesMatched?: number;
     /** Distinct slice subdirs observed. */
@@ -999,6 +1015,38 @@ export async function mapWithConcurrencySettled<T, R>(
 }
 
 /**
+ * Download per-worker JSONL in concurrency-bounded BATCHES, stopping once
+ * `budget` events have accumulated. Order-preserving over the files actually
+ * pulled. Used to cap the qr/ download to a preview-sized sample when qrs/
+ * summaries already supply the whole-match count + rollups, so a huge match
+ * never materializes client-side.
+ */
+export async function downloadEventsUntilBudget(
+  keys: readonly string[],
+  budget: number,
+  concurrency: number,
+  fetchParse: (key: string) => Promise<RetrieverEvent[]>,
+): Promise<{ events: RetrieverEvent[]; failures: number; filesDownloaded: number; stoppedEarly: boolean }> {
+  const events: RetrieverEvent[] = [];
+  let failures = 0;
+  let filesDownloaded = 0;
+  let i = 0;
+  while (i < keys.length && events.length < budget) {
+    const batch = keys.slice(i, i + concurrency);
+    i += batch.length;
+    const dl = await mapWithConcurrencySettled(batch, concurrency, fetchParse);
+    failures += dl.failures.length;
+    for (const chunk of dl.results) {
+      if (chunk) {
+        events.push(...chunk);
+        filesDownloaded++;
+      }
+    }
+  }
+  return { events, failures, filesDownloaded, stoppedEarly: i < keys.length };
+}
+
+/**
  * s3Get with bounded retry. S3 503 SlowDown / transient network errors on a
  * hot prefix are retryable; two backed-off retries clear the vast majority.
  */
@@ -1412,19 +1460,43 @@ export async function runRetrieverQuery(
     }
   }
 
-  // Download the per-worker JSONL results concurrently (bounded pool) with
-  // per-file retry; a file that still fails after retries degrades the fetch
-  // to partial (failedWorkerFiles > 0) instead of losing the whole query.
-  // Order-preserving + flattened, so the downstream sort + cap matches the
-  // old serial loop.
+  // Part A: cap the qr/ DOWNLOAD when qrs/ summaries can serve the rollups +
+  // count, so a huge match never materializes client-side. The engine still
+  // wrote the full set (results_location carries it); we just stop pulling it.
+  // Gate on a cheap qrs/ presence probe — with NO summaries we always download
+  // everything so the true count + rollups are never lost.
+  const maxDl = req.maxDownloadEvents;
+  // The download cap is only safe to engage when summaries can serve the
+  // rollups + count — which the rollup honesty rule forbids under filters[]
+  // (the engine summary writer's filter behavior is unverified). So under
+  // filters we keep the full download; the gate uses the SAME guard the
+  // tool's selectRollups uses, or the two disagree.
+  const filtersActive = Array.isArray(req.filters) && req.filters.length > 0;
+  let summariesPresent = false;
+  if (writeSummaries && !filtersActive && (maxDl === 0 || (typeof maxDl === 'number' && maxDl > 0))) {
+    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${target}/qrs/${queryId}/`);
+    summariesPresent = qrsProbe.some((o) => o.Key.endsWith('.jsonl'));
+  }
+
   const events: RetrieverEvent[] = [];
-  const eventDl = await mapWithConcurrencySettled(
-    jsonlKeys,
-    RETRIEVER_DOWNLOAD_CONCURRENCY,
-    async (key) => parseJsonl(await s3GetWithRetry(bucket, key)),
-  );
-  const failedWorkerFiles = eventDl.failures.length;
-  for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
+  let failedWorkerFiles = 0;
+  let downloadCapped = false;
+  const fetchParse = async (key: string) => parseJsonl(await s3GetWithRetry(bucket, key));
+  if (summariesPresent && maxDl === 0) {
+    // Count / aggregate served entirely by summaries — pull NO qr/ events.
+    downloadCapped = jsonlKeys.length > 0;
+  } else if (summariesPresent && typeof maxDl === 'number' && maxDl > 0) {
+    // Events format: pull only enough worker files to fill the return/preview.
+    const dl = await downloadEventsUntilBudget(jsonlKeys, maxDl, RETRIEVER_DOWNLOAD_CONCURRENCY, fetchParse);
+    for (const ev of dl.events) events.push(ev);
+    failedWorkerFiles = dl.failures;
+    downloadCapped = dl.stoppedEarly;
+  } else {
+    // Legacy / no-summaries path: full download (true count + rollups from events).
+    const eventDl = await mapWithConcurrencySettled(jsonlKeys, RETRIEVER_DOWNLOAD_CONCURRENCY, fetchParse);
+    failedWorkerFiles = eventDl.failures.length;
+    for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
+  }
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -1544,8 +1616,10 @@ export async function runRetrieverQuery(
       wallTimeMs,
       eventsMatched: events.length,
       workerFiles: jsonlKeys.length,
+      totalWorkerFiles: jsonlKeys.length,
       truncated,
       ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}),
+      ...(downloadCapped ? { downloadCapped: true } : {}),
       ...(summaries ? { summariesMatched: summaries.length, slicesObserved } : {}),
     },
     events: finalEvents,
