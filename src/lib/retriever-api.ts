@@ -127,6 +127,8 @@ export interface ExistingResultsResponse {
   truncated: boolean;
   /** Number of `.jsonl` worker files read. */
   jsonlObjectCount: number;
+  /** Worker files that failed to download after retries (events incomplete). */
+  failedWorkerFiles?: number;
   /** True when the `_DONE.json` marker exists. False when the query is mid-flight. */
   done: boolean;
   /** Resolved target prefix the result paths used. */
@@ -204,17 +206,19 @@ export async function fetchExistingResults(
     }
   }
 
-  // Download the per-worker JSONL results concurrently (bounded pool) instead
-  // of one-at-a-time. Order-preserving + flattened, so the downstream sort +
-  // cap is byte-identical to the old serial loop — just faster when the query
-  // fanned out across many workers.
+  // Download the per-worker JSONL results concurrently (bounded pool) with
+  // per-file retry; a file that still fails after retries degrades the fetch
+  // to partial (failedWorkerFiles > 0) instead of losing the whole query.
+  // Order-preserving + flattened, so the downstream sort + cap matches the
+  // old serial loop.
   const events: RetrieverEvent[] = [];
-  const eventChunks = await mapWithConcurrency(
+  const eventDl = await mapWithConcurrencySettled(
     jsonlKeys,
     RETRIEVER_DOWNLOAD_CONCURRENCY,
-    async (key) => parseJsonl(await s3Get(bucket, key)),
+    async (key) => parseJsonl(await s3GetWithRetry(bucket, key)),
   );
-  for (const chunk of eventChunks) events.push(...chunk);
+  const failedWorkerFiles = eventDl.failures.length;
+  for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -233,7 +237,7 @@ export async function fetchExistingResults(
     }
   }
 
-  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target };
+  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
 }
 
 /**
@@ -330,6 +334,12 @@ export interface RetrieverQueryResponse {
     eventsMatched: number;
     workerFiles: number;
     truncated: boolean;
+    /**
+     * Worker JSONL files that failed to download after retries. > 0 means
+     * the event set (and event-derived rollups) are INCOMPLETE — surface a
+     * partial caveat; the full set is still intact in S3.
+     */
+    failedWorkerFiles?: number;
     /** Per-slice summary record count when summaries were requested. */
     summariesMatched?: number;
     /** Distinct slice subdirs observed. */
@@ -873,6 +883,11 @@ interface S3ListEntry {
   Size: number;
 }
 
+// NOTE on pagination: `aws s3api list-objects-v2` AUTO-PAGINATES by default —
+// the CLI follows NextContinuationToken internally and merges all pages into
+// one Contents array (verified live: 54,597 keys returned on a single call vs
+// 1,000 with --no-paginate). Do NOT add manual token loops here. The real
+// ceiling is maxBuffer: ~150 bytes/key JSON means 32 MB covers ~200k keys.
 async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
   try {
     const { stdout } = await execFileP('aws', [
@@ -947,6 +962,57 @@ export async function mapWithConcurrency<T, R>(
   const pool = Math.max(1, Math.min(concurrency, items.length));
   await Promise.all(Array.from({ length: pool }, () => worker()));
   return results;
+}
+
+/**
+ * Like mapWithConcurrency but per-item failures do NOT abort the run:
+ * failed slots return undefined and are reported in `failures`. Used by the
+ * result-download paths so one persistently-failing worker file (e.g. S3
+ * 503 SlowDown that outlives retries) degrades the fetch to partial instead
+ * of losing the whole query.
+ */
+export async function mapWithConcurrencySettled<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<{ results: Array<R | undefined>; failures: Array<{ index: number; error: Error }> }> {
+  // fill() makes failed slots EXPLICIT undefined (not array holes) so
+  // consumers can rely on results.length === items.length with in-band
+  // undefined markers.
+  const results = new Array<R | undefined>(items.length).fill(undefined);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        failures.push({ index: i, error: e instanceof Error ? e : new Error(String(e)) });
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return { results, failures };
+}
+
+/**
+ * s3Get with bounded retry. S3 503 SlowDown / transient network errors on a
+ * hot prefix are retryable; two backed-off retries clear the vast majority.
+ */
+async function s3GetWithRetry(bucket: string, key: string, attempts = 3): Promise<string> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await s3Get(bucket, key);
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1) * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 /** Bounded concurrency for the per-worker S3 result downloads. */
@@ -1223,12 +1289,18 @@ export async function runRetrieverQuery(
   const writeResults = req.writeResults ?? true;
   const writeSummaries = req.writeSummaries ?? false;
 
+  // `pattern` is deprecated on this request shape, but direct callers
+  // (investigate stage-1) still pass it without `search` — and the old body
+  // builder silently dropped it, scanning UNFILTERED. Translate it here so
+  // the API layer can never silently widen a scoped query.
+  const effectiveSearch = req.search || (req.pattern ? buildPatternSearch(req.pattern) : '');
+
   const body: Record<string, unknown> = {
     id: queryId,
     name: req.name || `mcp-${queryId.slice(0, 8)}`,
     from: normalizeTimeExpression(req.from),
     to: normalizeTimeExpression(req.to || 'now'),
-    search: req.search || '',
+    search: effectiveSearch,
     filters: req.filters || [],
     ...(req.logLevels ? { logLevels: req.logLevels } : {}),
     writeResults,
@@ -1340,17 +1412,19 @@ export async function runRetrieverQuery(
     }
   }
 
-  // Download the per-worker JSONL results concurrently (bounded pool) instead
-  // of one-at-a-time. Order-preserving + flattened, so the downstream sort +
-  // cap is byte-identical to the old serial loop — just faster when the query
-  // fanned out across many workers.
+  // Download the per-worker JSONL results concurrently (bounded pool) with
+  // per-file retry; a file that still fails after retries degrades the fetch
+  // to partial (failedWorkerFiles > 0) instead of losing the whole query.
+  // Order-preserving + flattened, so the downstream sort + cap matches the
+  // old serial loop.
   const events: RetrieverEvent[] = [];
-  const eventChunks = await mapWithConcurrency(
+  const eventDl = await mapWithConcurrencySettled(
     jsonlKeys,
     RETRIEVER_DOWNLOAD_CONCURRENCY,
-    async (key) => parseJsonl(await s3Get(bucket, key)),
+    async (key) => parseJsonl(await s3GetWithRetry(bucket, key)),
   );
-  for (const chunk of eventChunks) events.push(...chunk);
+  const failedWorkerFiles = eventDl.failures.length;
+  for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -1372,10 +1446,13 @@ export async function runRetrieverQuery(
       .filter((obj) => obj.Key.endsWith('.jsonl'))
       .map((obj) => ({ obj, seg: parseSliceSegment(obj.Key, summariesPrefix) }))
       .filter((x): x is { obj: S3ListEntry; seg: NonNullable<typeof x.seg> } => x.seg !== null);
-    const summaryContents = await mapWithConcurrency(
+    const summaryDl = await mapWithConcurrencySettled(
       summaryFiles,
       RETRIEVER_DOWNLOAD_CONCURRENCY,
-      async ({ obj, seg }) => ({ seg, content: await s3Get(bucket, obj.Key) }),
+      async ({ obj, seg }) => ({ seg, content: await s3GetWithRetry(bucket, obj.Key) }),
+    );
+    const summaryContents = summaryDl.results.filter(
+      (x): x is { seg: { fromMs: number; toMs: number }; content: string } => x !== undefined,
     );
     for (const { seg: sliceSegment, content } of summaryContents) {
       distinctSlices.add(`${sliceSegment.fromMs}_${sliceSegment.toMs}`);
@@ -1468,6 +1545,7 @@ export async function runRetrieverQuery(
       eventsMatched: events.length,
       workerFiles: jsonlKeys.length,
       truncated,
+      ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}),
       ...(summaries ? { summariesMatched: summaries.length, slicesObserved } : {}),
     },
     events: finalEvents,

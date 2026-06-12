@@ -1198,7 +1198,11 @@ async function executeInvestigateInner(
           bucketSize: '1d',
           limit: 10_000,
         },
-        { timeoutMs: 30_000 }
+        // Measured cold floor on a Lambda-mode retriever is ~100s (worker
+        // cold-start dominates; window size barely matters). 30s guaranteed
+        // a silent catch -> retrieverFallback='unavailable' on every cold
+        // call — stage 1 was a production no-op. 150s covers cold + headroom.
+        { timeoutMs: 150_000 }
       );
       retrieverFallback = 'stage_1_only';
       // When Stage 1 reveals enough buckets with sustained movement, Stage 2

@@ -26,6 +26,7 @@
  */
 
 import { z } from 'zod';
+import { selectRollups, type RollupBasis } from '../lib/retriever-rollups.js';
 import type { EnvConfig } from '../lib/environments.js';
 import {
   runRetrieverQuery,
@@ -150,6 +151,15 @@ interface RetrieverQuerySummary {
    */
   results_location?: { bucket: string; prefix: string; uri: string };
   diagnostics_zero_reason?: string;
+  /**
+   * Where by_severity/by_service/by_day came from:
+   *  - 'qrs_summaries' — engine per-slice summaries; WHOLE-match counts.
+   *  - 'events_capped' — derived from the downloaded events (capped at
+   *    `limit`); for >limit matches these undercount.
+   *  - 'mixed' — summaries served some dimensions, events the rest
+   *    (deployment's enrichmentFields lack severity or service).
+   */
+  rollup_basis?: 'qrs_summaries' | 'events_capped' | 'mixed';
   by_severity?: Record<string, number>;
   by_service?: Record<string, number>;
   by_day?: Record<string, number>;
@@ -461,6 +471,7 @@ export async function executeRetrieverQuery(
       source_disclosure: {
         retriever_state_source: retrieverStateSource,
         transport: d.transport ?? 'http',
+        ...(d.rollup_basis ? { rollup_basis: d.rollup_basis } : {}),
         ...(d.sqs_latency_ms !== undefined ? { sqs_latency_ms: d.sqs_latency_ms } : {}),
       },
     },
@@ -579,6 +590,13 @@ async function executeRetrieverQueryInner(
     target: args.target,
     limit: args.limit,
     logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
+    // Per-slice summaries cost almost nothing to write/read and give the
+    // rollups whole-match correctness (see lib/retriever-rollups.ts).
+    // NOTE: count mode deliberately KEEPS writeResults:true — on engines
+    // that write no qrs/ summaries (the demo's does not), count derives
+    // from events; writeResults:false there would return zeros. Revisit
+    // when summaries are verified present in the field.
+    writeSummaries: true,
   };
 
   const resp = await runRetrieverQuery(env, req);
@@ -755,11 +773,14 @@ async function executeRetrieverQueryInner(
   // Structured NEXT_ACTIONS for autonomous chains.
   const nextActions: NextAction[] = [];
   const partialDiag = (resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
-  if (partialDiag) {
+  const failedDl = resp.execution.failedWorkerFiles ?? 0;
+  if (partialDiag || failedDl > 0) {
     nextActions.push({
       tool: 'log10x_retriever_query_status',
-      args: { queryId: resp.queryId, fetch_results: true, target: resp.target },
-      reason: 'partialResults: recover stranded events from S3 without resubmitting',
+      args: { query_id: resp.queryId, fetch_results: true, target: resp.target },
+      reason: failedDl > 0
+        ? `${failedDl} worker file(s) failed download after retries — re-fetch from S3 without resubmitting (the full set is intact there)`
+        : 'partialResults: recover stranded events from S3 without resubmitting',
     });
   }
   // Zero-events + dispatcher-failure fingerprint: surface retriever_query_status drill-in.
@@ -791,23 +812,37 @@ async function executeRetrieverQueryInner(
   if (block) lines.push('', block);
 
   if (sumOut) {
-    const bySeverity: Record<string, number> = {};
-    const byService: Record<string, number> = {};
-    const byDay: Record<string, number> = {};
+    // Event-derived rollups see only the capped download; summaries see the
+    // WHOLE match. Prefer summaries per-dimension when available, with two
+    // honesty guards: never under filters[] (whether the engine's summary
+    // writer applies filters is unverified — overcount risk), and never for
+    // a dimension the deployment's enrichmentFields don't cover.
+    const evSeverity: Record<string, number> = {};
+    const evService: Record<string, number> = {};
+    const evDay: Record<string, number> = {};
     for (const ev of resp.events) {
       const sev = (ev.severity_level as string) || 'unknown';
-      bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
+      evSeverity[sev] = (evSeverity[sev] ?? 0) + 1;
       const svc = (ev.tenx_user_service as string) || 'unknown';
-      byService[svc] = (byService[svc] ?? 0) + 1;
+      evService[svc] = (evService[svc] ?? 0) + 1;
       const ts = ev.timestamp;
       if (ts) {
         const d = new Date(typeof ts === 'number' ? ts : String(ts));
         if (!isNaN(d.getTime())) {
           const day = d.toISOString().slice(0, 10);
-          byDay[day] = (byDay[day] ?? 0) + 1;
+          evDay[day] = (evDay[day] ?? 0) + 1;
         }
       }
     }
+    const sel = selectRollups({
+      eventDerived: { by_severity: evSeverity, by_service: evService, by_day: evDay },
+      summaries: resp.summaries,
+      filtersActive: Array.isArray(args.filters) && args.filters.length > 0,
+    });
+    const bySeverity = sel.by_severity;
+    const byService = sel.by_service;
+    const byDay = sel.by_day;
+    const rollupBasis: RollupBasis = sel.rollup_basis;
     // When the caller asked for `count`, they wanted aggregates, not bodies.
     // Returning events_preview from a count call ships event payloads the
     // caller didn't ask for (bandwidth waste, and confusing in the envelope
@@ -821,7 +856,13 @@ async function executeRetrieverQueryInner(
           service: ev.tenx_user_service as string | undefined,
           text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
         }));
-    const partialResults = !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults;
+    // Worker files that failed download after retries make the event set
+    // (and event-derived rollups) incomplete — same agent-facing semantics
+    // as engine-side partial workers, so fold into the partial flag.
+    const failedDownloads = resp.execution.failedWorkerFiles ?? 0;
+    const partialResults =
+      !!(resp.diagnostics as RetrieverQueryDiagnostics & { partialResults?: boolean })?.partialResults ||
+      failedDownloads > 0;
     const offloadedHashCount = offloadByHash
       ? Object.values(offloadByHash).filter((s) => s.is_offloaded).length
       : 0;
@@ -863,6 +904,7 @@ async function executeRetrieverQueryInner(
       partial_results: partialResults,
       results_location: resultsLoc,
       diagnostics_zero_reason: resp.events.length === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      rollup_basis: rollupBasis,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
       by_service: Object.keys(byService).length > 0 ? byService : undefined,
       by_day: Object.keys(byDay).length > 0 ? byDay : undefined,
