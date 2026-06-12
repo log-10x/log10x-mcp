@@ -49,6 +49,25 @@ export type RollupBasis = 'qrs_summaries' | 'events_capped' | 'mixed';
  * sums `summaryVolume`. (Distinct from retriever-series' single-group_by
  * aggregation — this produces the three flat maps the query envelope needs.)
  */
+/**
+ * Normalize a qrs/ summary dimension value to a single bucket key. The engine
+ * emits these fields as arrays (multi-value groups are possible); take the
+ * first non-empty element. Empty array / empty string / absent value all map
+ * to 'unknown' — matching the event-derived rollups' `|| 'unknown'` convention.
+ */
+function normalizeDim(v: unknown): string {
+  if (Array.isArray(v)) {
+    for (const el of v) {
+      if (typeof el === 'string' && el.length > 0) return el;
+      if (typeof el === 'number') return String(el);
+    }
+    return 'unknown';
+  }
+  if (typeof v === 'string' && v.length > 0) return v;
+  if (typeof v === 'number') return String(v);
+  return 'unknown';
+}
+
 export function computeSummaryRollups(summaries: readonly RetrieverSummary[]): SummaryRollups {
   const by_severity: Record<string, number> = {};
   const by_service: Record<string, number> = {};
@@ -65,18 +84,22 @@ export function computeSummaryRollups(summaries: readonly RetrieverSummary[]): S
     total_bytes += Number.isFinite(row.summaryBytes) ? row.summaryBytes : 0;
 
     const rec = row as unknown as Record<string, unknown>;
-    const sev = rec['severity_level'];
-    if (typeof sev === 'string' && sev.length > 0) {
+    // The engine emits enrichment dimensions as ARRAYS in the qrs/ rows
+    // (e.g. severity_level:["DEBUG"], tenx_user_service:[]) — verified live
+    // on the otel-demo. Coverage = the deployment REGISTERED the dimension
+    // (the key is present on the row), independent of whether this group's
+    // value is empty; an empty value buckets as 'unknown', exactly as the
+    // event-derived path does, so the two bases stay consistent.
+    if ('severity_level' in rec) {
       sawSeverity = true;
+      const sev = normalizeDim(rec['severity_level']);
       by_severity[sev] = (by_severity[sev] ?? 0) + vol;
     } else {
-      // Field-absent rows bucket as 'unknown' so the map sums to
-      // total_volume, matching the event-path convention.
       by_severity['unknown'] = (by_severity['unknown'] ?? 0) + vol;
     }
-    const svc = rec['tenx_user_service'];
-    if (typeof svc === 'string' && svc.length > 0) {
+    if ('tenx_user_service' in rec) {
       sawService = true;
+      const svc = normalizeDim(rec['tenx_user_service']);
       by_service[svc] = (by_service[svc] ?? 0) + vol;
     } else {
       by_service['unknown'] = (by_service['unknown'] ?? 0) + vol;

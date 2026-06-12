@@ -163,3 +163,29 @@ test('unknown bucket: field-absent rows keep maps summing to total_volume', () =
   const sum = Object.values(r.by_severity).reduce((a, b) => a + b, 0);
   assert.equal(sum, r.total_volume);
 });
+
+test('array-valued engine fields (the real qrs/ shape) bucket by first element', () => {
+  // Exactly the shape the otel-demo engine emits: severity_level:["DEBUG"],
+  // tenx_user_service:[] (empty), keys always present.
+  const r = computeSummaryRollups([
+    row({ summaryVolume: 27, severity_level: ['DEBUG'], tenx_user_service: [] }),
+    row({ summaryVolume: 33, severity_level: [], tenx_user_service: [] }),
+    row({ summaryVolume: 5, severity_level: ['ERROR'], tenx_user_service: ['payment'] }),
+  ]);
+  assert.equal(r.coverage.severity, true);  // key present => served
+  assert.equal(r.coverage.service, true);
+  assert.deepEqual(r.by_severity, { DEBUG: 27, unknown: 33, ERROR: 5 });
+  assert.deepEqual(r.by_service, { unknown: 60, payment: 5 });
+  const sevSum = Object.values(r.by_severity).reduce((a, b) => a + b, 0);
+  assert.equal(sevSum, r.total_volume); // 65
+});
+
+test('array dims drive selectRollups to qrs_summaries when keys present', () => {
+  const sel = selectRollups({
+    eventDerived: EV,
+    summaries: [row({ summaryVolume: 10, severity_level: ['WARN'], tenx_user_service: ['cart'] })],
+    filtersActive: false,
+  });
+  assert.equal(sel.rollup_basis, 'qrs_summaries');
+  assert.deepEqual(sel.by_severity, { WARN: 10 });
+});
