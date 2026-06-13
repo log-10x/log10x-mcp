@@ -87,19 +87,56 @@ function buildSelector(
 }
 
 /**
- * Map the user-facing `include` enum to a single `routeState`
- * filter-value (or null for the pre-decision union).
+ * Engine route-state action names. Mirrors `Action` in lib/cost.ts but is
+ * declared locally so promql.ts stays dependency-free of the cost layer.
+ * Per the per-service action-routing feature the receiver now stamps
+ * `routeState="<action>"` (drop | offload | tier_down | compact | sample |
+ * pass) instead of only `drop`/`pass`.
+ */
+export type RouteStateAction =
+  | 'pass'
+  | 'sample'
+  | 'compact'
+  | 'tier_down'
+  | 'offload'
+  | 'drop';
+
+/**
+ * The cohort a caller wants to scope to. The three legacy tokens keep their
+ * exact original semantics; any single `RouteStateAction` selects that
+ * action's stamped cohort directly.
  *
  * `kept`    → `routeState!="drop"` (absence-tolerant; matches series with
  *             no `routeState` label AND any non-drop route state).
- * `dropped` → `routeState="drop"` (exact).
+ * `dropped` → `routeState="drop"` (exact). Alias of passing `'drop'`.
  * `both`    → no selector; caller runs a dual query to recover the
  *             dropped slice for the `dropped_*` envelope fields.
+ * `<action>`→ `routeState="<action>"` (exact) for any other action name, so
+ *             a caller can scope to e.g. the `offload` or `tier_down` cohort.
+ */
+export type IncludeCohort = 'kept' | 'dropped' | 'both' | RouteStateAction;
+
+const ROUTE_STATE_ACTIONS: ReadonlySet<string> = new Set<RouteStateAction>([
+  'pass',
+  'sample',
+  'compact',
+  'tier_down',
+  'offload',
+  'drop',
+]);
+
+/**
+ * Map the user-facing cohort selector to a single `routeState`
+ * filter-value (or null for the pre-decision union).
+ *
+ * Back-compat: `kept` / `dropped` / `both` behave EXACTLY as before. The
+ * generalization is that any other single action name yields an exact
+ * `routeState="<action>"` selector (run alone, no dual query).
  *
  * `runBoth` tells the executor whether to issue the second
- * `routeState="drop"` query in parallel.
+ * `routeState="drop"` query in parallel (only `both` does).
  */
-export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
+export function includeToSelector(include: IncludeCohort): {
   droppedFilter: FilterValue | null;
   runBoth: boolean;
 } {
@@ -107,6 +144,14 @@ export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
     return { droppedFilter: { op: '!=', val: 'drop' }, runBoth: false };
   if (include === 'dropped')
     return { droppedFilter: { op: '=', val: 'drop' }, runBoth: false };
+  if (include === 'both') return { droppedFilter: null, runBoth: true };
+  // Any other action name → that action's exact cohort. `drop` already
+  // returned above via the `dropped` alias path is unreachable here, but the
+  // exact `=` form below is identical for it anyway.
+  if (ROUTE_STATE_ACTIONS.has(include))
+    return { droppedFilter: { op: '=', val: include }, runBoth: false };
+  // Unknown token: fall back to the historical `both` union (no selector,
+  // dual query) so a stray value never silently filters everything out.
   return { droppedFilter: null, runBoth: true };
 }
 

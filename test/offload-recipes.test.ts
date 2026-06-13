@@ -43,19 +43,62 @@ test('no recipe uses the legacy boolean form (engine writes the string "drop")',
   }
 });
 
-test('each forwarder matches routeState in its native string form', () => {
+test('each forwarder matches routeState in its native string form (offload action)', () => {
+  // The engine now stamps a per-service action name; each forwarder routes the
+  // `offload` slice to S3 via a string match on that name.
   const expected: Record<OffloadForwarderId, RegExp> = {
-    vector: /\.routeState == "drop"/,
-    fluentd: /key routeState[\s\S]*pattern \/\^drop\$\//,
-    'fluent-bit': /rec\["routeState"\]=="drop"/,
-    'otel-collector': /attributes\["routeState"\] == "drop"/,
-    logstash: /if \[routeState\] == "drop"/,
-    cribl: /routeState == 'drop'/,
+    vector: /\.routeState == "offload"/,
+    fluentd: /key routeState[\s\S]*pattern \/\^offload\$\//,
+    'fluent-bit': /r=="offload"/,
+    'otel-collector': /attributes\["routeState"\] == "offload"/,
+    logstash: /if \[routeState\] == "offload"/,
+    cribl: /routeState == 'offload'/,
   };
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
     assert.match(r.body, expected[fwd], `${fwd}: routeState match form wrong`);
   }
+});
+
+test('each forwarder branches per action (offload / tier_down / drop)', () => {
+  // Every recipe must name all three non-SIEM actions so the per-service
+  // routing is complete (pass/compact/sample fall through to the SIEM).
+  for (const fwd of OFFLOAD_FORWARDERS) {
+    const r = offloadRecipe(fwd, PARAMS);
+    for (const action of ['offload', 'tier_down', 'drop']) {
+      assert.ok(
+        r.body.includes(action),
+        `${fwd}: missing the ${action} branch`,
+      );
+    }
+  }
+});
+
+test('each forwarder suppresses the drop slice (no destination for it)', () => {
+  // The drop branch must be visibly suppressed, not routed to a sink. Each
+  // forwarder expresses suppression in its own idiom.
+  const suppression: Record<OffloadForwarderId, RegExp> = {
+    // vector: the "drop" route exists but has no [sinks.*] consuming it.
+    vector: /route\.drop\s*=/,
+    fluentd: /@type null/,
+    'fluent-bit': /Name\s+null\s*\n\s*Match\s+tenx\.drop/,
+    'otel-collector': /logs\/drop:.*exporters:\s*\[nop\]/,
+    logstash: /SUPPRESSED/,
+    cribl: /devnull/,
+  };
+  for (const fwd of OFFLOAD_FORWARDERS) {
+    const r = offloadRecipe(fwd, PARAMS);
+    assert.match(r.body, suppression[fwd], `${fwd}: drop slice not suppressed`);
+  }
+});
+
+test('vector: the drop route has no sink consuming it (true suppression)', () => {
+  const r = offloadRecipe('vector', PARAMS);
+  // No [sinks.*] block should take inputs from tenx_action_route.drop.
+  assert.ok(
+    !/inputs\s*=\s*\["tenx_action_route\.drop"\]/.test(r.body),
+    'vector: a sink consumes the drop route (must be left unwired)',
+  );
 });
 
 test('each recipe strips routeState on the output path, never tenx_hash', () => {

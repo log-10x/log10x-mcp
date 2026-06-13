@@ -82,6 +82,7 @@ import {
 import {
   writeActionIntent,
   buildActionIntentEntries,
+  deriveActionsCsv,
   type ActionIntentEntry,
 } from '../lib/action-intent-writer.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
@@ -1307,11 +1308,15 @@ export async function executeConfigureEngine(
     }))
   );
   const actionIntentJson = writeActionIntent(actionIntentEntries);
+  // Per-SERVICE action routing (engine reads `actions.csv` keyed by k8s
+  // container == the service; one row per service, mode-of-actions with an
+  // aggressive tie-break). Derived from the SAME entries as action-intent.json.
+  const actionsCsv = deriveActionsCsv(actionIntentEntries);
 
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson);
+      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson, actionsCsv);
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -1342,7 +1347,8 @@ export async function executeConfigureEngine(
       newCsv,
       actionIntentJson,
       cmName,
-      ns
+      ns,
+      actionsCsv
     );
     applied = { ...result, delivery: 'kubectl_configmap' };
     if (result.ok) {
@@ -2388,12 +2394,16 @@ function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
   csvDiff: string,
-  actionIntentJson?: string
+  actionIntentJson?: string,
+  actionsCsv?: string
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
   const lookupPath = resolved.lookup_path;
   const actionIntentPath = 'data/action-intent.json';
+  // Per-service action routing lives beside action-intent.json. The engine's
+  // ConfigMap pull driver maps this file to the `actions.csv` ConfigMap key.
+  const actionsCsvPath = 'data/actions.csv';
   const prBranch = `mcp/engine-policy-${slug(args.service)}-${Date.now()}`;
   const prTitle = `engine-policy: configure ${args.service} (${args.containers!.length} container${args.containers!.length === 1 ? '' : 's'})`;
 
@@ -2407,6 +2417,7 @@ function renderPrCommand(
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
   out.push(`ACTION_INTENT_PATH=${shellQuote(actionIntentPath)}`);
+  if (actionsCsv) out.push(`ACTIONS_CSV_PATH=${shellQuote(actionsCsvPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -2428,6 +2439,22 @@ function renderPrCommand(
     out.push('# Resolve current action-intent.json SHA (empty if not yet created).');
     out.push(
       'INTENT_SHA=$(gh api "/repos/$REPO/contents/$ACTION_INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
+    );
+    out.push('');
+  }
+
+  // actions.csv block (per-service action routing). Written alongside
+  // action-intent.json: same intent, keyed by service for the engine's
+  // receiver instead of by pattern.
+  if (actionsCsv) {
+    out.push('ACTIONS_CSV_TMPFILE=$(mktemp)');
+    out.push("cat > \"$ACTIONS_CSV_TMPFILE\" <<'ACTIONS_EOF'");
+    out.push(actionsCsv.trimEnd());
+    out.push('ACTIONS_EOF');
+    out.push('');
+    out.push('# Resolve current actions.csv SHA (empty if not yet created).');
+    out.push(
+      'ACTIONS_CSV_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_CSV_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
     );
     out.push('');
   }
@@ -2456,6 +2483,19 @@ function renderPrCommand(
     out.push('  -f content="$INTENT_B64" )');
     out.push('[ -n "$INTENT_SHA" ] && INTENT_ARGS+=( -f sha="$INTENT_SHA" )');
     out.push('gh api "${INTENT_ARGS[@]}"');
+    out.push('');
+  }
+
+  if (actionsCsv) {
+    // Commit actions.csv alongside action-intent.json (per-service routing).
+    out.push('# Commit actions.csv (per-service action routing, beside action-intent.json).');
+    out.push('ACTIONS_CSV_B64=$(base64 < "$ACTIONS_CSV_TMPFILE" | tr -d "\\n")');
+    out.push('ACTIONS_CSV_ARGS=( -X PUT "/repos/$REPO/contents/$ACTIONS_CSV_PATH"');
+    out.push('  -f branch="$BRANCH"');
+    out.push('  -f message="$PR_TITLE (actions.csv)"');
+    out.push('  -f content="$ACTIONS_CSV_B64" )');
+    out.push('[ -n "$ACTIONS_CSV_SHA" ] && ACTIONS_CSV_ARGS+=( -f sha="$ACTIONS_CSV_SHA" )');
+    out.push('gh api "${ACTIONS_CSV_ARGS[@]}"');
     out.push('');
   }
 
@@ -2735,9 +2775,13 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  * `log10x-action-intent`) reads from this ConfigMap and hot-reloads the
  * policy without a pipeline restart.
  *
- * The ConfigMap carries TWO keys the engine expects:
+ * The ConfigMap carries THREE keys the engine expects:
  *   - `caps.csv` (engine's safety floor — per-container + per-pattern caps)
  *   - `action-intent.json` (canonical per-pattern action mapping)
+ *   - `actions.csv` (per-SERVICE action routing — the receiver reads this
+ *     keyed by k8s container == the service and stamps `route(<action>)` on
+ *     that service's regulator-excess slice; a service with no row defaults
+ *     to `drop`)
  *
  * Uses `kubectl apply -f -` so existing ConfigMaps are updated in place
  * (server-side apply semantics) and new ones are created. The actual
@@ -2748,7 +2792,8 @@ async function applyViaKubectlConfigMap(
   capCsv: string,
   actionIntentJson: string | undefined,
   configMapName: string,
-  namespace: string
+  namespace: string,
+  actionsCsv?: string
 ): Promise<{
   ok: boolean;
   configmap_location?: { namespace: string; name: string; keys: string[] };
@@ -2756,6 +2801,7 @@ async function applyViaKubectlConfigMap(
 }> {
   const data: Record<string, string> = { 'caps.csv': capCsv };
   if (actionIntentJson) data['action-intent.json'] = actionIntentJson;
+  if (actionsCsv) data['actions.csv'] = actionsCsv;
   const cm = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
