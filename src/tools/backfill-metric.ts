@@ -1,7 +1,7 @@
 /**
  * log10x_backfill_metric: DEPRECATED, kept dark. Builds a TSDB metric from the
  * offloaded cohort in the customer's S3 overflow bucket. Not advertised: the live
- * isDropped metric surface answers overflow-volume questions as a TSDB query.
+ * routeState metric surface answers overflow-volume questions as a TSDB query.
  * Retained only for the narrow custom-dimension case.
  *
  * Reads the offloaded cohort for a pattern from the overflow bucket over a window,

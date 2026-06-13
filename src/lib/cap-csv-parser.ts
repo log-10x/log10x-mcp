@@ -321,7 +321,7 @@ export function buildPatternBytesCapLookup(
 /**
  * Action bucket totals — the canonical shape consumed by VerifyResult's
  * `per_action_breakdown`. The `unattributed` field holds bytes for
- * pattern_hashes that had isDropped="true" volume but no matching
+ * pattern_hashes that had routeState="drop" volume but no matching
  * cap-CSV row (neither `pat:<hash>` nor a container default). Surfaced
  * separately so the parts-≤-whole guard can subtract it before clamping.
  */

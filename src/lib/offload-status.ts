@@ -1,10 +1,10 @@
 /**
  * Shared offload-status lookup helper.
  *
- * The receiver stamps `isDropped="true"` on every event it routes to the
+ * The receiver stamps `routeState="drop"` on every event it routes to the
  * customer-owned offload bucket (per `project_offload_loop_handoff.md`).
  * That stamp is visible on the metric surface
- * (`all_events_summaryBytes_total{isDropped="true"}`) — so any tool that
+ * (`all_events_summaryBytes_total{routeState="drop"}`) — so any tool that
  * has resolved a `pattern_hash` can ask "is this pattern currently being
  * offloaded?" with a single PromQL instant query.
  *
@@ -60,14 +60,14 @@ const DEFAULT_TIMEOUT_MS = 2000;
  */
 export interface OffloadStatus {
   /**
-   * True when the drop/offload cohort (`isDropped="true"`) has bytes in the
-   * window. NOTE: `isDropped` is BINARY and does NOT distinguish
+   * True when the drop/offload cohort (`routeState="drop"`) has bytes in the
+   * window. NOTE: today `routeState="drop"` does NOT distinguish
    * offload-to-S3 (fetchable via retriever_query) from hard-drop (gone,
    * never archived). So `is_offloaded` means "in the engine's drop/offload
    * cohort", NOT "confirmed archived/fetchable". Consumers must not promise
-   * fetchability from this alone — a true distinction needs an engine
-   * `tenx_action` signal. Until then, gate fetch-back claims on a found
-   * result / retriever-configured, not on this flag.
+   * fetchability from this alone — a true distinction needs the dedicated
+   * `routeState="offload"` setter (D1b). Until then, gate fetch-back claims
+   * on a found result / retriever-configured, not on this flag.
    */
   is_offloaded: boolean;
   dropped_bytes_in_window: number | null;
@@ -174,8 +174,8 @@ export async function getOffloadStatus(
   // emitted individually — same definitions, just inlined to keep the
   // two queries side-by-side and easy to read.
   void droppedFilter;
-  const keptDropFilter = `${'isDropped'}!="true"`;
-  const droppedDropFilter = `${'isDropped'}="true"`;
+  const keptDropFilter = `${'routeState'}!="drop"`;
+  const droppedDropFilter = `${'routeState'}="drop"`;
 
   const hashSel = `${labels.hash}="${escapeLabel(hash)}"`;
   const envSel = `${labels.env}="${escapeLabel(metricsEnv)}"`;
@@ -294,8 +294,8 @@ export async function getOffloadStatusBatch(
   const hashesRe = [...wanted].map((h) => escapeLabel(h).replace(/[.\\+*?()|[\]{}^$]/g, '\\$&')).join('|');
   const hashSel = `${labels.hash}=~"${hashesRe}"`;
   const envSel = `${labels.env}="${escapeLabel(metricsEnv)}"`;
-  const keptDropFilter = `isDropped!="true"`;
-  const droppedDropFilter = `isDropped="true"`;
+  const keptDropFilter = `routeState!="drop"`;
+  const droppedDropFilter = `routeState="drop"`;
 
   const keptQ = `sum by (${labels.hash}) (increase(${BYTES_METRIC}{${hashSel},${envSel},${keptDropFilter}}[${range}]))`;
   const droppedQ = `sum by (${labels.hash}) (increase(${BYTES_METRIC}{${hashSel},${envSel},${droppedDropFilter}}[${range}]))`;

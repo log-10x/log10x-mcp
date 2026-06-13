@@ -317,8 +317,8 @@ export function buildHumanSummary(
 /**
  * Offload-status hint shape surfaced on the envelope. One entry per
  * pattern (by name) that the env-mode top-N or the acute-spike chain
- * reports as in the receiver's drop/offload cohort (isDropped). Best-effort;
- * the field is absent on lookup failure. isDropped does not distinguish
+ * reports as in the receiver's drop/offload cohort (routeState="drop"). Best-effort;
+ * the field is absent on lookup failure. routeState="drop" does not distinguish
  * offload-to-S3 from hard-drop, so fetchability is conditional, not implied.
  */
 export interface TopOffloadedPattern {
@@ -538,7 +538,7 @@ export async function executeInvestigate(
       .join(', ');
     const nudge =
       `\n\n> **Reduction-aware routing**: ${topOffloaded.length} of the patterns above ` +
-      `are in the receiver's drop/offload cohort (isDropped marker). If a pattern is ` +
+      `are in the receiver's drop/offload cohort (routeState="drop" marker). If a pattern is ` +
       `offloaded to S3 (not hard-dropped), fetch its events via ` +
       `\`log10x_retriever_query{pattern: "<name>"}\`; a zero result means it was hard-dropped, not archived. ` +
       `In cohort: ${names}.`;
@@ -1291,7 +1291,7 @@ function buildInvestigateNextActions(
     out.push({
       tool: 'log10x_retriever_query',
       args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
-      reason: 'top mover is in the drop/offload cohort (isDropped); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
+      reason: 'top mover is in the drop/offload cohort (routeState="drop"); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
     });
   }
   return out;
@@ -1339,7 +1339,7 @@ function rewriteNextActionsWithOffload(
     {
       tool: 'log10x_retriever_query',
       args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
-      reason: 'top mover is in the drop/offload cohort (isDropped); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
+      reason: 'top mover is in the drop/offload cohort (routeState="drop"); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
     },
   ];
   const fresh = renderNextActions(merged);

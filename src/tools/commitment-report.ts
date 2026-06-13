@@ -1016,7 +1016,7 @@ async function executeWeeklyDigest(
         if (r.backend) {
           // commitment.env not available in the digest path; default to
           // the env nickname or 'prod' is wrong — instead, scope only by
-          // hash + isDropped filter (the env label is required by the
+          // hash + routeState filter (the env label is required by the
           // selector). Read the env from args.environment when set;
           // otherwise omit the env filter by passing a wildcard-ish
           // env="" (callers without an explicit environment get whatever
@@ -1286,7 +1286,7 @@ export async function fetchHashDescriptors(
   const L = DEFAULT_LABELS;
   const hashList = uniq.map((h) => h.replace(/[\\"]/g, (c) => `\\${c}`)).join('|');
   const selector =
-    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",isDropped!="true"`;
+    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",routeState!="drop"`;
   const query =
     `sum by (${L.hash},${L.service},${L.pattern}) ` +
     `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;
@@ -1968,7 +1968,7 @@ export async function executeCommitmentReport(
   });
 
   // 5b. Offload-bucket override via metric-surface stamp (§B.3).
-  // The receiver stamps `isDropped="true"` on every offloaded event;
+  // The receiver stamps `routeState="drop"` on every offloaded event;
   // getOffloadStatusBatch reads that signal. Any pattern flagged as
   // offloaded has its row's action_taken overridden to 'offload'
   // REGARDLESS of what the cap CSV said — the metric stamp is ground

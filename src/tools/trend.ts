@@ -43,10 +43,10 @@ export const trendSchema = {
   environment: z.string().optional().describe('Environment nickname'),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
-  // `isDropped` flag. Three states: `kept` (default, pre-PL-12 behavior)
-  // = events the engine forwarded as-is (selector `isDropped!="true"`,
+  // dropped flag. Three states: `kept` (default, pre-PL-12 behavior)
+  // = events the engine forwarded as-is (selector `routeState!="drop"`,
   // absence-tolerant so legacy series without the label still match);
-  // `dropped` = events tagged isDropped="true" by the engine;
+  // `dropped` = events stamped routeState="drop" by the engine;
   // `both` = the pre-decision union, with a parallel `dropped_*` series
   // added to the envelope so a single call surfaces the offload share
   // over time. The dual-query path runs both queries in parallel.
@@ -55,8 +55,8 @@ export const trendSchema = {
     .default('kept')
     .describe(
       'Which engine-decision cohort to scope the trend to. ' +
-      '`kept` (default) = events the engine forwarded as-is (isDropped!="true") — the pre-PL-12 behavior. ' +
-      '`dropped` = events tagged isDropped="true" by the engine (the offload/down-tier cohort). ' +
+      '`kept` (default) = events the engine forwarded as-is (routeState!="drop") — the pre-PL-12 behavior. ' +
+      '`dropped` = events stamped routeState="drop" by the engine (the offload/down-tier cohort). ' +
       '`both` = the pre-decision union; envelope adds a parallel `dropped_time_series` and `dropped_share_pct` so one call shows offload share over time. ' +
       'Use `dropped` to verify post-deploy realised savings or to chart "what we are offloading right now". ' +
       'Use `both` to overlay kept vs dropped on the same window.'
@@ -234,11 +234,11 @@ export async function executeTrend(
   //   (1) Pattern name was embedded as a raw underscored blob; the
   //       no-hash-in-headlines rule applies. Replaced with an
   //       underscores-to-spaces hint, same shape as the other dollar tools.
-  //   (2) "Currently offloaded" mislabels generic isDropped="true" bytes as
+  //   (2) "Currently offloaded" mislabels generic routeState="drop" bytes as
   //       offload-specific; same fix shape as top_patterns. Replaced with
   //       action-neutral "currently reduced".
   //   (3) "<pattern> offloaded over <window>" on include='dropped' headline:
-  //       same offload-overreach; cohort is generic isDropped, not
+  //       same offload-overreach; cohort is generic routeState="drop", not
   //       offload-specific. Renamed to "<pattern> reduced cohort
   //       over <window>".
   // Uses shared formatPatternLabel helper with 60-char cap. pattern_trend
@@ -423,24 +423,24 @@ async function executeTrendInner(
 
   // PL-12b — engine-decision cohort scope. patternBytesOverTime doesn't
   // take a selector map (the pattern selector is inlined), so we splice
-  // the `isDropped` label into the existing `{...}` selector via
+  // the `routeState` label into the existing `{...}` selector via
   // string replace. `kept` uses the absence-tolerant `!=` form so legacy
   // series without the label still match. `dropped` uses exact `=`.
-  // `both` runs two queries in parallel: the union (no `isDropped`
+  // `both` runs two queries in parallel: the union (no `routeState`
   // selector) AND the dropped slice, joined by timestamp downstream.
   const { droppedFilter, runBoth } = pql.includeToSelector(include);
   const baseQuery = pql.patternBytesOverTime(pattern, metricsEnv, step);
-  const spliceIsDropped = (q: string, op: '=' | '!=', val: string) =>
-    q.replace(/\}\[/, `,isDropped${op}"${val}"}[`);
+  const spliceRouteState = (q: string, op: '=' | '!=', val: string) =>
+    q.replace(/\}\[/, `,routeState${op}"${val}"}[`);
   // `includeToSelector` only returns the object form (never a raw string)
   // for `kept`/`dropped`, so narrow with a type guard the compiler accepts.
   let primaryQuery: string;
   if (droppedFilter !== null && typeof droppedFilter !== 'string') {
-    primaryQuery = spliceIsDropped(baseQuery, droppedFilter.op, droppedFilter.val);
+    primaryQuery = spliceRouteState(baseQuery, droppedFilter.op, droppedFilter.val);
   } else {
     primaryQuery = baseQuery;
   }
-  const droppedQuery = runBoth ? spliceIsDropped(baseQuery, '=', 'true') : null;
+  const droppedQuery = runBoth ? spliceRouteState(baseQuery, '=', 'drop') : null;
   const [res, droppedRes] = await Promise.all([
     queryRange(env, primaryQuery, start, now, stepSeconds),
     droppedQuery

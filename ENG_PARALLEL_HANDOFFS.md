@@ -54,7 +54,7 @@ gh workflow run dev_build_pipeline.yaml --repo log-10x/engine \
 
 **10x Prometheus (the TSDB):**
 - `https://prometheus.log10x.com`, single auth header: `X-10X-Auth: 4d985100-ee4a-4b6c-b784-a416b8684868/6aa99191-f827-4579-a96a-c0ebdfe73884`
-- key metrics: `all_events_summaryBytes_total`, `emitted_events_summaryBytes_total`, `all_events{isDropped="true"}` (new — the regulator-marked slice), `emitted_events_optimized_size_total` (compacted size; only emitted when `receiverOptimize=true`)
+- key metrics: `all_events_summaryBytes_total`, `emitted_events_summaryBytes_total`, `all_events{routeState="drop"}` (new — the regulator-marked slice), `emitted_events_optimized_size_total` (compacted size; only emitted when `receiverOptimize=true`)
 
 **Demo SIEM source (for POC-mode, raw events pre-install):** CloudWatch log group **`/log10x/otel-demo`** (acct `351939435334`, `us-east-1`) — live, ~1.5 GB, stream `tenx-fluentd`, real otel-demo app logs (cart/checkout/payment/etc). This is the "before 10x is installed" data source. (`/log10x/poc-test-otel` also exists, currently empty.)
 
@@ -64,7 +64,7 @@ gh workflow run dev_build_pipeline.yaml --repo log-10x/engine \
 - Commit messages end with: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 - **NEVER deploy to prod** unless the message contains the exact phrase `DEPLOY TO PROD`. The otel-demo cluster is NOT prod (safe). `prometheus.log10x.com` is a shared prod API — **read only**. Do not touch S3 `log10x-console`, CloudFront `E1ZA6ENI06V2YF`, `console.log10x.com`, `auth.log10x.com`.
 
-**Current soft-drop state (context, don't re-do):** `feat/soft-drop` has soft-drop working (the rate regulator marks `isDropped` in the groupFilter; the output decides via the `outputSoftDrop` knob: soft=emit/encode, hard=omit) plus the `isDropped` metric dimension (engine `5b9721693` + modules `8c044e0`). Verified live on the demo. NOT merged to `main` yet.
+**Current soft-drop state (context, don't re-do):** `feat/soft-drop` has soft-drop working (the rate regulator marks the drop route state in the groupFilter; the output decides via the `outputSoftDrop` knob: soft=emit/encode, hard=omit) plus the route-state metric dimension, now named `routeState` (engine `5b9721693` + modules `8c044e0`). Verified live on the demo. NOT merged to `main` yet.
 
 **OFF-LIMITS (owned by the cost/savings chat):** `log10x-mcp/src/tools/{savings,estimate-savings,resolve-batch,extract-templates}.ts`, `log10x-mcp/src/lib/{cost,promql,customer-metrics,cap-derivation}.ts`, `log10x-mcp/src/index.ts` (registration — coordinate before editing), and `config|modules/.../pipelines/run/aggregate/**`.
 

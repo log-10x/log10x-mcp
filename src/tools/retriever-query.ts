@@ -142,7 +142,7 @@ interface RetrieverQuerySummary {
    *  - 'events_downloaded' — count of the (full) qr/ download.
    *  - 'qrs_summaries_nondropped' — whole-match volume from the engine
    *    summaries because the qr/ download was capped; EXCLUDES engine-dropped
-   *    events (the summaries aggregator filters !isDropped).
+   *    events (the summaries aggregator filters routeState!="drop").
    */
   events_matched_basis?: 'events_downloaded' | 'qrs_summaries_nondropped';
   /** How events_preview was selected: earliest-by-timestamp, a sampled subset (download capped), or none (count). */
@@ -187,7 +187,7 @@ interface RetrieverQuerySummary {
    * Per-`tenx_hash` offload status for hashes that appear on the returned
    * events. Populated best-effort via a single batched PromQL lookup
    * (`getOffloadStatusBatch`) against the metric surface — the receiver
-   * stamps `isDropped="true"` on every event it routes to the
+   * stamps `routeState="drop"` on every event it routes to the
    * customer-owned offload bucket, so a non-zero dropped share over the
    * lookup window means the pattern is currently being offloaded.
    *
@@ -774,7 +774,7 @@ async function executeRetrieverQueryInner(
             const projected = offloadByHash[patternHashForNudge];
             const share = projected.dropped_share_pct;
             lines.push('');
-            // HONESTY: isDropped is the engine's drop/offload cohort and does
+            // HONESTY: routeState="drop" is the engine's drop/offload cohort and does
             // NOT distinguish offload-to-S3 (fetchable here) from hard-drop
             // (gone). So the nudge is RESULT-AWARE: events found => the slice is
             // really in the bucket; zero events => the honest read is hard-drop
@@ -782,7 +782,7 @@ async function executeRetrieverQueryInner(
             const sharePhrase =
               share === null || projected.kept_timed_out
                 ? 'kept-side share query slow on a heavy cohort, share not computed'
-                : `~${share.toFixed(0)}% of recent volume marked \`isDropped\``;
+                : `~${share.toFixed(0)}% of recent volume marked \`routeState="drop"\``;
             if (resp.events.length === 0) {
               lines.push(
                 `> **Reduction detected, no events found**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}), but this query returned no events. The likely reason: it was HARD-DROPPED (not archived), or the offload bucket is not wired into this retriever. Only patterns the receiver OFFLOADS to S3 are fetchable here — check \`log10x_advise_retriever\` for the bucket recipe.`,
@@ -833,7 +833,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_advise_retriever',
       args: {},
-      reason: 'pattern(s) in the drop/offload cohort (isDropped) — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
+      reason: 'pattern(s) in the drop/offload cohort (routeState="drop") — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
     });
   }
   const block = renderNextActions(nextActions);

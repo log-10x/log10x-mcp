@@ -2,8 +2,8 @@
  * Emitter-correctness tests for the per-forwarder offload recipes.
  *
  * These are the build-time smoke test for the emitter: they prove the
- * generated recipe is wired to the verified engine contract (boolean
- * `isDropped` match, the Retriever's `{bucket}/app/` JSONL layout, the
+ * generated recipe is wired to the verified engine contract (string
+ * `routeState == "drop"` match, the Retriever's `{bucket}/app/` JSONL layout, the
  * forwarder-write IAM grant). They do NOT prove a live event routes to S3 on
  * a real forwarder — that is the per-forwarder runtime gate, flagged via the
  * `SMOKE TEST REQUIRED` prerequisite on the research-derived recipes.
@@ -35,37 +35,37 @@ test('every forwarder recipe fills bucket, region, and the app/ prefix', () => {
   }
 });
 
-test('no recipe uses the string "true" form (engine writes an unquoted JSON boolean)', () => {
+test('no recipe uses the legacy boolean form (engine writes the string "drop")', () => {
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
-    assert.ok(!/==\s*"true"/.test(r.body), `${fwd}: uses == "true" (must be boolean)`);
-    assert.ok(!/:\s*"true"/.test(r.body), `${fwd}: quotes the boolean true`);
+    assert.ok(!/==\s*true\b/.test(r.body), `${fwd}: uses == true (must be string equality on "drop")`);
+    assert.ok(!/==\s*"true"/.test(r.body), `${fwd}: matches the string "true" (the wire value is "drop")`);
   }
 });
 
-test('each forwarder matches isDropped in its native boolean form', () => {
+test('each forwarder matches routeState in its native string form', () => {
   const expected: Record<OffloadForwarderId, RegExp> = {
-    vector: /\.isDropped == true/,
-    fluentd: /key isDropped[\s\S]*pattern \/\^true\$\//,
-    'fluent-bit': /rec\["isDropped"\]==true/,
-    'otel-collector': /attributes\["isDropped"\] == true/,
-    logstash: /if \[isDropped\]/,
-    cribl: /isDropped == true/,
+    vector: /\.routeState == "drop"/,
+    fluentd: /key routeState[\s\S]*pattern \/\^drop\$\//,
+    'fluent-bit': /rec\["routeState"\]=="drop"/,
+    'otel-collector': /attributes\["routeState"\] == "drop"/,
+    logstash: /if \[routeState\] == "drop"/,
+    cribl: /routeState == 'drop'/,
   };
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
-    assert.match(r.body, expected[fwd], `${fwd}: isDropped match form wrong`);
+    assert.match(r.body, expected[fwd], `${fwd}: routeState match form wrong`);
   }
 });
 
-test('each recipe strips isDropped on the output path, never tenx_hash', () => {
+test('each recipe strips routeState on the output path, never tenx_hash', () => {
   const stripForm: Record<OffloadForwarderId, RegExp> = {
-    vector: /except_fields\s*=\s*\["isDropped"\]/,
-    fluentd: /remove_keys isDropped/,
-    'fluent-bit': /Remove_key\s+isDropped/,
-    'otel-collector': /delete_key\(log\.attributes, "isDropped"\)/,
-    logstash: /remove_field => \["isDropped"/,
-    cribl: /Remove fields: isDropped/,
+    vector: /except_fields\s*=\s*\["routeState"\]/,
+    fluentd: /remove_keys routeState/,
+    'fluent-bit': /Remove_key\s+routeState/,
+    'otel-collector': /delete_key\(log\.attributes, "routeState"\)/,
+    logstash: /remove_field => \["routeState"/,
+    cribl: /Remove fields: routeState/,
   };
   // A real removal of tenx_hash would name it as a field token (quoted in
   // vector/otel/logstash, or `remove_keys tenx_hash` / `Remove_key tenx_hash`
@@ -75,7 +75,7 @@ test('each recipe strips isDropped on the output path, never tenx_hash', () => {
     /"tenx_hash"|(?:remove_keys|Remove_key|Remove fields:)\s+tenx_hash/;
   for (const fwd of OFFLOAD_FORWARDERS) {
     const r = offloadRecipe(fwd, PARAMS);
-    assert.match(r.body, stripForm[fwd], `${fwd}: does not strip isDropped on the output path`);
+    assert.match(r.body, stripForm[fwd], `${fwd}: does not strip routeState on the output path`);
     assert.ok(!stripsTenxHash.test(r.body), `${fwd}: must NOT strip tenx_hash`);
   }
 });
@@ -133,10 +133,10 @@ test('forwarder-write IAM grants PutObject scoped to the offload prefix', () => 
   assert.ok(iam.attachmentNote.includes('IRSA'), 'no IRSA attachment guidance');
 });
 
-test('Datadog Flex recipe routes @isDropped:true via the retention waterfall', () => {
+test('Datadog Flex recipe routes @routeState:drop via the retention waterfall', () => {
   const r = datadogFlexRecipe();
   assert.equal(r.target, 'datadog-flex');
-  assert.match(r.body, /@isDropped:true/);
+  assert.match(r.body, /@routeState:drop/);
   assert.match(r.body, /retention_days\s*=\s*0/);
   assert.match(r.body, /flex_retention_days\s*=\s*30/);
   assert.ok(r.note.toLowerCase().includes('index'), 'should clarify index-not-ingest saving');

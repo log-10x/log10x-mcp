@@ -80,7 +80,7 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   }
 
   // ── Forwarder offload ──
-  // Retriever only: how to route the isDropped slice to the customer's S3
+  // Retriever only: how to route the routeState="drop" slice to the customer's S3
   // (the bucket the Retriever already reads), plus SIEM down-tier alternatives.
   if ((action === 'install' || action === 'all') && plan.offloadMarkdown) {
     lines.push('## Forwarder offload (lossless cost reduction)');

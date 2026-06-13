@@ -22,11 +22,11 @@
  * MODE: verify
  *   Input is `baseline_window` (pre-merge) + `post_window` (post-merge).
  *   We query `all_events_summaryBytes_total` segmented by the engine's
- *   `isDropped` label (engine >= 1.0.8 — TenXSummary emits it on the
+ *   `routeState` label (TenXSummary emits it on the
  *   receive aggregator):
- *     - baseline_bytes      : sum over baseline (isDropped="" only)
- *     - post_passed_bytes   : sum over post (isDropped="" only)
- *     - post_dropped_bytes  : sum over post (isDropped="true")
+ *     - baseline_bytes      : sum over baseline (routeState!="drop" only)
+ *     - post_passed_bytes   : sum over post (routeState!="drop" only)
+ *     - post_dropped_bytes  : sum over post (routeState="drop")
  *   `delivered_pct = 1 - (post_passed_bytes / scale(baseline_bytes,...))`
  *   and we attribute the gap to four buckets:
  *     - cap_fired   : bytes the engine dropped for patterns that
@@ -439,7 +439,7 @@ export interface VerifyResult {
   per_action_breakdown?: ActionBytesBuckets;
   /**
    * Per-pattern attribution rows. One row per pattern_hash with
-   * non-zero isDropped="true" bytes in the post window. Action is
+   * non-zero routeState="drop" bytes in the post window. Action is
    * sourced from the cap-CSV via `buildPatternActionLookup`; rows
    * with no cap-CSV match are emitted with `action: 'drop'` and
    * `action_source: 'unattributed'` so the offload clamp + caveat
@@ -798,7 +798,7 @@ export async function runEstimateForecast(
   // preview_filter do — so queries land on the same backend that generated
   // the numbers those tools show. The selectorWithEnv() helper hardcoded
   // tenx_app=~"reporter|receiver",tenx_env="edge" which diverged from the
-  // kept-cohort isDropped!="true" selector the other tools use, causing
+  // kept-cohort routeState!="drop" selector the other tools use, causing
   // total-bytes mismatch on the same service+window.
   const probeFilters: Record<string, string> = {};
   if (args.service) probeFilters[env.labels.service] = args.service;
@@ -807,20 +807,20 @@ export async function runEstimateForecast(
     : await resolveMetricsEnv(env);
 
   // Build the scope selector using the same buildSelector path as top_patterns:
-  // isDropped!="true" (absence-tolerant kept cohort) + optional service filter.
+  // routeState!="drop" (absence-tolerant kept cohort) + optional service filter.
   // This replaces selectorWithEnv() which used tenx_app=~"reporter|receiver".
   const scopeFilters: Record<string, FilterValue> = {
-    isDropped: { op: '!=', val: 'true' },
+    routeState: { op: '!=', val: 'drop' },
   };
   if (args.service) {
     scopeFilters[env.labels.service] = args.service;
   }
   // Build a PromQL selector fragment for bytes queries. Re-use pql.bytesPerPattern
   // shape but inline here so we can group by hash rather than pattern string.
-  // The selector is the isDropped+service part; metricsEnv is appended via
+  // The selector is the routeState+service part; metricsEnv is appended via
   // the promql helpers internally. We build it manually to match the group-by-hash shape.
   const selectorParts: string[] = [
-    `isDropped!="true"`,
+    `routeState!="drop"`,
     `${env.labels.env}="${metricsEnv}"`,
   ];
   if (args.service) {
@@ -846,7 +846,7 @@ export async function runEstimateForecast(
   // Group by hash + service + message_pattern; take the dominant (service,
   // descriptor) per hash by bytes (same tie-break as extractHashContainerMap).
   const hashServiceQuery =
-    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{isDropped!="true",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
+    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{routeState!="drop",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
 
   const parallelQueries: Array<Promise<unknown>> = [
     queryInstant(env, bytesQuery),
@@ -1397,8 +1397,8 @@ export interface RunVerifyArgs {
 }
 
 /**
- * Pure-function entry for verify. Queries the engine's isDropped label
- * (TenXSummary, engine >= 1.0.8) to attribute the delta.
+ * Pure-function entry for verify. Queries the engine's routeState label
+ * (TenXSummary) to attribute the delta.
  */
 export async function runEstimateVerify(
   args: RunVerifyArgs,
@@ -1415,20 +1415,20 @@ export async function runEstimateVerify(
   const hashLabel = env.labels.hash;
 
   // 1. Baseline: bytes that PASSED the engine (no drops) over baseline_window.
-  //    Engine 1.0.8+ emits literal label values isDropped="false" (kept) and
-  //    isDropped="true" (capped). Pre-1.0.8 engines omit the label entirely.
-  //    Using `isDropped!="true"` covers BOTH: matches "false" AND label-absent.
-  //    `isDropped=""` matches zero series; `isDropped!="true"` matches the
-  //    kept cohort.
-  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.baseline_window}]))`;
-  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.baseline_window}]))`;
+  //    The engine emits the routeState label as a state NAME string
+  //    ("drop" for capped events). Older series may omit the label entirely.
+  //    Using `routeState!="drop"` covers BOTH: matches other states AND
+  //    label-absent. The negative-equality form matches the kept cohort
+  //    without excluding future kept states (regex alternation is reserved).
+  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]))`;
+  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]))`;
   // 2. Post: same query over post_window.
   const postTotalQuery = `sum(increase(${BYTES_METRIC}{${baseSelector}}[${args.post_window}]))`;
-  const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.post_window}]))`;
-  const postDroppedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
-  const postPassedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped!="true"}[${args.post_window}]))`;
+  const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.post_window}]))`;
+  const postDroppedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
+  const postPassedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.post_window}]))`;
   const patternLabel = env.labels.pattern;
-  const postDroppedByHashQuery = `sum by (${hashLabel}, ${patternLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
+  const postDroppedByHashQuery = `sum by (${hashLabel}, ${patternLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
 
   const [
     baselineTotalRes,
@@ -1476,7 +1476,7 @@ export async function runEstimateVerify(
     !!(args.cap_csv_content || args.action_intent_content);
   let patternToContainer = new Map<string, string>();
   if (hasActionSource && postDroppedBytes > 0) {
-    const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},isDropped="true"}[${args.post_window}]))`;
+    const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
     try {
       const pairRes = await queryInstant(env, dropByPairQuery);
       patternToContainer = extractHashContainerMap(
@@ -1599,7 +1599,7 @@ export async function runEstimateVerify(
   const caveats: string[] = [];
   if (postDroppedBytes === 0 && postTotalBytes > 0) {
     caveats.push(
-      'No isDropped="true" bytes observed in the post window. Either no policy is deployed, or the engine version does not emit the isDropped label (requires engine >= 1.0.8).'
+      'No routeState="drop" bytes observed in the post window. Either no policy is deployed, or the engine version does not emit the routeState label.'
     );
   }
   if (baseDays < 7) {

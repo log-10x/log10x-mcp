@@ -76,18 +76,18 @@ export const topPatternsSchema = {
       'Output format. Always "summary" — the structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. Field retained for backward-compat with callers that still pass `view: "summary"`.'
     ),
   // PL-12a — three-way engine-decision cohort filter. Replaces the
-  // earlier boolean `isDropped` swap (which could only express
+  // earlier boolean dropped-flag swap (which could only express
   // kept-OR-dropped, not the union). Default 'kept' preserves pre-PL-12
-  // behavior. The `kept` path uses an absence-tolerant `isDropped!="true"`
+  // behavior. The `kept` path uses an absence-tolerant `routeState!="drop"`
   // selector (see promql.includeToSelector) so series emitted before the
-  // receiver started stamping the `isDropped` label still match.
+  // receiver started stamping the `routeState` label still match.
   include: z
     .enum(['kept', 'dropped', 'both'])
     .default('kept')
     .describe(
       'Which engine-decision cohort to scope to. ' +
-      '`kept` (default) = events the engine forwarded as-is (isDropped!="true") — the pre-PL-12 behavior. ' +
-      '`dropped` = events tagged isDropped="true" by the engine (the offload/down-tier cohort). ' +
+      '`kept` (default) = events the engine forwarded as-is (routeState!="drop") — the pre-PL-12 behavior. ' +
+      '`dropped` = events stamped routeState="drop" by the engine (the offload/down-tier cohort). ' +
       '`both` = the pre-decision union; per-row output adds kept_bytes / dropped_bytes / dropped_share_pct. ' +
       'Use `dropped` to verify post-deploy realised savings or to answer "which patterns are we offloading right now". ' +
       'Use `both` to compute the offload share denominator in a single call.'
@@ -182,11 +182,11 @@ export async function executeTopPatterns(
   const rate_source: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
   const costPerGb: number | null = rateResolved.rate_per_gb;
 
-  // PL-12a — resolve include mode and the `isDropped` selector once.
+  // PL-12a — resolve include mode and the `routeState` selector once.
   // `kept` (default) uses an absence-tolerant `!=` selector so series
-  // without the `isDropped` label still match. `dropped` exact-matches
+  // without the `routeState` label still match. `dropped` exact-matches
   // the engine-stamped cohort. `both` adds no selector here and triggers
-  // the dual-query path below (a second `isDropped="true"` pass is run
+  // the dual-query path below (a second `routeState="drop"` pass is run
   // in parallel and joined into the `dropped_*` envelope fields).
   const include = args.include ?? 'kept';
   const { droppedFilter, runBoth } = includeToSelector(include);
@@ -200,19 +200,19 @@ export async function executeTopPatterns(
   // the cohort selector with zero call-site changes. The standalone
   // trend range query further below does NOT use buildSelector — it
   // gets the inline suffix.
-  if (droppedFilter != null) filters['isDropped'] = droppedFilter;
+  if (droppedFilter != null) filters['routeState'] = droppedFilter;
   // Inline selector tail for the trend-range query. Mirrors the same
   // exact/negated semantics buildSelector emits.
-  const isDroppedSelector =
+  const routeStateSelector =
     droppedFilter == null
       ? ''
       : typeof droppedFilter === 'string'
-        ? `,isDropped="${droppedFilter}"`
-        : `,isDropped${droppedFilter.op}"${droppedFilter.val}"`;
+        ? `,routeState="${droppedFilter}"`
+        : `,routeState${droppedFilter.op}"${droppedFilter.val}"`;
 
   // PL-12a — the 24h trend-range sparkline must read `all_events` for the
   // dropped/both cohorts: dropped events are NOT in `emitted_events`, so
-  // `emitted_events{isDropped="true"}` is empty and the sparkline reads
+  // `emitted_events{routeState="drop"}` is empty and the sparkline reads
   // near-zero. `kept` == emitted, so emitted_events is correct there.
   const trendMetric =
     include === 'kept' ? 'emitted_events_summaryBytes_total' : 'all_events_summaryBytes_total';
@@ -228,12 +228,12 @@ export async function executeTopPatterns(
     : await resolveMetricsEnv(env);
 
   // PL-12a — `include='both'` needs a parallel pass with
-  // `isDropped="true"` to recover the dropped slice per (pattern,
+  // `routeState="drop"` to recover the dropped slice per (pattern,
   // service, severity). The kept slice is `union - dropped`. When
   // include is `kept` or `dropped`, the main query already scopes to
   // the right cohort and we skip the dual query.
   const droppedSliceFilters: Record<string, FilterValue> = { ...filters };
-  if (runBoth) droppedSliceFilters['isDropped'] = { op: '=', val: 'true' };
+  if (runBoth) droppedSliceFilters['routeState'] = { op: '=', val: 'drop' };
 
   // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct,
   //              cost-by-service rollup ---
@@ -262,7 +262,7 @@ export async function executeTopPatterns(
 
   if (res.status !== 'success' || res.data.result.length === 0) {
     // When include='dropped', the empty-result cause is ambiguous:
-    //   A. enrichment_not_wired — receiver does not emit the isDropped label at all.
+    //   A. enrichment_not_wired — receiver does not emit the routeState label at all.
     //   B. enrichment_wired_window_empty — label is wired but no dropped events in this window/scope.
     //   C. onboarding_gate — engine is < 24h old and has no data yet (the original case).
     //
@@ -271,12 +271,12 @@ export async function executeTopPatterns(
     // through to the existing generic message (no dropped-label dependency there).
     if (include === 'dropped') {
       // Meta probe: count the number of distinct message_pattern series that carry
-      // the isDropped="true" label env-wide (no window scope — use a generous 24h
+      // the routeState="drop" label env-wide (no window scope — use a generous 24h
       // lookback so a sparse env is not misclassified as unwired). If the count is
       // zero the label is not being stamped by the receiver at all (state A).
       let distinctDroppedPatternCount = 0;
       try {
-        const metaProbeQuery = `count(count by (message_pattern) (all_events_summaryBytes_total{tenx_env="${metricsEnv}",isDropped="true"}[24h]))`;
+        const metaProbeQuery = `count(count by (message_pattern) (all_events_summaryBytes_total{tenx_env="${metricsEnv}",routeState="drop"}[24h]))`;
         const metaRes = await queryInstant(env, metaProbeQuery);
         if (metaRes.status === 'success' && metaRes.data.result.length > 0) {
           distinctDroppedPatternCount = Number(metaRes.data.result[0].value?.[1] ?? 0) || 0;
@@ -289,12 +289,12 @@ export async function executeTopPatterns(
       let message: string;
 
       if (distinctDroppedPatternCount === 0) {
-        // State A: isDropped label never seen in this env.
+        // State A: routeState label never seen in this env.
         enrichmentState = 'enrichment_not_wired';
         message =
-          'isDropped enrichment is not wired on this env\'s Receiver — the receiver does not emit the isDropped label. ' +
-          'To enable, ensure the rate-receiver settings.yaml includes \'isDropped\' in enrichmentFields (it is on by default), ' +
-          'and the engine is on run-edge 1.1.0+ (the release that appends the isDropped label on the wire). ' +
+          'routeState enrichment is not wired on this env\'s Receiver — the receiver does not emit the routeState label. ' +
+          'To enable, ensure the rate-receiver settings.yaml includes \'routeState\' in enrichmentFields (it is on by default), ' +
+          'and the engine is on a run-edge release that appends the routeState label on the wire. ' +
           'See docs/cross-pillar-primitives.md for setup details.';
       } else {
         // State B: label is wired, but the requested window/scope returned zero dropped events.
@@ -302,7 +302,7 @@ export async function executeTopPatterns(
         const scopeDesc = args.service ? ` for service "${args.service}"` : '';
         message =
           `No dropped-cohort patterns in this ${tf.label} window${scopeDesc}. ` +
-          `The isDropped enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed across the source in the last 24h) ` +
+          `The routeState enrichment IS wired (${distinctDroppedPatternCount} distinct pattern${distinctDroppedPatternCount === 1 ? '' : 's'} observed across the source in the last 24h) ` +
           `but the current scope returned zero events. ` +
           (args.service ? 'Try removing the service scope, or ' : 'Try ') +
           'widening the time window (e.g. timeRange="24h").';
@@ -523,7 +523,7 @@ export async function executeTopPatterns(
       r.hash
         ? queryRange(
             env,
-            `sum by (${LABELS.hash}) (rate(${trendMetric}{${LABELS.hash}="${r.hash}"${isDroppedSelector}}[5m]))`,
+            `sum by (${LABELS.hash}) (rate(${trendMetric}{${LABELS.hash}="${r.hash}"${routeStateSelector}}[5m]))`,
             trendStart,
             now,
             trendStepSec
@@ -798,7 +798,7 @@ export async function executeTopPatterns(
   //   - include='dropped' → kept_bytes=null, dropped_bytes=bytes (the cohort),
   //                          dropped_share_pct=100
   //   - include='both'    → kept_bytes = bytes - dropped_bytes (joined from
-  //                          the parallel `isDropped="true"` query on
+  //                          the parallel `routeState="drop"` query on
   //                          (pattern, service, severity)),
   //                          dropped_share_pct = dropped / union * 100
   // `dropped_bytes_monthly` / `dropped_events_monthly` are derived from the
@@ -920,7 +920,7 @@ export async function executeTopPatterns(
 
   // PL-12a — totals block dropped fields. Sums the per-row `dropped_bytes`
   // across the SHOWN rows (not env-wide); the env-wide `dropped_share_pct`
-  // when include='both' uses the parallel `totalBytesInScope(isDropped=true)`
+  // when include='both' uses the parallel `totalBytesInScope(routeState="drop")`
   // query against the union from `totalBytes`. When include='kept', all
   // three are null. When include='dropped', the cohort IS the dropped
   // slice, so `dropped_bytes_total = shownBytes` and share=100.

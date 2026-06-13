@@ -5,14 +5,14 @@
  * four action-axis columns that let an agent / FinOps reader see where
  * each service's savings are coming from:
  *
- *   - `bytes_offloaded`  : isDropped="true" bytes whose cap-CSV row's
+ *   - `bytes_offloaded`  : routeState="drop" bytes whose cap-CSV row's
  *                          action is `offload` (routed to customer S3)
  *   - `bytes_compacted`  : action == `compact` (in-engine encode() wins)
  *   - `bytes_dropped`    : action == `drop` (hard kill at the receiver)
- *   - `bytes_passed`     : isDropped!="true" bytes (the kept cohort)
+ *   - `bytes_passed`     : routeState!="drop" bytes (the kept cohort)
  *
  * The split is computed MCP-side by joining the per-(service, hash)
- * `isDropped="true"` byte sum against the cap-CSV the MCP itself wrote
+ * `routeState="drop"` byte sum against the cap-CSV the MCP itself wrote
  * (see `lib/cap-csv-parser.ts`). No engine label change is required;
  * `tier_down` and `sample` collapse into the action lookup but don't
  * surface as their own columns (they're rendered as `bytes_dropped` for
@@ -303,8 +303,8 @@ async function executeServicesInner(
   // container we cannot fall back to the container default when no
   // `pat:<hash>` override exists; we just leave the row unattributed.
   const containerLabel = 'k8s_container';
-  const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
-  const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
+  const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",routeState="drop"}[${tf.range}]))`;
+  const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",routeState!="drop"}[${tf.range}]))`;
 
   // Resolve gitops repo via the same fallback chain configure_engine /
   // pattern_mitigate use: envs.json field → LOG10X_GH_REPO env var →

@@ -64,8 +64,8 @@ function escapeLabel(value: string): string {
 /**
  * Filter value: either a plain string (default exact-match `=`) or an
  * object form `{op, val}` that lets callers emit `!=` selectors: the
- * `kept` cohort needs absence-tolerant `isDropped!="true"` to include
- * legacy series that pre-date the receiver's `isDropped` label stamping.
+ * `kept` cohort needs absence-tolerant `routeState!="drop"` to include
+ * legacy series that pre-date the receiver's `routeState` label stamping.
  */
 export type FilterValue = string | { op: '=' | '!='; val: string };
 
@@ -87,26 +87,26 @@ function buildSelector(
 }
 
 /**
- * Map the user-facing `include` enum to a single `isDropped`
+ * Map the user-facing `include` enum to a single `routeState`
  * filter-value (or null for the pre-decision union).
  *
- * `kept`    → `isDropped!="true"` (absence-tolerant; matches series with
- *             no `isDropped` label AND `isDropped="false"`).
- * `dropped` → `isDropped="true"` (exact).
+ * `kept`    → `routeState!="drop"` (absence-tolerant; matches series with
+ *             no `routeState` label AND any non-drop route state).
+ * `dropped` → `routeState="drop"` (exact).
  * `both`    → no selector; caller runs a dual query to recover the
  *             dropped slice for the `dropped_*` envelope fields.
  *
  * `runBoth` tells the executor whether to issue the second
- * `isDropped="true"` query in parallel.
+ * `routeState="drop"` query in parallel.
  */
 export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
   droppedFilter: FilterValue | null;
   runBoth: boolean;
 } {
   if (include === 'kept')
-    return { droppedFilter: { op: '!=', val: 'true' }, runBoth: false };
+    return { droppedFilter: { op: '!=', val: 'drop' }, runBoth: false };
   if (include === 'dropped')
-    return { droppedFilter: { op: '=', val: 'true' }, runBoth: false };
+    return { droppedFilter: { op: '=', val: 'drop' }, runBoth: false };
   return { droppedFilter: null, runBoth: true };
 }
 

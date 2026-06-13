@@ -3,9 +3,9 @@
  *
  * Sibling to `forwarder-snippets.ts`, but a different shape. Where the
  * drop-rule snippet emits a single SIEM-side exclude, an offload recipe is a
- * TWO-route fan-out keyed on the engine-stamped `isDropped` marker:
+ * TWO-route fan-out keyed on the engine-stamped `routeState` marker:
  *
- *   1. the dropped slice (isDropped == true) -> the forwarder's OWN native S3
+ *   1. the dropped slice (routeState == "drop") -> the forwarder's OWN native S3
  *      output, written as full, newline-delimited JSON under `{bucket}/{prefix}`
  *      (the exact layout the Retriever indexes), and
  *   2. everything else -> the existing SIEM destination.
@@ -16,12 +16,12 @@
  *
  * Engine contract (verified live on run-edge 1.1.0, config repo 42e5331):
  *   - the receiver runs with `outputOffload true`, which resolves the output
- *     field to `fullText("tenx_hash","isDropped")` and the drop filter to
+ *     field to `fullText("tenx_hash","routeState")` and the drop filter to
  *     `isObject` (every marked event flows back to the forwarder, full text).
- *   - `isDropped` lands as a JSON boolean UNQUOTED (`"isDropped":true` /
- *     `"isDropped":false`), spliced inside the event envelope. Every forwarder
- *     match MUST therefore be a boolean test (`== true` / truthiness), NEVER
- *     the string `"true"`.
+ *   - `routeState` lands as a JSON STRING (`"routeState":"drop"` /
+ *     `"routeState":"pass"`), spliced inside the event envelope. Every
+ *     forwarder match MUST therefore be string equality against `"drop"`,
+ *     never a boolean/truthiness test.
  *   - `tenx_hash` ships alongside it, so the same S3 object carries the stable
  *     identity the Retriever correlates on.
  */
@@ -78,9 +78,9 @@ const DEFAULT_PREFIX = 'app';
 /** Prerequisites shared by every forwarder recipe. */
 function basePrereqs(p: OffloadParams): string[] {
   return [
-    'Engine: the receiver runs with `outputOffload true` (full-text events + `isDropped` marker, all events flow back to the forwarder).',
+    'Engine: the receiver runs with `outputOffload true` (full-text events + `routeState` marker, all events flow back to the forwarder).',
     `IAM: the forwarder's identity can \`s3:PutObject\` to \`${p.bucket}/${p.prefix ?? DEFAULT_PREFIX}/*\` — see \`forwarderWriteIamPolicy()\`.`,
-    'Match on the boolean `isDropped == true`, never the string "true" (the engine writes an unquoted JSON boolean).',
+    'Match the string `routeState == "drop"`, never a boolean test (the engine writes the route-state name as a JSON string).',
   ];
 }
 
@@ -95,7 +95,7 @@ function recipeVector(p: OffloadParams): OffloadRecipe {
 [transforms.tenx_offload_route]
 type   = "route"
 inputs = ["tenx_sidecar"]            # the source reading 10x's return path
-route.offload = '.isDropped == true' # boolean test, not "true"
+route.offload = '.routeState == "drop"' # string equality on the route-state name
 
 # Dropped slice -> customer-owned S3, as the Retriever's input layout (JSONL).
 [sinks.tenx_offload_s3]
@@ -106,13 +106,13 @@ key_prefix  = "${prefix}/"
 region      = "${p.region}"
 compression = "none"
 encoding.codec          = "json"
-encoding.except_fields  = ["isDropped"]   # marker did its job at the route; drop it (tenx_hash kept)
+encoding.except_fields  = ["routeState"]  # marker did its job at the route; drop it (tenx_hash kept)
 framing.method          = "newline_delimited"
 
 # Everything else -> your existing SIEM sink (the implicit _unmatched route).
 [sinks.your_siem]
 inputs = ["tenx_offload_route._unmatched"]
-encoding.except_fields = ["isDropped"]     # strip the marker on the SIEM path too
+encoding.except_fields = ["routeState"]    # strip the marker on the SIEM path too
 # ... your existing SIEM sink config ...`,
     placementNote:
       'add the `route` transform downstream of the source reading 10x\'s return ' +
@@ -153,13 +153,13 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
   <filter **>
     @type grep
     <regexp>
-      key isDropped
-      pattern /^true$/        <!-- keep only the dropped slice -->
+      key routeState
+      pattern /^drop$/        <!-- keep only the dropped slice -->
     </regexp>
   </filter>
   <filter **>
     @type record_transformer
-    remove_keys isDropped       <!-- marker did its job; tenx_hash kept -->
+    remove_keys routeState      <!-- marker did its job; tenx_hash kept -->
   </filter>
   <match **>
     @type s3
@@ -183,13 +183,13 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
   <filter **>
     @type grep
     <exclude>
-      key isDropped
-      pattern /^true$/        <!-- drop the offloaded slice from the SIEM path -->
+      key routeState
+      pattern /^drop$/        <!-- drop the offloaded slice from the SIEM path -->
     </exclude>
   </filter>
   <filter **>
     @type record_transformer
-    remove_keys isDropped
+    remove_keys routeState
   </filter>
   <match **>
     <!-- ... your existing destination <match> ... -->
@@ -209,9 +209,9 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
 }
 
 // ---------------------------------------------------------------------------
-// fluent-bit  (smoke-tested live, v5: rewrite_tag's string regex CANNOT match
-// a msgpack boolean, so a lua filter stringifies isDropped to a routing key
-// first; KEEP must be true; a grep excludes the dropped slice from the SIEM.)
+// fluent-bit  (smoke-tested live, v5: a lua filter maps the routeState match
+// to a dedicated routing key first; KEEP must be true; a grep excludes the
+// dropped slice from the SIEM.)
 // ---------------------------------------------------------------------------
 function recipeFluentBit(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
@@ -220,13 +220,13 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
     body: `[SERVICE]
     Grace 5                # let the re-emitted chunk flush before shutdown
 
-# 1) stringify the boolean marker to a routing key. rewrite_tag's Rule is a
-#    STRING regex and does NOT match a msgpack boolean, so map it first.
+# 1) map the routeState marker to a dedicated routing key for rewrite_tag's
+#    Rule below.
 [FILTER]
     Name    lua
     Match   tenx.*
     call    tag_route
-    code    function tag_route(tag,ts,rec) if rec["isDropped"]==true then rec["_drop"]="yes" else rec["_drop"]="no" end return 2,ts,rec end
+    code    function tag_route(tag,ts,rec) if rec["routeState"]=="drop" then rec["_drop"]="yes" else rec["_drop"]="no" end return 2,ts,rec end
 
 # 2) route the dropped slice to its own tag. KEEP=true (4th field): KEEP=false
 #    drops the re-emitted record entirely in fluent-bit. The original copy
@@ -247,7 +247,7 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
 [FILTER]
     Name       record_modifier
     Match      tenx.*
-    Remove_key isDropped
+    Remove_key routeState
     Remove_key _drop
 
 # 5) dropped slice -> customer-owned S3 as JSONL
@@ -262,14 +262,13 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
 
 # 6) kept slice -> your existing SIEM output, Match tenx.app`,
     placementNote:
-      'all FILTERs sit on the 10x return path (`Match tenx.*`); `isDropped` only ' +
-      'exists on post-sidecar records. The lua filter is required because ' +
-      'fluent-bit\'s `rewrite_tag` string regex cannot match a msgpack boolean ' +
-      '(verified live), so the marker is mapped to a string key `_drop` first.',
+      'all FILTERs sit on the 10x return path (`Match tenx.*`); `routeState` only ' +
+      'exists on post-sidecar records. The lua filter maps the marker match to a ' +
+      'dedicated routing key `_drop`, which the `rewrite_tag` Rule then matches.',
     prerequisites: [
       ...basePrereqs(p),
-      'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `isDropped` key is mangled in a delimited round-trip.',
-      'The lua filter (boolean -> string routing key) and `KEEP=true` are both mandatory: rewrite_tag cannot regex-match a boolean, and KEEP=false drops the re-emitted record (both verified live on fluent-bit v5).',
+      'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `routeState` key is mangled in a delimited round-trip.',
+      'The lua filter (marker -> routing key) and `KEEP=true` are both mandatory in this shape: the route is keyed off `_drop`, and KEEP=false drops the re-emitted record (verified live on fluent-bit v5).',
     ],
   };
 }
@@ -287,24 +286,24 @@ function recipeOtelCollector(p: OffloadParams): OffloadRecipe {
   routing:
     default_pipelines: [logs/siem]
     table:
-      # context: log is REQUIRED — isDropped is a LOG attribute. The default
+      # context: log is REQUIRED — routeState is a LOG attribute. The default
       # resource context never matches it (every event falls through to default).
       - context: log
-        condition: attributes["isDropped"] == true
+        condition: attributes["routeState"] == "drop"
         pipelines: [logs/offload]
 
 processors:
   transform/offload:
     error_mode: ignore
     log_statements:
-      - delete_key(log.attributes, "isDropped")  # marker did its job; tenx_hash kept
+      - delete_key(log.attributes, "routeState") # marker did its job; tenx_hash kept
       - set(log.body, log.attributes)            # fold attrs into the body so tenx_hash
                                                   # survives marshaler:body (it is a LOG
                                                   # attribute; body-only would drop it)
   transform/strip:
     error_mode: ignore
     log_statements:
-      - delete_key(log.attributes, "isDropped")  # SIEM path: just drop the marker
+      - delete_key(log.attributes, "routeState") # SIEM path: just drop the marker
 
 exporters:
   awss3:
@@ -328,7 +327,7 @@ service:
       ...basePrereqs(p),
       'Distribution: requires the FULL otelcol-contrib distro (routingconnector + transformprocessor + awss3exporter). A minimal/custom "contrib" build can omit them — verified: a stripped otelcol-contrib had connectors:[] and no transform/awss3.',
       'Routing MUST use `context: log` + `condition` (verified live). `statement: route() where ...` defaults to RESOURCE context and never matches the log attribute, so every event falls through to the SIEM.',
-      'tenx_hash is a LOG attribute; `marshaler: body` alone drops it, so the offload pipeline folds attributes into the body (`set(log.body, log.attributes)`). VERIFIED live against MinIO S3: the object is flat JSONL `{"...":...,"tenx_hash":"..."}` with isDropped removed (the awss3 body marshaler serializes the kvlist body to a flat JSON object).',
+      'tenx_hash is a LOG attribute; `marshaler: body` alone drops it, so the offload pipeline folds attributes into the body (`set(log.body, log.attributes)`). VERIFIED live against MinIO S3: the object is flat JSONL `{"...":...,"tenx_hash":"..."}` with routeState removed (the awss3 body marshaler serializes the kvlist body to a flat JSON object).',
       'Object layout: the awss3 exporter TIME-PARTITIONS the key under the prefix (e.g. `app/year=2026/month=06/day=01/...`), so the Retriever S3->SQS notification must fire recursively under `app/` (it does). Set `s3uploader.s3_partition_format` to flatten the layout if a specific key shape is required.',
     ],
   };
@@ -346,14 +345,14 @@ function recipeLogstash(p: OffloadParams): OffloadRecipe {
 # (logstash-internal, never serialized to a destination), so no routing
 # field leaks into S3 or the SIEM.
 filter {
-  if [isDropped] {                  # truthiness on the boolean (NOT a string compare)
+  if [routeState] == "drop" {       # string equality on the route-state name
     mutate { add_field => { "[@metadata][tenx_route]" => "offload" } }
   }
   # marker did its job; drop it (tenx_hash kept). Also drop [event][original]:
   # under ECS-compat v8 (Logstash 8.x default) the json codec stores the raw
-  # source line there, which still contains "isDropped" (verified leaking into
+  # source line there, which still contains "routeState" (verified leaking into
   # both sinks). Or set pipeline.ecs_compatibility: disabled on this pipeline.
-  mutate { remove_field => ["isDropped", "[event][original]"] }
+  mutate { remove_field => ["routeState", "[event][original]"] }
 }
 
 output {
@@ -372,10 +371,10 @@ output {
       'the route + strip go in the `filter {}` block of the destinations pipeline ' +
       '(the one reading 10x\'s return path); `output {}` then routes on the ' +
       '`[@metadata]` flag. `@metadata` is never shipped, so the routing signal does ' +
-      'not leak into S3 or the SIEM, and `isDropped` is removed before either.',
+      'not leak into S3 or the SIEM, and `routeState` is removed before either.',
     prerequisites: [
       ...basePrereqs(p),
-      'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with isDropped), so the strip removes it too — or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
+      'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with routeState), so the strip removes it too — or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
     ],
   };
 }
@@ -390,7 +389,7 @@ function recipeCribl(p: OffloadParams): OffloadRecipe {
     body: `Routing table (two routes, evaluated top-down):
 
 Route 1  "tenx-offload"
-  Filter:      isDropped == true
+  Filter:      routeState == 'drop'
   Output:      tenx_offload_s3   (S3 destination, below)
   Final:       Yes               (stop; do not also send to the SIEM)
 
@@ -406,19 +405,19 @@ S3 destination "tenx_offload_s3":
   Compression:     none
 
 Strip the marker (both destinations):
-  Pipeline "tenx_strip_isdropped"  ->  one Eval function  ->  Remove fields: isDropped
+  Pipeline "tenx_strip_routestate"  ->  one Eval function  ->  Remove fields: routeState
   Attach it as the Post-Processing Pipeline on BOTH tenx_offload_s3 AND the
   SIEM destination. (Cribl S3/SIEM destinations have no native field-exclude,
   so the strip is a destination-attached pipeline, after the route. tenx_hash kept.)`,
     placementNote:
       'add Route 1 above the SIEM route with Final=Yes so the dropped slice is ' +
-      'pulled out before the catch-all. The route must still see `isDropped`, so ' +
+      'pulled out before the catch-all. The route must still see `routeState`, so ' +
       'the strip is a Post-Processing Pipeline on each destination (after routing), ' +
       'not in the route pipeline. Cribl S3 destinations are batch (staging dir then ' +
       'flush), so objects appear on the flush interval, not per event.',
     prerequisites: [
       ...basePrereqs(p),
-      'Logic verified live via `cribl pipe` (Cribl 4.x real expression engine): Route filter `isDropped == true` matched the boolean, the Eval "Remove fields" dropped isDropped on both outputs, tenx_hash kept. This recipe ships as prose, not paste-ready config — build it in the Cribl UI/API. A full single-mode daemon run additionally needs an event-breaker ruleset + a file-monitor source scoped to your input.',
+      'Logic verified live via `cribl pipe` (Cribl 4.x real expression engine): Route filter `routeState == \'drop\'` matched the marker, the Eval "Remove fields" dropped routeState on both outputs, tenx_hash kept. This recipe ships as prose, not paste-ready config — build it in the Cribl UI/API. A full single-mode daemon run additionally needs an event-breaker ruleset + a file-monitor source scoped to your input.',
     ],
   };
 }
@@ -482,7 +481,7 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
  */
 export function forwarderWriteTerraform(): string {
   return `# Forwarder-write IAM for the offload loop. The forwarder PutObjects the
-# isDropped slice to the Retriever input bucket; the Retriever's own role only
+# routeState=="drop" slice to the Retriever input bucket; the Retriever's own role only
 # READS it, so this is a SEPARATE, additive grant.
 
 variable "bucket" {
@@ -569,7 +568,7 @@ output "forwarder_offload_role_arn" {
 }
 
 // ---------------------------------------------------------------------------
-// SIEM tier_down recipes  (down-tier in place, keyed on the SAME isDropped
+// SIEM tier_down recipes  (down-tier in place, keyed on the SAME routeState
 // marker — no second attribute needed for a binary premium/cheap split).
 // ---------------------------------------------------------------------------
 export interface SiemTierRecipe {
@@ -580,7 +579,7 @@ export interface SiemTierRecipe {
   note: string;
 }
 
-/** Datadog: route `@isDropped:true` to a Flex-only index (cheaper queryable
+/** Datadog: route `@routeState:drop` to a Flex-only index (cheaper queryable
  * tier) instead of the premium Standard index. In-platform Terraform. */
 export function datadogFlexRecipe(opts: { flexRetentionDays?: number } = {}): SiemTierRecipe {
   const flex = opts.flexRetentionDays ?? 30;
@@ -600,7 +599,8 @@ resource "datadog_logs_index" "tenx_offload_flex" {
   name = "tenx-offload"
 
   filter {
-    query = "@isDropped:true"   # the slice 10x marked as low-value
+    query = "@routeState:drop"   # the slice 10x marked as low-value
+    # D1d end state: @routeState:tier_down once the engine stamps tier_down
   }
 
   # retention waterfall: 0 days Standard, then ${flex} days TOTAL (= ${flex} in Flex).
@@ -633,7 +633,7 @@ resource "datadog_logs_index_order" "tenx_offload_order" {
   };
 }
 
-/** CloudWatch: route `isDropped == true` to an Infrequent-Access log group
+/** CloudWatch: route `routeState == "drop"` to an Infrequent-Access log group
  * (~50% cheaper ingest, still Logs-Insights queryable). The split is
  * forwarder-side (events go to a different log group); this is the TF for the
  * IA group. */
@@ -647,14 +647,15 @@ export function cloudwatchIaRecipe(opts: { logGroupName?: string } = {}): SiemTi
   log_group_class = "INFREQUENT_ACCESS"   # ~50% cheaper ingest, still Insights-queryable
 }
 
-# Forwarder side: send isDropped==true events to "${name}",
+# Forwarder side: split on routeState == "drop" today (== "tier_down" after
+# D1d): send the marked events to "${name}",
 # everything else to your Standard log group.`,
     note:
       'IA is a create-time-only, immutable log-group property; AWS ships no ' +
       'auto-router, so the stamped forwarder log-group split is the missing ' +
       'automation (10x is not redundant here). HARDENING: a stamp-miss routes to ' +
       'the Standard fallback and bills at full rate, so the recipe should fail ' +
-      'toward the IA group on the offload path only when `isDropped` is present.',
+      'toward the IA group on the offload path only when `routeState` is present.',
   };
 }
 
@@ -704,14 +705,14 @@ export function renderOffloadSection(
   const lines: string[] = [];
 
   lines.push(
-    'Route the slice 10x marks low-value (`isDropped == true`) to the customer\'s ' +
+    'Route the slice 10x marks low-value (`routeState == "drop"`) to the customer\'s ' +
       'own S3 before the SIEM bills it; the Retriever indexes that bucket and ' +
       'fetches it back by stamped identity. Nothing is deleted, it is relocated. ' +
       'This is lossless cost reduction, not archival.',
     '',
     `Target: \`s3://${params.bucket}/${prefix}/\` (region \`${params.region}\`), newline-delimited JSON.`,
     'Prerequisite on the engine side: run the receiver with `outputOffload true` ' +
-      '(full-text events plus the `isDropped` marker, every event flowing back).',
+      '(full-text events plus the `routeState` marker, every event flowing back).',
     ''
   );
 
@@ -759,7 +760,7 @@ export function renderOffloadSection(
 
   if (showDatadog || showCloudWatch) {
     lines.push(
-      '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `isDropped` marker, no second attribute):',
+      '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
     );
     if (showDatadog) {

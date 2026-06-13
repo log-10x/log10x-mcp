@@ -69,7 +69,7 @@ export interface CapabilitySummary {
   cost_attribution_available: boolean;
   /** Receiver tier installed (in-path) so compact/sample/drop CAN take effect. */
   compact_installable: boolean;
-  /** Receiver tier emits the `isDropped` marker so the SIEM can tier_down by routing rule. */
+  /** Receiver tier emits the `routeState` marker so the SIEM can tier_down by routing rule. */
   tier_down_available: boolean;
   /** Retriever reachable to read the offloaded cohort from the overflow S3 bucket. */
   forensic_query_available: boolean;
@@ -163,9 +163,9 @@ async function probeReporterTier(env: EnvConfig): Promise<'edge' | 'cloud' | nul
 }
 
 /**
- * Probe Receiver tier — distinct from Reporter. Receiver flips the
- * `isDropped` label on at least some events (compact / sample / drop
- * happens in-path), so a non-zero `isDropped="true"` series is the
+ * Probe Receiver tier — distinct from Reporter. Receiver stamps the
+ * `routeState` label on at least some events (compact / sample / drop
+ * happens in-path), so a non-zero `routeState="drop"` series is the
  * tell. This is best-effort; absence does not prove Receiver is
  * uninstalled (could be installed in pass-only mode).
  */
@@ -173,7 +173,7 @@ async function probeReceiverInPath(env: EnvConfig, reporterTier: 'edge' | 'cloud
   try {
     const res = await queryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",isDropped="true"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState="drop"}) > 0`
     );
     if (res.status === 'success' && res.data.result.length > 0) {
       return { detected: true, uncertain: false };

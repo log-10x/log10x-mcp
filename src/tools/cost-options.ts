@@ -159,7 +159,7 @@ async function probeReceiverInPath(
   try {
     const res = await queryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",isDropped="true"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState="drop"}) > 0`
     );
     if (res.status === 'success' && res.data.result.length > 0) {
       return { detected: true, uncertain: false };
@@ -369,7 +369,7 @@ function buildModes(
       id: 'tier_down',
       label: 'Tier-down: stack stores events at a cheaper storage tier.',
       description:
-        'Engine stamps events with the isDropped marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,
