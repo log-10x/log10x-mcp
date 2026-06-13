@@ -395,3 +395,35 @@ test('projectActionRange hoists rate_source from expected to top level', () => {
   // Datadog has $0 list storage — still 'list', not 'unset'.
   assert.equal(range.rate_source.storage, 'list');
 });
+
+// ─── Phase 2: measured compact_ratio_override ────────────────────────
+
+test('compact_ratio_override on splunk uses the measured ratio across the whole band', () => {
+  // Measured 0.5 (half the input survives) overrides the static 0.08-0.15
+  // band. Splunk is envelope mode, where the on-wire size IS the billed size.
+  const r = projectActionRange({
+    action: 'compact',
+    bytes_in: GB,
+    destination: 'splunk',
+    compact_ratio_override: 0.5,
+  });
+  // The band collapses to the single measured ratio: bytes_out = 0.5 * GB.
+  assert.ok(Math.abs(r.expected.bytes_out - 0.5 * GB) < 1, `bytes_out=${r.expected.bytes_out}`);
+  assert.equal(r.low.bytes_out, r.expected.bytes_out);
+  assert.equal(r.high.bytes_out, r.expected.bytes_out);
+  // ~50% reduction, not the ~88% the static band would have given.
+  assert.ok(Math.abs(r.percent_reduction_expected - 50) < 1, `pct=${r.percent_reduction_expected}`);
+  assert.ok(r.expected.notes!.some((n) => /measured/.test(n)), r.expected.notes?.join('|'));
+});
+
+test('compact_ratio_override is ignored on a non-envelope destination (clickhouse keeps its band)', () => {
+  // ClickHouse compacts in dict-udf-view mode; the wire ratio diverges from
+  // the stored size, so the measured override must NOT drive the projection.
+  const withOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'clickhouse', compact_ratio_override: 0.5,
+  });
+  const withoutOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'clickhouse',
+  });
+  assert.equal(withOverride.expected.bytes_out, withoutOverride.expected.bytes_out);
+});

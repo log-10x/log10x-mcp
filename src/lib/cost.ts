@@ -540,6 +540,19 @@ export interface ProjectActionArgs {
     ingest_per_gb_override?: number;
     storage_per_gb_month_override?: number;
   };
+  /**
+   * Measured per-service compact ratio (optimized_bytes / input_bytes, in
+   * [0.02, 1.0]) from the engine's own `emitted_events_optimized_size_total`.
+   * When present AND the destination compacts in `envelope` mode (Splunk,
+   * where the on-wire encoded size IS the billed size), this replaces the
+   * static destination band for action='compact' so the projection reflects
+   * the service's real compressibility instead of a destination-wide guess.
+   * Ignored on index-pruned (ES) / dict-udf-view (ClickHouse) destinations,
+   * where the wire ratio diverges from the billed index/stored size; those
+   * keep the static band for the dollar projection. The value already
+   * reflects realized small-event overhead, so it is NOT re-degraded.
+   */
+  compact_ratio_override?: number;
 }
 
 /**
@@ -621,6 +634,21 @@ function projectActionWithRatio(
       if (model.compact_mode === 'no-op') {
         bytes_out = args.bytes_in;
         notes.push(`compact not supported on ${args.destination}`);
+      } else if (
+        args.compact_ratio_override !== undefined &&
+        args.compact_ratio_override >= 0.02 &&
+        args.compact_ratio_override <= 1.0 &&
+        model.compact_mode === 'envelope'
+      ) {
+        // Measured per-service ratio on an envelope destination (Splunk):
+        // the on-wire encoded size IS the billed size, so use the real
+        // measurement directly. It already reflects small-event overhead,
+        // so we do NOT re-degrade. The low/expected/high band collapses to
+        // this single value across all three legs (no modeled uncertainty).
+        bytes_out = args.bytes_in * args.compact_ratio_override;
+        notes.push(
+          `compact ratio ${args.compact_ratio_override.toFixed(3)} measured from emitted_events_optimized_size_total`
+        );
       } else {
         const effective = degradeRatioForSmallEvents(
           ratio,

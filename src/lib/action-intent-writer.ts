@@ -185,7 +185,10 @@ function actionRank(a: Action): number {
  * engine keys this file by container and an empty key is meaningless (those
  * patterns still carry their action in action-intent.json).
  */
-export function deriveActionsCsv(entries: ActionIntentEntry[]): string {
+export function deriveActionsCsv(
+  entries: ActionIntentEntry[],
+  authoritativeByService?: Map<string, Action>
+): string {
   // service → (action → count)
   const byService = new Map<string, Map<Action, number>>();
   for (const e of entries) {
@@ -201,6 +204,15 @@ export function deriveActionsCsv(entries: ActionIntentEntry[]): string {
   const services = [...byService.keys()].sort((a, b) => a.localeCompare(b));
   const lines = ['container,action'];
   for (const service of services) {
+    // Phase 2: when an authoritative per-service action is supplied (the
+    // advisory's resolved standard-tier decision), it wins outright. The
+    // mode rule is only the fallback for services with no authoritative
+    // entry (e.g. a container carrying only audit/error patterns).
+    const authoritative = authoritativeByService?.get(service);
+    if (authoritative !== undefined) {
+      lines.push(`${service},${authoritative}`);
+      continue;
+    }
     const counts = byService.get(service)!;
     let best: Action | undefined;
     let bestCount = -1;
