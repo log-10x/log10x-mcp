@@ -23,7 +23,7 @@ const ALL: SiemId[] = [
 function resolve(
   destination: SiemId,
   overrides: {
-    compressibility?: { ratio: number | null; input_bytes: number; optimized_bytes: number };
+    compressibility?: { ratio: number | null; input_bytes: number; optimized_bytes: number; source?: 'live' | 'sample' };
     policy?: { standard_action?: Action; keep_queryable?: boolean };
     autoRecommend?: boolean;
     globalStandardAction?: Action;
@@ -89,7 +89,7 @@ test('splunk: measured-poor compressibility (0.9) -> offload', () => {
     compressibility: { ratio: 0.9, input_bytes: 1e9, optimized_bytes: 9e8 },
   });
   assert.equal(decision.action, 'offload');
-  assert.equal(decision.ratio_source, 'measured');
+  assert.equal(decision.ratio_source, 'measured_live');
   assert.equal(decision.measured_compression_pct, 10); // 1 - 0.9
 });
 
@@ -168,4 +168,28 @@ test('auto_recommend=true: compact threads the measured override (per-service pa
   });
   assert.equal(decision.action, 'compact');
   assert.equal(decision.compact_ratio_override, 0.1);
+});
+
+// ─── ratio provenance: live vs sample vs static band ─────────────────
+
+test('a live (default) measured ratio reports ratio_source=measured_live', () => {
+  const { decision } = resolve('splunk', {
+    compressibility: { ratio: 0.2, input_bytes: 1e9, optimized_bytes: 2e8 }, // no source -> live
+  });
+  assert.equal(decision.ratio_source, 'measured_live');
+});
+
+test('an on-demand sample ratio reports ratio_source=measured_sample (and still drives the action)', () => {
+  // The measure_compaction path: 1/3.7x ~= 0.27 survives -> still <=0.6 -> compact.
+  const { decision } = resolve('splunk', {
+    compressibility: { ratio: 0.27, input_bytes: 0, optimized_bytes: 0, source: 'sample' },
+  });
+  assert.equal(decision.ratio_source, 'measured_sample');
+  assert.equal(decision.action, 'compact');
+  assert.equal(decision.compact_ratio_override, 0.27);
+});
+
+test('no compressibility reports ratio_source=static_band', () => {
+  const { decision } = resolve('splunk', {});
+  assert.equal(decision.ratio_source, 'static_band');
 });

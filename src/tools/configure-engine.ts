@@ -379,6 +379,22 @@ export const configureEngineSchema = {
     .describe(
       'Compressibility threshold for the compact-vs-offload auto-recommendation: a service whose measured optimized/input ratio (or the destination modeled compaction band when no measured ratio is available) is at or below this keeps `compact` (queryable plus a meaningful cut); above it `offload` is recommended (compact would save little). Default 0.6.'
     ),
+  service_compaction: z
+    .record(
+      z.string(),
+      z.object({
+        compaction_ratio_x: z
+          .number()
+          .positive()
+          .describe(
+            'Measured aggregate compaction (original bytes / encoded bytes) for this service, from `log10x_measure_compaction.data.payload.aggregate_compaction_ratio_x`.'
+          ),
+      })
+    )
+    .optional()
+    .describe(
+      'Per-service measured compaction from `log10x_measure_compaction`, keyed by k8s_container. Grounds the per-service advisory in the real codec BEFORE optimize mode is deployed (the live optimize-mode metric only exists after deployment). Precedence for each service compressibility signal: live production metric (when optimize mode is running) wins, else this on-demand sample, else the static destination band. Run `log10x_measure_compaction` per service first, then pass `{ "<k8s_container>": { compaction_ratio_x: N } }`.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
@@ -423,9 +439,9 @@ interface PerServiceSummaryRow {
   bytes_share_pct: number;
   saved_bytes_monthly: number;
   saved_dollars_monthly: number;
-  /** Measured compaction (1 - optimized/input) as a percent, or null when no optimized-size metric was available and the static band was used. */
+  /** Measured compaction (1 - optimized/input) as a percent, or null when no measurement was available and the static band was used. */
   measured_compression_pct: number | null;
-  ratio_source: 'measured' | 'static_band';
+  ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
   keep_queryable: boolean;
   reason: string;
 }
@@ -875,6 +891,27 @@ export async function executeConfigureEngine(
     observationDays,
     metricsEnv
   );
+
+  // Phase 2: overlay caller-supplied log10x_measure_compaction results onto any
+  // container the live optimize-mode metric did not cover with a usable ratio.
+  // This is what grounds the advisory in the real codec BEFORE optimize mode is
+  // deployed (the live metric only exists post-deploy, a chicken-and-egg the
+  // on-demand sample breaks). Live production ratio always wins; the sample
+  // fills the gap; the static band is the last resort.
+  if (args.service_compaction) {
+    for (const [svc, m] of Object.entries(args.service_compaction)) {
+      const live = compressByContainer.get(svc);
+      if (live && live.ratio !== null) continue; // realized production metric wins
+      const frac = m.compaction_ratio_x > 0 ? 1 / m.compaction_ratio_x : NaN;
+      const ratio = frac >= 0.02 && frac <= 1.0 ? frac : null;
+      compressByContainer.set(svc, {
+        ratio,
+        input_bytes: 0,
+        optimized_bytes: 0,
+        source: 'sample',
+      });
+    }
+  }
 
   // Monthly projection from observation window.
   const scaleToMonth = 30 / observationDays;
@@ -1563,6 +1600,23 @@ export async function executeConfigureEngine(
       tool: 'log10x_baseline',
       args: { horizon: '30d', destination },
       why: 'Establish whether a less aggressive target is achievable given current volume + growth.',
+    });
+  }
+
+  // Phase 2 discoverability: when the per-service advisory had no measured
+  // ratio at all (no live optimize-mode metric, no service_compaction passed)
+  // on a destination where compaction matters, point the agent at the real
+  // measurement so the next call is grounded in the codec instead of the band.
+  if (
+    autoRecommend &&
+    model.compact_mode !== 'no-op' &&
+    !args.service_compaction &&
+    ![...serviceActionByContainer.values()].some((d) => d.ratio_source !== 'static_band')
+  ) {
+    nextActions.push({
+      tool: 'log10x_measure_compaction',
+      args: { service: args.containers?.[0] ?? args.service, sample_size: 500, timeRange: '24h' },
+      why: `Per-service compaction is currently the modeled ${destination} band (no live optimize-mode metric, no service_compaction supplied). Run measure_compaction per service (real codec on a real sample), then re-call configure_engine with service_compaction={ "<container>": { compaction_ratio_x } } to ground each compact-vs-offload decision in the measured ratio.`,
     });
   }
 
@@ -2480,6 +2534,14 @@ interface ServiceCompressibility {
   ratio: number | null;
   input_bytes: number;
   optimized_bytes: number;
+  /**
+   * Where the ratio came from. `live` = the engine's realized optimize-mode
+   * output (Prometheus, full production volume). `sample` = an on-demand
+   * log10x_measure_compaction run (real codec on a sampled batch), used before
+   * optimize mode is deployed. Live wins when both exist. Absent is treated as
+   * `live` (the historical default).
+   */
+  source?: 'live' | 'sample';
 }
 
 /**
@@ -2532,7 +2594,7 @@ async function fetchCompressibilityPerContainer(
       const raw = opt / input;
       ratio = raw >= 0.02 && raw <= 1.0 ? raw : null;
     }
-    out.set(c, { ratio, input_bytes: input, optimized_bytes: opt });
+    out.set(c, { ratio, input_bytes: input, optimized_bytes: opt, source: 'live' });
   }
   return out;
 }
@@ -2541,7 +2603,7 @@ interface ServiceActionDecision {
   action: Action;
   source: 'user_pinned' | 'auto' | 'global_default';
   reason: string;
-  ratio_source: 'measured' | 'static_band';
+  ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
   measured_compression_pct: number | null;
   keep_queryable: boolean;
   /** Measured ratio threaded into projectActionRange; cost.ts honors it for compact only on envelope destinations. */
@@ -2575,7 +2637,12 @@ export function _resolveServiceAction(params: {
   const keepQueryable = policy?.keep_queryable ?? false;
   const measuredRatio = compressibility?.ratio ?? null;
   const measuredPct = measuredRatio !== null ? roundOne((1 - measuredRatio) * 100) : null;
-  const ratioSource: 'measured' | 'static_band' = measuredRatio !== null ? 'measured' : 'static_band';
+  const ratioSource: ServiceActionDecision['ratio_source'] =
+    measuredRatio === null
+      ? 'static_band'
+      : compressibility?.source === 'sample'
+        ? 'measured_sample'
+        : 'measured_live';
 
   // An action is "legal" if the destination + forwarder can honor it AND it
   // actually saves: compact only where compaction is not a no-op, tier_down
@@ -2658,7 +2725,7 @@ export function _resolveServiceAction(params: {
   const offloadLegal = isLegal('offload');
   const effectiveRatio = measuredRatio ?? (model.compact_ratio_low + model.compact_ratio_high) / 2;
   const savedPct = Math.round((1 - effectiveRatio) * 100);
-  const measured = ratioSource === 'measured' ? 'measured' : 'modeled';
+  const measured = ratioSource === 'static_band' ? 'modeled' : 'measured';
 
   if (compactLegal && (effectiveRatio <= compactWorthItRatio || keepQueryable)) {
     const why = effectiveRatio <= compactWorthItRatio
