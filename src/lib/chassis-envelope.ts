@@ -738,10 +738,27 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // schema drift immediately. In production, catch at the call site.
   const validatedData = ChassisDataSchema.parse(chassisData);
 
+  // Ground dollars in truth: when the surfaced dollars came from the SIEM
+  // vendor LIST rate (not the customer's contracted rate), attach a standard
+  // calibration callout so no envelope ever presents a list-price dollar as if
+  // it were the customer's real number. Volume (GB / %) is exact regardless and
+  // is what headlines lead with; this keeps the dollar honest everywhere,
+  // automatically, for every tool that sets rate_source='list_price'. A tool's
+  // own explicit headline_callout still wins (it can say something more
+  // specific).
+  const listPriceCallout =
+    input.source_disclosure.rate_source === 'list_price'
+      ? 'Dollar figures use the SIEM vendor list rate, not your contracted rate. Pass `effective_ingest_per_gb` (or set `analyzerCost` in your env) to ground them in your real price. Volume (GB / %) is exact regardless.'
+      : undefined;
+
   const summary: Summary = {
     headline: input.headline,
     ...(input.headline_bullets != null ? { bullets: input.headline_bullets } : {}),
-    ...(input.headline_callout != null ? { callout: input.headline_callout } : {}),
+    ...(input.headline_callout != null
+      ? { callout: input.headline_callout }
+      : listPriceCallout != null
+        ? { callout: listPriceCallout }
+        : {}),
   };
 
   const outer = buildEnvelope({

@@ -25,6 +25,23 @@ export function fmtDollar(amount: number): string {
   return `${sign}$${(abs / 1000000).toFixed(1)}M`;
 }
 
+/**
+ * C-policy dollar gating: present a dollar figure only when it is grounded in
+ * the customer's real rate. Returns the formatted dollar when `rateSource` is
+ * `customer_supplied` (or `snapshot`, a captured real rate); returns null for
+ * `list_price` / `none` / unset, so headlines lead with volume (GB / %, always
+ * exact) and append a dollar only when it is true. The chassis attaches a
+ * list-price calibration callout for the non-grounded case.
+ */
+export function groundedDollar(
+  amount: number,
+  rateSource: 'customer_supplied' | 'list_price' | 'snapshot' | 'none' | undefined,
+): string | null {
+  return rateSource === 'customer_supplied' || rateSource === 'snapshot'
+    ? fmtDollar(amount)
+    : null;
+}
+
 /** Format a GB number with a sensible unit: MB < 1, GB < 1000, TB above. */
 export function fmtGb(gb: number): string {
   if (gb === 0) return '0 GB';

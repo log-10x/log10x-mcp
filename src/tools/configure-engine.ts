@@ -1808,6 +1808,17 @@ export async function executeConfigureEngine(
     source_disclosure: {
       bytes_source: 'tsdb',
       siem_vendor: destination,
+      // C-policy: disclose whether the dollar projections used the customer's
+      // contracted rate or the SIEM vendor list rate. When list, the chassis
+      // attaches a calibration callout so the dollar is never quoted as the
+      // customer's real number; the headline already leads with the exact
+      // percent + GB volume.
+      rate_source:
+        resolvedIngest.source === 'customer_supplied'
+          ? 'customer_supplied'
+          : resolvedIngest.source === 'list_price'
+            ? 'list_price'
+            : 'none',
       pattern_count_source: {
         kind: 'scoped_total_above_threshold',
         count: rows.length,
