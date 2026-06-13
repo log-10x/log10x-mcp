@@ -357,7 +357,7 @@ export const configureEngineSchema = {
           .boolean()
           .optional()
           .describe(
-            'When true, force the in-platform compact action wherever compact is legal on the destination, keeping this service queryable in the destination rather than offloading to S3, even when its compaction is modest. No effect on destinations where compact is a no-op (Datadog/CloudWatch/Azure/GCP/Sumo) — there the queryable lever is tier_down, already preferred when it has a priced cheaper tier.'
+            'When true, force the in-platform compact action wherever compact is legal on the destination, keeping this service queryable in the destination rather than offloading to S3, even when its compaction is modest. No effect on destinations where compact is a no-op (Datadog/CloudWatch/Azure/GCP/Sumo); there the queryable lever is tier_down, already preferred when it has a priced cheaper tier.'
           ),
       })
     )
@@ -1432,26 +1432,38 @@ export async function executeConfigureEngine(
     rows.map((r) => ({
       pattern_hash: r.pattern_hash,
       action: r.action,
-      // Phase 2: key each entry by the row's k8s_container (the engine's
-      // actions.csv key), not the single customer-vocab args.service.
-      service: r.container ?? args.service,
+      // Phase 2: under auto-recommend, key each entry by the row's k8s_container
+      // (the engine's actions.csv key). Under auto_recommend=false keep the
+      // legacy single args.service so action-intent.json stays byte-identical
+      // to the pre-Phase-2 output.
+      service: autoRecommend ? (r.container ?? args.service) : args.service,
       reason: r.floor_reason ?? r.reason,
     }))
   );
   const actionIntentJson = writeActionIntent(actionIntentEntries);
-  // Per-SERVICE action routing: engine reads `actions.csv` keyed by k8s
-  // container. The authoritative per-container action is the advisory's
-  // resolved standard-tier decision (NOT a mode over mixed-tier per-pattern
-  // rows, which could let audit/error patterns outvote the bulk decision).
-  // deriveActionsCsv falls back to its mode rule for any container with no
-  // authoritative entry (e.g. a container with only audit/error patterns).
-  const standardBearingContainers = new Set(
-    candidates.filter((c) => c.tier === 'standard').map((c) => c.container)
-  );
+  // Per-SERVICE action routing: under auto-recommend the engine's actions.csv
+  // per-container action is the advisory's resolved standard-tier decision (NOT
+  // a mode over mixed-tier rows, which could let audit/error patterns outvote
+  // the bulk decision). Only containers with a SURVIVING standard row (the
+  // decision's action actually reached output, not downgraded to `pass` by the
+  // target-met shortcut) get the authoritative action, so actions.csv agrees
+  // with action-intent.json on a target-met container. Every other container,
+  // and the ENTIRE auto_recommend=false legacy path, falls back to
+  // deriveActionsCsv's mode rule (byte-identical to Phase 1).
   const authoritativeActionByService = new Map<string, Action>();
-  for (const [container, decision] of serviceActionByContainer) {
-    if (standardBearingContainers.has(container)) {
-      authoritativeActionByService.set(container, decision.action);
+  if (autoRecommend) {
+    const survivingStandard = new Set<string>();
+    for (const r of rows) {
+      if (!r.container) continue;
+      const dec = serviceActionByContainer.get(r.container);
+      if (dec && r.action === dec.action && r.action !== 'pass') {
+        survivingStandard.add(r.container);
+      }
+    }
+    for (const [container, decision] of serviceActionByContainer) {
+      if (survivingStandard.has(container)) {
+        authoritativeActionByService.set(container, decision.action);
+      }
     }
   }
   const actionsCsv = deriveActionsCsv(actionIntentEntries, authoritativeActionByService);
@@ -2486,9 +2498,13 @@ async function fetchCompressibilityPerContainer(
 ): Promise<Map<string, ServiceCompressibility>> {
   const out = new Map<string, ServiceCompressibility>();
   if (containers.length === 0) return out;
+  // No env anchor would sum all_events across every tenant on a shared backend,
+  // yielding a meaningless cross-tenant ratio. Skip and fall back to the static
+  // band (mirrors fetchPerPatternBytes, which warns in the same situation).
+  if (!envId) return out;
   const containerRegex = containers.map(promEscape).join('|');
   const { inputQ, optimizedQ } = compressibilityPerContainer(
-    envId ?? '',
+    envId,
     `${observationDays}d`,
     containerRegex
   );
@@ -2574,8 +2590,12 @@ export function _resolveServiceAction(params: {
     if (a === 'offload') return allowed.includes('offload');
     return false;
   };
+  // Thread the measured ratio into the dollar projection only on the auto path.
+  // Under auto_recommend=false the legacy run must stay dollar-identical to the
+  // pre-Phase-2 static band, so no override there even if a measured series
+  // exists.
   const overrideFor = (a: Action): number | undefined =>
-    a === 'compact' ? measuredRatio ?? undefined : undefined;
+    autoRecommend && a === 'compact' ? measuredRatio ?? undefined : undefined;
   const mk = (
     action: Action,
     source: ServiceActionDecision['source'],

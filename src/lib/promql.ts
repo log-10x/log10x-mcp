@@ -399,16 +399,22 @@ export function edgeEmittedBytes(
 }
 
 /**
- * Measured per-service (per-k8s_container) compressibility inputs for the
- * Phase-2 advisory: input bytes (what the receiver classified, the same
- * metric configure_engine caps per pattern) and the receiver's optimized
- * output size. ratio = optimized/input is the service's realized compaction,
- * used to choose compact (compresses well, stays queryable) vs offload
- * (compresses poorly, take the max cut). Anchored on tenx_env + the same
- * container regex as the per-pattern fetch so the two reconcile. The caller
- * passes an already-escaped container regex. Returns both queries to run in
- * one batch; a container missing from `optimizedQ` (receiver-optimize not
- * deployed for it) falls back to the static destination band.
+ * Measured per-service (per-k8s_container) realized compaction for the Phase-2
+ * advisory: ratio = total receiver-emitted bytes / receiver-classified input
+ * bytes, over the SAME cohort on both sides (tenx_app="receiver", kept slice
+ * routeState!="drop"). Used to choose compact (compresses well, stays
+ * queryable) vs offload (compresses poorly, take the max cut).
+ *
+ * Both legs MUST share the same app + routeState cohort or the ratio is
+ * garbage: all_events_summaryBytes_total is emitted by reporter AND receiver,
+ * so an unscoped denominator double-counts a two-stage pipeline and biases the
+ * ratio low (fake compaction). The numerator sums BOTH emitted metrics the way
+ * edgeEmittedBytes does (optimized output for compacted events + full-size
+ * emitted for pass-through), so it reconciles with the kept input. This mirrors
+ * the ROI dashboard's input/emitted legs. `routeState!="drop"` also matches
+ * series with no routeState label, so it is safe on engines that do not stamp
+ * it. The caller passes an already-escaped container regex; a container missing
+ * from the optimized leg falls back to the static destination band.
  */
 export function compressibilityPerContainer(
   envId: string,
@@ -417,8 +423,9 @@ export function compressibilityPerContainer(
   labels: LabelNameMap = DEFAULT_LABELS
 ): { inputQ: string; optimizedQ: string } {
   const envClause = envId ? `${labels.env}="${envId}",` : '';
-  const inputQ = `sum by (k8s_container)(increase(${BYTES_METRIC}{${envClause}k8s_container=~"${containerRegex}"}[${range}]))`;
-  const optimizedQ = `sum by (k8s_container)(increase(${EMITTED_OPT_METRIC}{${envClause}tenx_app="receiver",k8s_container=~"${containerRegex}"}[${range}]))`;
+  const cohort = `${envClause}tenx_app="receiver",routeState!="drop",k8s_container=~"${containerRegex}"`;
+  const inputQ = `sum by (k8s_container)(increase(${BYTES_METRIC}{${cohort}}[${range}]))`;
+  const optimizedQ = `sum by (k8s_container)(increase(${EMITTED_OPT_METRIC}{${cohort}}[${range}]) or increase(${EMITTED_METRIC}{${cohort}}[${range}]))`;
   return { inputQ, optimizedQ };
 }
 

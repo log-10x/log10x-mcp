@@ -148,3 +148,24 @@ test('auto_recommend=false: compact on a no-op destination remaps to its first l
   const { decision } = resolve('datadog', { autoRecommend: false, globalStandardAction: 'compact' });
   assert.equal(decision.action, 'offload');
 });
+
+test('auto_recommend=false: compact carries NO measured override even when a ratio exists (legacy dollar-identity)', () => {
+  // The measured compact_ratio_override would collapse the cost.ts band to the
+  // measured value, diverging from pre-Phase-2 static-band dollars. Under auto
+  // off it must NOT thread, so a legacy Splunk run stays dollar-identical.
+  const { decision } = resolve('splunk', {
+    autoRecommend: false,
+    globalStandardAction: 'compact',
+    compressibility: { ratio: 0.1, input_bytes: 1e9, optimized_bytes: 1e8 },
+  });
+  assert.equal(decision.action, 'compact');
+  assert.equal(decision.compact_ratio_override, undefined);
+});
+
+test('auto_recommend=true: compact threads the measured override (per-service path active)', () => {
+  const { decision } = resolve('splunk', {
+    compressibility: { ratio: 0.1, input_bytes: 1e9, optimized_bytes: 1e8 },
+  });
+  assert.equal(decision.action, 'compact');
+  assert.equal(decision.compact_ratio_override, 0.1);
+});
