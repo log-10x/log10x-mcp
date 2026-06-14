@@ -320,11 +320,35 @@
       },
       "category": "paste"
     },
-    "log10x_compile": {
-      "title": "Compile symbol library",
-      "description": "Run the Log10x Compiler app to generate a symbol library from any mix of: a local folder of source code / binaries (`source_path`), GitHub repositories via the GitHub REST API (`github_repos`, with optional `github_branch` / `github_folders`), docker/OCI images (`docker_images`), and Helm charts (`helm_charts`) — the AOT artifact the 10x runtime later uses to assign hidden classes (TenXTemplates) to events. Scans the sources (Java, Go, Python, JS/TS, Scala, C/C++, C#, plus binaries) and writes per-file `.10x.json` symbol units plus a single linked `.10x.tar` library, returning their paths, the unit count, and a tail of the engine log. GitHub pull REQUIRES a token even for public repos — pass `github_token` or set GH_TOKEN in the MCP server env; without one the tool returns not_configured with remediation to ask the user. Docker-image pull is daemonless (podman bundled in compiler-10x, no host docker socket; the tool grants the compile container `--cap-add SYS_ADMIN` automatically) and public images need no credentials — pass `docker_username`/`docker_token` only for private Docker Hub repos. Helm pull is a meta-source: the compiler renders the chart (`helm template`/`helm show chart`) and by default also pulls the docker images it references (so it needs the same `--cap-add SYS_ADMIN`); OCI/URL chart refs resolve standalone while a bare `repo/chart` needs a matching `helm_repos` entry (added via `helm repo add` in a pre-step), and `helm_pull_repos` (pull the chart's GitHub source repos) requires a GitHub token. REQUIRES the CLOUD flavor: it runs the cloud compiler image `docker run log10x/compiler-10x @apps/compiler` by default (cloud-flavor by construction), or a locally-installed cloud-flavor `tenx` if you set mode=\"local\" (the Edge native/JIT flavor lacks the compiler and is refused with remediation). No Kubernetes, no deployed app, and no Log10x account needed. Artifactory / gomod pull and library push are not yet wired into this tool. Note: `.jar` files are not scanned directly — provide extracted `.class` files. First compile of a large codebase runs ~10–30 min; subsequent runs are near-instant via checksum reuse (raise `timeout_ms` for very large trees).",
+    "log10x_compile_start": {
+      "title": "Start compile (async)",
+      "description": "Start an ASYNCHRONOUS Log10x Compiler run and return a `job_id` immediately — compiling a large codebase runs ~10–30 min, so this never blocks. Sources combine freely: a local folder of source code / binaries (`source_path`), GitHub repositories via the GitHub REST API (`github_repos`, with optional `github_branch` / `github_folders`), docker/OCI images (`docker_images`), Helm charts (`helm_charts`), and Artifactory artifacts (`artifactory_instance` + `artifactory_repo`, with `artifactory_files` / `artifactory_folders`). The run scans the sources (Java, Go, Python, JS/TS, Scala, C/C++, C#, plus binaries) and writes per-file `.10x.json` symbol units plus a single linked `.10x.tar` library — the AOT artifact the 10x runtime later uses to assign hidden classes (TenXTemplates) to events. The output folder is PINNED per source set, so re-running the same compile reuses prior units (near-instant) instead of a cold scan. GitHub pull REQUIRES a token even for public repos — pass `github_token` or set GH_TOKEN; without one the tool returns not_configured. Docker-image pull is daemonless (podman bundled in compiler-10x, `--cap-add SYS_ADMIN` granted automatically) and public images need no credentials. Helm pull is a meta-source (renders the chart, by default also pulls the images it references); OCI/URL chart refs resolve standalone while a bare `repo/chart` needs a matching `helm_repos` entry. Artifactory pull needs a token (`artifactory_token` or ARTIFACTORY_TOKEN). REQUIRES the CLOUD flavor: runs `log10x/compiler-10x @apps/compiler` by default, or a local cloud-flavor `tenx` with mode=\"local\" (Edge is refused). No Kubernetes or Log10x account needed. `.jar` files are not scanned directly — provide extracted `.class`. Poll progress + diagnostics + the linked library with log10x_compile_status.",
       "annotations": {
-        "title": "Compile symbol library",
+        "title": "Start compile (async)",
+        "readOnlyHint": false,
+        "idempotentHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "category": "compile"
+    },
+    "log10x_compile_status": {
+      "title": "Compile status",
+      "description": "Poll an asynchronous compile started by log10x_compile_start (or a link started by log10x_compile_link), by its `job_id`. Returns `job_status` (running / completed / failed / timed_out), the units produced so far + the linked `.10x.tar` (path + size), elapsed time, the engine exit code, and a credential-redacted tail of the engine log. Crucially, it promotes the engine's scan/link DIAGNOSTICS into the envelope so the compiler is not a black box at 100k–500k-file scale: per-language scan-failure counts with capped failure samples (which files failed to parse and why), and the link report (units merged / skipped, files excluded by folder/name filter, and the symbol-type histogram — class / enum / log / exec). Those appear once the compiler-10x image carries the engine diagnostics change; on an older image the tool degrades to unit counts + the log tail. The first terminal poll captures the exit code into the job record and frees the container; later polls stay readable and the compiled library is never removed.",
+      "annotations": {
+        "title": "Compile status",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "category": "compile"
+    },
+    "log10x_compile_link": {
+      "title": "Link symbol units",
+      "description": "Link an existing folder of `.10x.json` symbol units (from a prior compile) into a single `.10x.tar` library — with NO source scan. This is the same Cloud-flavor Compiler app invoked with link-only arguments: the units folder is the `outputSymbolFolder` and no source is mounted, so the engine reuses the units already on disk (scans 0 new files) and merges them into the library, which is written into that same folder. Returns a `job_id` immediately; poll with log10x_compile_status (it handles link jobs too). Use it to re-link after editing or pruning units, to assemble a library from a units tree built piecemeal, or to rebuild a library from the output folder of a prior log10x_compile_start. REQUIRES the CLOUD flavor (runs `log10x/compiler-10x @apps/compiler` by default, or a local cloud-flavor `tenx` with mode=\"local\"; Edge is refused). No Kubernetes or Log10x account needed.",
+      "annotations": {
+        "title": "Link symbol units",
         "readOnlyHint": false,
         "idempotentHint": true,
         "destructiveHint": false,

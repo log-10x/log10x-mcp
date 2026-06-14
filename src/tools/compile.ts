@@ -1,10 +1,15 @@
 /**
- * log10x_compile — run the Log10x Compiler app to generate a symbol library.
+ * Compiler source validation + config build — the shared front half of the
+ * Compiler tools. `prepareCompile` validates every source and credential and
+ * builds the CompileConfig; `log10x_compile_start` then spawns it asynchronously
+ * (see compile-start.ts) and `log10x_compile_status` polls it. The pure
+ * validators here (docker-ref / helm-ref / artifactory shape, the stable output
+ * key) are also exercised directly by the unit tests.
  *
- * Scans source code / binaries with the CLOUD-flavor Compiler app
- * (`tenx @apps/compiler`) and writes a symbol library — per-file `.10x.json`
- * units plus a linked `.10x.tar` — that the 10x runtime later uses to assign
- * hidden classes (TenXTemplates) to events.
+ * The compile itself scans source code / binaries with the CLOUD-flavor
+ * Compiler app (`tenx @apps/compiler`) and writes a symbol library — per-file
+ * `.10x.json` units plus a linked `.10x.tar` — that the 10x runtime later uses
+ * to assign hidden classes (TenXTemplates) to events.
  *
  * Sources — all combine freely:
  *   - a local folder (`source_path`),
@@ -19,8 +24,11 @@
  *     chart and pulls the docker images + GitHub source repos it references.
  *     OCI/URL chart refs resolve standalone; bare `repo/chart` names need a
  *     matching `helm_repos` entry (added in a pre-step).
- * Artifactory / gomod pull are the remaining axes; the runner's CompileConfig
- * descriptor carries the seams.
+ *   - Artifactory artifacts (`artifactory_instance` + `artifactory_repo`),
+ *     pulled via the Artifactory REST API — token required, no host privilege.
+ * gomod pull is the one engine axis deliberately NOT exposed: it recurses the
+ * full transitive dependency graph and floods the library with third-party
+ * symbols.
  *
  * Backend: Docker-first. By default it runs the cloud image
  * log10x/compiler-10x (which is cloud-flavor by construction); if the caller
@@ -28,28 +36,19 @@
  * JIT) flavor cannot compile and is refused with a clear remediation.
  */
 
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { type StructuredOutput, type Action } from '../lib/output-types.js';
-import {
-  buildChassisEnvelope,
-  buildChassisErrorEnvelope,
-  type ChassisStatus,
-} from '../lib/chassis-envelope.js';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import {
-  runCompile,
-  NotCloudFlavorError,
-  HelmRepoAddError,
-  type CompileConfig,
-  type CompileRunResult,
-  type HelmRepo,
-} from '../lib/compile-runner.js';
-import { DevCliNotInstalledError, DockerNotAvailableError } from '../lib/dev-cli.js';
+import { type CompileConfig, type HelmRepo } from '../lib/compile-runner.js';
 
-const TOOL = 'log10x_compile';
+// prepareCompile's validation envelopes are returned through compile_start —
+// attribute them to that tool.
+const TOOL = 'log10x_compile_start';
 
 export const compileSchema = {
   source_path: z
@@ -124,6 +123,42 @@ export const compileSchema = {
     .describe(
       'Whether to pull + scan the GitHub source repos a chart references (via org.opencontainers.image.source annotations). Default false because it REQUIRES a GitHub token (engine refuses an empty token) — enabling it without github_token / GH_TOKEN returns not_configured.',
     ),
+  artifactory_instance: z
+    .string()
+    .optional()
+    .describe(
+      'Base URL of an Artifactory instance to pull artifacts (Java archives, .NET assemblies, etc.) from and scan, e.g. "https://demo.jfrog.io/artifactory". Requires artifactory_repo and a token (artifactory_token or ARTIFACTORY_TOKEN). Pull is via the Artifactory REST API — no extra host privilege. Combines freely with the other sources.',
+    ),
+  artifactory_repo: z
+    .string()
+    .optional()
+    .describe(
+      'Artifactory repository key to pull from, e.g. "libs-release-local". Required when artifactory_instance is given. Scope the pull with artifactory_files and/or artifactory_folders.',
+    ),
+  artifactory_files: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Specific files within artifactory_repo to pull, each a repo-relative path (e.g. ["dist/app-1.0.0.tar.gz"]). Combine with artifactory_folders; at least one of the two is required when pulling from Artifactory.',
+    ),
+  artifactory_folders: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Folder paths within artifactory_repo to pull (e.g. ["com/acme/app"]). Traversed recursively unless artifactory_recursive is false. At least one of artifactory_files / artifactory_folders is required when pulling from Artifactory.',
+    ),
+  artifactory_recursive: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Whether artifactory_folders are pulled recursively (sub-folders too). Default true. Ignored when only artifactory_files are given.',
+    ),
+  artifactory_token: z
+    .string()
+    .optional()
+    .describe(
+      'Artifactory API access token for artifactory_instance. Falls back to ARTIFACTORY_TOKEN from the MCP server environment. Required when pulling from Artifactory. Reaches the compiler as process environment only — never written to disk or argv.',
+    ),
   output_path: z
     .string()
     .optional()
@@ -153,7 +188,7 @@ export const compileSchema = {
     ),
 };
 
-interface CompileArgs {
+export interface CompileArgs {
   source_path?: string;
   github_repos?: string[];
   github_branch?: string;
@@ -166,6 +201,12 @@ interface CompileArgs {
   helm_repos?: string[];
   helm_pull_images: boolean;
   helm_pull_repos: boolean;
+  artifactory_instance?: string;
+  artifactory_repo?: string;
+  artifactory_files?: string[];
+  artifactory_folders?: string[];
+  artifactory_recursive: boolean;
+  artifactory_token?: string;
   output_path?: string;
   library_name: string;
   mode: 'auto' | 'docker' | 'local';
@@ -236,7 +277,7 @@ export function classifyHelmChartRef(
 }
 
 /** Human description of what the compile read, for headlines/summaries. */
-function describeSources(args: CompileArgs): string {
+export function describeSources(args: CompileArgs): string {
   const parts: string[] = [];
   if (args.source_path) parts.push(args.source_path);
   if (args.github_repos?.length) {
@@ -254,57 +295,75 @@ function describeSources(args: CompileArgs): string {
   if (args.helm_charts?.length) {
     parts.push(`Helm ${args.helm_charts.join(', ')}`);
   }
+  if (args.artifactory_instance && args.artifactory_repo) {
+    parts.push(`Artifactory ${args.artifactory_instance}/${args.artifactory_repo}`);
+  }
   return parts.join(' + ');
 }
 
-function sanitizeName(name: string): string {
+export function sanitizeName(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+/, '');
   return cleaned.length > 0 ? cleaned : 'symbols';
 }
 
-function defaultOutputDir(runtimeName: string): string {
-  return join(tmpdir(), 'log10x-mcp-compile', `${runtimeName}-${Date.now()}-${process.pid}`, 'symbols');
+/**
+ * Stable per-source cache key. Re-running the SAME compile must land in the
+ * SAME output folder — that is what lets the engine's checksum-based unit
+ * reuse fire (the old `${name}-${Date.now()}-${pid}` temp dir was unique every
+ * run, so reuse never triggered and every compile was a cold scan, defeating
+ * the "subsequent runs are near-instant" contract). Hashes only the inputs
+ * that determine the symbols: the sources and the runtime name. Credentials,
+ * timeout, and mode are excluded — they don't change the produced library.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function stableOutputKey(args: CompileArgs, runtimeName: string): string {
+  const canonical = JSON.stringify({
+    runtimeName,
+    source_path: args.source_path ? resolve(args.source_path) : null,
+    github_repos: args.github_repos ?? null,
+    github_branch: args.github_branch ?? null,
+    github_folders: args.github_folders ?? null,
+    docker_images: args.docker_images ?? null,
+    helm_charts: args.helm_charts ?? null,
+    helm_repos: args.helm_repos ?? null,
+    helm_pull_images: args.helm_pull_images,
+    helm_pull_repos: args.helm_pull_repos,
+    artifactory_instance: args.artifactory_instance ?? null,
+    artifactory_repo: args.artifactory_repo ?? null,
+    artifactory_files: args.artifactory_files ?? null,
+    artifactory_folders: args.artifactory_folders ?? null,
+    artifactory_recursive: args.artifactory_recursive,
+  });
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
+
+function defaultOutputDir(runtimeName: string, key: string): string {
+  return join(tmpdir(), 'log10x-mcp-compile', `${runtimeName}-${key}`, 'symbols');
+}
+
 
 /**
- * Last `n` non-empty lines of the combined engine log, for the result.
- *
- * `secrets` are scrubbed first: on a failed pipeline launch the engine dumps
- * its RESOLVED options to stderr — including credential values like
- * githubPullToken / dockerPassword — and without redaction those would ride
- * log_tail straight back into the agent conversation.
+ * Validate every source + credential and build the CompileConfig the runner
+ * consumes. Returns the built config on success, or a ready-to-return error /
+ * not_configured envelope when validation fails — discriminate with
+ * `'inputs' in result`. Single-sources all the gating so compile_start (which
+ * spawns the config asynchronously) shares exactly the same checks.
  */
-function logTail(result: CompileRunResult, n: number, secrets: Array<string | undefined>): string[] {
-  let merged = `${result.stdout}\n${result.stderr}`;
-  for (const s of secrets) {
-    if (s && s.length >= 4) merged = merged.split(s).join('***');
-  }
-  return merged
-    .split('\n')
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0)
-    .slice(-n);
-}
-
-function humanByteSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export async function executeCompile(args: CompileArgs): Promise<string | StructuredOutput> {
+export async function prepareCompile(args: CompileArgs): Promise<CompileConfig | StructuredOutput> {
   // ── 1. Validate sources ──
   const hasGithub = (args.github_repos?.length ?? 0) > 0;
   const hasDockerImages = (args.docker_images?.length ?? 0) > 0;
   const hasHelm = (args.helm_charts?.length ?? 0) > 0;
-  if (!args.source_path && !hasGithub && !hasDockerImages && !hasHelm) {
+  const hasArtifactory = !!(args.artifactory_instance || args.artifactory_repo);
+  if (!args.source_path && !hasGithub && !hasDockerImages && !hasHelm && !hasArtifactory) {
     return buildChassisErrorEnvelope({
       tool: TOOL,
       err: {
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), docker_images (image refs), helm_charts (chart refs), or any combination.',
+        hint: 'No source given. Pass source_path (a local folder), github_repos (owner/repo list), docker_images (image refs), helm_charts (chart refs), artifactory_instance + artifactory_repo, or any combination.',
       },
     });
   }
@@ -416,6 +475,42 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     }
   }
 
+  if (hasArtifactory) {
+    if (!args.artifactory_instance || !args.artifactory_repo) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: 'Artifactory pull needs both artifactory_instance (the base URL, e.g. https://demo.jfrog.io/artifactory) and artifactory_repo (the repository key, e.g. libs-release-local).',
+        },
+      });
+    }
+    if (!/^https?:\/\/\S+$/i.test(args.artifactory_instance)) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: `artifactory_instance must be an http(s):// URL (no spaces); got: ${JSON.stringify(args.artifactory_instance)}.`,
+        },
+      });
+    }
+    if ((args.artifactory_files?.length ?? 0) === 0 && (args.artifactory_folders?.length ?? 0) === 0) {
+      return buildChassisErrorEnvelope({
+        tool: TOOL,
+        err: {
+          error_type: 'input_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: 'Artifactory pull needs at least one of artifactory_files (repo-relative file paths) or artifactory_folders (folder paths) to scope what to pull.',
+        },
+      });
+    }
+  }
+
   // Resolve a GitHub token only for sources that can actually use it:
   // github_repos, docker_images' source-repo scan, and helm only when it pulls
   // referenced repos or images (both consult org.opencontainers.image.source).
@@ -447,9 +542,30 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     });
   }
 
+  // Artifactory pull requires an API token; resolve from arg or env and gate
+  // up front (the engine cannot pull without it).
+  const artifactoryToken: string | undefined = hasArtifactory
+    ? args.artifactory_token || process.env.ARTIFACTORY_TOKEN
+    : undefined;
+  if (hasArtifactory && !artifactoryToken) {
+    return buildNotConfiguredEnvelope({
+      tool: TOOL,
+      kind: 'generic',
+      remediation: [
+        'Artifactory pull needs an API access token.',
+        'Ask the user for an Artifactory token (a scoped access token with read access to the target repo suffices) and either:',
+        '  1. pass it as the `artifactory_token` argument of this tool, or',
+        '  2. set ARTIFACTORY_TOKEN in the MCP server environment and retry.',
+        'The token is forwarded to the compiler as process environment only — never written to disk or argv.',
+      ].join('\n'),
+    });
+  }
+
   // ── 2. Build the compile config ──
   const runtimeName = sanitizeName(args.library_name);
-  const outputFolder = resolve(args.output_path ?? defaultOutputDir(runtimeName));
+  const outputFolder = resolve(
+    args.output_path ?? defaultOutputDir(runtimeName, stableOutputKey(args, runtimeName)),
+  );
   const inputs: CompileConfig['inputs'] = [];
   if (args.source_path) inputs.push({ kind: 'local', path: resolve(args.source_path) });
   if (hasGithub) {
@@ -472,6 +588,16 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
       pullRepos: args.helm_pull_repos,
     });
   }
+  if (hasArtifactory) {
+    inputs.push({
+      kind: 'artifactory',
+      instance: args.artifactory_instance!,
+      repo: args.artifactory_repo!,
+      files: args.artifactory_files,
+      folders: args.artifactory_folders,
+      recursive: args.artifactory_recursive,
+    });
+  }
   // Registry creds are used by a direct docker_images pull AND by a Helm chart
   // pulling its referenced (possibly private) images, which goes through the
   // same docker pull module.
@@ -483,8 +609,8 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     ? args.docker_token || process.env.DOCKER_TOKEN
     : undefined;
   const credentials =
-    githubToken || dockerUsername || dockerToken
-      ? { githubToken, dockerUsername, dockerToken }
+    githubToken || dockerUsername || dockerToken || artifactoryToken
+      ? { githubToken, dockerUsername, dockerToken, artifactoryToken }
       : undefined;
   const cfg: CompileConfig = {
     inputs,
@@ -498,147 +624,5 @@ export async function executeCompile(args: CompileArgs): Promise<string | Struct
     timeoutMs: args.timeout_ms,
   };
 
-  // ── 3. Run, mapping precondition failures to branchable envelopes ──
-  let result: CompileRunResult;
-  try {
-    result = await runCompile(cfg, { modeOverride: args.mode });
-  } catch (e) {
-    if (
-      e instanceof DevCliNotInstalledError ||
-      e instanceof DockerNotAvailableError ||
-      e instanceof NotCloudFlavorError
-    ) {
-      return buildNotConfiguredEnvelope({ tool: TOOL, kind: 'generic', remediation: e.message });
-    }
-    if (e instanceof HelmRepoAddError) {
-      return buildChassisErrorEnvelope({
-        tool: TOOL,
-        err: {
-          error_type: 'input_invalid',
-          retryable: false,
-          suggested_backoff_ms: null,
-          hint: `${e.message}. Check the helm_repos url (an http(s):// chart-repo index) and that the repo is reachable.`,
-        },
-      });
-    }
-    throw e;
-  }
-
-  // ── 4. Shape the result ──
-  const { exitCode, timedOut, output } = result;
-  // Zero-byte units and empty tars don't count: a unit whose every symbol was
-  // filtered out, linked into a hollow library, is the "green but empty" trap.
-  const producedSymbols = output.unitCount > 0 || output.libraries.some((l) => l.bytes > 0);
-  const ok = exitCode === 0;
-  const sources = describeSources(args);
-
-  const library = output.libraries[0];
-  const libraryDesc = library ? `${library.path} (${humanByteSize(library.bytes)})` : 'none';
-  const payload = {
-    mode: result.mode,
-    image: result.image ?? null,
-    flavor: result.flavor ?? null,
-    flavor_verified: result.flavorVerified,
-    exit_code: exitCode,
-    timed_out: timedOut,
-    wall_time_ms: result.wallTimeMs,
-    source_path: args.source_path ? resolve(args.source_path) : null,
-    github: hasGithub
-      ? {
-          repos: args.github_repos!,
-          branch: args.github_branch ?? null,
-          folders: args.github_folders ?? [],
-        }
-      : null,
-    docker_images: hasDockerImages ? args.docker_images! : null,
-    helm: hasHelm
-      ? {
-          charts: args.helm_charts!,
-          repos: args.helm_repos ?? [],
-          pull_images: args.helm_pull_images,
-          pull_repos: args.helm_pull_repos,
-        }
-      : null,
-    output: {
-      folder: output.folder,
-      unit_count: output.unitCount,
-      empty_unit_count: output.emptyUnitCount,
-      library_files: output.libraries,
-    },
-    // Scrub actual secrets only — NOT dockerUsername, which is non-sensitive
-    // and (being a short, possibly-common string) would over-redact the log.
-    log_tail: logTail(result, 40, [githubToken, dockerToken, cfg.license]),
-  };
-
-  if (!ok && !producedSymbols) {
-    // Hard failure — engine exited non-zero and wrote nothing.
-    return buildChassisErrorEnvelope({
-      tool: TOOL,
-      err: {
-        error_type: timedOut ? 'backend_timeout' : 'local_processing_failed',
-        retryable: timedOut,
-        suggested_backoff_ms: null,
-        hint: timedOut
-          ? `Compile timed out after ${args.timeout_ms}ms. Raise timeout_ms or scope source_path to a smaller tree.`
-          : `Compiler (${result.mode}) exited ${exitCode} with no symbols produced. See data.payload.log_tail.`,
-      },
-      contextPayload: payload,
-    });
-  }
-
-  const emptyNote =
-    output.emptyUnitCount > 0
-      ? ` ${output.emptyUnitCount} unit${output.emptyUnitCount === 1 ? ' was' : 's were'} emitted empty — every symbol filtered out (the default symbol.types keeps class/enum/log/exec only).`
-      : '';
-
-  const status: ChassisStatus = ok ? (producedSymbols ? 'success' : 'no_signal') : 'partial';
-  const headline = ok
-    ? producedSymbols
-      ? `Compiled ${output.unitCount} symbol unit${output.unitCount === 1 ? '' : 's'} → ${libraryDesc}.`
-      : `Compiler ran cleanly but produced no symbols from ${sources} — check the sources contain supported file types.${emptyNote}`
-    : `Compiler exited ${exitCode} with partial output (${output.unitCount} unit${output.unitCount === 1 ? '' : 's'}). See data.payload.log_tail.`;
-
-  const human_summary = ok
-    ? producedSymbols
-      ? `Compiled ${output.unitCount} symbol unit${output.unitCount === 1 ? '' : 's'} from ${sources} into ${output.folder} via ${result.mode} in ${result.wallTimeMs}ms${library ? `, linked to ${library.path}` : ''}.`
-      : `The compiler ran to completion via ${result.mode} but found no symbols in ${sources}. Confirm the sources hold supported source/binary files (extracted .class, not .jar).${emptyNote}`
-    : `The compiler exited ${exitCode} via ${result.mode} but still wrote ${output.unitCount} unit${output.unitCount === 1 ? '' : 's'} to ${output.folder}. Treat as partial; inspect data.payload.log_tail before using the library.`;
-
-  // Next step: smoke-test the freshly compiled library against sample events
-  // by pointing the validate tool's symbolPaths at the output folder.
-  const actions: Action[] =
-    ok && producedSymbols
-      ? [
-          {
-            tool: 'log10x_validate',
-            args: { extra_args: [['symbolPaths', output.folder]] },
-            reason: 'smoke-test the compiled symbol library against a few sample event lines (supply input_lines)',
-          },
-        ]
-      : [];
-
-  return buildChassisEnvelope({
-    tool: TOOL,
-    view: 'summary',
-    headline,
-    status,
-    decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: {},
-    scope: {
-      window: [
-        args.source_path ? 'local' : null,
-        hasGithub ? 'github' : null,
-        hasDockerImages ? 'images' : null,
-        hasHelm ? 'helm' : null,
-      ]
-        .filter(Boolean)
-        .join('+') + '_compile',
-      window_basis: 'explicit',
-      candidates_count: output.unitCount,
-      candidates_usable: output.libraries.length,
-    },
-    payload,
-    human_summary,
-    actions,
-  });
+  return cfg;
 }

@@ -12,6 +12,7 @@ import {
   renderGithubPullOverlay,
   renderDockerPullOverlay,
   renderHelmPullOverlay,
+  renderArtifactoryPullOverlay,
   needsContainerEngine,
   compileEnvVars,
   scanSymbolOutputs,
@@ -98,6 +99,13 @@ test('buildDockerArgs adds --name only when a containerName is supplied', () => 
   const i = named.indexOf('log10x-compile-xyz');
   assert.ok(i > 0 && named[i - 1] === '--name', '--name <containerName> expected');
   assert.ok(!buildDockerArgs(fixtureConfig(), 'img').includes('--name'));
+});
+
+test('buildDockerArgs omits --rm under keepContainer (async needs the container post-exit)', () => {
+  // Synchronous runner reaps via --rm; the async start keeps the container so
+  // compile_status can read a true exit code via `docker inspect`.
+  assert.ok(buildDockerArgs(fixtureConfig(), 'img').includes('--rm'));
+  assert.ok(!buildDockerArgs(fixtureConfig(), 'img', { keepContainer: true }).includes('--rm'));
 });
 
 test('buildDockerArgs mounts pull-config overlays read-only over their baked paths', () => {
@@ -198,6 +206,40 @@ test('buildDockerArgs passes registry creds as bare -e pass-throughs, only when 
   );
   assert.ok(!anonymous.includes('DOCKER_USERNAME'));
   assert.ok(!anonymous.includes('DOCKER_TOKEN'));
+});
+
+test('buildDockerArgs passes ARTIFACTORY_TOKEN as a bare -e and grants no SYS_ADMIN (REST pull)', () => {
+  const cfg = fixtureConfig({
+    inputs: [
+      {
+        kind: 'artifactory',
+        instance: 'https://art.corp',
+        repo: 'libs-release-local',
+        folders: ['com/acme'],
+        recursive: true,
+      },
+    ],
+    credentials: { artifactoryToken: 'art_secret' },
+  });
+  const args = buildDockerArgs(cfg, 'img');
+  const i = args.indexOf('ARTIFACTORY_TOKEN');
+  assert.ok(i > 0 && args[i - 1] === '-e', 'bare -e ARTIFACTORY_TOKEN expected');
+  assert.ok(!args.some((a) => a.includes('art_secret')), 'token value must not appear in argv');
+  // Artifactory is a REST pull — no daemonless podman, so no privilege grant.
+  assert.ok(!args.includes('--cap-add'));
+  assert.ok(!args.some((a) => a.endsWith('/etc/tenx/config/data/compile/sources:ro')));
+});
+
+test('needsContainerEngine is false for an artifactory-only compile', () => {
+  assert.ok(
+    !needsContainerEngine(
+      fixtureConfig({
+        inputs: [
+          { kind: 'artifactory', instance: 'https://art', repo: 'r', folders: ['x'], recursive: true },
+        ],
+      }),
+    ),
+  );
 });
 
 // ── compileEnvVars ───────────────────────────────────────────────────────
@@ -329,6 +371,54 @@ test('renderHelmPullOverlay honors pullRepos=true / pullImages=false', () => {
   });
   assert.match(yaml, /^ {4}dockerImages: false$/m);
   assert.match(yaml, /^ {6}repos: true$/m);
+});
+
+// ── renderArtifactoryPullOverlay ─────────────────────────────────────────
+
+test('renderArtifactoryPullOverlay renders instance/repo as a list entry, token as an env reference', () => {
+  const yaml = renderArtifactoryPullOverlay({
+    kind: 'artifactory',
+    instance: 'https://demo.jfrog.io/artifactory',
+    repo: 'libs-release-local',
+    folders: ['com/acme/app'],
+    recursive: true,
+  });
+  assert.match(yaml, /^tenx: compile$/m);
+  assert.match(yaml, /^artifactory:$/m);
+  assert.match(yaml, /^ {2}- token: \$=TenXEnv\.get\("ARTIFACTORY_TOKEN"\)$/m);
+  assert.match(yaml, /^ {4}instance: 'https:\/\/demo\.jfrog\.io\/artifactory'$/m);
+  assert.match(yaml, /^ {4}repo: 'libs-release-local'$/m);
+  assert.match(yaml, /^ {4}folders:$/m);
+  assert.match(yaml, /^ {6}- 'com\/acme\/app'$/m);
+  assert.match(yaml, /^ {4}recursive: true$/m);
+  // No files given → explicit empty list, not a null key.
+  assert.match(yaml, /^ {4}files: \[\]$/m);
+});
+
+test('renderArtifactoryPullOverlay lists files, omits empty folders as [], and reflects recursive=false', () => {
+  const yaml = renderArtifactoryPullOverlay({
+    kind: 'artifactory',
+    instance: 'https://art.corp',
+    repo: 'pypi-local',
+    files: ['dist/app-1.0.0.tar.gz'],
+    recursive: false,
+  });
+  assert.match(yaml, /^ {4}files:$/m);
+  assert.match(yaml, /^ {6}- 'dist\/app-1\.0\.0\.tar\.gz'$/m);
+  assert.match(yaml, /^ {4}folders: \[\]$/m);
+  assert.match(yaml, /^ {4}recursive: false$/m);
+});
+
+test('renderArtifactoryPullOverlay single-quotes and escapes embedded quotes', () => {
+  const yaml = renderArtifactoryPullOverlay({
+    kind: 'artifactory',
+    instance: "https://art/o'hare",
+    repo: 'r',
+    folders: ["a'b"],
+    recursive: true,
+  });
+  assert.match(yaml, /instance: 'https:\/\/art\/o''hare'/);
+  assert.match(yaml, /- 'a''b'/);
 });
 
 // ── buildLocalIncludePaths ───────────────────────────────────────────────

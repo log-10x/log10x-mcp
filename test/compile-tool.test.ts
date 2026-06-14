@@ -1,6 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isValidDockerImageRef, parseHelmRepos, classifyHelmChartRef } from '../src/tools/compile.js';
+import {
+  isValidDockerImageRef,
+  parseHelmRepos,
+  classifyHelmChartRef,
+  stableOutputKey,
+} from '../src/tools/compile.js';
+
+/** Minimal CompileArgs with the Zod-defaulted fields filled, for key tests. */
+function compileArgs(overrides: Record<string, unknown> = {}) {
+  return {
+    helm_pull_images: true,
+    helm_pull_repos: false,
+    artifactory_recursive: true,
+    library_name: 'symbols',
+    mode: 'auto' as const,
+    timeout_ms: 1_800_000,
+    ...overrides,
+  } as unknown as Parameters<typeof stableOutputKey>[0];
+}
 
 // Regression guard: the first cut of DOCKER_IMAGE_RE rejected port-bearing
 // registry hosts (localhost:5000/app, harbor.corp:8443/team/app) — exactly the
@@ -78,4 +96,43 @@ test('classifyHelmChartRef distinguishes standalone refs, bare repo/chart, and i
   assert.equal(classifyHelmChartRef('singlename'), 'invalid');
   assert.equal(classifyHelmChartRef(''), 'invalid');
   assert.equal(classifyHelmChartRef('has space/chart'), 'invalid');
+});
+
+// The old defaultOutputDir embedded Date.now()+pid, so every run got a fresh
+// folder and the engine's checksum-based unit reuse never fired. stableOutputKey
+// must be deterministic over the sources so re-runs reuse the same folder.
+test('stableOutputKey is identical across runs of the same source set', () => {
+  const a = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
+  const b = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
+  assert.equal(a, b);
+  assert.match(a, /^[a-f0-9]{16}$/);
+});
+
+test('stableOutputKey changes when any source changes', () => {
+  const base = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
+  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-lang'] }), 'symbols'));
+  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'other'));
+  assert.notEqual(
+    base,
+    stableOutputKey(
+      compileArgs({
+        github_repos: ['apache/commons-cli'],
+        artifactory_instance: 'https://art',
+        artifactory_repo: 'r',
+        artifactory_folders: ['x'],
+      }),
+      'symbols',
+    ),
+  );
+});
+
+test('stableOutputKey ignores credentials, mode, and timeout (they do not change symbols)', () => {
+  const base = stableOutputKey(compileArgs({ source_path: '/src/app' }), 'symbols');
+  assert.equal(
+    base,
+    stableOutputKey(
+      compileArgs({ source_path: '/src/app', mode: 'docker', timeout_ms: 60_000, github_token: 'ghp_x' }),
+      'symbols',
+    ),
+  );
 });

@@ -70,6 +70,7 @@ import {
   DevCliNotInstalledError,
   DockerNotAvailableError,
 } from './dev-cli.js';
+import { spawnToLog } from './compile-jobs.js';
 
 // ── Config descriptor (the extension seam) ─────────────────────────────────
 
@@ -124,17 +125,35 @@ export interface CompileHelmInput {
   pullRepos: boolean;
 }
 
+/** Artifacts to pull from a remote Artifactory instance (REST API) and scan. */
+export interface CompileArtifactoryInput {
+  kind: 'artifactory';
+  /** Artifactory base URL, e.g. `https://demo.jfrog.io/artifactory`. */
+  instance: string;
+  /** Target repository key, e.g. `libs-release-local`. */
+  repo: string;
+  /** Specific files within the repo to pull; omit to rely on folders. */
+  files?: string[];
+  /** Folder paths within the repo to pull; omit to rely on files. */
+  folders?: string[];
+  /** Pull folders recursively (sub-folders too). */
+  recursive: boolean;
+}
+
 /**
  * Where the compiler reads sources from. Local folder, GitHub pull, docker-
- * image pull, and Helm pull are implemented; future kinds (artifactory /
- * gomod) slot in here as union members — the appliers branch on `kind` and
- * emit the matching pull-config overlay.
+ * image pull, Helm pull, and Artifactory pull are implemented; further kinds
+ * slot in here as union members — the appliers branch on `kind` and emit the
+ * matching pull-config overlay. gomod pull is deliberately NOT exposed: it
+ * recurses the full transitive dependency graph and floods the library with
+ * third-party symbols.
  */
 export type CompileInput =
   | CompileLocalInput
   | CompileGithubInput
   | CompileDockerImageInput
-  | CompileHelmInput;
+  | CompileHelmInput
+  | CompileArtifactoryInput;
 
 export interface CompileConfig {
   /** Inputs to scan — any mix of local folders, GitHub pulls, and docker-image pulls. */
@@ -163,6 +182,8 @@ export interface CompileConfig {
     dockerUsername?: string;
     /** Registry token/password for docker-image pull, surfaced as DOCKER_TOKEN. */
     dockerToken?: string;
+    /** Artifactory API token, surfaced to the engine as ARTIFACTORY_TOKEN. */
+    artifactoryToken?: string;
   };
   /** Hard cap on compile wall time in ms. */
   timeoutMs: number;
@@ -254,6 +275,10 @@ const IN_IMAGE_DOCKER_COMMAND = '/usr/local/bin/docker';
 const CONTAINER_HELM_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/helm/config.yaml';
 /** The helm pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const HELM_PULL_CONFIG_REL = ['compile', 'pull', 'helm', 'config.yaml'];
+/** The baked artifactory pull config our rendered overlay replaces (docker mode). */
+const CONTAINER_ARTIFACTORY_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/artifactory/config.yaml';
+/** The artifactory pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
+const ARTIFACTORY_PULL_CONFIG_REL = ['compile', 'pull', 'artifactory', 'config.yaml'];
 /** Where we mount the shared helm home (repositories.yaml + index cache). */
 const CONTAINER_HELM_HOME = '/helm-home';
 
@@ -268,6 +293,125 @@ export async function runCompile(
   return mode === 'docker' ? runDockerCompile(cfg) : runLocalCompile(cfg);
 }
 
+// ── Async spawn (compile_start) ──────────────────────────────────────────────
+
+/** What `spawnCompileDetached` hands back for the job layer to persist. */
+export interface CompileSpawnHandle {
+  mode: CompileMode;
+  /** Docker image (docker mode). */
+  image?: string;
+  /** Container name — the docker-mode liveness + exit-code + log key. */
+  containerName?: string;
+  /** Spawned client (docker) / engine (local) pid. */
+  pid: number;
+  /** Pull-config overlay dir written for this run (reaped on completion). */
+  overlayDir?: string;
+  /** Shared helm-home populated for this run (reaped on completion). */
+  helmHomeDir?: string;
+}
+
+/**
+ * Spawn a compile DETACHED and return immediately — the counterpart to
+ * runCompile for the async `compile_start` / `compile_status` split. Unlike
+ * runCompile it never awaits the engine; `compile_status` reads the outcome
+ * later from the container/process + the streamed log. Overlays are written
+ * under `workspaceDir` (a PERSISTED per-job dir, not a mkdtemp that gets
+ * cleaned in a `finally`), so the bind-mounts outlive this call for the whole
+ * run. The same precondition gates as runCompile apply (docker availability /
+ * cloud-flavor) and throw the same errors before anything is spawned.
+ */
+export async function spawnCompileDetached(
+  cfg: CompileConfig,
+  spawnOpts: { workspaceDir: string; logPath: string; containerName: string },
+  opts: { modeOverride?: 'auto' | 'docker' | 'local' } = {},
+): Promise<CompileSpawnHandle> {
+  const mode = await resolveMode(opts.modeOverride);
+  await mkdir(cfg.output.folder, { recursive: true });
+  return mode === 'docker'
+    ? spawnDockerCompileDetached(cfg, spawnOpts)
+    : spawnLocalCompileDetached(cfg, spawnOpts);
+}
+
+async function spawnDockerCompileDetached(
+  cfg: CompileConfig,
+  spawnOpts: { workspaceDir: string; logPath: string; containerName: string },
+): Promise<CompileSpawnHandle> {
+  await probeDocker();
+  const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
+  // The helm pre-steps share one absolute deadline so they can't run past the
+  // caller's timeout; the long compile itself is unbounded here (compile_status
+  // enforces the wall-cap and can reap a container that overruns).
+  const deadline = Date.now() + cfg.timeoutMs;
+
+  const overlayDir = join(spawnOpts.workspaceDir, 'overlays');
+  let configMounts: Array<{ hostPath: string; containerPath: string }> = [];
+  if (hasPullOverlay(cfg)) {
+    await mkdir(overlayDir, { recursive: true });
+    configMounts = await writeDockerPullOverlays(cfg, overlayDir);
+  }
+  const helmInput = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
+  let helmHomeDir: string | undefined;
+  if (helmInput?.repos && helmInput.repos.length > 0) {
+    helmHomeDir = await prepHelmHome(image, helmInput.repos, linuxUserMapping(), deadline);
+  }
+
+  const args = buildDockerArgs(cfg, image, {
+    linuxUser: linuxUserMapping(),
+    configMounts,
+    containerName: spawnOpts.containerName,
+    helmHomeHostDir: helmHomeDir,
+    keepContainer: true,
+  });
+
+  // Secrets ride the spawned client's env via the bare `-e VAR` pass-through in
+  // buildDockerArgs — values never appear in argv.
+  const pid = await spawnToLog('docker', args, {
+    env: { ...process.env, ...credentialEnv(cfg) },
+    logPath: spawnOpts.logPath,
+  });
+
+  return {
+    mode: 'docker',
+    image,
+    containerName: spawnOpts.containerName,
+    pid,
+    overlayDir: hasPullOverlay(cfg) ? overlayDir : undefined,
+    helmHomeDir,
+  };
+}
+
+async function spawnLocalCompileDetached(
+  cfg: CompileConfig,
+  spawnOpts: { workspaceDir: string; logPath: string },
+): Promise<CompileSpawnHandle> {
+  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  if (!(await isBinaryOnPath(binary))) {
+    throw new DevCliNotInstalledError();
+  }
+  const { flavor } = await detectFlavor(binary);
+  if (flavor && flavor !== 'cloud') {
+    throw new NotCloudFlavorError(binary, flavor);
+  }
+
+  const overlayDir = join(spawnOpts.workspaceDir, 'overlays');
+  await mkdir(overlayDir, { recursive: true });
+  await writeLocalOverlays(cfg, overlayDir);
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    TENX_INCLUDE_PATHS: buildLocalIncludePaths(resolveInstallPaths(), overlayDir),
+    ...compileEnvVars({
+      outputFolder: cfg.output.folder,
+      libraryFile: cfg.output.libraryFile,
+      runtimeName: cfg.output.runtimeName,
+    }),
+    ...credentialEnv(cfg),
+  };
+
+  const pid = await spawnToLog(binary, ['@apps/compiler'], { env, logPath: spawnOpts.logPath });
+  return { mode: 'local', pid, overlayDir };
+}
+
 /**
  * Mode resolution: an explicit tool arg wins; `auto`/unset defers to
  * dev-cli's `resolveTenxMode()` (which prefers docker and falls back to a
@@ -277,6 +421,133 @@ export async function runCompile(
 async function resolveMode(modeOverride?: 'auto' | 'docker' | 'local'): Promise<CompileMode> {
   if (modeOverride === 'docker' || modeOverride === 'local') return modeOverride;
   return resolveTenxMode();
+}
+
+// ── Shared overlay writers (sync + async paths) ──────────────────────────────
+
+/** True when any input needs a pull-config overlay (i.e. is not a local folder). */
+function hasPullOverlay(cfg: CompileConfig): boolean {
+  return cfg.inputs.some(
+    (i) =>
+      i.kind === 'github' ||
+      i.kind === 'dockerImage' ||
+      i.kind === 'helm' ||
+      i.kind === 'artifactory',
+  );
+}
+
+/**
+ * Write the per-source pull-config overlays into `overlayDir` and return the
+ * docker bind-mounts (host overlay → baked container config, read-only). Shared
+ * by the synchronous runner (mkdtemp dir, cleaned in `finally`) and the async
+ * spawn (persisted job dir, reaped on completion). Helm-home prep is NOT here —
+ * it runs pre-step containers and is handled by the caller.
+ */
+async function writeDockerPullOverlays(
+  cfg: CompileConfig,
+  overlayDir: string,
+): Promise<Array<{ hostPath: string; containerPath: string }>> {
+  const mounts: Array<{ hostPath: string; containerPath: string }> = [];
+  const github = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
+  if (github) {
+    const hostPath = join(overlayDir, 'github-config.yaml');
+    await writeFile(hostPath, renderGithubPullOverlay(github), 'utf8');
+    mounts.push({ hostPath, containerPath: CONTAINER_GITHUB_PULL_CONFIG });
+  }
+  const dockerImage = cfg.inputs.find(
+    (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
+  );
+  if (dockerImage) {
+    const hostPath = join(overlayDir, 'docker-config.yaml');
+    await writeFile(
+      hostPath,
+      renderDockerPullOverlay(dockerImage, { command: IN_IMAGE_DOCKER_COMMAND }),
+      'utf8',
+    );
+    mounts.push({ hostPath, containerPath: CONTAINER_DOCKER_PULL_CONFIG });
+  }
+  const helm = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
+  if (helm) {
+    const hostPath = join(overlayDir, 'helm-config.yaml');
+    await writeFile(hostPath, renderHelmPullOverlay(helm), 'utf8');
+    mounts.push({ hostPath, containerPath: CONTAINER_HELM_PULL_CONFIG });
+  }
+  const artifactory = cfg.inputs.find(
+    (i): i is CompileArtifactoryInput => i.kind === 'artifactory',
+  );
+  if (artifactory) {
+    const hostPath = join(overlayDir, 'artifactory-config.yaml');
+    await writeFile(hostPath, renderArtifactoryPullOverlay(artifactory), 'utf8');
+    mounts.push({ hostPath, containerPath: CONTAINER_ARTIFACTORY_PULL_CONFIG });
+  }
+  return mounts;
+}
+
+/**
+ * Write the local-mode overlay tree into `overlayDir` (placed FIRST on
+ * TENX_INCLUDE_PATHS by the caller so it shadows the install's copies): a
+ * `compile/scanners/config.yaml` re-pointing inputPaths at the local sources
+ * (only when local sources exist — a pull-only compile keeps the bundled
+ * default), plus each active pull source's config under its include-relative
+ * path. Shared by the synchronous local runner and the async local spawn.
+ */
+async function writeLocalOverlays(cfg: CompileConfig, overlayDir: string): Promise<void> {
+  const sourcePaths = cfg.inputs
+    .filter((i): i is CompileLocalInput => i.kind === 'local')
+    .map((i) => i.path);
+  if (sourcePaths.length > 0) {
+    await mkdir(join(overlayDir, 'compile', 'scanners'), { recursive: true });
+    await writeFile(
+      join(overlayDir, 'compile', 'scanners', 'config.yaml'),
+      renderScannersOverlay(sourcePaths),
+      'utf8',
+    );
+  }
+
+  const github = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
+  if (github) {
+    await mkdir(join(overlayDir, ...GITHUB_PULL_CONFIG_REL.slice(0, -1)), { recursive: true });
+    await writeFile(
+      join(overlayDir, ...GITHUB_PULL_CONFIG_REL),
+      renderGithubPullOverlay(github),
+      'utf8',
+    );
+  }
+
+  const dockerImage = cfg.inputs.find(
+    (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
+  );
+  if (dockerImage) {
+    await mkdir(join(overlayDir, ...DOCKER_PULL_CONFIG_REL.slice(0, -1)), { recursive: true });
+    // No `command` override locally — the engine's platform default docker path
+    // applies; the host must have a docker/podman CLI with a working engine.
+    await writeFile(
+      join(overlayDir, ...DOCKER_PULL_CONFIG_REL),
+      renderDockerPullOverlay(dockerImage, {}),
+      'utf8',
+    );
+  }
+
+  const helm = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
+  if (helm) {
+    await mkdir(join(overlayDir, ...HELM_PULL_CONFIG_REL.slice(0, -1)), { recursive: true });
+    await writeFile(join(overlayDir, ...HELM_PULL_CONFIG_REL), renderHelmPullOverlay(helm), 'utf8');
+    // Local mode uses the host's own helm config — `helm_repos` are NOT
+    // auto-added here, so a bare `repo/chart` only resolves if the user has
+    // already `helm repo add`-ed it (OCI / URL chart refs always resolve).
+  }
+
+  const artifactory = cfg.inputs.find(
+    (i): i is CompileArtifactoryInput => i.kind === 'artifactory',
+  );
+  if (artifactory) {
+    await mkdir(join(overlayDir, ...ARTIFACTORY_PULL_CONFIG_REL.slice(0, -1)), { recursive: true });
+    await writeFile(
+      join(overlayDir, ...ARTIFACTORY_PULL_CONFIG_REL),
+      renderArtifactoryPullOverlay(artifactory),
+      'utf8',
+    );
+  }
 }
 
 // ── Docker applier ─────────────────────────────────────────────────────────
@@ -291,43 +562,21 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   // Pull-config overlays are written to a host temp dir and bind-mounted
   // OVER the corresponding baked config file (wholesale replacement — the
   // engine reads one config.yaml per pull source).
-  const githubInput = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
-  const dockerImageInput = cfg.inputs.find(
-    (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
-  );
   const helmInput = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
-  const configMounts: Array<{ hostPath: string; containerPath: string }> = [];
+  let configMounts: Array<{ hostPath: string; containerPath: string }> = [];
   let overlayDir: string | undefined;
   let helmHomeDir: string | undefined;
   try {
-    if (githubInput || dockerImageInput || helmInput) {
+    if (hasPullOverlay(cfg)) {
       overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-pull-'));
+      configMounts = await writeDockerPullOverlays(cfg, overlayDir);
     }
-    if (githubInput) {
-      const hostPath = join(overlayDir!, 'github-config.yaml');
-      await writeFile(hostPath, renderGithubPullOverlay(githubInput), 'utf8');
-      configMounts.push({ hostPath, containerPath: CONTAINER_GITHUB_PULL_CONFIG });
-    }
-    if (dockerImageInput) {
-      const hostPath = join(overlayDir!, 'docker-config.yaml');
-      await writeFile(
-        hostPath,
-        renderDockerPullOverlay(dockerImageInput, { command: IN_IMAGE_DOCKER_COMMAND }),
-        'utf8',
-      );
-      configMounts.push({ hostPath, containerPath: CONTAINER_DOCKER_PULL_CONFIG });
-    }
-    if (helmInput) {
-      const hostPath = join(overlayDir!, 'helm-config.yaml');
-      await writeFile(hostPath, renderHelmPullOverlay(helmInput), 'utf8');
-      configMounts.push({ hostPath, containerPath: CONTAINER_HELM_PULL_CONFIG });
-      // A bare `repo/chart` only resolves if its repo is known to helm, and
-      // the engine never runs `helm repo add`. Populate a shared helm-home
-      // (repositories.yaml + cached index) in pre-step containers, then mount
-      // it into the compile so the engine's `helm template` resolves it.
-      if (helmInput.repos && helmInput.repos.length > 0) {
-        helmHomeDir = await prepHelmHome(image, helmInput.repos, linuxUserMapping(), deadline);
-      }
+    // A bare `repo/chart` only resolves if its repo is known to helm, and the
+    // engine never runs `helm repo add`. Populate a shared helm-home
+    // (repositories.yaml + cached index) in pre-step containers, then mount it
+    // into the compile so the engine's `helm template` resolves it.
+    if (helmInput?.repos && helmInput.repos.length > 0) {
+      helmHomeDir = await prepHelmHome(image, helmInput.repos, linuxUserMapping(), deadline);
     }
 
     // Named so a timeout can reap the container: `docker run` does NOT
@@ -344,11 +593,7 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
 
     // Secrets ride the docker client's own env via bare `-e VAR` pass-through
     // (buildDockerArgs) so the values never appear in argv.
-    const credEnv: Record<string, string> = {};
-    if (cfg.credentials?.githubToken) credEnv.GH_TOKEN = cfg.credentials.githubToken;
-    if (cfg.credentials?.dockerUsername) credEnv.DOCKER_USERNAME = cfg.credentials.dockerUsername;
-    if (cfg.credentials?.dockerToken) credEnv.DOCKER_TOKEN = cfg.credentials.dockerToken;
-    if (cfg.license) credEnv.TENX_LICENSE_KEY = cfg.license;
+    const credEnv = credentialEnv(cfg);
     const env: NodeJS.ProcessEnv | undefined =
       Object.keys(credEnv).length > 0 ? { ...process.env, ...credEnv } : undefined;
 
@@ -487,9 +732,13 @@ export function buildDockerArgs(
     configMounts?: Array<{ hostPath: string; containerPath: string }>;
     containerName?: string;
     helmHomeHostDir?: string;
+    keepContainer?: boolean;
   } = {},
 ): string[] {
-  const args = ['run', '--rm'];
+  // Async (`compile_start`) keeps the container after exit so `compile_status`
+  // can read a true exit code via `docker inspect`; the synchronous runner uses
+  // `--rm` because it reads the exit code from the awaited client.
+  const args = opts.keepContainer ? ['run'] : ['run', '--rm'];
   if (opts.containerName) args.push('--name', opts.containerName);
   if (opts.linuxUser) args.push('--user', opts.linuxUser);
   // Daemonless podman needs the cap for any image pull — a direct dockerImage
@@ -531,6 +780,7 @@ export function buildDockerArgs(
   if (cfg.credentials?.githubToken) args.push('-e', 'GH_TOKEN');
   if (cfg.credentials?.dockerUsername) args.push('-e', 'DOCKER_USERNAME');
   if (cfg.credentials?.dockerToken) args.push('-e', 'DOCKER_TOKEN');
+  if (cfg.credentials?.artifactoryToken) args.push('-e', 'ARTIFACTORY_TOKEN');
 
   args.push(image, '@apps/compiler');
   return args;
@@ -588,58 +838,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   // env hooks the bundled config reads.
   const overlayDir = await mkdtemp(join(tmpdir(), 'log10x-mcp-compile-cfg-'));
   try {
-    const sourcePaths = cfg.inputs
-      .filter((i): i is CompileLocalInput => i.kind === 'local')
-      .map((i) => i.path);
-    if (sourcePaths.length > 0) {
-      await mkdir(join(overlayDir, 'compile', 'scanners'), { recursive: true });
-      await writeFile(
-        join(overlayDir, 'compile', 'scanners', 'config.yaml'),
-        renderScannersOverlay(sourcePaths),
-        'utf8',
-      );
-    }
-
-    const githubInput = cfg.inputs.find((i): i is CompileGithubInput => i.kind === 'github');
-    if (githubInput) {
-      const githubDir = join(overlayDir, ...GITHUB_PULL_CONFIG_REL.slice(0, -1));
-      await mkdir(githubDir, { recursive: true });
-      await writeFile(
-        join(overlayDir, ...GITHUB_PULL_CONFIG_REL),
-        renderGithubPullOverlay(githubInput),
-        'utf8',
-      );
-    }
-
-    const dockerImageInput = cfg.inputs.find(
-      (i): i is CompileDockerImageInput => i.kind === 'dockerImage',
-    );
-    if (dockerImageInput) {
-      const dockerDir = join(overlayDir, ...DOCKER_PULL_CONFIG_REL.slice(0, -1));
-      await mkdir(dockerDir, { recursive: true });
-      // No `command` override locally — the engine's platform default docker
-      // path applies; the host must have a docker/podman CLI with a working
-      // engine behind it.
-      await writeFile(
-        join(overlayDir, ...DOCKER_PULL_CONFIG_REL),
-        renderDockerPullOverlay(dockerImageInput, {}),
-        'utf8',
-      );
-    }
-
-    const helmInput = cfg.inputs.find((i): i is CompileHelmInput => i.kind === 'helm');
-    if (helmInput) {
-      const helmDir = join(overlayDir, ...HELM_PULL_CONFIG_REL.slice(0, -1));
-      await mkdir(helmDir, { recursive: true });
-      await writeFile(
-        join(overlayDir, ...HELM_PULL_CONFIG_REL),
-        renderHelmPullOverlay(helmInput),
-        'utf8',
-      );
-      // Local mode uses the host's own helm config — `helm_repos` are NOT
-      // auto-added here, so a bare `repo/chart` only resolves if the user has
-      // already `helm repo add`-ed it (OCI / URL chart refs always resolve).
-    }
+    await writeLocalOverlays(cfg, overlayDir);
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -654,6 +853,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     if (cfg.credentials?.githubToken) env.GH_TOKEN = cfg.credentials.githubToken;
     if (cfg.credentials?.dockerUsername) env.DOCKER_USERNAME = cfg.credentials.dockerUsername;
     if (cfg.credentials?.dockerToken) env.DOCKER_TOKEN = cfg.credentials.dockerToken;
+    if (cfg.credentials?.artifactoryToken) env.ARTIFACTORY_TOKEN = cfg.credentials.artifactoryToken;
 
     const t0 = Date.now();
     const r = await execCapture(binary, ['@apps/compiler'], { env, timeoutMs: cfg.timeoutMs });
@@ -797,6 +997,42 @@ export function renderHelmPullOverlay(input: CompileHelmInput): string {
 }
 
 /**
+ * Render the artifactory pull config that replaces the baked
+ * `compile/pull/artifactory/config.yaml` wholesale. The token stays an
+ * `$=TenXEnv.get("ARTIFACTORY_TOKEN")` env reference — the secret value travels
+ * as process env, never onto disk. instance/repo and the files/folders lists
+ * are single-quoted so they can't be parsed as `$=` expressions. `files` and
+ * `folders` are always emitted (as `[]` when absent) since the engine reads
+ * both keys.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function renderArtifactoryPullOverlay(input: CompileArtifactoryInput): string {
+  const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+  const lines = [
+    'tenx: compile',
+    'artifactory:',
+    '  - token: $=TenXEnv.get("ARTIFACTORY_TOKEN")',
+    `    instance: ${q(input.instance)}`,
+    `    repo: ${q(input.repo)}`,
+  ];
+  if (input.files && input.files.length > 0) {
+    lines.push('    files:');
+    for (const f of input.files) lines.push(`      - ${q(f)}`);
+  } else {
+    lines.push('    files: []');
+  }
+  if (input.folders && input.folders.length > 0) {
+    lines.push('    folders:');
+    for (const d of input.folders) lines.push(`      - ${q(d)}`);
+  } else {
+    lines.push('    folders: []');
+  }
+  lines.push(`    recursive: ${input.recursive ? 'true' : 'false'}`, '');
+  return lines.join('\n');
+}
+
+/**
  * Build TENX_INCLUDE_PATHS for local mode, overlay dir FIRST so its
  * `compile/scanners/config.yaml` shadows the install's copy. Mirrors the
  * include-path spelling in dev-cli's local runner. Separator is `;` on all
@@ -880,6 +1116,24 @@ export function compileEnvVars(p: {
     TENX_RUNTIME_NAME: p.runtimeName,
     TENX_LOG_APPENDER: 'tenxConsoleAppender',
   };
+}
+
+/**
+ * The secret env (credentials + license) a run needs, keyed by the var names
+ * the engine reads. Docker maps these onto the spawned client's environment so
+ * a bare `-e VAR` pass-through carries the value (never argv); local spreads
+ * them into the child env. Empty when no creds/license are set.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function credentialEnv(cfg: CompileConfig): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (cfg.credentials?.githubToken) env.GH_TOKEN = cfg.credentials.githubToken;
+  if (cfg.credentials?.dockerUsername) env.DOCKER_USERNAME = cfg.credentials.dockerUsername;
+  if (cfg.credentials?.dockerToken) env.DOCKER_TOKEN = cfg.credentials.dockerToken;
+  if (cfg.credentials?.artifactoryToken) env.ARTIFACTORY_TOKEN = cfg.credentials.artifactoryToken;
+  if (cfg.license) env.TENX_LICENSE_KEY = cfg.license;
+  return env;
 }
 
 // ── Output scanning ────────────────────────────────────────────────────────

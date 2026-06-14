@@ -152,7 +152,9 @@ import { findSkewSchema, executeFindSkew } from './tools/find-skew.js';
 // overlapped with log10x_investigate's trajectory + chain analysis.
 import { discoverLabelsSchema, executeDiscoverLabels } from './tools/discover-labels.js';
 import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract-templates.js';
-import { compileSchema, executeCompile } from './tools/compile.js';
+import { compileStartSchema, executeCompileStart } from './tools/compile-start.js';
+import { compileStatusSchema, executeCompileStatus } from './tools/compile-status.js';
+import { compileLinkSchema, executeCompileLink } from './tools/compile-link.js';
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
@@ -1322,10 +1324,22 @@ registerLog10xTool('log10x_resolve_batch', resolveBatchSchema, (args) =>
   wrap('log10x_resolve_batch', async () => executeResolveBatch(args))
 );
 
-// ── Tool: log10x_compile ──
+// ── Tool: log10x_compile_start ──
 
-registerLog10xTool('log10x_compile', compileSchema, (args) =>
-  wrap('log10x_compile', async () => executeCompile(args))
+registerLog10xTool('log10x_compile_start', compileStartSchema, (args) =>
+  wrap('log10x_compile_start', async () => executeCompileStart(args))
+);
+
+// ── Tool: log10x_compile_status ──
+
+registerLog10xTool('log10x_compile_status', compileStatusSchema, (args) =>
+  wrap('log10x_compile_status', async () => executeCompileStatus(args))
+);
+
+// ── Tool: log10x_compile_link ──
+
+registerLog10xTool('log10x_compile_link', compileLinkSchema, (args) =>
+  wrap('log10x_compile_link', async () => executeCompileLink(args))
 );
 
 // ── Tool: log10x_extract_templates ──
@@ -1886,7 +1900,9 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
-  { name: 'log10x_compile', intent: 'Compile a symbol library from any mix of a local source folder, GitHub repos, docker/OCI images, and Helm charts via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image and Helm-referenced-image pull are daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds; Helm bare repo/chart names need helm_repos (OCI/URL resolve standalone). Edge flavor is refused.' },
+  { name: 'log10x_compile_start', intent: 'Start an ASYNC symbol-library compile (returns a job_id immediately — compiles run 10–30 min). Sources combine freely: a local source folder, GitHub repos, docker/OCI images, Helm charts, and Artifactory artifacts, via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image and Helm-referenced-image pull are daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds; Helm bare repo/chart names need helm_repos (OCI/URL resolve standalone); Artifactory needs artifactory_instance + artifactory_repo + a token. Output is pinned per-source so re-runs reuse prior units (near-instant). Edge flavor is refused. Poll with log10x_compile_status.' },
+  { name: 'log10x_compile_status', intent: 'Poll an async compile started by log10x_compile_start (by job_id): job_status (running/completed/failed/timed_out), units produced + linked .10x.tar, and the engine diagnostics that make the compiler not a black box at scale — per-language scan-failure counts with capped samples, and the link report (merge/exclude counts + symbol-type histogram). Captures the exit code and frees the container on first terminal poll; repeat polls stay readable. Polls log10x_compile_link jobs too.' },
+  { name: 'log10x_compile_link', intent: 'Link an existing folder of .10x.json symbol units into a single .10x.tar library, with NO source scan — the same compiler invoked with link-only args (units folder as outputSymbolFolder, no source), so it reuses on-disk units and merges them. Returns a job_id; poll with log10x_compile_status. Use to re-link after editing/pruning units or to rebuild a library from a units tree (e.g. the output folder of a prior log10x_compile_start).' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -1941,11 +1957,12 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_TENX_MODE          `local`, `docker`, or unset (auto-detect, prefers docker) — backend for tenx-running tools (privacy-mode + compile)',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used in local mode; compile requires the cloud flavor)',
         '  LOG10X_TENX_IMAGE         Docker image for the streaming tools when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
-        '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',
-        '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile); omit to use the image built-in limited license',
-        '  GH_TOKEN                  GitHub token for log10x_compile github_repos pull (or pass the github_token arg; required even for public repos)',
-        '  DOCKER_USERNAME           Registry username for log10x_compile docker_images pull (or pass the docker_username arg; omit for public images)',
-        '  DOCKER_TOKEN              Registry token/password for log10x_compile docker_images pull (or pass the docker_token arg; omit for public images)',
+        '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile_start (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',
+        '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile_start); omit to use the image built-in limited license',
+        '  GH_TOKEN                  GitHub token for log10x_compile_start github_repos pull (or pass the github_token arg; required even for public repos)',
+        '  DOCKER_USERNAME           Registry username for log10x_compile_start docker_images pull (or pass the docker_username arg; omit for public images)',
+        '  DOCKER_TOKEN              Registry token/password for log10x_compile_start docker_images pull (or pass the docker_token arg; omit for public images)',
+        '  ARTIFACTORY_TOKEN         Artifactory API token for log10x_compile_start artifactory_instance pull (or pass the artifactory_token arg)',
         '  LOG10X_THRESHOLDS_FILE    JSON file overriding investigate engine thresholds',
         '  LOG10X_MCP_LOG_LEVEL      stderr log level (silent | error | warn | info | debug)',
         '  DATADOG_API_KEY           Datadog API key for backfill_metric destination',
