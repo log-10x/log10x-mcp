@@ -887,8 +887,8 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
   if (env.tick_history.length > 0) {
     lines.push('## Tick history');
     lines.push('');
-    lines.push('| Timestamp | Status | Savings % | Delta patterns | Delta pp |');
-    lines.push('|-----------|--------|-----------|----------------|----------|');
+    lines.push('| Timestamp | Status | Projected % | Delta patterns | Delta pp |');
+    lines.push('|-----------|--------|-------------|----------------|----------|');
     for (const t of env.tick_history) {
       const ts = t.ts.slice(0, 19).replace('T', ' ');
       lines.push(

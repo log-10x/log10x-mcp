@@ -407,6 +407,8 @@ export interface VerifyResult {
   commitment_id?: string;
   baseline_window: string;
   post_window: string;
+  /** Echo of the honored baseline offset (pre-policy anchor); absent when none/invalid. */
+  baseline_offset?: string;
   baseline_bytes: number;
   post_passed_bytes: number;
   post_dropped_bytes: number;
@@ -1394,7 +1396,28 @@ export interface RunVerifyArgs {
    */
   container_label?: string;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
   lensed?: boolean;
+  /**
+   * PromQL duration (e.g. "30d") shifting the BASELINE queries back in time
+   * via the `offset` modifier, so the baseline measures a window that ENDS
+   * `baseline_offset` ago instead of trailing to "now".
+   *
+   * Why it exists: without it, both baseline and post `increase(...[w])`
+   * vectors trail from "now" over an overlapping range, so the baseline is
+   * the policy's own post-deploy output. delivered_pct then collapses to 0
+   * algebraically (the degenerate-windowing caveat fires). Anchoring the
+   * baseline before the policy went live (`commitment.started_at`) is exactly
+   * the fix the caveat prescribes; the commitment runner sets this to the
+   * age of the commitment so the baseline window lands in pre-policy data.
+   *
+   * Must be a bare PromQL range duration (`^\d+(ms|s|m|h|d|w|y)$`); any other
+   * value is ignored (no offset applied) and a caveat is pushed. The $ view
+   * is unaffected either way; it reads post-window dropped bytes directly.
+   */
+  baseline_offset?: string;
 }
+
+/** PromQL range-duration shape, e.g. "7d", "168h", "30m". */
+const PROMQL_DURATION_RE = /^\d+(ms|s|m|h|d|w|y)$/;
 
 /**
  * Pure-function entry for verify. Queries the engine's routeState label
@@ -1414,14 +1437,23 @@ export async function runEstimateVerify(
   const baseSelector = selectorWithEnv(env, extraFilters);
   const hashLabel = env.labels.hash;
 
+  // baseline_offset: shift the baseline range-vector back in time so it
+  // measures pre-policy data instead of trailing to "now" over the same
+  // range as the post window (which would force delivered_pct to 0). Only a
+  // well-formed PromQL duration is honored; anything else is ignored with a
+  // caveat. The clause goes AFTER the range bracket, inside increase().
+  const baselineOffsetValid =
+    !!args.baseline_offset && PROMQL_DURATION_RE.test(args.baseline_offset);
+  const baseOffsetClause = baselineOffsetValid ? ` offset ${args.baseline_offset}` : '';
+
   // 1. Baseline: bytes that PASSED the engine (no drops) over baseline_window.
   //    The engine emits the routeState label as a state NAME string
   //    ("drop" for capped events). Older series may omit the label entirely.
   //    Using `routeState!="drop"` covers BOTH: matches other states AND
   //    label-absent. The negative-equality form matches the kept cohort
   //    without excluding future kept states (regex alternation is reserved).
-  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]))`;
-  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]))`;
+  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]${baseOffsetClause}))`;
+  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]${baseOffsetClause}))`;
   // 2. Post: same query over post_window.
   const postTotalQuery = `sum(increase(${BYTES_METRIC}{${baseSelector}}[${args.post_window}]))`;
   const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.post_window}]))`;
@@ -1607,6 +1639,15 @@ export async function runEstimateVerify(
       `Baseline window is ${baseDays.toFixed(1)}d (<7d). Attribution may be noisy; widen the baseline for higher confidence.`
     );
   }
+  if (baselineOffsetValid) {
+    caveats.push(
+      `Baseline anchored ${args.baseline_offset} before now via offset (pre-policy window), so delivered_pct compares post-deploy volume against pre-deploy volume rather than the policy's own output.`
+    );
+  } else if (args.baseline_offset) {
+    caveats.push(
+      `baseline_offset "${args.baseline_offset}" is not a valid PromQL duration (e.g. "30d") and was ignored; the baseline trails to now. delivered_pct may be degenerate.`
+    );
+  }
   if (postDays < 7) {
     caveats.push(
       `Post window is ${postDays.toFixed(1)}d (<7d). Drift and new-pattern attribution may not have stabilized.`
@@ -1692,6 +1733,7 @@ export async function runEstimateVerify(
     commitment_id: args.commitment_id,
     baseline_window: args.baseline_window,
     post_window: args.post_window,
+    ...(baselineOffsetValid ? { baseline_offset: args.baseline_offset } : {}),
     baseline_bytes: baselineBytes,
     baseline_bytes_scaled: baselineScaled,
     post_passed_bytes: postPassedBytes,

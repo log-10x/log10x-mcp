@@ -1731,10 +1731,17 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
 //      baseline_window is the pre-policy reference.
 //   3. Adapts VerifyResult → WeeklyVerifyResult.
 //
-// Limitation: runEstimateVerify queries `[range]` ending at "now", so
-// every weekly loop hits the same live snapshot. Week-specific windows
-// and the per_pattern_breakdown cap-CSV join are not yet implemented;
-// this path only unblocks the not_ready hard-return.
+// Baseline anchoring: the baseline range-vector is offset back by the
+// commitment's age (baseline_offset below) so it measures PRE-policy data
+// instead of trailing to "now" over the same range as the post window. That
+// removes the degenerate-windowing wash (delivered_pct forced to 0) for the
+// commitment path. The $ view was always correct (post-window dropped bytes).
+//
+// Remaining limitation: the POST query still trails to "now", so each weekly
+// cursor measures the same recent snapshot rather than its own absolute
+// [week_start, week_end] window. Per-week absolute anchoring (a post-side
+// `@ <week_end>` modifier) is the next refinement; today the aggregate
+// delivered_pct is sound but the per-week series is not yet time-sliced.
 
 _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   const env = resolveEnv(getEnvs(), commitment.env);
@@ -1774,11 +1781,24 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
       fetchActionIntentForEnv(env).catch(() => undefined),
     ]);
   }
+  // Anchor the baseline BEFORE the policy went live. Without this the
+  // baseline range-vector trails to "now" over the same window as the post
+  // query (the policy's own output), forcing delivered_pct to 0. Offsetting
+  // by the commitment's age lands the baseline window in pre-policy data.
+  // Skipped for day-zero commitments (no pre-policy gap yet to measure).
+  const commitmentAgeDays = Math.floor(
+    (Date.now() - Date.parse(commitment.started_at)) / MS_PER_DAY
+  );
+  const baselineOffset =
+    Number.isFinite(commitmentAgeDays) && commitmentAgeDays >= 1
+      ? `${commitmentAgeDays}d`
+      : undefined;
   const vr = await runEstimateVerify(
     {
       destination: commitment.destination,
       baseline_window: commitment.baseline_window || '7d',
       post_window: `${weekDays}d`,
+      ...(baselineOffset ? { baseline_offset: baselineOffset } : {}),
       commitment_id: commitment.id,
       contract_type: commitment.contract_type,
       cap_csv_content: capCsv,
