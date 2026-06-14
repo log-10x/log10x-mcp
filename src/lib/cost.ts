@@ -39,6 +39,15 @@ import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './siem/pricing
 // is decimal GB.
 const GB = 1_000_000_000;
 
+// Customer-owned object-store (S3) standard storage rate, $/GB-month. Used to
+// NET the `offload` action: offloaded bytes leave the SIEM entirely (full byte
+// saving) but do not vanish: the customer still pays to store them in their
+// own bucket. ~$0.023/GB-mo is S3 Standard; cheaper tiers (S3-IA ~$0.0125,
+// Glacier Instant ~$0.004) apply when the offload bucket uses them, overridable
+// via customer_rate.s3_per_gb_month_override. Without netting this, offload
+// reads as a free win and the compact-vs-offload comparison is rigged toward it.
+export const S3_STORAGE_PER_GB_MONTH = 0.023;
+
 // ---------------------------------------------------------------------------
 // BACK-COMPAT LAYER — do not change signatures.
 // ---------------------------------------------------------------------------
@@ -202,6 +211,14 @@ export interface SavingsProjection {
   /** For the retention window the caller supplies (default 1 month). */
   storage_dollars: number | null;
   total_dollars: number | null;
+  /**
+   * For `offload` only: the residual cost the customer pays to store the
+   * offloaded bytes in their own object store ($/window). 0 for every other
+   * action. Already NETTED into total_dollars, so savings = baseline - total is
+   * net of S3. Surfaced separately so renderers can show "saved $X (net of $Y
+   * S3 storage)".
+   */
+  s3_storage_dollars?: number;
   /** Disclosed-value mirror of total_dollars. Always populated when total_dollars is non-null. */
   total_dollars_disclosed?: DisclosedDollarValue | null;
   /** Disclosed-value mirror of ingest_dollars. */
@@ -539,6 +556,13 @@ export interface ProjectActionArgs {
   customer_rate?: {
     ingest_per_gb_override?: number;
     storage_per_gb_month_override?: number;
+    /**
+     * Customer's offload-bucket storage rate ($/GB-month) used to net the
+     * `offload` action. Defaults to S3 Standard (S3_STORAGE_PER_GB_MONTH) when
+     * absent. Pass the cheaper tier (IA / Glacier) when the offload bucket uses
+     * it.
+     */
+    s3_per_gb_month_override?: number;
   };
   /**
    * Measured per-service compact ratio (optimized_bytes / input_bytes, in
@@ -625,10 +649,12 @@ function projectActionWithRatio(
       }
       break;
     case 'offload':
-      // Destination sees nothing; S3 cost is OUT OF SCOPE here. Caller
-      // adds S3 storage separately.
+      // Destination sees nothing (full byte saving), but the bytes do not
+      // vanish: they land in the customer's own object store. The S3 storage
+      // cost is netted into total_dollars below (savings = SIEM cost - S3
+      // cost), so offload is no longer modeled as a free win. The explanatory
+      // note is pushed after the S3 dollar is computed.
       bytes_out = 0;
-      notes.push('offload: S3 archival cost not included in this projection');
       break;
     case 'compact': {
       if (model.compact_mode === 'no-op') {
@@ -732,12 +758,28 @@ function projectActionWithRatio(
     storageSource = 'unset';
   }
 
+  // offload: net the customer's residual object-store cost. The bytes left the
+  // SIEM (bytes_out=0 -> ingest+storage = 0 above) but the customer still pays
+  // to store them in their own bucket. Netting here makes downstream savings =
+  // SIEM cost - S3 cost instead of a gross "free win".
+  const s3RatePerGbMonth =
+    args.customer_rate?.s3_per_gb_month_override ?? S3_STORAGE_PER_GB_MONTH;
+  const s3_storage_dollars =
+    args.action === 'offload' ? (args.bytes_in / GB) * s3RatePerGbMonth * months : 0;
+  if (args.action === 'offload') {
+    notes.push(
+      `offload: net of ~$${s3_storage_dollars.toFixed(2)} customer S3 storage (${months}mo at $${s3RatePerGbMonth}/GB-mo); bytes leave the SIEM in full.`
+    );
+  }
+
   // total nulls out if either axis is unset (cannot sum a known and an
-  // unknown without misrepresenting the unknown as zero).
+  // unknown without misrepresenting the unknown as zero). The S3 residual (0
+  // for non-offload) is added so total_dollars is the customer's real cost
+  // after the action.
   const total_dollars =
     ingest_dollars == null || storage_dollars == null
       ? null
-      : ingest_dollars + storage_dollars;
+      : ingest_dollars + storage_dollars + s3_storage_dollars;
 
   const pct = percentReduction(args.bytes_in, bytes_out).expected;
 
@@ -783,6 +825,7 @@ function projectActionWithRatio(
     ingest_dollars,
     storage_dollars,
     total_dollars,
+    s3_storage_dollars,
     ingest_dollars_disclosed,
     storage_dollars_disclosed,
     total_dollars_disclosed,

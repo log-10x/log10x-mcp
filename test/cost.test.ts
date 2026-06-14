@@ -178,15 +178,41 @@ test('projectAction tier_down keeps bytes and emits routing caveat', () => {
   assert.ok(p.notes && p.notes.some((n) => /tier_down/.test(n)));
 });
 
-test('projectAction offload sends zero bytes downstream with S3 caveat', () => {
+test('projectAction offload sends zero bytes downstream, total_dollars is the netted S3 residual', () => {
   const p = projectAction({
     action: 'offload',
     bytes_in: GB,
     destination: 'splunk',
   });
+  // All bytes leave the SIEM.
   assert.equal(p.bytes_out, 0);
-  assert.equal(p.total_dollars, 0);
+  // But total_dollars is no longer 0: it is the customer's residual S3 cost
+  // (1 GB at S3 Standard $0.023/GB-mo for 1 month), surfaced separately too.
+  assert.ok(Math.abs((p.total_dollars ?? -1) - 0.023) < 1e-6, `total=${p.total_dollars}`);
+  assert.ok(Math.abs((p.s3_storage_dollars ?? -1) - 0.023) < 1e-6, `s3=${p.s3_storage_dollars}`);
   assert.ok(p.notes && p.notes.some((n) => /S3/.test(n)));
+});
+
+test('offload savings are netted: baseline minus S3, not gross', () => {
+  // On splunk ($6/GB ingest + $0.10/GB-mo storage), 1 GB baseline (pass) costs
+  // ~$6.10/mo. Offloading it removes that from the SIEM but adds ~$0.023 S3, so
+  // the net saving is ~$6.077, NOT the gross $6.10.
+  const baseline = projectAction({ action: 'pass', bytes_in: GB, destination: 'splunk' });
+  const off = projectAction({ action: 'offload', bytes_in: GB, destination: 'splunk' });
+  const netSaving = (baseline.total_dollars ?? 0) - (off.total_dollars ?? 0);
+  const grossSaving = baseline.total_dollars ?? 0;
+  assert.ok(netSaving < grossSaving, 'net must be below gross');
+  assert.ok(Math.abs(grossSaving - netSaving - 0.023) < 1e-6, `S3 delta=${grossSaving - netSaving}`);
+});
+
+test('offload S3 rate is overridable (cheaper tier)', () => {
+  const standard = projectAction({ action: 'offload', bytes_in: GB, destination: 'splunk' });
+  const glacier = projectAction({
+    action: 'offload', bytes_in: GB, destination: 'splunk',
+    customer_rate: { s3_per_gb_month_override: 0.004 },
+  });
+  assert.ok((glacier.total_dollars ?? 1) < (standard.total_dollars ?? 0));
+  assert.ok(Math.abs((glacier.s3_storage_dollars ?? -1) - 0.004) < 1e-6);
 });
 
 test('projectAction compact on clickhouse uses dict-udf-view band and stored-month basis', () => {
