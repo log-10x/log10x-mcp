@@ -1948,7 +1948,7 @@ export async function executeEstimateSavings(
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
       const rateTag = result.rate_source === 'customer_supplied'
         ? 'contracted rate'
-        : `${destination} list price — your bill may differ`;
+        : `${destination} list price, your bill may differ`;
 
       // ── Action-mix disclosure ──
       // Compute per-action bucket totals from the full (pre-slice) per_pattern
@@ -1984,23 +1984,48 @@ export async function executeEstimateSavings(
       // every pattern got tier_down (tierDownOnly), only the actual action
       // matters; suppress solverActionTag in that branch so the headline
       // stops claiming two contradictory actions.
+      // C-policy: quote the saved DOLLAR in the headline only when the rate is
+      // grounded in the customer's real (contracted) rate. At list_price the
+      // dollar is the SIEM vendor rack rate, not their number, so lead with
+      // VOLUME (GB saved / % reduction, always exact) and let the chassis
+      // list-rate calibration callout (fired by source_disclosure.rate_source
+      // === 'list_price') carry the "set effective_ingest_per_gb" caveat.
+      const leadDollar = result.rate_source === 'customer_supplied';
+      // Exact saved-volume framing for the volume-lead branches.
+      const savedVol = fmtBytes(result.totals.bytes_saved_monthly);
+      const bytePctReduced = result.totals.bytes_in_monthly > 0
+        ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% reduction`
+        : '0% reduction';
       let headline: string;
       if (args.enforcement_mode === 'manual_report') {
-        headline = `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
+        headline = leadDollar
+          ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
+          : `If you enforce externally: ${savedVol}/mo (${bytePctReduced})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
       } else if (tierDownOnly) {
         const solverNote = args.target_percent !== undefined && args.default_action === 'compact'
           ? ` (solver requested compact; destination forced tier_down)`
           : '';
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
+        // tier_down leaves byte volume unchanged; the saving is purely the
+        // per-GB rate delta, so there is no GB-reduction volume to lead with.
+        // Lead with the moved GB at the cheaper tier + pattern coverage, and
+        // append the dollar only at customer_supplied.
+        const tierVol = fmtBytes(result.totals.bytes_in_monthly);
+        headline = leadDollar
+          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`
+          : `Forecast (${destination}): ${tierVol}/mo moved to a cheaper destination tier${serviceTag} via tier_down (lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
         const bytePct = totalBytesForMix(actionMix, ['drop', 'sample', 'compact', 'offload']);
         const totalIn = result.totals.bytes_in_monthly;
         const bytePctStr = totalIn > 0 ? `${((bytePct / totalIn) * 100).toFixed(0)}% bytes` : '';
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings (at ${rateTag})${serviceTag} — ${fmtDollar(bytesSavingDollars)} via byte reduction (${bytePctStr}), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change) — on ${patternCountLabel}.`;
+        headline = leadDollar
+          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings (at ${rateTag})${serviceTag}, ${fmtDollar(bytesSavingDollars)} via byte reduction (${bytePctStr}), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change), on ${patternCountLabel}.`
+          : `Forecast (${destination}): ${savedVol}/mo (${bytePctReduced}) via byte-reducing actions plus tier_down (no bytes change)${serviceTag} on ${patternCountLabel}.`;
       } else {
-        headline = `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
+        headline = leadDollar
+          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`
+          : `Forecast (${destination}): ${savedVol}/mo (${bytePctReduced}) expected reduction${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
       }
 
       const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode, actionMix);
@@ -2104,11 +2129,27 @@ export async function executeEstimateSavings(
     // close enough to zero that the CFO-facing narrative still applies.
     const pctViewWashed =
       Math.abs(result.delivered_pct) < 1e-6 && droppedBytesPositive;
-    const headline = pctViewWashed
-      ? `Verify (${destination}): cap fired on ${(result.post_dropped_bytes / 1_000_000_000).toFixed(2)} GB this window (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ). Passed-byte ratio washed to 0% (see degenerate-windowing caveat); trust the $ figure. Confidence ${(result.causal_confidence * 100).toFixed(0)}%.`
-      : `Verify (${destination}): ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr projected at ${destination} list price — your bill may differ, confidence ${(result.causal_confidence * 100).toFixed(0)}%).`;
-    const human_summary = buildVerifyHumanSummary(result, destination);
+    // C-policy: quote the projected DOLLAR in the headline only when the rate
+    // is the customer's contracted rate. At list_price the dollar is the SIEM
+    // rack rate, so lead with VOLUME (GB cap-fired / % delivered reduction,
+    // always exact) and drop the dollar; the chassis list-rate callout (fired
+    // by source_disclosure.rate_source === 'list_price') carries the caveat.
     const verifyRateSource = result.rate_source === 'customer_supplied' ? 'customer_supplied' as const : 'list_price' as const;
+    const verifyLeadDollar = verifyRateSource === 'customer_supplied';
+    const droppedGb = (result.post_dropped_bytes / 1_000_000_000).toFixed(2);
+    const deliveredPctStr = (result.delivered_pct * 100).toFixed(1);
+    const confStr = (result.causal_confidence * 100).toFixed(0);
+    let headline: string;
+    if (pctViewWashed) {
+      headline = verifyLeadDollar
+        ? `Verify (${destination}): cap fired on ${droppedGb} GB this window (${fmtDollar(result.delivered_dollars_annual_projection)}/yr at your contracted rate). Passed-byte ratio washed to 0% (see degenerate-windowing caveat); trust the $ figure. Confidence ${confStr}%.`
+        : `Verify (${destination}): cap fired on ${droppedGb} GB this window. Passed-byte ratio washed to 0% (see degenerate-windowing caveat); trust the GB figure. Confidence ${confStr}%.`;
+    } else {
+      headline = verifyLeadDollar
+        ? `Verify (${destination}): ${deliveredPctStr}% delivered reduction (${fmtDollar(result.delivered_dollars_annual_projection)}/yr at your contracted rate, confidence ${confStr}%).`
+        : `Verify (${destination}): ${deliveredPctStr}% delivered reduction (${droppedGb} GB cap-fired this window, confidence ${confStr}%).`;
+    }
+    const human_summary = buildVerifyHumanSummary(result, destination);
     return buildChassisEnvelope({
       tool: 'log10x_estimate_savings',
       view: 'summary',
@@ -2242,6 +2283,15 @@ function buildForecastHumanSummary(
   const rateTag = result.rate_source === 'customer_supplied'
     ? 'contracted rate'
     : `${destination} list price`;
+  // C-policy: lead the summary with the saved DOLLAR only when the rate is the
+  // customer's contracted rate. At list_price the dollar is the SIEM rack
+  // rate, so lead with VOLUME (GB saved / % reduction, always exact); the
+  // chassis list-rate callout carries the calibration caveat.
+  const leadDollar = result.rate_source === 'customer_supplied';
+  const savedVol = fmtBytes(result.totals.bytes_saved_monthly);
+  const bytePctReduced = result.totals.bytes_in_monthly > 0
+    ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% reduction`
+    : '0% reduction';
 
   // When action mix is uniformly tier_down (or bytes_saved is 0 and tier_down
   // dominates), use the tier-down framing so callers understand savings come
@@ -2253,7 +2303,13 @@ function buildForecastHumanSummary(
       result.per_pattern.every((r) => r.action === 'tier_down');
     const tierDownOnly = allTierDown || (zeroByteSaved && actionMix.tier_down.pattern_count === result.per_pattern.length);
     if (tierDownOnly) {
-      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+      // tier_down leaves byte volume unchanged; lead with the moved GB at the
+      // cheaper tier, append the dollar only at customer_supplied.
+      const tierVol = fmtBytes(result.totals.bytes_in_monthly);
+      const tierLead = leadDollar
+        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged)`
+        : `${tierVol}/mo moved to a cheaper destination tier via tier_down (lower ingest + storage rate; byte volume unchanged)`;
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${tierLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
     // Mixed actions: break down by byte-reducing vs tier_down.
     if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
@@ -2261,23 +2317,34 @@ function buildForecastHumanSummary(
       const bytesPct = result.totals.bytes_in_monthly > 0
         ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% bytes`
         : '0% bytes';
-      return `estimate_savings forecast on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings — ${fmtDollar(byteReducingDollars)} via byte-reducing actions (${bytesPct} reduced), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change). ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+      const mixLead = leadDollar
+        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings, ${fmtDollar(byteReducingDollars)} via byte-reducing actions (${bytesPct} reduced), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change)`
+        : `${savedVol}/mo (${bytesPct} reduced) via byte-reducing actions plus tier_down (no bytes change)`;
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${mixLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
   }
 
-  // Only surface a "(range $X–$Y)" band when the endpoints actually differ.
+  // Only surface a "(range $X to $Y)" band when the endpoints actually differ.
   // Point-estimate actions (e.g. offload, where low=expected=high) were
-  // rendering "(range $49–$49)" — a single number dressed as a band, which
+  // rendering "(range $49 to $49)", a single number dressed as a band, which
   // reads as false rigor. Suppress the band when low and high are within a
-  // cent of each other.
+  // cent of each other. The dollar band only appears in the dollar-lead path.
   const rangeClause =
     Math.abs(result.totals.dollars_high_monthly - result.totals.dollars_low_monthly) >= 0.01
-      ? ` (range ${fmtDollar(result.totals.dollars_low_monthly)}–${fmtDollar(result.totals.dollars_high_monthly)})`
+      ? ` (range ${fmtDollar(result.totals.dollars_low_monthly)} to ${fmtDollar(result.totals.dollars_high_monthly)})`
       : '';
-  const lead =
-    enforcement_mode === 'manual_report'
-      ? `If you enforce externally on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${rangeClause}. Enforcement is not automatic — this is the potential if the exclusion/drop is applied.`
-      : `estimate_savings forecast on ${destination}${serviceClause} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings${rangeClause}`;
+  let lead: string;
+  if (leadDollar) {
+    lead =
+      enforcement_mode === 'manual_report'
+        ? `If you enforce externally on ${destination}${serviceClause}: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${rangeClause}. Enforcement is not automatic; this is the potential if the exclusion/drop is applied.`
+        : `estimate_savings forecast on ${destination}${serviceClause} projects ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings${rangeClause}`;
+  } else {
+    lead =
+      enforcement_mode === 'manual_report'
+        ? `If you enforce externally on ${destination}${serviceClause}: ${savedVol}/mo (${bytePctReduced}) savings potential. Enforcement is not automatic; this is the potential if the exclusion/drop is applied.`
+        : `estimate_savings forecast on ${destination}${serviceClause} projects ${savedVol}/mo (${bytePctReduced}) expected reduction`;
+  }
   const disclosureSuffix = result.rate_disclosure ? ` ${result.rate_disclosure}.` : '.';
   return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }
@@ -2294,7 +2361,14 @@ function buildVerifyHumanSummary(
     Number.isFinite(result.post_dropped_bytes);
   const pctViewWashed = Math.abs(result.delivered_pct) < 1e-6 && droppedBytesPositive;
   const lead = pctViewWashed
-    ? `estimate_savings verify on ${destination} measured cap fired on ${(result.post_dropped_bytes / 1_000_000_000).toFixed(2)} GB this window (passed-byte ratio washed to 0% — see caveat) at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`
+    ? `estimate_savings verify on ${destination} measured cap fired on ${(result.post_dropped_bytes / 1_000_000_000).toFixed(2)} GB this window (passed-byte ratio washed to 0%, see caveat) at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`
     : `estimate_savings verify on ${destination} measured ${(result.delivered_pct * 100).toFixed(1)}% delivered reduction at causal confidence ${(result.causal_confidence * 100).toFixed(0)}%.`;
-  return `${lead} Annual projection ${fmtDollar(result.delivered_dollars_annual_projection)} using the engine list price.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+  // C-policy: append the annual DOLLAR projection only when the rate is the
+  // customer's contracted rate. At list_price it is the SIEM rack rate, so the
+  // summary stays on the volume/% lead and the chassis list-rate callout
+  // carries the caveat.
+  const dollarSuffix = result.rate_source === 'customer_supplied'
+    ? ` Annual projection ${fmtDollar(result.delivered_dollars_annual_projection)} at your contracted rate.`
+    : '';
+  return `${lead}${dollarSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
 }

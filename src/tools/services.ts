@@ -176,13 +176,16 @@ export async function executeServices(
   const tailNote = tailCount > 0
     ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
-  // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
-  // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
-  // phrasing stays.
+  // C-policy: the headline quotes a dollar only when it is grounded in the
+  // customer's real (contracted) rate. At `list_price` the dollar is the SIEM
+  // vendor rack rate, not their number, so the headline leads with volume
+  // (GB / %, always exact) and the chassis attaches the list-rate calibration
+  // callout. At `unset` there is no rate at all, so we add the set-your-rate
+  // hint inline.
   const headline = top
-    ? (d.rate_source === 'unset'
-      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote} (no $/GB rate configured — pass effective_ingest_per_gb to see dollars.)`
-      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`)
+    ? (d.rate_source === 'customer_supplied'
+      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`
+      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',

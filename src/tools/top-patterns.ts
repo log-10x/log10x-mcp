@@ -1015,28 +1015,39 @@ export async function executeTopPatterns(
       incidents.length > 0
         ? ` ${incidents.length} incident cluster${incidents.length === 1 ? '' : 's'} detected.`
         : '';
-    const rateUnsetTail =
-      ' Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.';
+    // C-policy: a top-line dollar appears in the HEADLINE only when the
+    // rate is the customer's real contracted number. At list_price the
+    // dollar is the SIEM vendor rack rate, not their number, so the
+    // headline leads with volume; the chassis already adds the list-rate
+    // caveat. At unset there is no dollar at all.
+    const showDollarHeadline =
+      rate_source === 'customer_supplied' && totalCostMonthlyDisclosed != null;
+    // The "set your rate" hint is unset-only. At list_price the chassis
+    // emits the list-rate caveat, so we do NOT repeat a rate hint here.
+    const rateHintTail =
+      rate_source === 'unset'
+        ? ' Dollar overlay omitted (rate unset); pass effective_ingest_per_gb to project savings.'
+        : '';
     // Dollar tail rendered once. fmtDisclosedDollar carries the
     // SIEM/list-price caveat (or customer_supplied tag) inline, so the
-    // pre-migration `at ${rateTag}` suffix is dropped — the disclosure
+    // pre-migration `at ${rateTag}` suffix is dropped; the disclosure
     // covers source attribution.
     const dollarTail = `${fmtDisclosedDollar(totalCostMonthlyDisclosed)}/mo`;
     if (include === 'dropped') {
-      if (totalCostMonthlyDisclosed != null) {
+      if (showDollarHeadline) {
         headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope), ~${dollarTail}.${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length} OFFLOADED patterns over ${tf.label}: ${bytesLabel} flagged for drop/down-tier (${sharePctLabel} of scanned bytes in scope).${rateHintTail}${incidentTail}`;
       }
     } else if (include === 'both') {
       const offloadShareLabel =
         droppedShareTotalPct != null
           ? `${Math.round(droppedShareTotalPct)}%`
           : '0%';
-      if (totalCostMonthlyDisclosed != null) {
+      if (showDollarHeadline) {
         headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced), ~${dollarTail} total.${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length} patterns over ${tf.label}: ${bytesLabel} union (${offloadShareLabel} currently reduced).${rateHintTail}${incidentTail}`;
       }
     } else {
       // kept (default) headline shape:
@@ -1046,14 +1057,14 @@ export async function executeTopPatterns(
       // Falls back to bytes-only framing when no rate is configured.
       const totalLabel =
         patternCountTotal != null ? ` of ${patternCountTotal}` : '';
-      if (totalCostMonthlyDisclosed != null && costPerGb != null && windowHours > 0) {
+      if (showDollarHeadline && costPerGb != null && windowHours > 0) {
         const shownCostMonthly =
           (bytesToCost(shownBytes, costPerGb) / windowHours) * 720;
         const shownDollarLabel = fmtDollar(shownCostMonthly);
         const totalDollarLabel = fmtDisclosedDollar(totalCostMonthlyDisclosed);
         headline = `Top ${renderRows.length}${totalLabel} patterns cover ~${shownDollarLabel}/mo of ${totalDollarLabel}/mo total (${sharePctLabel}).${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateUnsetTail}${incidentTail}`;
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateHintTail}${incidentTail}`;
       }
     }
   }
