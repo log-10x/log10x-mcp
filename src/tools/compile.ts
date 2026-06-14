@@ -1,8 +1,8 @@
 /**
  * Compiler source validation + config build — the shared front half of the
  * Compiler tools. `prepareCompile` validates every source and credential and
- * builds the CompileConfig; `log10x_compile_start` then spawns it asynchronously
- * (see compile-start.ts) and `log10x_compile_status` polls it. The pure
+ * builds the CompileConfig; `log10x_compile` then spawns it asynchronously
+ * (see compile-run.ts) and `log10x_compile_status` polls it. The pure
  * validators here (docker-ref / helm-ref / artifactory shape, the stable output
  * key) are also exercised directly by the unit tests.
  *
@@ -46,9 +46,9 @@ import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { type CompileConfig, type HelmRepo } from '../lib/compile-runner.js';
 
-// prepareCompile's validation envelopes are returned through compile_start —
+// prepareCompile's validation envelopes are returned through log10x_compile —
 // attribute them to that tool.
-const TOOL = 'log10x_compile_start';
+const TOOL = 'log10x_compile';
 
 export const compileSchema = {
   source_path: z
@@ -347,7 +347,7 @@ function defaultOutputDir(runtimeName: string, key: string): string {
  * Validate every source + credential and build the CompileConfig the runner
  * consumes. Returns the built config on success, or a ready-to-return error /
  * not_configured envelope when validation fails — discriminate with
- * `'inputs' in result`. Single-sources all the gating so compile_start (which
+ * `'inputs' in result`. Single-sources all the gating so log10x_compile (which
  * spawns the config asynchronously) shares exactly the same checks.
  */
 export async function prepareCompile(args: CompileArgs): Promise<CompileConfig | StructuredOutput> {

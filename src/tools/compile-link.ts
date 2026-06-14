@@ -7,30 +7,24 @@
  * source, so the engine reuses the units already on disk (scans 0 new files)
  * and merges them into the library. No separate link app or pipeline — just
  * the right invocation, which is a CompileConfig with `inputs: []` and the
- * output folder set to the units folder. It therefore reuses the whole async
- * spawn + job machinery: this tool starts a `link`-kind job and you poll it
- * with log10x_compile_status exactly like a compile.
+ * output folder set to the units folder. It therefore reuses the whole launch +
+ * wait machinery (compile-launch.ts): like log10x_compile it waits inline up to
+ * `max_wait_ms` (linking is usually fast, so it normally returns the linked
+ * library in one call) and otherwise hands back a job_id you poll with
+ * log10x_compile_status.
  *
  * Use it to re-link after editing/pruning units, to merge a units tree that was
  * produced piecemeal, or to (re)build a library from units alone.
  */
 
-import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { type StructuredOutput, type Action } from '../lib/output-types.js';
-import { buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
-import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
-import {
-  spawnCompileDetached,
-  NotCloudFlavorError,
-  HelmRepoAddError,
-  type CompileConfig,
-} from '../lib/compile-runner.js';
-import { DevCliNotInstalledError, DockerNotAvailableError } from '../lib/dev-cli.js';
-import { jobDir, writeJobRecord, reapJob, type CompileJobRecord } from '../lib/compile-jobs.js';
-import { sanitizeName } from './compile.js';
 import { z } from 'zod';
+import { type StructuredOutput } from '../lib/output-types.js';
+import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { type CompileConfig } from '../lib/compile-runner.js';
+import { sanitizeName } from './compile.js';
+import { launchCompileJob } from './compile-launch.js';
 
 const TOOL = 'log10x_compile_link';
 
@@ -48,7 +42,7 @@ export const compileLinkSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend, same contract as log10x_compile_start: `auto` prefers the cloud compiler image, `docker` forces it, `local` uses a cloud-flavor tenx. The Edge flavor is refused.',
+      'Execution backend, same contract as log10x_compile: `auto` prefers the cloud compiler image, `docker` forces it, `local` uses a cloud-flavor tenx. The Edge flavor is refused.',
     ),
   timeout_ms: z
     .number()
@@ -59,6 +53,15 @@ export const compileLinkSchema = {
     .describe(
       'Hard cap on link wall time in ms. Default 600,000 (10 min) — linking is much faster than scanning, but a very large units tree can still take minutes.',
     ),
+  max_wait_ms: z
+    .number()
+    .int()
+    .min(0)
+    .max(300_000)
+    .default(45_000)
+    .describe(
+      'How long to wait inline (ms) for the link to finish before handing back a job_id to poll. Default 45,000 (45s) — linking usually finishes inside this and returns the library in ONE call. A very large units tree returns a running job_id you poll with log10x_compile_status. 0 = fire-and-forget.',
+    ),
 };
 
 interface CompileLinkArgs {
@@ -66,9 +69,10 @@ interface CompileLinkArgs {
   library_name: string;
   mode: 'auto' | 'docker' | 'local';
   timeout_ms: number;
+  max_wait_ms: number;
 }
 
-/** Count the `.10x.json` units under a folder (recursive), capped for speed. */
+/** Count the `.10x.json` units under a folder (recursive). */
 async function countUnits(dir: string): Promise<number> {
   let entries: string[];
   try {
@@ -119,7 +123,7 @@ export async function executeCompileLink(args: CompileLinkArgs): Promise<string 
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `No .10x.json symbol units found under ${unitsPath} — nothing to link. Compile sources first with log10x_compile_start (its output folder is a valid units_path).`,
+        hint: `No .10x.json symbol units found under ${unitsPath} — nothing to link. Compile sources first with log10x_compile (its output folder is a valid units_path).`,
       },
     });
   }
@@ -139,103 +143,16 @@ export async function executeCompileLink(args: CompileLinkArgs): Promise<string 
     timeoutMs: args.timeout_ms,
   };
 
-  const jobId = randomUUID();
-  const workspaceDir = jobDir(jobId);
-  const logPath = join(workspaceDir, 'link.log');
-  const containerName = `log10x-link-${jobId}`;
-  const sources = `link ${unitsPath}`;
-
-  let handle;
-  try {
-    handle = await spawnCompileDetached(
-      cfg,
-      { workspaceDir, logPath, containerName },
-      { modeOverride: args.mode },
-    );
-  } catch (e) {
-    if (
-      e instanceof DevCliNotInstalledError ||
-      e instanceof DockerNotAvailableError ||
-      e instanceof NotCloudFlavorError
-    ) {
-      return buildNotConfiguredEnvelope({ tool: TOOL, kind: 'generic', remediation: e.message });
-    }
-    if (e instanceof HelmRepoAddError) {
-      // Not reachable for link-only (no helm), but keep the mapping uniform.
-      return buildChassisErrorEnvelope({
-        tool: TOOL,
-        err: {
-          error_type: 'input_invalid',
-          retryable: false,
-          suggested_backoff_ms: null,
-          hint: e.message,
-        },
-      });
-    }
-    throw e;
-  }
-
-  const record: CompileJobRecord = {
-    job_id: jobId,
+  return launchCompileJob({
+    cfg,
     kind: 'link',
-    mode: handle.mode,
-    image: handle.image,
-    container_name: handle.containerName,
-    pid: handle.pid,
-    output_folder: unitsPath,
-    library_file: cfg.output.libraryFile,
-    log_file: logPath,
-    job_dir: workspaceDir,
-    overlay_dir: handle.overlayDir,
-    helm_home_dir: handle.helmHomeDir,
-    started_at: Date.now(),
-    timeout_ms: cfg.timeoutMs,
-    sources,
-    runtime_name: runtimeName,
-  };
-  try {
-    await writeJobRecord(record);
-  } catch (e) {
-    await reapJob(record).catch(() => {});
-    throw e;
-  }
-
-  const headline = `Link job \`${jobId}\` started (${handle.mode}) over ${unitCount} unit${unitCount === 1 ? '' : 's'} in ${unitsPath}. Poll log10x_compile_status with this job_id.`;
-  const actions: Action[] = [
-    {
-      tool: 'log10x_compile_status',
-      args: { job_id: jobId },
-      reason: 'poll the link job — progress, link diagnostics, and the linked library when done',
-    },
-  ];
-
-  return buildChassisEnvelope({
+    sources: `link ${unitsPath}`,
+    runtimeName,
+    mode: args.mode,
+    maxWaitMs: args.max_wait_ms,
     tool: TOOL,
-    view: 'summary',
-    headline,
-    status: 'success',
-    decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: {},
-    scope: {
-      window: `${runtimeName}_link`,
-      window_basis: 'explicit',
-      candidates_count: unitCount,
-      candidates_usable: unitCount,
-    },
-    payload: {
-      job_id: jobId,
-      job_status: 'running',
-      mode: handle.mode,
-      image: handle.image ?? null,
-      units_path: unitsPath,
-      unit_count: unitCount,
-      library_file: cfg.output.libraryFile,
-      runtime_name: runtimeName,
-      started_at: record.started_at,
-      timeout_ms: cfg.timeoutMs,
-      log_file: logPath,
-    },
-    human_summary: `Started link job ${jobId} via ${handle.mode} over ${unitCount} symbol unit${unitCount === 1 ? '' : 's'} in ${unitsPath}. The compiler links detached (no source scan); call log10x_compile_status({ job_id: "${jobId}" }) to watch it and collect ${runtimeName}.10x.tar when it completes.`,
-    actions,
+    scopeWindow: `${runtimeName}_link`,
+    candidatesCount: unitCount,
+    startedPayloadExtra: { units_path: unitsPath, unit_count: unitCount },
   });
 }

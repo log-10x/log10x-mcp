@@ -293,7 +293,7 @@ export async function runCompile(
   return mode === 'docker' ? runDockerCompile(cfg) : runLocalCompile(cfg);
 }
 
-// ── Async spawn (compile_start) ──────────────────────────────────────────────
+// ── Async spawn (log10x_compile) ──────────────────────────────────────────────
 
 /** What `spawnCompileDetached` hands back for the job layer to persist. */
 export interface CompileSpawnHandle {
@@ -312,7 +312,7 @@ export interface CompileSpawnHandle {
 
 /**
  * Spawn a compile DETACHED and return immediately — the counterpart to
- * runCompile for the async `compile_start` / `compile_status` split. Unlike
+ * runCompile for the async `log10x_compile` / `compile_status` split. Unlike
  * runCompile it never awaits the engine; `compile_status` reads the outcome
  * later from the container/process + the streamed log. Overlays are written
  * under `workspaceDir` (a PERSISTED per-job dir, not a mkdtemp that gets
@@ -735,7 +735,7 @@ export function buildDockerArgs(
     keepContainer?: boolean;
   } = {},
 ): string[] {
-  // Async (`compile_start`) keeps the container after exit so `compile_status`
+  // Async (`log10x_compile`) keeps the container after exit so `compile_status`
   // can read a true exit code via `docker inspect`; the synchronous runner uses
   // `--rm` because it reads the exit code from the awaited client.
   const args = opts.keepContainer ? ['run'] : ['run', '--rm'];

@@ -1,6 +1,6 @@
 /**
  * Compile job registry — the disk-backed state that lets the compiler tools
- * run a long compile asynchronously: `compile_start` spawns the engine
+ * run a long compile asynchronously: `log10x_compile` spawns the engine
  * detached and writes a job record; `compile_status` reads the record back,
  * probes liveness, tails the log, and parses the engine's `printResults` JSON
  * once the run finishes.
@@ -47,7 +47,7 @@ const JOBS_ROOT = join(tmpdir(), 'log10x-mcp-compile', 'jobs');
 export type CompileJobKind = 'compile' | 'link';
 
 /**
- * The persisted handle for one async engine run. Written by `compile_start`,
+ * The persisted handle for one async engine run. Written by `log10x_compile`,
  * read by `compile_status`. Holds locations and liveness keys only — no
  * secret values.
  */
@@ -104,7 +104,7 @@ function jobRecordPath(jobId: string): string {
   return join(jobDir(jobId), 'job.json');
 }
 
-/** Persist the record atomically enough for a single-writer (compile_start). */
+/** Persist the record atomically enough for a single-writer (log10x_compile). */
 export async function writeJobRecord(record: CompileJobRecord): Promise<void> {
   await mkdir(record.job_dir, { recursive: true });
   await writeFile(jobRecordPath(record.job_id), JSON.stringify(record, null, 2), 'utf8');

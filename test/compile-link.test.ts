@@ -10,6 +10,7 @@ const linkArgs = (units_path: string) => ({
   library_name: 'linked',
   mode: 'auto' as const,
   timeout_ms: 600_000,
+  max_wait_ms: 0,
 });
 
 // All three reject BEFORE any spawn, so they need no docker — they guard the

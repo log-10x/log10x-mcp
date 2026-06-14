@@ -1,6 +1,6 @@
 /**
  * log10x_compile_status — poll an async Compiler run started by
- * log10x_compile_start, and surface what the engine is actually doing.
+ * log10x_compile, and surface what the engine is actually doing.
  *
  * Reads the disk job record, probes liveness (docker container / local pid),
  * scans the output folder for produced units + the linked `.10x.tar`, and
@@ -54,7 +54,7 @@ const STARTUP_GRACE_MS = 30_000;
 export const compileStatusSchema = {
   job_id: z
     .string()
-    .describe('The job id returned by log10x_compile_start (data.payload.job_id).'),
+    .describe('The job id returned by log10x_compile (data.payload.job_id).'),
   log_lines: z
     .number()
     .int()
@@ -179,7 +179,7 @@ export async function executeCompileStatus(
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `Unknown compile job_id "${args.job_id}". It was never started or its record has been cleaned up. Start a fresh compile with log10x_compile_start.`,
+        hint: `Unknown compile job_id "${args.job_id}". It was never started or its record has been cleaned up. Start a fresh compile with log10x_compile.`,
       },
     });
   }
