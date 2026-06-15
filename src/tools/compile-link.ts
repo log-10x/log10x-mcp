@@ -130,7 +130,10 @@ export async function executeCompileLink(args: CompileLinkArgs): Promise<string 
 
   // Link-only = the compiler with output.folder pointed at the units folder and
   // NO source inputs: the engine reuses the on-disk units (scans 0 new) and
-  // merges them into output.libraryFile.
+  // merges them into output.libraryFile. `mergeExistingUnits` is REQUIRED here:
+  // with no source scan the run's scan-state is empty, so without it the merge
+  // sees 0 units and writes an EMPTY library. It rides the engine argv as a
+  // literal `mergeExistingUnits true` (see compileAppArgs).
   const runtimeName = sanitizeName(args.library_name);
   const cfg: CompileConfig = {
     inputs: [],
@@ -139,6 +142,7 @@ export async function executeCompileLink(args: CompileLinkArgs): Promise<string 
       libraryFile: join(unitsPath, `${runtimeName}.10x.tar`),
       runtimeName,
     },
+    mergeExistingUnits: true,
     license: process.env.TENX_LICENSE_KEY || process.env.LOG10X_LICENSE_KEY || undefined,
     timeoutMs: args.timeout_ms,
   };

@@ -167,6 +167,17 @@ export interface CompileConfig {
     /** Compile runtimeName (TENX_RUNTIME_NAME); also the default tar stem. */
     runtimeName: string;
   };
+  /**
+   * Link the `.10x.json` symbol units ALREADY on disk under `output.folder` that
+   * this run did not itself scan, the engine's `mergeExistingUnits` option. A
+   * link-only run (no source `inputs`, output folder pointed at a pre-compiled
+   * units tree) scans 0 files, so without this the merge sees an empty
+   * scan-state and writes an EMPTY library. The bundled compiler config never
+   * sets the option (it defaults `$?mergeExistingUnits=false`), so we pass it as
+   * a literal CLI option arg, see `compileAppArgs`. Leave unset/false for a
+   * normal source compile (only this run's freshly-scanned units are merged).
+   */
+  mergeExistingUnits?: boolean;
   /** TENX_LICENSE_KEY to pass through. Omit to use the image's built-in limited license. */
   license?: string;
   /**
@@ -408,7 +419,7 @@ async function spawnLocalCompileDetached(
     ...credentialEnv(cfg),
   };
 
-  const pid = await spawnToLog(binary, ['@apps/compiler'], { env, logPath: spawnOpts.logPath });
+  const pid = await spawnToLog(binary, compileAppArgs(cfg), { env, logPath: spawnOpts.logPath });
   return { mode: 'local', pid, overlayDir };
 }
 
@@ -782,7 +793,7 @@ export function buildDockerArgs(
   if (cfg.credentials?.dockerToken) args.push('-e', 'DOCKER_TOKEN');
   if (cfg.credentials?.artifactoryToken) args.push('-e', 'ARTIFACTORY_TOKEN');
 
-  args.push(image, '@apps/compiler');
+  args.push(image, ...compileAppArgs(cfg));
   return args;
 }
 
@@ -856,7 +867,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     if (cfg.credentials?.artifactoryToken) env.ARTIFACTORY_TOKEN = cfg.credentials.artifactoryToken;
 
     const t0 = Date.now();
-    const r = await execCapture(binary, ['@apps/compiler'], { env, timeoutMs: cfg.timeoutMs });
+    const r = await execCapture(binary, compileAppArgs(cfg), { env, timeoutMs: cfg.timeoutMs });
     const wallTimeMs = Date.now() - t0;
 
     const scanned = await scanSymbolOutputs(cfg.output.folder);
@@ -1116,6 +1127,27 @@ export function compileEnvVars(p: {
     TENX_RUNTIME_NAME: p.runtimeName,
     TENX_LOG_APPENDER: 'tenxConsoleAppender',
   };
+}
+
+/**
+ * The engine argv for a run: the Compiler app config path, plus the
+ * `mergeExistingUnits true` option when `cfg.mergeExistingUnits` is set. The
+ * engine takes options as positional `name value` pairs after the config path
+ * (PipelineCommandLine), and the `link` unit declares `mergeExistingUnits` as a
+ * boolean option that `units/scan/settings.yaml` reads via `$?mergeExistingUnits`.
+ * The literal `true` is passed verbatim (NOT a `$=TenXEnv.get(...)` expression,
+ * which encodes as `~true` and is flaky); since no bundled config assigns the
+ * option, a CLI value can't collide (no OverwrittenOptionException), unlike
+ * inputPaths/outputSymbolFolder which the bundled config sets and which
+ * therefore ride env/overlay instead. Shared by all three invocation sites
+ * (docker argv, async local spawn, sync local exec).
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function compileAppArgs(cfg: CompileConfig): string[] {
+  const args = ['@apps/compiler'];
+  if (cfg.mergeExistingUnits) args.push('mergeExistingUnits', 'true');
+  return args;
 }
 
 /**

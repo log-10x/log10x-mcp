@@ -15,6 +15,7 @@ import {
   renderArtifactoryPullOverlay,
   needsContainerEngine,
   compileEnvVars,
+  compileAppArgs,
   scanSymbolOutputs,
   type CompileConfig,
 } from '../src/lib/compile-runner.js';
@@ -256,6 +257,29 @@ test('compileEnvVars builds the TENX_* env hooks the bundled compiler config rea
     TENX_RUNTIME_NAME: 'lib',
     TENX_LOG_APPENDER: 'tenxConsoleAppender',
   });
+});
+
+// ── compileAppArgs (mergeExistingUnits wiring) ───────────────────────────
+
+test('compileAppArgs is just the app for a normal compile (no mergeExistingUnits)', () => {
+  assert.deepEqual(compileAppArgs(fixtureConfig()), ['@apps/compiler']);
+  assert.deepEqual(compileAppArgs(fixtureConfig({ mergeExistingUnits: false })), ['@apps/compiler']);
+});
+
+test('compileAppArgs appends the literal `mergeExistingUnits true` for a link run', () => {
+  // Link shape: no source inputs, output folder pointed at a units tree.
+  const linkCfg = fixtureConfig({ inputs: [], mergeExistingUnits: true });
+  assert.deepEqual(compileAppArgs(linkCfg), ['@apps/compiler', 'mergeExistingUnits', 'true']);
+  // The value is the literal string 'true', NOT a $=TenXEnv.get(...) expression.
+  assert.ok(!compileAppArgs(linkCfg).some((a) => a.includes('TenXEnv') || a.includes('~')));
+});
+
+test('buildDockerArgs tail carries `mergeExistingUnits true` after the app for a link run', () => {
+  const args = buildDockerArgs(fixtureConfig({ inputs: [], mergeExistingUnits: true }), 'img');
+  // The engine reads options as positional name/value pairs AFTER the config path.
+  assert.deepEqual(args.slice(-3), ['@apps/compiler', 'mergeExistingUnits', 'true']);
+  // A normal compile keeps the app as the final arg (no merge option).
+  assert.equal(buildDockerArgs(fixtureConfig(), 'img').at(-1), '@apps/compiler');
 });
 
 // ── renderScannersOverlay ────────────────────────────────────────────────
