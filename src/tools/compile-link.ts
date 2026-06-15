@@ -1,11 +1,11 @@
 /**
- * log10x_compile_link — link an existing folder of `.10x.json` symbol units
+ * log10x_compile_link, link an existing folder of `.10x.json` symbol units
  * into a single `.10x.tar` library, with no source scan.
  *
  * This is the same Cloud-flavor Compiler app (`@apps/compiler`) invoked with
  * link-only args: point `outputSymbolFolder` at the units folder and mount no
  * source, so the engine reuses the units already on disk (scans 0 new files)
- * and merges them into the library. No separate link app or pipeline — just
+ * and merges them into the library. No separate link app or pipeline, just
  * the right invocation, which is a CompileConfig with `inputs: []` and the
  * output folder set to the units folder. It therefore reuses the whole launch +
  * wait machinery (compile-launch.ts): like log10x_compile it waits inline up to
@@ -51,7 +51,7 @@ export const compileLinkSchema = {
     .max(3_600_000)
     .default(600_000)
     .describe(
-      'Hard cap on link wall time in ms. Default 600,000 (10 min) — linking is much faster than scanning, but a very large units tree can still take minutes.',
+      'Hard cap on link wall time in ms. Default 600,000 (10 min). Linking is much faster than scanning, but a very large units tree can still take minutes.',
     ),
   max_wait_ms: z
     .number()
@@ -60,7 +60,7 @@ export const compileLinkSchema = {
     .max(300_000)
     .default(45_000)
     .describe(
-      'How long to wait inline (ms) for the link to finish before handing back a job_id to poll. Default 45,000 (45s) — linking usually finishes inside this and returns the library in ONE call. A very large units tree returns a running job_id you poll with log10x_compile_status. 0 = fire-and-forget.',
+      'How long to wait inline (ms) for the link to finish before handing back a job_id to poll. Default 45,000 (45s). Linking usually finishes inside this and returns the library in ONE call. A very large units tree returns a running job_id you poll with log10x_compile_status. 0 = fire-and-forget.',
     ),
 };
 
@@ -123,7 +123,7 @@ export async function executeCompileLink(args: CompileLinkArgs): Promise<string 
         error_type: 'input_invalid',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `No .10x.json symbol units found under ${unitsPath} — nothing to link. Compile sources first with log10x_compile (its output folder is a valid units_path).`,
+        hint: `No .10x.json symbol units found under ${unitsPath}. Nothing to link. Compile sources first with log10x_compile (its output folder is a valid units_path).`,
       },
     });
   }

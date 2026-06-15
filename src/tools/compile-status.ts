@@ -1,5 +1,5 @@
 /**
- * log10x_compile_status — poll an async Compiler run started by
+ * log10x_compile_status, poll an async Compiler run started by
  * log10x_compile, and surface what the engine is actually doing.
  *
  * Reads the disk job record, probes liveness (docker container / local pid),
@@ -45,7 +45,7 @@ const TOOL = 'log10x_compile_status';
 
 /**
  * Grace window after spawn during which a docker container that is not yet
- * inspectable (`gone`) is treated as still-starting rather than finished —
+ * inspectable (`gone`) is treated as still-starting rather than finished,
  * `docker run` takes a moment to register the container, and the run keeps it
  * (no `--rm`) so a real completion always shows as `exited`, never `gone`.
  */
@@ -185,7 +185,7 @@ export async function executeCompileStatus(
   }
 
   // Resolve terminal state. A record carrying ended_at was already captured on
-  // a prior poll — trust it and skip the live probe (the container is gone).
+  // a prior poll, trust it and skip the live probe (the container is gone).
   let terminal = record.ended_at !== undefined;
   let timedOut = false;
   let exitCode: number | null = record.exit_code ?? null;
@@ -201,14 +201,14 @@ export async function executeCompileStatus(
     // Because the async run keeps its container (no `--rm`), a FINISHED docker
     // run is always inspectable as `exited`. So `gone` (no such object) can only
     // mean the container is not registered YET (the `docker run` client is still
-    // creating it) — within a startup grace, that is still-running, not done.
+    // creating it), within a startup grace, that is still-running, not done.
     // Reaping here would race-kill the just-starting container. Past the grace a
     // still-`gone` container never materialized (the client failed to start it).
     const stillStarting =
       live.state === 'gone' && record.mode === 'docker' && elapsed < STARTUP_GRACE_MS;
     const inFlight = live.state === 'running' || stillStarting;
     if (inFlight && elapsed > record.timeout_ms) {
-      // Overran the wall-cap — free the container and mark it timed out.
+      // Overran the wall-cap, free the container and mark it timed out.
       terminal = true;
       timedOut = true;
       exitCode = null;
@@ -217,7 +217,7 @@ export async function executeCompileStatus(
       record.exit_code = null;
       await writeJobRecord(record).catch(() => {});
     } else if (!inFlight) {
-      // Exited (true terminal), or gone past the startup grace (never started) —
+      // Exited (true terminal), or gone past the startup grace (never started),
       // capture the outcome once, then free the container.
       terminal = true;
       exitCode = live.exitCode;
@@ -228,7 +228,7 @@ export async function executeCompileStatus(
     }
   }
 
-  // Always read outputs, log, and diagnostics — even mid-run, to show progress.
+  // Always read outputs, log, and diagnostics, even mid-run, to show progress.
   const scanned = await scanSymbolOutputs(record.output_folder);
   const logText = await readJobLog(record);
   const tail = args.log_lines > 0 ? tailLines(logText, args.log_lines) : [];
@@ -276,7 +276,7 @@ export async function executeCompileStatus(
     actions.push({
       tool: 'log10x_compile_status',
       args: { job_id: record.job_id },
-      reason: 'still running — poll again for progress and the linked library',
+      reason: 'still running; poll again for progress and the linked library',
     });
   } else if (jobStatus === 'completed' && producedSymbols) {
     actions.push({
@@ -335,11 +335,11 @@ function buildHeadline(
   const noun = record.kind === 'link' ? 'Link' : 'Compile';
   switch (jobStatus) {
     case 'running':
-      return `${noun} job \`${record.job_id}\` running — ${humanDuration(elapsedMs)} elapsed, ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} so far${failedClause}. Poll again.`;
+      return `${noun} job \`${record.job_id}\` running, ${humanDuration(elapsedMs)} elapsed, ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} so far${failedClause}. Poll again.`;
     case 'completed': {
       const lib = library ? `${library.path} (${humanByteSize(library.bytes)})` : 'no library';
       return scanned.unitCount > 0
-        ? `${noun} job \`${record.job_id}\` done — ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} → ${lib}${failedClause}.`
+        ? `${noun} job \`${record.job_id}\` done: ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} → ${lib}${failedClause}.`
         : `${noun} job \`${record.job_id}\` ran cleanly but produced no symbols from ${record.sources}.`;
     }
     case 'timed_out':
@@ -363,11 +363,11 @@ function buildHumanSummary(
     const base = `${noun} job ${record.job_id} (${record.mode}) over ${record.sources} has been running ${humanDuration(elapsedMs)} and has written ${scanned.unitCount} symbol unit${scanned.unitCount === 1 ? '' : 's'} so far.`;
     const pace =
       record.kind === 'link'
-        ? 'Linking is fast — poll again shortly.'
+        ? 'Linking is fast. Poll again shortly.'
         : 'First compiles of a large tree take 10–30 min.';
     return diagnostics.results_available
       ? `${base} ${scanFailureSentence(diagnostics)} Poll log10x_compile_status again for the final library and link report.`
-      : `${base} The engine has not printed its results block yet — poll again. ${pace}`;
+      : `${base} The engine has not printed its results block yet. Poll again. ${pace}`;
   }
 
   const parts: string[] = [];
@@ -388,7 +388,7 @@ function buildHumanSummary(
   }
   if (scanned.emptyUnitCount > 0) {
     parts.push(
-      `${scanned.emptyUnitCount} unit${scanned.emptyUnitCount === 1 ? ' was' : 's were'} emitted empty — every symbol filtered out (the default symbol.types keeps class/enum/log/exec only).`,
+      `${scanned.emptyUnitCount} unit${scanned.emptyUnitCount === 1 ? ' was' : 's were'} emitted empty: every symbol filtered out (the default symbol.types keeps class/enum/log/exec only).`,
     );
   }
   if (diagnostics.results_available) {
@@ -408,11 +408,11 @@ function scanFailureSentence(diagnostics: ReturnType<typeof buildDiagnostics>): 
     .map(([lang, n]) => `${lang} ${n}`)
     .join(', ');
   const sample = health.failure_samples[0];
-  const sampleClause = sample ? ` Example: ${sample.name} — ${sample.reason}.` : '';
+  const sampleClause = sample ? ` Example: ${sample.name}, ${sample.reason}.` : '';
   return `${health.files_failed} file${health.files_failed === 1 ? '' : 's'} failed to scan (top: ${byLang}).${sampleClause}`;
 }
 
-/** One sentence on the link report — merge counts + the symbol-type mix. */
+/** One sentence on the link report, merge counts + the symbol-type mix. */
 function linkReportSentence(diagnostics: ReturnType<typeof buildDiagnostics>): string {
   const link = diagnostics.link_report;
   if (!link) return '';

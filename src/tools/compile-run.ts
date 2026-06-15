@@ -1,5 +1,5 @@
 /**
- * log10x_compile — compile a symbol library from any mix of sources, waiting
+ * log10x_compile, compile a symbol library from any mix of sources, waiting
  * inline for the result when it is quick and handing back a pollable job when
  * it is not.
  *
@@ -9,7 +9,7 @@
  * prior units via the pinned output folder), finishes in that window and the
  * tool returns the finished library plus the full scan/link diagnostics in one
  * call. A long first compile of a large tree overruns the wait and returns a
- * running job_id — the run still finishes on its own and writes to the pinned
+ * running job_id, the run still finishes on its own and writes to the pinned
  * output, so it is collected by polling log10x_compile_status or by simply
  * calling this tool again later. `max_wait_ms: 0` returns the job_id
  * immediately (fire-and-forget).
@@ -37,7 +37,7 @@ export const compileToolSchema = {
     .max(300_000)
     .default(45_000)
     .describe(
-      'How long to wait inline (ms) for the compile to finish before handing back a job_id to poll. Default 45,000 (45s): small compiles and re-runs (which reuse prior units) finish inside this and return the library + diagnostics in ONE call. A long first compile of a large tree returns a running job_id you poll with log10x_compile_status — or just call this tool again later, since the output is pinned and a finished run is collected near-instantly. 0 = fire-and-forget (return the job_id immediately).',
+      'How long to wait inline (ms) for the compile to finish before handing back a job_id to poll. Default 45,000 (45s): small compiles and re-runs (which reuse prior units) finish inside this and return the library + diagnostics in ONE call. A long first compile of a large tree returns a running job_id you poll with log10x_compile_status, or just call this tool again later, since the output is pinned and a finished run is collected near-instantly. 0 = fire-and-forget (return the job_id immediately).',
     ),
 };
 

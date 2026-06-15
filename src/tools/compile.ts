@@ -1,5 +1,5 @@
 /**
- * Compiler source validation + config build — the shared front half of the
+ * Compiler source validation + config build, the shared front half of the
  * Compiler tools. `prepareCompile` validates every source and credential and
  * builds the CompileConfig; `log10x_compile` then spawns it asynchronously
  * (see compile-run.ts) and `log10x_compile_status` polls it. The pure
@@ -7,25 +7,25 @@
  * key) are also exercised directly by the unit tests.
  *
  * The compile itself scans source code / binaries with the CLOUD-flavor
- * Compiler app (`tenx @apps/compiler`) and writes a symbol library — per-file
- * `.10x.json` units plus a linked `.10x.tar` — that the 10x runtime later uses
+ * Compiler app (`tenx @apps/compiler`) and writes a symbol library, per-file
+ * `.10x.json` units plus a linked `.10x.tar`, that the 10x runtime later uses
  * to assign hidden classes (TenXTemplates) to events.
  *
- * Sources — all combine freely:
+ * Sources, all combine freely:
  *   - a local folder (`source_path`),
  *   - GitHub repositories pulled via the GitHub REST API (`github_repos`,
- *     token required — the engine refuses an empty token even for public
+ *     token required, the engine refuses an empty token even for public
  *     repos),
  *   - docker/OCI images (`docker_images`), pulled DAEMONLESSLY by the podman
- *     bundled in compiler-10x — no host docker socket; the tool adds
+ *     bundled in compiler-10x, no host docker socket; the tool adds
  *     `--cap-add SYS_ADMIN` to the compile container automatically, and
  *     registry creds are optional (public images pull anonymously),
- *   - Helm charts (`helm_charts`) — a meta-source: the engine renders the
+ *   - Helm charts (`helm_charts`), a meta-source: the engine renders the
  *     chart and pulls the docker images + GitHub source repos it references.
  *     OCI/URL chart refs resolve standalone; bare `repo/chart` names need a
  *     matching `helm_repos` entry (added in a pre-step).
  *   - Artifactory artifacts (`artifactory_instance` + `artifactory_repo`),
- *     pulled via the Artifactory REST API — token required, no host privilege.
+ *     pulled via the Artifactory REST API, token required, no host privilege.
  * gomod pull is the one engine axis deliberately NOT exposed: it recurses the
  * full transitive dependency graph and floods the library with third-party
  * symbols.
@@ -46,7 +46,7 @@ import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { type CompileConfig, type HelmRepo } from '../lib/compile-runner.js';
 
-// prepareCompile's validation envelopes are returned through log10x_compile —
+// prepareCompile's validation envelopes are returned through log10x_compile,
 // attribute them to that tool.
 const TOOL = 'log10x_compile';
 
@@ -55,13 +55,13 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Absolute path to a local folder of source code / binaries to scan. The compiler recursively traverses it for supported languages (Java, Go, Python, JS/TS, Scala, C/C++, C#) and binaries. Note: .jar files are not scanned directly — provide extracted .class files. Optional when github_repos is given; at least one source (source_path and/or github_repos) is required.',
+      'Absolute path to a local folder of source code / binaries to scan. The compiler recursively traverses it for supported languages (Java, Go, Python, JS/TS, Scala, C/C++, C#) and binaries. Note: .jar files are not scanned directly; provide extracted .class files. Optional when github_repos is given; at least one source (source_path and/or github_repos) is required.',
     ),
   github_repos: z
     .array(z.string())
     .optional()
     .describe(
-      'GitHub repositories to pull (via the GitHub REST API) and scan, each as owner/repo (e.g. ["apache/commons-cli"]). REQUIRES a GitHub token — even for public repos: pass github_token, or have GH_TOKEN / GITHUB_TOKEN set in the MCP server environment. Combines freely with source_path.',
+      'GitHub repositories to pull (via the GitHub REST API) and scan, each as owner/repo (e.g. ["apache/commons-cli"]). REQUIRES a GitHub token, even for public repos: pass github_token, or have GH_TOKEN / GITHUB_TOKEN set in the MCP server environment. Combines freely with source_path.',
     ),
   github_branch: z
     .string()
@@ -79,19 +79,19 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'GitHub access token for github_repos (a fine-grained token with read-only Contents access to the target repos suffices). Falls back to GH_TOKEN / GITHUB_TOKEN from the MCP server environment. Reaches the compiler as process environment only — never written to disk or argv. When docker_images are given too, this same token additionally lets the compiler pull + scan each image\'s source repo (the org.opencontainers.image.source annotation); without it that extra scan is skipped silently.',
+      'GitHub access token for github_repos (a fine-grained token with read-only Contents access to the target repos suffices). Falls back to GH_TOKEN / GITHUB_TOKEN from the MCP server environment. Reaches the compiler as process environment only; never written to disk or argv. When docker_images are given too, this same token additionally lets the compiler pull + scan each image\'s source repo (the org.opencontainers.image.source annotation); without it that extra scan is skipped silently.',
     ),
   docker_images: z
     .array(z.string())
     .optional()
     .describe(
-      'Docker/OCI images to pull and scan for symbols, as image refs — fully-qualified recommended (e.g. ["docker.io/grafana/grafana:11.1.0"]; a port-bearing host like "harbor.corp:8443/team/app:2.1" is fine, and a bare "alpine" resolves against the engine default registry). The pull is daemonless — podman inside the compiler-10x image, no host docker socket — and the tool automatically grants the compile container `--cap-add SYS_ADMIN` (needed by podman; only when this arg is used). Public images need no credentials. docker_username + docker_token `docker login` to the DEFAULT registry (Docker Hub), so they cover private Docker Hub repos; images on a different private registry must be pre-authenticated on the host/engine. In mode=local the host needs a docker/podman CLI with a working engine, and pulled images are left in its store (remove:false). Combines freely with source_path and github_repos.',
+      'Docker/OCI images to pull and scan for symbols, as image refs, fully-qualified recommended (e.g. ["docker.io/grafana/grafana:11.1.0"]; a port-bearing host like "harbor.corp:8443/team/app:2.1" is fine, and a bare "alpine" resolves against the engine default registry). The pull is daemonless (podman inside the compiler-10x image, no host docker socket), and the tool automatically grants the compile container `--cap-add SYS_ADMIN` (needed by podman; only when this arg is used). Public images need no credentials. docker_username + docker_token `docker login` to the DEFAULT registry (Docker Hub), so they cover private Docker Hub repos; images on a different private registry must be pre-authenticated on the host/engine. In mode=local the host needs a docker/podman CLI with a working engine, and pulled images are left in its store (remove:false). Combines freely with source_path and github_repos.',
     ),
   docker_username: z
     .string()
     .optional()
     .describe(
-      'Registry username for docker_images login — also used for private images a Helm chart references (helm_pull_images). Authenticates the default registry (Docker Hub). Falls back to DOCKER_USERNAME from the MCP server environment. Omit for public images. The engine logs in only when BOTH username and token are non-blank. Reaches the compiler as process environment only.',
+      'Registry username for docker_images login, also used for private images a Helm chart references (helm_pull_images). Authenticates the default registry (Docker Hub). Falls back to DOCKER_USERNAME from the MCP server environment. Omit for public images. The engine logs in only when BOTH username and token are non-blank. Reaches the compiler as process environment only.',
     ),
   docker_token: z
     .string()
@@ -109,7 +109,7 @@ export const compileSchema = {
     .array(z.string())
     .optional()
     .describe(
-      'Helm chart repositories to register before resolving helm_charts, each as "name=url" (e.g. ["ingress-nginx=https://kubernetes.github.io/ingress-nginx"]). Required for bare "repo/chart" names; unnecessary for OCI/URL refs. Added via `helm repo add` in pre-step containers (docker mode only — in mode=local the host helm config is used as-is). url must be an http(s):// chart-repo index URL; for an OCI registry, put the oci://… ref directly in helm_charts (`helm repo add` does not support oci://).',
+      'Helm chart repositories to register before resolving helm_charts, each as "name=url" (e.g. ["ingress-nginx=https://kubernetes.github.io/ingress-nginx"]). Required for bare "repo/chart" names; unnecessary for OCI/URL refs. Added via `helm repo add` in pre-step containers (docker mode only; in mode=local the host helm config is used as-is). url must be an http(s):// chart-repo index URL; for an OCI registry, put the oci://… ref directly in helm_charts (`helm repo add` does not support oci://).',
     ),
   helm_pull_images: z
     .boolean()
@@ -121,13 +121,13 @@ export const compileSchema = {
     .boolean()
     .default(false)
     .describe(
-      'Whether to pull + scan the GitHub source repos a chart references (via org.opencontainers.image.source annotations). Default false because it REQUIRES a GitHub token (engine refuses an empty token) — enabling it without github_token / GH_TOKEN returns not_configured.',
+      'Whether to pull + scan the GitHub source repos a chart references (via org.opencontainers.image.source annotations). Default false because it REQUIRES a GitHub token (engine refuses an empty token); enabling it without github_token / GH_TOKEN returns not_configured.',
     ),
   artifactory_instance: z
     .string()
     .optional()
     .describe(
-      'Base URL of an Artifactory instance to pull artifacts (Java archives, .NET assemblies, etc.) from and scan, e.g. "https://demo.jfrog.io/artifactory". Requires artifactory_repo and a token (artifactory_token or ARTIFACTORY_TOKEN). Pull is via the Artifactory REST API — no extra host privilege. Combines freely with the other sources.',
+      'Base URL of an Artifactory instance to pull artifacts (Java archives, .NET assemblies, etc.) from and scan, e.g. "https://demo.jfrog.io/artifactory". Requires artifactory_repo and a token (artifactory_token or ARTIFACTORY_TOKEN). Pull is via the Artifactory REST API, no extra host privilege. Combines freely with the other sources.',
     ),
   artifactory_repo: z
     .string()
@@ -157,7 +157,7 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Artifactory API access token for artifactory_instance. Falls back to ARTIFACTORY_TOKEN from the MCP server environment. Required when pulling from Artifactory. Reaches the compiler as process environment only — never written to disk or argv.',
+      'Artifactory API access token for artifactory_instance. Falls back to ARTIFACTORY_TOKEN from the MCP server environment. Required when pulling from Artifactory. Reaches the compiler as process environment only; never written to disk or argv.',
     ),
   output_path: z
     .string()
@@ -175,7 +175,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those — podman included, daemonless — which is why Docker is the default.',
+      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
     ),
   timeout_ms: z
     .number()
@@ -184,7 +184,7 @@ export const compileSchema = {
     .max(3_600_000)
     .default(1_800_000)
     .describe(
-      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min) — the first compile of a large codebase typically runs 10–30 min; subsequent runs are near-instant via checksum reuse.',
+      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min). The first compile of a large codebase typically runs 10–30 min; subsequent runs are near-instant via checksum reuse.',
     ),
 };
 
@@ -244,7 +244,7 @@ export function parseHelmRepos(entries: string[]): { repos: HelmRepo[] } | { err
       return { error: `helm_repos name must be alphanumeric/._-; got: ${JSON.stringify(name)}.` };
     }
     // http(s) only: `helm repo add` does NOT support oci:// (OCI registries
-    // aren't "added" — reference an OCI chart directly in helm_charts as
+    // aren't "added", reference an OCI chart directly in helm_charts as
     // oci://...). Accepting oci here would fail the whole compile at repo-add.
     if (!/^https?:\/\/\S+$/i.test(url)) {
       return {
@@ -257,7 +257,7 @@ export function parseHelmRepos(entries: string[]): { repos: HelmRepo[] } | { err
 }
 
 /**
- * Classify a helm chart ref: 'standalone' (oci:// or http(s):// — resolves
+ * Classify a helm chart ref: 'standalone' (oci:// or http(s)://, resolves
  * with no repo add), {bareRepo} (a `repo/chart` short name that needs its repo
  * in helm_repos), or 'invalid' (empty, contains whitespace, an unsupported
  * scheme, or a bare single name). Exported for tests.
@@ -308,12 +308,12 @@ export function sanitizeName(name: string): string {
 
 /**
  * Stable per-source cache key. Re-running the SAME compile must land in the
- * SAME output folder — that is what lets the engine's checksum-based unit
+ * SAME output folder, that is what lets the engine's checksum-based unit
  * reuse fire (the old `${name}-${Date.now()}-${pid}` temp dir was unique every
  * run, so reuse never triggered and every compile was a cold scan, defeating
  * the "subsequent runs are near-instant" contract). Hashes only the inputs
  * that determine the symbols: the sources and the runtime name. Credentials,
- * timeout, and mode are excluded — they don't change the produced library.
+ * timeout, and mode are excluded, they don't change the produced library.
  *
  * Pure (no I/O) so it is unit-testable.
  */
@@ -346,7 +346,7 @@ function defaultOutputDir(runtimeName: string, key: string): string {
 /**
  * Validate every source + credential and build the CompileConfig the runner
  * consumes. Returns the built config on success, or a ready-to-return error /
- * not_configured envelope when validation fails — discriminate with
+ * not_configured envelope when validation fails, discriminate with
  * `'inputs' in result`. Single-sources all the gating so log10x_compile (which
  * spawns the config asynchronously) shares exactly the same checks.
  */
@@ -523,7 +523,7 @@ export async function prepareCompile(args: CompileArgs): Promise<CompileConfig |
       ? args.github_token || process.env.GH_TOKEN || process.env.GITHUB_TOKEN
       : undefined;
   // The engine hard-refuses an empty GitHub token ("empty GitHub API token"),
-  // even for public repos — so it is REQUIRED for github_repos and for helm
+  // even for public repos, so it is REQUIRED for github_repos and for helm
   // pulling referenced source repos. Gate up front instead of burning a
   // container start on a guaranteed failure.
   if ((hasGithub || helmNeedsToken) && !githubToken) {
@@ -532,12 +532,12 @@ export async function prepareCompile(args: CompileArgs): Promise<CompileConfig |
       kind: 'generic',
       remediation: [
         hasGithub
-          ? 'GitHub pull needs an access token — the compiler requires one even for public repos.'
-          : 'Pulling the GitHub source repos a Helm chart references (helm_pull_repos) needs a GitHub access token — the compiler refuses an empty one. Either provide a token, or set helm_pull_repos=false to scan only the chart and its docker images.',
+          ? 'GitHub pull needs an access token, the compiler requires one even for public repos.'
+          : 'Pulling the GitHub source repos a Helm chart references (helm_pull_repos) needs a GitHub access token, the compiler refuses an empty one. Either provide a token, or set helm_pull_repos=false to scan only the chart and its docker images.',
         'Ask the user for a GitHub token (a fine-grained token with read-only Contents access suffices; https://github.com/settings/tokens) and either:',
         '  1. pass it as the `github_token` argument of this tool, or',
         '  2. set GH_TOKEN (or GITHUB_TOKEN) in the MCP server environment and retry.',
-        'The token is forwarded to the compiler as process environment only — never written to disk or argv.',
+        'The token is forwarded to the compiler as process environment only; never written to disk or argv.',
       ].join('\n'),
     });
   }
@@ -556,7 +556,7 @@ export async function prepareCompile(args: CompileArgs): Promise<CompileConfig |
         'Ask the user for an Artifactory token (a scoped access token with read access to the target repo suffices) and either:',
         '  1. pass it as the `artifactory_token` argument of this tool, or',
         '  2. set ARTIFACTORY_TOKEN in the MCP server environment and retry.',
-        'The token is forwarded to the compiler as process environment only — never written to disk or argv.',
+        'The token is forwarded to the compiler as process environment only; never written to disk or argv.',
       ].join('\n'),
     });
   }

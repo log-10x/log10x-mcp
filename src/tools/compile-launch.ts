@@ -1,5 +1,5 @@
 /**
- * Shared launch orchestration for the compiler tools — spawn the engine
+ * Shared launch orchestration for the compiler tools, spawn the engine
  * detached, persist the job record, and then EITHER wait inline up to a budget
  * for completion (bounded-synchronous) OR hand back a pollable job id.
  *
@@ -7,7 +7,7 @@
  * re-run, which reuses prior units) finishes inside `maxWaitMs`, so the tool
  * returns the finished library + diagnostics in a single call and there is no
  * second phase for an agent to forget. A genuinely long first compile overruns
- * the budget and returns a running handle — but the run finishes on its own
+ * the budget and returns a running handle, but the run finishes on its own
  * (it is detached) and writes to a PINNED output folder, so the work is never
  * lost: polling log10x_compile_status collects it, and because the output is
  * pinned, simply calling the same tool again later returns the finished library
@@ -70,7 +70,7 @@ export async function launchCompileJob(p: LaunchParams): Promise<string | Struct
 
   // Spawn detached, mapping the same precondition failures the synchronous
   // runner surfaced (docker missing / non-cloud flavor / helm repo add) to
-  // branchable envelopes — these throw BEFORE anything is spawned.
+  // branchable envelopes, these throw BEFORE anything is spawned.
   let handle: CompileSpawnHandle;
   try {
     handle = await spawnCompileDetached(
@@ -121,7 +121,7 @@ export async function launchCompileJob(p: LaunchParams): Promise<string | Struct
   try {
     await writeJobRecord(record);
   } catch (e) {
-    // The engine is already running but we couldn't persist the handle — kill
+    // The engine is already running but we couldn't persist the handle, kill
     // it rather than orphan an untracked container, and surface the failure.
     await reapJob(record).catch(() => {});
     throw e;
@@ -165,12 +165,12 @@ function handoffEnvelope(
     : `${noun} job \`${record.job_id}\` still running after ${waitedS}s over ${p.sources}. Poll log10x_compile_status, or call ${p.tool} again later to collect it.`;
   const human_summary = immediate
     ? `Started ${p.kind} job ${record.job_id} via ${handle.mode} over ${p.sources}. It runs detached; call log10x_compile_status({ job_id: "${record.job_id}" }) to watch it and collect the library when it completes.`
-    : `${noun} job ${record.job_id} is still running after ${waitedS}s (it ran past the inline wait). It finishes on its own and writes to ${record.output_folder} regardless, so the work is not lost: poll log10x_compile_status({ job_id: "${record.job_id}" }) to watch it, or just call ${p.tool} again with the same arguments later — the output is pinned, so a completed run is collected near-instantly in one call.`;
+    : `${noun} job ${record.job_id} is still running after ${waitedS}s (it ran past the inline wait). It finishes on its own and writes to ${record.output_folder} regardless, so the work is not lost: poll log10x_compile_status({ job_id: "${record.job_id}" }) to watch it, or just call ${p.tool} again with the same arguments later; the output is pinned, so a completed run is collected near-instantly in one call.`;
   const actions: Action[] = [
     {
       tool: 'log10x_compile_status',
       args: { job_id: record.job_id },
-      reason: 'poll the job — progress, scan/link diagnostics, and the linked library when done',
+      reason: 'poll the job, progress, scan/link diagnostics, and the linked library when done',
     },
   ];
   return buildChassisEnvelope({

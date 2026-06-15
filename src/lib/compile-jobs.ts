@@ -1,5 +1,5 @@
 /**
- * Compile job registry — the disk-backed state that lets the compiler tools
+ * Compile job registry, the disk-backed state that lets the compiler tools
  * run a long compile asynchronously: `log10x_compile` spawns the engine
  * detached and writes a job record; `compile_status` reads the record back,
  * probes liveness, tails the log, and parses the engine's `printResults` JSON
@@ -10,7 +10,7 @@
  * A compile of a large codebase runs 10–30 min. The MCP server can restart in
  * that window (config reload, crash, redeploy). A disk record keyed by job id,
  * plus liveness probed from the container name (docker) / pid (local), means
- * `compile_status` keeps working across a server restart — the running engine
+ * `compile_status` keeps working across a server restart, the running engine
  * is owned by dockerd / the OS process group, not by this Node process.
  *
  * WHY THE DOCKER RUN DROPS `--rm`
@@ -24,7 +24,7 @@
  *
  * SECRETS
  *
- * The job record NEVER holds credential values — only the env-var names that
+ * The job record NEVER holds credential values, only the env-var names that
  * were set. On a failed launch the engine dumps its resolved options (which
  * include credential values) to stderr; `redactSecrets` masks those by key
  * pattern, so a leaked token is scrubbed without this layer ever persisting
@@ -48,18 +48,18 @@ export type CompileJobKind = 'compile' | 'link';
 
 /**
  * The persisted handle for one async engine run. Written by `log10x_compile`,
- * read by `compile_status`. Holds locations and liveness keys only — no
+ * read by `compile_status`. Holds locations and liveness keys only, no
  * secret values.
  */
 export interface CompileJobRecord {
   job_id: string;
   kind: CompileJobKind;
   mode: 'docker' | 'local';
-  /** Docker image (docker mode) — for the status header. */
+  /** Docker image (docker mode), for the status header. */
   image?: string;
-  /** Container name — the docker-mode liveness + exit-code + log key. */
+  /** Container name, the docker-mode liveness + exit-code + log key. */
   container_name?: string;
-  /** Child pid — the local-mode liveness key. */
+  /** Child pid, the local-mode liveness key. */
   pid?: number;
   /** Stable per-source output folder (units + the linked `.10x.tar`). */
   output_folder: string;
@@ -83,8 +83,8 @@ export interface CompileJobRecord {
   runtime_name: string;
   /**
    * Captured by `compile_status` the first time it observes a terminal run:
-   * the engine exit code (docker; null when local/unknown). Its presence —
-   * together with `ended_at` — marks the record terminal so later polls read
+   * the engine exit code (docker; null when local/unknown). Its presence,
+   * together with `ended_at`, marks the record terminal so later polls read
    * the outcome from the record without re-probing a removed container.
    */
   exit_code?: number | null;
@@ -144,7 +144,7 @@ export async function probeDockerContainer(containerName: string): Promise<Liven
     if (status === 'running' || status === 'created' || status === 'restarting') {
       return { state: 'running', exitCode: null };
     }
-    // exited / dead / paused — treat as terminal and surface the exit code.
+    // exited / dead / paused, treat as terminal and surface the exit code.
     const exitCode = Number.isFinite(Number(code)) ? Number(code) : null;
     return { state: 'exited', exitCode };
   } catch {
@@ -157,7 +157,7 @@ export async function probeDockerContainer(containerName: string): Promise<Liven
  * Probe a local process by pid. `kill(pid, 0)` throws ESRCH when the process
  * is gone and EPERM when it exists but is owned by another user (still alive).
  * Local mode can't recover a true exit code post-hoc, so a dead pid reports
- * `exited` with a null code — the caller infers success from the output.
+ * `exited` with a null code, the caller infers success from the output.
  */
 export function probeLocalPid(pid: number): LivenessResult {
   try {
@@ -174,7 +174,7 @@ export function probeLocalPid(pid: number): LivenessResult {
 /**
  * Recover the engine log for a job. Prefers the streamed log file; falls back
  * to `docker logs <container>` when the file is empty/missing (the streaming
- * client died — typically an MCP restart mid-run). Always redacted.
+ * client died, typically an MCP restart mid-run). Always redacted.
  */
 export async function readJobLog(record: CompileJobRecord): Promise<string> {
   let text = '';
@@ -191,7 +191,7 @@ export async function readJobLog(record: CompileJobRecord): Promise<string> {
       });
       text = `${stdout}\n${stderr}`;
     } catch {
-      // container removed / docker gone — nothing to recover
+      // container removed / docker gone, nothing to recover
     }
   }
   return redactSecrets(text);
@@ -207,7 +207,7 @@ export function tailLines(text: string, n: number): string[] {
 }
 
 /**
- * Mask credential values by KEY pattern — independent of the value, so nothing
+ * Mask credential values by KEY pattern, independent of the value, so nothing
  * secret has to be persisted to match against. Catches the engine's
  * resolved-option dump on a failed launch (`githubPullToken=...`,
  * `dockerPassword: ...`, `ARTIFACTORY_TOKEN=...`) and Authorization headers.
@@ -280,7 +280,7 @@ export interface CompileResultsDoc {
  */
 export function parseCompileResults(logText: string): CompileResultsDoc | null {
   // Scan every '{' that follows a `"phases"` mention and brace-match outward,
-  // taking the last one that parses — the report is printed once, near the end.
+  // taking the last one that parses, the report is printed once, near the end.
   let result: CompileResultsDoc | null = null;
   let searchFrom = 0;
   while (true) {
@@ -351,8 +351,8 @@ export async function reapJob(record: CompileJobRecord): Promise<void> {
 }
 
 /**
- * Free a terminated run's heavy resources — remove the container and the pull
- * overlays / helm-home it no longer needs — but KEEP the job dir (log + record)
+ * Free a terminated run's heavy resources, remove the container and the pull
+ * overlays / helm-home it no longer needs, but KEEP the job dir (log + record)
  * and the output folder. Called by `compile_status` the first time it captures
  * a terminal outcome, so the container doesn't linger while repeat polls and
  * the compiled library stay readable.
@@ -383,7 +383,7 @@ export async function spawnToLog(
 ): Promise<number> {
   const { openSync, closeSync } = await import('node:fs');
   // The job dir may not exist yet (a local-source compile writes no overlay,
-  // and the record is persisted only after the spawn) — create it first.
+  // and the record is persisted only after the spawn), create it first.
   await mkdir(dirname(opts.logPath), { recursive: true });
   const fd = openSync(opts.logPath, 'a');
   try {
