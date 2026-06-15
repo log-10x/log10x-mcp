@@ -65,7 +65,7 @@ A powerful Claude 4.8 with SIEM/PromQL read access already does ~80% of diagnosi
 - **Now:** `configure_regulator` already has the unified `reduction` knob (soft→compact, hard→drop) + tier model (audit/error/standard/debug/synthetic) + `tier_overrides`, two-phase (service→containers→PR), emits cap CSV row `container,<bytes>::<reason>:<action>`. `configure_compact` is a near-duplicate two-phase tool with a binary decision → separate `compact-cap.csv`.
 - **Do:** rename/extend to `configure_engine`; add `reduction='sample'` (standard tier → sample). Keep `configure_compact` as a **deprecated alias** that calls `configure_engine(compaction_enabled=true)` and warns. Compaction becomes an orthogonal per-row flag, not a separate tool/file.
 - **Files:** new `src/tools/configure-engine.ts`; deprecate `configure-regulator.ts` + `configure-compact.ts` (aliases); `src/index.ts` registry.
-- **Resolve first (open Qs):** (a) where the engine regulator parses the CSV `:action` (confirm `bytes::reason:action` order + enum); (b) ~~does soft/compact keep events in `all_events_*`~~ **RESOLVED 2026-05-31:** yes — `all_events` filter is `isObject` (counts everything); `emitted_events` excludes `isDropped`; AND `isDropped` is now a direct metric label (modules `ad02ec6`), so marked/compacted/down-tiered bytes = `all_events{isDropped="true"}` per service. Cost stays visible and is directly attributable. (c) one unified CSV vs two files (recommend one + migration note); (d) exact `sample` semantics.
+- **Resolve first (open Qs):** (a) where the engine regulator parses the CSV `:action` (confirm `bytes::reason:action` order + enum); (b) ~~does soft/compact keep events in `all_events_*`~~ **RESOLVED 2026-05-31:** yes — `all_events` filter is `isObject` (counts everything); `emitted_events` excludes the drop-routed slice; AND the route state (now the `routeState` label) is a direct metric label (modules `ad02ec6`), so marked/compacted/down-tiered bytes = `all_events{routeState="drop"}` per service. Cost stays visible and is directly attributable. (c) one unified CSV vs two files (recommend one + migration note); (d) exact `sample` semantics.
 
 ### §2 — `estimate_savings`  ·  item #2
 - **Purpose:** forecast $/mo + bytes saved for a *proposed* cap/config **before** the human approves — lets the agent validate "saves ~$X" autonomously.
@@ -93,7 +93,7 @@ The local-templatizers emit a **local** template hash (local `tenx` CLI over a p
 ---
 
 ## Cross-cutting open questions (resolve as we go)
-- Engine CSV `:action` parser location. (Metric-visibility half RESOLVED 2026-05-31 — see §1 open-Q (b): `isDropped` is now a metric dimension, marked bytes are a direct `all_events{isDropped="true"}` query.)
+- Engine CSV `:action` parser location. (Metric-visibility half RESOLVED 2026-05-31 — see §1 open-Q (b): the route state (now the `routeState` label) is a metric dimension, marked bytes are a direct `all_events{routeState="drop"}` query.)
 - One unified cap CSV vs two files (migration).
 - Re-tune host (MCP-scheduled vs Reporter job) + alerting.
 - Whether `estimate_savings` + `configure_retune` share the cap-derivation lib with `configure_engine` (recommend yes — one `src/lib/cap-derivation.ts`).
@@ -102,7 +102,7 @@ The local-templatizers emit a **local** template hash (local `tenx` CLI over a p
 
 ## Status log
 - 2026-05-31 — Plan created from the catalog audit + 4 design specs. All items `TODO`. Starting with P0 (#1–#4), one by one.
-- 2026-05-31 — Resolved §1 open-Q (b): added `isDropped` to `enrichmentFields` (modules `ad02ec6`, feat/soft-drop) so reduction is directly attributable per service via `all_events{isDropped="true"}` — no extra aggregator. Confirmed `EventIsDroppedFieldAccessor` makes it groupable. Runtime proof (label appears) folds into the pending soft-drop demo redeploy. Unblocks #2 estimate_savings (honest per-lever math).
+- 2026-05-31 — Resolved §1 open-Q (b): added the route-state label (now `routeState`) to `enrichmentFields` (modules `ad02ec6`, feat/soft-drop) so reduction is directly attributable per service via `all_events{routeState="drop"}` — no extra aggregator. Confirmed the route-state field accessor (now `EventRouteStateFieldAccessor`) makes it groupable. Runtime proof (label appears) folds into the pending soft-drop demo redeploy. Unblocks #2 estimate_savings (honest per-lever math).
 
 ---
 

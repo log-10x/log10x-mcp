@@ -55,7 +55,7 @@ import {
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
-import { LABELS } from '../lib/promql.js';
+import { LABELS, compressibilityPerContainer } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRate } from '../lib/rate-resolution.js';
@@ -71,6 +71,7 @@ import {
   COST_MODEL_BY_DESTINATION,
   getDestinationCostModel,
   getDefaultActionForDestination,
+  getAllowedActionsForDestination,
   projectActionRange,
   type Action,
 } from '../lib/cost.js';
@@ -82,6 +83,7 @@ import {
 import {
   writeActionIntent,
   buildActionIntentEntries,
+  deriveActionsCsv,
   type ActionIntentEntry,
 } from '../lib/action-intent-writer.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
@@ -334,6 +336,65 @@ export const configureEngineSchema = {
     .describe(
       'Response shape. `summary` (default) returns slim payload: phase, target_percent, action_mix counts, totals (bytes_in / bytes_saved / dollars_saved monthly), top_5_per_pattern, and a short PR-command prose summary. Target: under 8K tokens for a 119-pattern policy. `detail` returns the full envelope with pr_command, per_pattern_rows, and csv_diff included. `pr_command_only` returns ONLY the pr_command string for copy-paste callers.'
     ),
+  // ── Phase 2: per-service action advisory ──
+  // The env ships to ONE destination, so per-service variation means choosing
+  // a different ACTION (within that destination's legal, saving set) per
+  // k8s_container, driven by each service's MEASURED compressibility. By
+  // default the solver auto-recommends per service (compresses well -> compact
+  // and stays queryable; compresses poorly -> offload for the larger cut). A
+  // caller can pin a service's action and/or its queryability preference.
+  service_policy: z
+    .record(
+      z.string(),
+      z.object({
+        standard_action: z
+          .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
+          .optional()
+          .describe(
+            'Pin this service (k8s_container) standard-tier action, overriding the auto-recommendation. An action that is illegal or zero-saving on the env destination (e.g. compact on Datadog, tier_down with no cheaper tier) is rejected with a warning and the service falls back to its normal resolution (the compressibility auto-recommendation, or the global action_defaults.standard when auto_recommend is off).'
+          ),
+        keep_queryable: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, force the in-platform compact action wherever compact is legal on the destination, keeping this service queryable in the destination rather than offloading to S3, even when its compaction is modest. No effect on destinations where compact is a no-op (Datadog/CloudWatch/Azure/GCP/Sumo); there the queryable lever is tier_down, already preferred when it has a priced cheaper tier.'
+          ),
+      })
+    )
+    .optional()
+    .describe(
+      'Per-service override map keyed by k8s_container name. A service absent from the map is auto-recommended. Pinned actions win unless illegal on the destination.'
+    ),
+  auto_recommend: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When true (default), services without a `service_policy` entry get a per-service auto-recommended standard-tier action (cost-optimal within the destination legal set, compressibility-driven). When false, every service falls back to the single global `action_defaults.standard` (legacy one-size behavior).'
+    ),
+  compact_worth_it_ratio: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0.6)
+    .describe(
+      'Compressibility threshold for the compact-vs-offload auto-recommendation: a service whose measured optimized/input ratio (or the destination modeled compaction band when no measured ratio is available) is at or below this keeps `compact` (queryable plus a meaningful cut); above it `offload` is recommended (compact would save little). Default 0.6.'
+    ),
+  service_compaction: z
+    .record(
+      z.string(),
+      z.object({
+        compaction_ratio_x: z
+          .number()
+          .positive()
+          .describe(
+            'Measured aggregate compaction (original bytes / encoded bytes) for this service, from `log10x_measure_compaction.data.payload.aggregate_compaction_ratio_x`.'
+          ),
+      })
+    )
+    .optional()
+    .describe(
+      'Per-service measured compaction from `log10x_measure_compaction`, keyed by k8s_container. Grounds the per-service advisory in the real codec BEFORE optimize mode is deployed (the live optimize-mode metric only exists after deployment). Precedence for each service compressibility signal: live production metric (when optimize mode is running) wins, else this on-demand sample, else the static destination band. Run `log10x_measure_compaction` per service first, then pass `{ "<k8s_container>": { compaction_ratio_x: N } }`.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
@@ -342,9 +403,13 @@ export type ConfigureEngineArgs = z.infer<typeof schemaObj>;
 // ─── output types ─────────────────────────────────────────────────────
 export interface PerPatternRow {
   pattern_hash: string;
+  /** Human pattern name — renderers lead with this, never the hash. */
+  pattern: string;
   current_bytes_30d: number;
   cap_bytes_per_window: number;
   action: Action;
+  /** k8s_container this slice belongs to (== the engine's actions.csv key). */
+  container?: string;
   // Actual projected reduction for THIS pattern under its assigned action.
   // A `pass` row sheds nothing, so both are 0 — pass is never credited as
   // savings. Summed into the headline totals so they reconcile with the plan.
@@ -354,6 +419,30 @@ export interface PerPatternRow {
   projected_monthly_usd_expected: number;
   projected_monthly_usd_high: number;
   floor_reason?: string;
+  reason: string;
+}
+
+/**
+ * One row of the Phase-2 per-service advisory. The engine ships every service
+ * to the env's single destination, so the advisory varies the ACTION per
+ * k8s_container, not the destination. `chosen_action` is the standard-tier
+ * action this service was advised; the per-pattern audit/error/floor rows keep
+ * their own actions in action-intent.json.
+ */
+interface PerServiceSummaryRow {
+  /** k8s_container (== the engine's actions.csv key). */
+  service: string;
+  chosen_action: Action;
+  /** Where the action came from. */
+  source: 'user_pinned' | 'auto' | 'global_default';
+  bytes_in_monthly: number;
+  bytes_share_pct: number;
+  saved_bytes_monthly: number;
+  saved_dollars_monthly: number;
+  /** Measured compaction (1 - optimized/input) as a percent, or null when no measurement was available and the static band was used. */
+  measured_compression_pct: number | null;
+  ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
+  keep_queryable: boolean;
   reason: string;
 }
 
@@ -389,6 +478,8 @@ interface ConfigureEngineData {
     actions_used: Partial<Record<Action, number>>;
   };
   per_pattern_rows?: PerPatternRow[];
+  /** Phase-2 per-service advisory: one entry per k8s_container, sorted DESC by volume. */
+  per_service_summary?: PerServiceSummaryRow[];
   checks?: {
     coverage_pct: number;
     feasible: boolean;
@@ -792,6 +883,36 @@ export async function executeConfigureEngine(
     metricsEnv
   );
 
+  // Phase 2: measure each container's realized compaction (best-effort; a
+  // container with no optimized-size series falls back to the static band).
+  const compressByContainer = await fetchCompressibilityPerContainer(
+    env,
+    args.containers,
+    observationDays,
+    metricsEnv
+  );
+
+  // Phase 2: overlay caller-supplied log10x_measure_compaction results onto any
+  // container the live optimize-mode metric did not cover with a usable ratio.
+  // This is what grounds the advisory in the real codec BEFORE optimize mode is
+  // deployed (the live metric only exists post-deploy, a chicken-and-egg the
+  // on-demand sample breaks). Live production ratio always wins; the sample
+  // fills the gap; the static band is the last resort.
+  if (args.service_compaction) {
+    for (const [svc, m] of Object.entries(args.service_compaction)) {
+      const live = compressByContainer.get(svc);
+      if (live && live.ratio !== null) continue; // realized production metric wins
+      const frac = m.compaction_ratio_x > 0 ? 1 / m.compaction_ratio_x : NaN;
+      const ratio = frac >= 0.02 && frac <= 1.0 ? frac : null;
+      compressByContainer.set(svc, {
+        ratio,
+        input_bytes: 0,
+        optimized_bytes: 0,
+        source: 'sample',
+      });
+    }
+  }
+
   // Monthly projection from observation window.
   const scaleToMonth = 30 / observationDays;
   const totalObservedBytes = perPattern.reduce((s, p) => s + p.bytes, 0);
@@ -925,6 +1046,32 @@ export async function executeConfigureEngine(
     effectiveStandardAction = getDefaultActionForDestination(destination, 1);
   }
 
+  // ── Phase 2: per-service action advisory ──
+  // Resolve a standard-tier action per k8s_container under the env's single
+  // destination. A `service_policy` pin wins when legal; otherwise each
+  // service is auto-recommended from its measured compressibility (compact
+  // when it compresses well and stays queryable, offload when it does not).
+  // Any container without a resolution falls back to effectiveStandardAction.
+  const autoRecommend = args.auto_recommend ?? true;
+  const compactWorthItRatio = args.compact_worth_it_ratio ?? 0.6;
+  const serviceActionByContainer = new Map<string, ServiceActionDecision>();
+  for (const container of new Set(perPattern.map((p) => p.container))) {
+    serviceActionByContainer.set(
+      container,
+      _resolveServiceAction({
+        container,
+        destination,
+        model,
+        compressibility: compressByContainer.get(container),
+        policy: args.service_policy?.[container],
+        autoRecommend,
+        globalStandardAction: standardAction,
+        compactWorthItRatio,
+        warnings,
+      })
+    );
+  }
+
   // Run the greedy solver.
   const rows: PerPatternRow[] = [];
   const actionsUsed: Partial<Record<Action, number>> = {};
@@ -987,7 +1134,10 @@ export async function executeConfigureEngine(
       action = 'sample';
       reason = 'tier=error';
     } else if (c.tier === 'standard') {
-      action = effectiveStandardAction;
+      // Phase 2: the standard-tier action is the service's resolved
+      // recommendation (per-container), falling back to the env-wide default.
+      const decision = serviceActionByContainer.get(c.container);
+      action = decision ? decision.action : effectiveStandardAction;
       reason = 'tier=standard';
       defaultTier = 'standard';
     } else if (c.tier === 'debug') {
@@ -1049,7 +1199,9 @@ export async function executeConfigureEngine(
       standardFallbackSurvivors += 1;
     }
 
-    // Project savings range using the cost lib.
+    // Project savings range using the cost lib. For a compact row, thread the
+    // service's measured compaction ratio (cost.ts honors it for compact only
+    // on envelope destinations, where the on-wire size IS the billed size).
     const range = projectActionRange({
       action,
       bytes_in: monthlyBytes,
@@ -1059,6 +1211,10 @@ export async function executeConfigureEngine(
       retention_months: 1,
       esPruned: args.es_pruned,
       customer_rate: customerRate,
+      compact_ratio_override:
+        action === 'compact'
+          ? serviceActionByContainer.get(c.container)?.compact_ratio_override
+          : undefined,
     });
 
     // Track shed bytes.
@@ -1095,6 +1251,8 @@ export async function executeConfigureEngine(
 
     rows.push({
       pattern_hash: c.pattern_hash,
+      pattern: c.pattern,
+      container: c.container,
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
       action,
@@ -1128,7 +1286,12 @@ export async function executeConfigureEngine(
   // was demoted to pass by the target-met downgrade), we say so —
   // claiming the fallback fired without survivors gives the agent a
   // misleading mental model of the policy actually deployed.
-  if (standardCompactNoOpFallbackFired) {
+  //
+  // Phase 2: under auto-recommend the per-service resolver already chose each
+  // container's no-op-compact fallback and explains it in per_service_summary,
+  // so this env-wide warning would double-report. Only fire it on the legacy
+  // single-action path (auto_recommend=false).
+  if (standardCompactNoOpFallbackFired && !autoRecommend) {
     if (standardFallbackSurvivors > 0) {
       warnings.push(
         `\`compact\` is a no-op on ${destination}; ${standardFallbackSurvivors} standard-tier row${standardFallbackSurvivors === 1 ? '' : 's'} took \`${effectiveStandardAction}\` (destination's preferred level-1 action). Override via \`action_defaults.standard\`.`
@@ -1212,6 +1375,13 @@ export async function executeConfigureEngine(
     },
   ];
   for (const { tier, requested, bypassHint } of configurableTiers) {
+    // Phase 2: under auto-recommend the standard-tier action is chosen
+    // per-service (compressibility-driven), NOT from the global compact
+    // default, so "default never applied" does not apply to the standard tier.
+    // A correct plan that auto-diverts every service to offload would otherwise
+    // fire a false "downgraded to pass" warning. per_service_summary is the
+    // surface that explains each service's chosen standard-tier action.
+    if (tier === 'standard' && autoRecommend) continue;
     if (patternsByTier[tier] === 0) {
       const reason =
         `0 of ${totalPatternsClassified} patterns classified as ${tier}-tier; ` +
@@ -1299,16 +1469,46 @@ export async function executeConfigureEngine(
     rows.map((r) => ({
       pattern_hash: r.pattern_hash,
       action: r.action,
-      service: args.service,
+      // Phase 2: under auto-recommend, key each entry by the row's k8s_container
+      // (the engine's actions.csv key). Under auto_recommend=false keep the
+      // legacy single args.service so action-intent.json stays byte-identical
+      // to the pre-Phase-2 output.
+      service: autoRecommend ? (r.container ?? args.service) : args.service,
       reason: r.floor_reason ?? r.reason,
     }))
   );
   const actionIntentJson = writeActionIntent(actionIntentEntries);
+  // Per-SERVICE action routing: under auto-recommend the engine's actions.csv
+  // per-container action is the advisory's resolved standard-tier decision (NOT
+  // a mode over mixed-tier rows, which could let audit/error patterns outvote
+  // the bulk decision). Only containers with a SURVIVING standard row (the
+  // decision's action actually reached output, not downgraded to `pass` by the
+  // target-met shortcut) get the authoritative action, so actions.csv agrees
+  // with action-intent.json on a target-met container. Every other container,
+  // and the ENTIRE auto_recommend=false legacy path, falls back to
+  // deriveActionsCsv's mode rule (byte-identical to Phase 1).
+  const authoritativeActionByService = new Map<string, Action>();
+  if (autoRecommend) {
+    const survivingStandard = new Set<string>();
+    for (const r of rows) {
+      if (!r.container) continue;
+      const dec = serviceActionByContainer.get(r.container);
+      if (dec && r.action === dec.action && r.action !== 'pass') {
+        survivingStandard.add(r.container);
+      }
+    }
+    for (const [container, decision] of serviceActionByContainer) {
+      if (survivingStandard.has(container)) {
+        authoritativeActionByService.set(container, decision.action);
+      }
+    }
+  }
+  const actionsCsv = deriveActionsCsv(actionIntentEntries, authoritativeActionByService);
 
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson);
+      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson, actionsCsv);
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -1339,7 +1539,8 @@ export async function executeConfigureEngine(
       newCsv,
       actionIntentJson,
       cmName,
-      ns
+      ns,
+      actionsCsv
     );
     applied = { ...result, delivery: 'kubectl_configmap' };
     if (result.ok) {
@@ -1402,6 +1603,77 @@ export async function executeConfigureEngine(
     });
   }
 
+  // Phase 2 discoverability: when the per-service advisory had no measured
+  // ratio at all (no live optimize-mode metric, no service_compaction passed)
+  // on a destination where compaction matters, point the agent at the real
+  // measurement so the next call is grounded in the codec instead of the band.
+  if (
+    autoRecommend &&
+    model.compact_mode !== 'no-op' &&
+    !args.service_compaction &&
+    ![...serviceActionByContainer.values()].some((d) => d.ratio_source !== 'static_band')
+  ) {
+    nextActions.push({
+      tool: 'log10x_measure_compaction',
+      args: { service: args.containers?.[0] ?? args.service, sample_size: 500, timeRange: '24h' },
+      why: `Per-service compaction is currently the modeled ${destination} band (no live optimize-mode metric, no service_compaction supplied). Run measure_compaction per service (real codec on a real sample), then re-call configure_engine with service_compaction={ "<container>": { compaction_ratio_x } } to ground each compact-vs-offload decision in the measured ratio.`,
+    });
+  }
+
+  // Phase 2: offer a "pin these" affordance so the user can lock the
+  // auto-recommended per-service actions into a service_policy for future
+  // refresh runs (otherwise each run re-derives from live compressibility).
+  const autoPicked = [...serviceActionByContainer.entries()].filter(
+    ([, d]) => d.source === 'auto'
+  );
+  if (feasible && autoPicked.length > 0) {
+    const pinPolicy: Record<string, { standard_action: Action }> = {};
+    for (const [container, d] of autoPicked) {
+      pinPolicy[container] = { standard_action: d.action };
+    }
+    nextActions.push({
+      tool: 'log10x_configure_engine',
+      args: {
+        ...args,
+        service_policy: { ...(args.service_policy ?? {}), ...pinPolicy },
+      },
+      why: `Pin the ${autoPicked.length} auto-recommended per-service action${autoPicked.length === 1 ? '' : 's'} so future refresh runs keep them instead of re-deriving from live compressibility.`,
+    });
+  }
+
+  // ── Phase 2: per-service advisory summary ──
+  // Fold the plan by k8s_container: each service's chosen standard-tier action,
+  // its share of volume, and the savings its rows delivered. Sorted DESC by
+  // volume (lead with GB, not dollars).
+  const perServiceAgg = new Map<string, { bytesIn: number; savedBytes: number; savedDollars: number }>();
+  for (const r of rows) {
+    const c = r.container ?? args.service;
+    const agg = perServiceAgg.get(c) ?? { bytesIn: 0, savedBytes: 0, savedDollars: 0 };
+    agg.bytesIn += r.current_bytes_30d;
+    agg.savedBytes += r.saved_bytes_monthly;
+    agg.savedDollars += r.saved_dollars_monthly;
+    perServiceAgg.set(c, agg);
+  }
+  const perServiceSummary: PerServiceSummaryRow[] = [...perServiceAgg.entries()]
+    .map(([service, agg]): PerServiceSummaryRow => {
+      const decision = serviceActionByContainer.get(service);
+      return {
+        service,
+        chosen_action: decision?.action ?? effectiveStandardAction,
+        source: decision?.source ?? 'global_default',
+        bytes_in_monthly: Math.round(agg.bytesIn),
+        bytes_share_pct:
+          currentMonthlyBytes > 0 ? roundOne((agg.bytesIn / currentMonthlyBytes) * 100) : 0,
+        saved_bytes_monthly: Math.round(agg.savedBytes),
+        saved_dollars_monthly: roundCents(agg.savedDollars),
+        measured_compression_pct: decision?.measured_compression_pct ?? null,
+        ratio_source: decision?.ratio_source ?? 'static_band',
+        keep_queryable: decision?.keep_queryable ?? false,
+        reason: decision?.reason ?? 'global default',
+      };
+    })
+    .sort((a, b) => b.bytes_in_monthly - a.bytes_in_monthly);
+
   const phase: ConfigureEngineData['phase'] = !feasible
     ? 'solver_failed'
     : 'pr_rendered';
@@ -1425,6 +1697,7 @@ export async function executeConfigureEngine(
       actions_used: actionsUsed,
     },
     per_pattern_rows: rows,
+    per_service_summary: perServiceSummary,
     checks: {
       coverage_pct: roundPct(coveragePct),
       feasible,
@@ -1535,6 +1808,17 @@ export async function executeConfigureEngine(
     source_disclosure: {
       bytes_source: 'tsdb',
       siem_vendor: destination,
+      // C-policy: disclose whether the dollar projections used the customer's
+      // contracted rate or the SIEM vendor list rate. When list, the chassis
+      // attaches a calibration callout so the dollar is never quoted as the
+      // customer's real number; the headline already leads with the exact
+      // percent + GB volume.
+      rate_source:
+        resolvedIngest.source === 'customer_supplied'
+          ? 'customer_supplied'
+          : resolvedIngest.source === 'list_price'
+            ? 'list_price'
+            : 'none',
       pattern_count_source: {
         kind: 'scoped_total_above_threshold',
         count: rows.length,
@@ -1687,6 +1971,10 @@ function buildSummaryPayload(params: {
       dollars_saved_monthly: roundCents(dollarsSavedMonthly),
     },
     top_5_per_pattern: top5,
+    // Phase 2: per-service advisory, capped to the top services by volume so
+    // the slim view stays within budget (services << patterns; full list is
+    // in view='detail'). Each entry leads with volume, then the chosen action.
+    per_service_summary: (data.per_service_summary ?? []).slice(0, 12),
     pr_command_summary: prCommandSummary,
     derivation: data.derivation,
     checks: data.checks,
@@ -1701,6 +1989,14 @@ function buildSummaryPayload(params: {
       per_pattern_rows_via: "arg view='detail'",
       csv_diff_via: "arg view='detail'",
       pattern_count: rows.length,
+      service_count: (data.per_service_summary ?? []).length,
+      // Summary view shows the top 12 services by volume; the rest are in
+      // view='detail'. action_mix/totals always reflect ALL services.
+      per_service_summary_truncated: (data.per_service_summary ?? []).length > 12,
+      per_service_summary_via:
+        (data.per_service_summary ?? []).length > 12
+          ? `arg view='detail' for all ${(data.per_service_summary ?? []).length} services`
+          : undefined,
     },
   };
 }
@@ -2133,6 +2429,10 @@ async function resolveTarget(
 // ─── per-pattern fetch ────────────────────────────────────────────────
 interface PerPattern {
   pattern_hash: string;
+  /** Human pattern name (TSDB pattern label); falls back to the hash. */
+  pattern: string;
+  /** k8s_container this slice belongs to (== the engine's actions.csv key). */
+  container: string;
   bytes: number;
   events: number;
   severity: string;
@@ -2184,42 +2484,278 @@ async function fetchPerPatternBytes(
   // container-default cap row in the rendered CSV. Note topk is an OUTER
   // operator — Prom must fully evaluate the inner increase() before
   // slicing — so the tenx_env anchor above is the real cardinality cut.
-  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.severity})(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
-  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash})(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
+  // Phase 2: group by k8s_container as well, so each (pattern, container)
+  // slice is a distinct candidate the solver can route per service. The
+  // container label IS the engine's actions.csv key (rateReceiverContainerField
+  // defaults to k8s_container), so segmenting here is what makes per-service
+  // action advice land on the right row. Single-container calls collapse to
+  // exactly today's behavior (one container per hash).
+  const bytesQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, ${LABELS.pattern}, ${LABELS.severity}, k8s_container)(increase(all_events_summaryBytes_total{${filter}}[${window}])))`;
+  const eventsQ = `topk(${PER_PATTERN_TOPK}, sum by (${LABELS.hash}, k8s_container)(increase(all_events_summaryVolume_total{${filter}}[${window}])))`;
 
   const [bytesRes, eventsRes] = await Promise.all([
     queryInstant(env, bytesQ),
     queryInstant(env, eventsQ),
   ]);
 
-  const eventsByHash = new Map<string, number>();
+  // Key events by hash+container so avg-event-size resolves per slice. A
+  // missing k8s_container label degrades to "__node__" (matches the engine's
+  // own fallback when the container field is absent on an event).
+  const containerOf = (m: Record<string, string>): string =>
+    m.k8s_container || '__node__';
+  const sliceKey = (h: string, c: string): string => `${h} ${c}`;
+
+  const eventsByKey = new Map<string, number>();
   for (const r of eventsRes.data.result) {
     const h = r.metric[LABELS.hash];
     if (!h) continue;
-    eventsByHash.set(h, parseFloat(r.value?.[1] ?? '0'));
+    eventsByKey.set(sliceKey(h, containerOf(r.metric)), parseFloat(r.value?.[1] ?? '0'));
   }
 
-  const byHash = new Map<string, PerPattern>();
+  const byKey = new Map<string, PerPattern>();
   for (const r of bytesRes.data.result) {
     const h = r.metric[LABELS.hash];
     if (!h) continue;
+    const container = containerOf(r.metric);
+    const key = sliceKey(h, container);
     const bytes = parseFloat(r.value?.[1] ?? '0');
     const severity = r.metric[LABELS.severity] ?? '';
-    const existing = byHash.get(h);
+    const existing = byKey.get(key);
     if (existing) {
       existing.bytes += bytes;
       if (!existing.severity && severity) existing.severity = severity;
     } else {
-      byHash.set(h, {
+      byKey.set(key, {
         pattern_hash: h,
+        pattern: r.metric[LABELS.pattern] || h,
+        container,
         bytes,
-        events: eventsByHash.get(h) ?? 0,
+        events: eventsByKey.get(key) ?? 0,
         severity,
       });
     }
   }
 
-  return [...byHash.values()];
+  return [...byKey.values()];
+}
+
+// ─── Phase 2: per-service compressibility + action advisory ───────────
+interface ServiceCompressibility {
+  /** optimized/input, clamped to [0.02, 1.0]; null when unmeasurable. */
+  ratio: number | null;
+  input_bytes: number;
+  optimized_bytes: number;
+  /**
+   * Where the ratio came from. `live` = the engine's realized optimize-mode
+   * output (Prometheus, full production volume). `sample` = an on-demand
+   * log10x_measure_compaction run (real codec on a sampled batch), used before
+   * optimize mode is deployed. Live wins when both exist. Absent is treated as
+   * `live` (the historical default).
+   */
+  source?: 'live' | 'sample';
+}
+
+/**
+ * Measure each k8s_container's realized compaction from the engine's own
+ * `emitted_events_optimized_size_total` vs `all_events_summaryBytes_total`.
+ * Best-effort: a query error or a container with no optimized series (receiver
+ * not in optimize mode for it) yields ratio=null, and the caller falls back to
+ * the static destination band. An out-of-range ratio (>1 pass-through, or
+ * implausibly <0.02) is also treated as unmeasured.
+ */
+async function fetchCompressibilityPerContainer(
+  env: EnvConfig,
+  containers: string[],
+  observationDays: number,
+  envId: string | undefined
+): Promise<Map<string, ServiceCompressibility>> {
+  const out = new Map<string, ServiceCompressibility>();
+  if (containers.length === 0) return out;
+  // No env anchor would sum all_events across every tenant on a shared backend,
+  // yielding a meaningless cross-tenant ratio. Skip and fall back to the static
+  // band (mirrors fetchPerPatternBytes, which warns in the same situation).
+  if (!envId) return out;
+  const containerRegex = containers.map(promEscape).join('|');
+  const { inputQ, optimizedQ } = compressibilityPerContainer(
+    envId,
+    `${observationDays}d`,
+    containerRegex
+  );
+  let inputRes: PrometheusResponse;
+  let optRes: PrometheusResponse;
+  try {
+    [inputRes, optRes] = await Promise.all([
+      queryInstant(env, inputQ),
+      queryInstant(env, optimizedQ),
+    ]);
+  } catch {
+    return out; // best-effort; every service falls back to the static band
+  }
+  const optBy = new Map<string, number>();
+  for (const r of optRes.data.result) {
+    const c = r.metric.k8s_container || '__node__';
+    optBy.set(c, parseFloat(r.value?.[1] ?? '0'));
+  }
+  for (const r of inputRes.data.result) {
+    const c = r.metric.k8s_container || '__node__';
+    const input = parseFloat(r.value?.[1] ?? '0');
+    const opt = optBy.get(c) ?? 0;
+    let ratio: number | null = null;
+    if (input > 0 && opt > 0) {
+      const raw = opt / input;
+      ratio = raw >= 0.02 && raw <= 1.0 ? raw : null;
+    }
+    out.set(c, { ratio, input_bytes: input, optimized_bytes: opt, source: 'live' });
+  }
+  return out;
+}
+
+interface ServiceActionDecision {
+  action: Action;
+  source: 'user_pinned' | 'auto' | 'global_default';
+  reason: string;
+  ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
+  measured_compression_pct: number | null;
+  keep_queryable: boolean;
+  /** Measured ratio threaded into projectActionRange; cost.ts honors it for compact only on envelope destinations. */
+  compact_ratio_override?: number;
+}
+
+/**
+ * Resolve the standard-tier action for one service (k8s_container) under the
+ * env's single destination. Precedence: explicit pin (validated legal) ->
+ * the global non-compact action_defaults.standard or auto-off legacy fallback
+ * -> compressibility-driven auto-recommendation (compact when it compresses
+ * well and stays queryable; offload when it compresses poorly). Never emits an
+ * action that is illegal or zero-saving on the destination.
+ */
+export function _resolveServiceAction(params: {
+  container: string;
+  destination: SiemId;
+  model: ReturnType<typeof getDestinationCostModel>;
+  compressibility?: ServiceCompressibility;
+  policy?: { standard_action?: Action; keep_queryable?: boolean };
+  autoRecommend: boolean;
+  globalStandardAction: Action;
+  compactWorthItRatio: number;
+  warnings: string[];
+}): ServiceActionDecision {
+  const {
+    container, destination, model, compressibility, policy,
+    autoRecommend, globalStandardAction, compactWorthItRatio, warnings,
+  } = params;
+  const allowed = getAllowedActionsForDestination(destination);
+  const keepQueryable = policy?.keep_queryable ?? false;
+  const measuredRatio = compressibility?.ratio ?? null;
+  const measuredPct = measuredRatio !== null ? roundOne((1 - measuredRatio) * 100) : null;
+  const ratioSource: ServiceActionDecision['ratio_source'] =
+    measuredRatio === null
+      ? 'static_band'
+      : compressibility?.source === 'sample'
+        ? 'measured_sample'
+        : 'measured_live';
+
+  // An action is "legal" if the destination + forwarder can honor it AND it
+  // actually saves: compact only where compaction is not a no-op, tier_down
+  // only where the cost model has a cheaper target tier (cloudwatch today;
+  // datadog Flex is unpriced so tier_down there is handled by the level-1
+  // fallback, matching Phase 1, with its zero-saving surfaced by the
+  // projection notes rather than swapped here).
+  const isLegal = (a: Action): boolean => {
+    if (a === 'pass' || a === 'sample' || a === 'drop') return true;
+    if (a === 'compact') return model.compact_mode !== 'no-op' && allowed.includes('compact');
+    if (a === 'tier_down') return !!model.tier_down_target_tier;
+    if (a === 'offload') return allowed.includes('offload');
+    return false;
+  };
+  // Thread the measured ratio into the dollar projection only on the auto path.
+  // Under auto_recommend=false the legacy run must stay dollar-identical to the
+  // pre-Phase-2 static band, so no override there even if a measured series
+  // exists.
+  const overrideFor = (a: Action): number | undefined =>
+    autoRecommend && a === 'compact' ? measuredRatio ?? undefined : undefined;
+  const mk = (
+    action: Action,
+    source: ServiceActionDecision['source'],
+    reason: string
+  ): ServiceActionDecision => ({
+    action, source, reason,
+    ratio_source: ratioSource,
+    measured_compression_pct: measuredPct,
+    keep_queryable: keepQueryable,
+    compact_ratio_override: overrideFor(action),
+  });
+
+  // The destination's first legal+saving lever, in the allow-list's own order:
+  // cloudwatch -> tier_down (has a cheaper IA tier); datadog -> offload (its
+  // tier_down/Flex is unpriced, so tier_down is NOT legal here); offload-only
+  // destinations -> offload. offload is the universal safety net (legal on
+  // every destination). This never returns a zero-saving action the engine
+  // would route to the SIEM at full price.
+  const firstLegalLever = (): Action => allowed.find(isLegal) ?? 'offload';
+
+  // 1. Explicit pin wins when legal; otherwise warn and fall through to auto.
+  if (policy?.standard_action) {
+    const pin = policy.standard_action;
+    if (isLegal(pin)) return mk(pin, 'user_pinned', 'pinned via service_policy');
+    const why = pin === 'compact'
+      ? `a no-op on ${destination}`
+      : pin === 'tier_down'
+        ? `unpriced on ${destination} (no cheaper tier modeled)`
+        : `illegal on ${destination}`;
+    // Name the path the rejected service actually falls through to: the
+    // compressibility auto-recommender only runs when auto_recommend is on AND
+    // the global standard is the implicit compact; otherwise it lands on the
+    // global default action.
+    const fellBackTo =
+      autoRecommend && globalStandardAction === 'compact'
+        ? 'auto-recommended instead'
+        : 'fell back to the global default action instead';
+    warnings.push(
+      `service_policy["${container}"].standard_action="${pin}" is ${why}; ${fellBackTo}.`
+    );
+  }
+
+  // 2. Legacy / explicit-non-compact path: honor the global action verbatim
+  // (with the destination-compat fallback) for every service. This is the
+  // one-size behavior and keeps single-action callers byte-identical.
+  if (!autoRecommend || globalStandardAction !== 'compact') {
+    // Match Phase 1 exactly: ONLY the compact-on-no-op-destination case is
+    // remapped (to the destination's first legal lever). Every other explicit
+    // action passes through verbatim, so an explicit illegal non-compact action
+    // keeps its Phase-1 zero-saving projection note instead of being silently
+    // rewritten. This preserves byte-identical auto_recommend=false behavior.
+    let a = globalStandardAction;
+    if (a === 'compact' && model.compact_mode === 'no-op') a = firstLegalLever();
+    return mk(a, 'global_default', `global action_defaults.standard=${globalStandardAction}`);
+  }
+
+  // 3. Auto-recommend (globalStandardAction === 'compact' && autoRecommend):
+  // compressibility decides compact-vs-offload within the legal set.
+  const compactLegal = isLegal('compact');
+  const offloadLegal = isLegal('offload');
+  const effectiveRatio = measuredRatio ?? (model.compact_ratio_low + model.compact_ratio_high) / 2;
+  const savedPct = Math.round((1 - effectiveRatio) * 100);
+  const measured = ratioSource === 'static_band' ? 'modeled' : 'measured';
+
+  if (compactLegal && (effectiveRatio <= compactWorthItRatio || keepQueryable)) {
+    const why = effectiveRatio <= compactWorthItRatio
+      ? `${measured} ${savedPct}% compaction, stays queryable in ${destination}`
+      : `keep_queryable set; compact stays in ${destination} at ${savedPct}% compaction`;
+    return mk('compact', 'auto', `auto: compact (${why})`);
+  }
+  if (compactLegal && offloadLegal) {
+    return mk('offload', 'auto', `auto: offload (only ${measured} ${savedPct}% compaction; S3 takes the larger cut)`);
+  }
+  // compact illegal on this destination -> its first legal+saving lever
+  // (cloudwatch -> tier_down; datadog -> offload, since Flex tier_down is
+  // unpriced; offload-only destinations -> offload). Never emits a zero-saving
+  // action the engine would route to the SIEM at full price.
+  const lever = firstLegalLever();
+  const why = model.compact_mode === 'no-op'
+    ? `compact is a no-op on ${destination}; ${lever} is its first saving lever`
+    : `${lever} for ${destination}`;
+  return mk(lever, 'auto', `auto: ${lever} (${why})`);
 }
 
 // ─── tier inference ──────────────────────────────────────────────────
@@ -2382,12 +2918,16 @@ function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
   csvDiff: string,
-  actionIntentJson?: string
+  actionIntentJson?: string,
+  actionsCsv?: string
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
   const lookupPath = resolved.lookup_path;
   const actionIntentPath = 'data/action-intent.json';
+  // Per-service action routing lives beside action-intent.json. The engine's
+  // ConfigMap pull driver maps this file to the `actions.csv` ConfigMap key.
+  const actionsCsvPath = 'data/actions.csv';
   const prBranch = `mcp/engine-policy-${slug(args.service)}-${Date.now()}`;
   const prTitle = `engine-policy: configure ${args.service} (${args.containers!.length} container${args.containers!.length === 1 ? '' : 's'})`;
 
@@ -2401,6 +2941,7 @@ function renderPrCommand(
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
   out.push(`ACTION_INTENT_PATH=${shellQuote(actionIntentPath)}`);
+  if (actionsCsv) out.push(`ACTIONS_CSV_PATH=${shellQuote(actionsCsvPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -2422,6 +2963,22 @@ function renderPrCommand(
     out.push('# Resolve current action-intent.json SHA (empty if not yet created).');
     out.push(
       'INTENT_SHA=$(gh api "/repos/$REPO/contents/$ACTION_INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
+    );
+    out.push('');
+  }
+
+  // actions.csv block (per-service action routing). Written alongside
+  // action-intent.json: same intent, keyed by service for the engine's
+  // receiver instead of by pattern.
+  if (actionsCsv) {
+    out.push('ACTIONS_CSV_TMPFILE=$(mktemp)');
+    out.push("cat > \"$ACTIONS_CSV_TMPFILE\" <<'ACTIONS_EOF'");
+    out.push(actionsCsv.trimEnd());
+    out.push('ACTIONS_EOF');
+    out.push('');
+    out.push('# Resolve current actions.csv SHA (empty if not yet created).');
+    out.push(
+      'ACTIONS_CSV_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_CSV_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
     );
     out.push('');
   }
@@ -2450,6 +3007,19 @@ function renderPrCommand(
     out.push('  -f content="$INTENT_B64" )');
     out.push('[ -n "$INTENT_SHA" ] && INTENT_ARGS+=( -f sha="$INTENT_SHA" )');
     out.push('gh api "${INTENT_ARGS[@]}"');
+    out.push('');
+  }
+
+  if (actionsCsv) {
+    // Commit actions.csv alongside action-intent.json (per-service routing).
+    out.push('# Commit actions.csv (per-service action routing, beside action-intent.json).');
+    out.push('ACTIONS_CSV_B64=$(base64 < "$ACTIONS_CSV_TMPFILE" | tr -d "\\n")');
+    out.push('ACTIONS_CSV_ARGS=( -X PUT "/repos/$REPO/contents/$ACTIONS_CSV_PATH"');
+    out.push('  -f branch="$BRANCH"');
+    out.push('  -f message="$PR_TITLE (actions.csv)"');
+    out.push('  -f content="$ACTIONS_CSV_B64" )');
+    out.push('[ -n "$ACTIONS_CSV_SHA" ] && ACTIONS_CSV_ARGS+=( -f sha="$ACTIONS_CSV_SHA" )');
+    out.push('gh api "${ACTIONS_CSV_ARGS[@]}"');
     out.push('');
   }
 
@@ -2729,9 +3299,13 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  * `log10x-action-intent`) reads from this ConfigMap and hot-reloads the
  * policy without a pipeline restart.
  *
- * The ConfigMap carries TWO keys the engine expects:
+ * The ConfigMap carries THREE keys the engine expects:
  *   - `caps.csv` (engine's safety floor — per-container + per-pattern caps)
  *   - `action-intent.json` (canonical per-pattern action mapping)
+ *   - `actions.csv` (per-SERVICE action routing — the receiver reads this
+ *     keyed by k8s container == the service and stamps `route(<action>)` on
+ *     that service's regulator-excess slice; a service with no row defaults
+ *     to `drop`)
  *
  * Uses `kubectl apply -f -` so existing ConfigMaps are updated in place
  * (server-side apply semantics) and new ones are created. The actual
@@ -2742,7 +3316,8 @@ async function applyViaKubectlConfigMap(
   capCsv: string,
   actionIntentJson: string | undefined,
   configMapName: string,
-  namespace: string
+  namespace: string,
+  actionsCsv?: string
 ): Promise<{
   ok: boolean;
   configmap_location?: { namespace: string; name: string; keys: string[] };
@@ -2750,6 +3325,7 @@ async function applyViaKubectlConfigMap(
 }> {
   const data: Record<string, string> = { 'caps.csv': capCsv };
   if (actionIntentJson) data['action-intent.json'] = actionIntentJson;
+  if (actionsCsv) data['actions.csv'] = actionsCsv;
   const cm = {
     apiVersion: 'v1',
     kind: 'ConfigMap',

@@ -242,7 +242,7 @@ function parseForwarderEnv(raw: string | undefined): EnvConfig['forwarder'] {
  * for the user even if exclusion_filter can't generate a native
  * config for them.
  */
-function parseAnalyzerEnv(raw: string | undefined): string | undefined {
+export function parseAnalyzerEnv(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const s = raw.trim().toLowerCase();
   if (!s) return undefined;

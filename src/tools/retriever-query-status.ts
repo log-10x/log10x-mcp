@@ -18,7 +18,7 @@ import {
   FilterLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { getRetrieverState } from '../lib/retriever-state.js';
-import { isRetrieverConfigured } from '../lib/retriever-api.js';
+import { isRetrieverConfigured, fetchExistingResults, retrieverResultsLocation } from '../lib/retriever-api.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import {
@@ -46,6 +46,12 @@ export const retrieverQueryStatusSchema = {
     .default('app')
     .describe(
       'Target app/service prefix used when the original query was submitted. Defaults to "app". Must match the target that was passed to the original query.'
+    ),
+  fetch_results: z
+    .boolean()
+    .default(false)
+    .describe(
+      'When true and the query has completed, ALSO recover the results from S3: a 10-event preview, counts, and the results_location pointer — same core fields as a completed log10x_retriever_query. Use after a partial/timed-out query to recover stranded events without resubmitting.'
     ),
   include_pod_logs: z
     .boolean()
@@ -129,7 +135,8 @@ async function s3List(
     const { stdout } = await execFileP(
       'aws',
       ['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', prefix, '--output', 'json'],
-      { maxBuffer: 8 * 1024 * 1024 }
+      // CLI auto-paginates (merges all pages); buffer is the only ceiling.
+      { maxBuffer: 32 * 1024 * 1024 }
     );
     if (!stdout.trim()) return { entries: [] };
     const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
@@ -374,8 +381,11 @@ async function runDiagnosticsEngine(params: {
     };
   }
 
-  // Results not uploaded: workers matched events but none were returned
-  const matched = done.matched ?? 0;
+  // Results not uploaded: workers matched events but none were returned.
+  // Only meaningful in local-dispatch mode — in remote-dispatch (Lambda)
+  // mode the coordinator's matched counter is structurally 0 (it only sees
+  // local work), so this signature cannot be evaluated there.
+  const matched = (done.expectedMarkers ?? 0) > 0 ? (done.matched ?? 0) : 0;
   if (matched > 0 && eventsReturned === 0) {
     evidence.push(`_DONE.json: matched=${matched}, but 0 events were returned.`);
     evidence.push('Workers matched index objects but no event files were written to the qr/ prefix, or they were not read back.');
@@ -413,11 +423,13 @@ export async function executeRetrieverQueryStatus(
     query_id: string;
     target?: string;
     include_pod_logs?: boolean;
+    fetch_results?: boolean;
   }
 ): Promise<string | StructuredOutput> {
   const queryId = (args.query_id ?? '').trim();
   const target = args.target ?? 'app';
   const includePodLogs = args.include_pod_logs ?? true;
+  const fetchResults = args.fetch_results ?? false;
   const telemetry = newChassisTelemetry();
 
   // Early-return chassis error envelope when query_id is empty after trim.
@@ -577,6 +589,8 @@ export async function executeRetrieverQueryStatus(
           elapsedMs: doneJson.elapsedMs,
           reason: doneJson.reason,
           scanned: doneJson.scanned,
+          // Coordinator-local counter: structurally 0 in remote-dispatch
+          // (Lambda) mode. The envelope status does NOT use this raw value.
           matched: doneJson.matched,
           skippedSearch: doneJson.skippedSearch,
           skippedTemplate: doneJson.skippedTemplate,
@@ -631,7 +645,16 @@ export async function executeRetrieverQueryStatus(
     // Also: any s3List failure forces 'partial' so an agent sees the
     // partial-failure provenance from list-objects-v2 errors.
     let status: ChassisStatus;
-    const matched = doneJson?.matched ?? 0;
+    // _DONE.json counters are written by the COORDINATOR. In remote-dispatch
+    // (Lambda) mode its counters only see local scan work, so matched can be
+    // 0 on a query that matched millions (retriever-api.ts documents the same
+    // trap for expectedMarkers). Trust matched only when expectedMarkers > 0
+    // (local-dispatch mode); otherwise derive success from qr/ event-file
+    // presence — files written means workers matched and uploaded.
+    const countersTrustworthy = (doneJson?.expectedMarkers ?? 0) > 0;
+    const matched = countersTrustworthy
+      ? (doneJson?.matched ?? 0)
+      : eventFiles.length;
     const partialDiagnosticCategories = new Set([
       'dispatcher_failure',
       'dispatch_failure',
@@ -645,11 +668,61 @@ export async function executeRetrieverQueryStatus(
       status = 'insufficient_data';
     }
 
+    // fetch_results recovery: pull the stranded results from S3 and shape
+    // them with the SAME core field names a completed retriever_query
+    // envelope carries (events_preview / events_matched / results_location)
+    // so the pending->status chain hands the agent a familiar shape.
+    let fetched:
+      | {
+          events_matched: number;
+          events_preview: Array<{ timestamp?: string | number; severity?: string; service?: string; text?: string }>;
+          results_location: { bucket: string; prefix: string; uri: string };
+          truncated: boolean;
+          worker_files: number;
+          failed_worker_files?: number;
+          rollup_basis: 'events_recovered';
+          done: boolean;
+        }
+      | { error: string }
+      | undefined;
+    if (fetchResults) {
+      try {
+        const existing = await fetchExistingResults(queryId, { target });
+        const loc = await retrieverResultsLocation(existing.target, queryId);
+        fetched = {
+          events_matched: existing.events.length,
+          events_preview: existing.events.slice(0, 10).map((ev) => ({
+            timestamp: ev.timestamp as string | number | undefined,
+            severity: ev.severity_level as string | undefined,
+            service: ev.tenx_user_service as string | undefined,
+            text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+          })),
+          results_location: loc,
+          truncated: existing.truncated,
+          worker_files: existing.jsonlObjectCount,
+          ...(existing.failedWorkerFiles ? { failed_worker_files: existing.failedWorkerFiles } : {}),
+          // Recovery reads the FULL raw qr/ set (no limit cap applied) —
+          // distinct label so agents don't infer a cap that wasn't.
+          rollup_basis: 'events_recovered' as const,
+          done: existing.done,
+        };
+      } catch (e) {
+        fetched = { error: (e as Error).message.slice(0, 300) };
+      }
+    }
+
+    // A recovery that lost files (or failed outright) degrades the envelope
+    // status — mirrors retriever-query's failedDownloads fold-in.
+    if (fetched && ('error' in fetched || (('failed_worker_files' in fetched) && (fetched.failed_worker_files ?? 0) > 0))) {
+      status = 'partial';
+    }
+
     const payload = {
       query_id: queryId,
       target,
       bucket,
       s3_done_key: doneKey,
+      ...(fetched ? { fetched_results: fetched } : {}),
       stats,
       done_read_error: doneError,
       marker_count: markerCount,
@@ -763,7 +836,7 @@ function buildHumanSummary(params: {
   } else {
     parts.push(
       `Query ${queryId} on target ${target} completed (reason=${stats.reason ?? '?'}, elapsed=${stats.elapsedMs ?? '?'}ms). ` +
-        `Scanned ${stats.scanned ?? '?'} objects, matched ${stats.matched ?? '?'}, ` +
+        `Scanned ${stats.scanned ?? '?'} objects, matched ${stats.matched ?? '?'} (coordinator-local counter — structurally 0 in remote-dispatch/Lambda mode; the status verdict uses qr/ file presence instead), ` +
         `submitted ${stats.submittedTasks ?? '?'} scan tasks, stream requests: ${stats.streamRequests ?? '?'}.`
     );
   }

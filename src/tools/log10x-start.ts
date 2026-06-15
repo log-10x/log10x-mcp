@@ -25,6 +25,8 @@
  */
 
 import { z } from 'zod';
+import { resolveSiemLens, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
+import { isDemoFallbackActive } from '../lib/demo-env.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
@@ -57,6 +59,9 @@ export const SessionStateSchema = z
 export const log10xStartSchema = {
   intent_hint: IntentHintSchema,
   session_state: SessionStateSchema,
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe(
+    'What-if destination lens: orient pricing/applicability for THIS destination while the pipeline keeps its actual one (the user\'s stack differs from the connected demo/env). Carry the same siem_lens onto cost_options / estimate_savings / top_patterns / savings calls that follow.'
+  ),
 };
 
 export interface CapabilitySummary {
@@ -64,7 +69,7 @@ export interface CapabilitySummary {
   cost_attribution_available: boolean;
   /** Receiver tier installed (in-path) so compact/sample/drop CAN take effect. */
   compact_installable: boolean;
-  /** Receiver tier emits a `tenx_action` marker so the SIEM can tier_down by tag. */
+  /** Receiver tier emits the `routeState` marker so the SIEM can tier_down by routing rule. */
   tier_down_available: boolean;
   /** Retriever reachable to read the offloaded cohort from the overflow S3 bucket. */
   forensic_query_available: boolean;
@@ -78,7 +83,7 @@ export interface CapabilitySummary {
 
 export interface ActionMenuItem {
   /** Stable action identifier the user picks by number. */
-  action: 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'orient_only';
+  action: 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'explore_receiver' | 'explore_overflow' | 'orient_only';
   /** Short label rendered to the user in the menu. */
   label: string;
   /** Whether the user's current tier supports this action without further setup. */
@@ -116,6 +121,12 @@ export interface Log10xStartEnvelope {
   forbidden_next_actions: string[];
   /** Intent hint as resolved (`orient` when caller passed undefined). */
   intent_hint: 'cost' | 'forensic' | 'install' | 'orient';
+  /** Present when a what-if destination lens is in effect (siem_lens arg). */
+  siem_lens?: string;
+  /** Actual destination, canonical form, when a lens is in effect. */
+  siem_actual?: string | null;
+  /** How the effective destination was chosen, when a lens is in effect. */
+  siem_lens_basis?: 'requested' | 'detected' | 'none';
 }
 
 /** Pick the default env (the one resolveEnv would land on with no arg). */
@@ -152,9 +163,9 @@ async function probeReporterTier(env: EnvConfig): Promise<'edge' | 'cloud' | nul
 }
 
 /**
- * Probe Receiver tier — distinct from Reporter. Receiver flips the
- * `isDropped` label on at least some events (compact / sample / drop
- * happens in-path), so a non-zero `isDropped="true"` series is the
+ * Probe Receiver tier — distinct from Reporter. Receiver stamps the
+ * `routeState` label on at least some events (compact / sample / drop
+ * happens in-path), so a non-zero `routeState="drop"` series is the
  * tell. This is best-effort; absence does not prove Receiver is
  * uninstalled (could be installed in pass-only mode).
  */
@@ -162,7 +173,7 @@ async function probeReceiverInPath(env: EnvConfig, reporterTier: 'edge' | 'cloud
   try {
     const res = await queryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",isDropped="true"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState="drop"}) > 0`
     );
     if (res.status === 'success' && res.data.result.length > 0) {
       return { detected: true, uncertain: false };
@@ -275,27 +286,39 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
         : 'Requires the overflow bucket to be set up. Install via log10x_advise_retriever.',
       routes_to: 'log10x_retriever_query',
     },
-    {
-      action: 'install_receiver',
-      label: 'Deploy the Receiver so 10x can compact / sample / drop in-flight',
-      applicable: tier === 'reporter',
-      gated_reason:
-        tier === 'reporter'
-          ? undefined
-          : tier === 'dev'
-            ? 'Install Reporter first (zero-touch DaemonSet) before adding the Receiver sidecar.'
-            : `You are already at tier "${tier}" — Receiver capability is in place.`,
-      routes_to: 'log10x_advise_install',
-    },
-    {
-      action: 'install_retriever',
-      label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
-      applicable: !caps.forensic_query_available,
-      gated_reason: caps.forensic_query_available
-        ? 'Overflow bucket already set up and reachable.'
-        : undefined,
-      routes_to: 'log10x_advise_retriever',
-    },
+    // Receiver slot: an INSTALLED capability is an invitation to explore it,
+    // not a grayed-out install. Status is not a feature; the next action is.
+    tier === 'receiver' || tier === 'retriever'
+      ? {
+          action: 'explore_receiver',
+          label: 'Explore the Receiver: compact, sample, drop, tier down, offload',
+          applicable: true,
+          routes_to: 'log10x_explain_mode',
+        }
+      : {
+          action: 'install_receiver',
+          label: 'Deploy the Receiver so 10x can compact / sample / drop in-flight',
+          applicable: tier === 'reporter',
+          gated_reason:
+            tier === 'reporter'
+              ? undefined
+              : 'Install Reporter first (zero-touch DaemonSet) before adding the Receiver sidecar.',
+          routes_to: 'log10x_advise_install',
+        },
+    // Overflow-bucket slot: same rule as the Receiver slot above.
+    caps.forensic_query_available
+      ? {
+          action: 'explore_overflow',
+          label: 'Explore the overflow bucket: contents, fetch-back, controls',
+          applicable: true,
+          routes_to: 'log10x_overflow_contents',
+        }
+      : {
+          action: 'install_retriever',
+          label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
+          applicable: true,
+          routes_to: 'log10x_advise_retriever',
+        },
     {
       action: 'orient_only',
       label: 'Just orient me — explain what 10x does and what I should ask next',
@@ -367,6 +390,7 @@ function renderVerbatim(args: {
   menu: ActionMenuItem[];
   phases: JourneyPhase[];
   intent: 'cost' | 'forensic' | 'install' | 'orient';
+  lens?: SiemLensResolution;
 }): string {
   const tierLine = {
     dev: 'Dev CLI — local binary only. No pipeline infrastructure detected.',
@@ -389,15 +413,25 @@ function renderVerbatim(args: {
     })
     .join('\n');
 
-  const siemLine = args.siemDetected
-    ? `SIEM credentials detected: \`${args.siemDetected}\`.`
-    : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
+  // Under a lens, the user's selected stack LEADS and the pipeline's actual
+  // destination is the parenthetical. Two separate lines (detected: X, then
+  // lens: Y) read as the product ignoring the user's selection.
+  const siemLine = args.lens?.lensed && args.lens.display
+    ? `Stack: ${args.lens.display} (selected) · pipeline destination: \`${args.siemDetected ?? 'unknown'}\`. Volumes are real; pricing follows ${args.lens.display} list rates.`
+    : args.siemDetected
+      ? `SIEM credentials detected: \`${args.siemDetected}\`.`
+      : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
+
+  const demoLine = isDemoFallbackActive()
+    ? `_Demo dataset (read-only) — the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
+    : null;
 
   return [
     `### Log10x orientation`,
     ``,
     `**Tier:** ${tierLine}`,
     `**${siemLine}**`,
+    ...(demoLine ? [demoLine] : []),
     ``,
     `**Journey:**`,
     phaseLines,
@@ -423,6 +457,7 @@ export async function executeLog10xStart(
   args: {
     intent_hint?: 'cost' | 'forensic' | 'install' | 'orient';
     session_state?: 'fresh' | 'midway' | 'returning';
+    siem_lens?: string;
   }
 ): Promise<StructuredOutput> {
   const intent = args.intent_hint ?? 'orient';
@@ -528,6 +563,7 @@ export async function executeLog10xStart(
 
   const menu = buildActionMenu(caps, tier);
   const phases = buildJourneyPhases(tier, caps);
+  const lensRes: SiemLensResolution = resolveSiemLens(args.siem_lens, siemDetected);
   const mustRenderVerbatim = renderVerbatim({
     tier,
     siemDetected,
@@ -535,6 +571,7 @@ export async function executeLog10xStart(
     menu,
     phases,
     intent,
+    lens: lensRes,
   });
 
   const mustAskUser: MustAskUser = {
@@ -555,9 +592,10 @@ export async function executeLog10xStart(
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbiddenNextActions,
     intent_hint: intent,
+    ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting user pick before any further tool call.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting user pick before any further tool call.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

@@ -264,18 +264,22 @@ test('drop and observe_only are always applicable at receiver tier', () => {
 
 // ── siemSupportsCompact helper ─────────────────────────────────────────────────
 
-test('siemSupportsCompact returns true for splunk and elasticsearch', () => {
+test('siemSupportsCompact returns true ONLY where the cost model says compact is real', () => {
+  // Single source of truth: COST_MODEL_BY_DESTINATION.compact_mode !== 'no-op'
+  // (splunk envelope, self-hosted ES index-pruned, clickhouse dict-udf-view).
   assert.equal(siemSupportsCompact('splunk'), true);
   assert.equal(siemSupportsCompact('elasticsearch'), true);
   assert.equal(siemSupportsCompact('clickhouse'), true);
-  assert.equal(siemSupportsCompact('azure-monitor'), true);
-  assert.equal(siemSupportsCompact('gcp-logging'), true);
-  assert.equal(siemSupportsCompact('sumo'), true);
 });
 
-test('siemSupportsCompact returns false for datadog and cloudwatch', () => {
+test('siemSupportsCompact returns false on compact no-op destinations', () => {
+  // These previously drifted to true in a hand-maintained set, promising a
+  // lossless compact win that estimate_savings then refused one step later.
   assert.equal(siemSupportsCompact('datadog'), false);
   assert.equal(siemSupportsCompact('cloudwatch'), false);
+  assert.equal(siemSupportsCompact('azure-monitor'), false);
+  assert.equal(siemSupportsCompact('gcp-logging'), false);
+  assert.equal(siemSupportsCompact('sumo'), false);
 });
 
 test('siemSupportsCompact returns true for unknown SIEM (null)', () => {

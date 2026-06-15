@@ -7,7 +7,7 @@
  * wants to REVIEW what's accumulating, not query it.
  *
  * What this tool does:
- *   - Queries `all_events_summaryBytes_total{isDropped="true"}` grouped
+ *   - Queries `all_events_summaryBytes_total{routeState="drop"}` grouped
  *     by (pattern_hash, service, k8s_container) over the requested
  *     time window.
  *   - Joins the result to the cap-CSV the MCP wrote (via
@@ -86,6 +86,13 @@ export const overflowContentsSchema = {
 
 interface OverflowPattern {
   pattern_hash: string;
+  /**
+   * Human-readable pattern name (the engine's symbol-message label).
+   * THIS is what renderers lead with — never the hash (hashes are for
+   * joins and tool args). Falls back to the hash when the TSDB series
+   * lacks the pattern label.
+   */
+  pattern: string;
   service: string;
   container: string;
   bytes_in_window: number;
@@ -199,7 +206,7 @@ export async function executeOverflowContents(
   const serviceFilter = args.service?.trim() || null;
 
   // Build the dropped-pattern selector with optional service filter.
-  const baseFilters = [`${LABELS.env}="${metricsEnv}"`, `isDropped="true"`];
+  const baseFilters = [`${LABELS.env}="${metricsEnv}"`, `routeState="drop"`];
   if (serviceFilter) {
     baseFilters.push(`${LABELS.service}="${escapeLabel(serviceFilter)}"`);
   }
@@ -213,7 +220,7 @@ export async function executeOverflowContents(
   //      the growth baseline against the full-window bytes for the
   //      growth_rate_pct calc.
   const halfLabel = halfWindowLabel(tf.range);
-  const bytesByPatternQ = `sum by (${LABELS.hash}, ${LABELS.service}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector}}[${tf.range}]))`;
+  const bytesByPatternQ = `sum by (${LABELS.hash}, ${LABELS.pattern}, ${LABELS.service}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector}}[${tf.range}]))`;
   const eventsByPatternQ = `sum by (${LABELS.hash}, ${LABELS.service}) (increase(${VOLUME_METRIC}{${baseSelector}}[${tf.range}]))`;
   const firstHalfBytesQ = `sum by (${LABELS.hash}) (increase(${BYTES_METRIC}{${baseSelector}}[${halfLabel}] offset ${halfLabel}))`;
   // Time-window bookends use the timestamp() trick on the series' last
@@ -253,6 +260,7 @@ export async function executeOverflowContents(
 
   interface Aggr {
     pattern_hash: string;
+    pattern: string;
     service: string;
     container: string;
     bytes_in_window: number;
@@ -269,6 +277,7 @@ export async function executeOverflowContents(
   if (bytesRes && bytesRes.status === 'success') {
     for (const r of bytesRes.data.result) {
       const hash = r.metric[LABELS.hash] ?? '';
+      const patternName = r.metric[LABELS.pattern] ?? '';
       const service = r.metric[LABELS.service] ?? '(unknown)';
       const container = r.metric[containerLabel] ?? '';
       const v = parseValue(r);
@@ -284,6 +293,7 @@ export async function executeOverflowContents(
       } else {
         byHash.set(key, {
           pattern_hash: hash,
+          pattern: patternName || hash,
           service,
           container,
           bytes_in_window: v,
@@ -489,6 +499,7 @@ export async function executeOverflowContents(
 
       return {
         pattern_hash: p.pattern_hash,
+        pattern: p.pattern,
         service: p.service,
         container: p.container,
         bytes_in_window: p.bytes_in_window,

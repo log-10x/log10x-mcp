@@ -813,8 +813,8 @@ async function executePatternMitigateInner(
   // Option 3 — Mute at 10x edge. Gated on capability.
   if (caps.canMute) {
     const archiveNote = caps.hasRetrieverArchive
-      ? 'Your env has the 10x S3 archive enabled, so the muted events are still saved in your own S3 bucket and you can search them later if you need them.'
-      : 'Your env does NOT currently have the 10x S3 archive enabled — once muted, events are gone. Add the archive (Retriever) if recoverable history matters.';
+      ? 'Your env offloads to your own S3, so the muted events are still saved in your own S3 bucket and you can fetch them back later if you need them.'
+      : 'Your env does NOT currently offload to your own S3, so once muted, events are gone. Add offload (Retriever) if you want to fetch events back later.';
     const sourceTag = caps.gitopsSource ? ` (PR target resolved from ${caps.gitopsSource})` : '';
     lines.push(`**3. Mute it inside the 10x engine.** We open a PR against \`${caps.gitopsRepo}\`${sourceTag}, you merge, and the cost stops within minutes of merge. ${archiveNote}`);
   } else {

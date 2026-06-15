@@ -63,7 +63,7 @@ export const pocFromLocalSchema = {
     .boolean()
     .optional()
     .default(true)
-    .describe('Templatize via locally-installed `tenx` (true) or the public Log10x paste endpoint (false). Default true.'),
+    .describe('Templatize via a local Log10x engine (native `tenx`, or local Docker via `LOG10X_TENX_MODE=docker`) when true, or the public Log10x paste endpoint when false. Default true.'),
   target_percent_reduction: z
     .number()
     .min(0)

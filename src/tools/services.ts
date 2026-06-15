@@ -5,14 +5,14 @@
  * four action-axis columns that let an agent / FinOps reader see where
  * each service's savings are coming from:
  *
- *   - `bytes_offloaded`  : isDropped="true" bytes whose cap-CSV row's
+ *   - `bytes_offloaded`  : routeState="drop" bytes whose cap-CSV row's
  *                          action is `offload` (routed to customer S3)
  *   - `bytes_compacted`  : action == `compact` (in-engine encode() wins)
  *   - `bytes_dropped`    : action == `drop` (hard kill at the receiver)
- *   - `bytes_passed`     : isDropped!="true" bytes (the kept cohort)
+ *   - `bytes_passed`     : routeState!="drop" bytes (the kept cohort)
  *
  * The split is computed MCP-side by joining the per-(service, hash)
- * `isDropped="true"` byte sum against the cap-CSV the MCP itself wrote
+ * `routeState="drop"` byte sum against the cap-CSV the MCP itself wrote
  * (see `lib/cap-csv-parser.ts`). No engine label change is required;
  * `tier_down` and `sample` collapse into the action lookup but don't
  * surface as their own columns (they're rendered as `bytes_dropped` for
@@ -176,13 +176,16 @@ export async function executeServices(
   const tailNote = tailCount > 0
     ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
-  // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
-  // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
-  // phrasing stays.
+  // C-policy: the headline quotes a dollar only when it is grounded in the
+  // customer's real (contracted) rate. At `list_price` the dollar is the SIEM
+  // vendor rack rate, not their number, so the headline leads with volume
+  // (GB / %, always exact) and the chassis attaches the list-rate calibration
+  // callout. At `unset` there is no rate at all, so we add the set-your-rate
+  // hint inline.
   const headline = top
-    ? (d.rate_source === 'unset'
-      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote} (no $/GB rate configured — pass effective_ingest_per_gb to see dollars.)`
-      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`)
+    ? (d.rate_source === 'customer_supplied'
+      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`
+      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',
@@ -303,8 +306,8 @@ async function executeServicesInner(
   // container we cannot fall back to the container default when no
   // `pat:<hash>` override exists; we just leave the row unattributed.
   const containerLabel = 'k8s_container';
-  const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
-  const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
+  const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",routeState="drop"}[${tf.range}]))`;
+  const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",routeState!="drop"}[${tf.range}]))`;
 
   // Resolve gitops repo via the same fallback chain configure_engine /
   // pattern_mitigate use: envs.json field → LOG10X_GH_REPO env var →

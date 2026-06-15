@@ -31,6 +31,7 @@ import { fmtDollar, fmtBytes, fmtPct, fmtDisclosedDollar, parseTimeframe, costPe
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
+import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 
 /** S3 Standard default, matching the ROI dashboard's storageCost default ($/GB/month). */
@@ -44,6 +45,7 @@ export const savingsSchema = {
   analyzerCost: z.number().optional().describe('DEPRECATED alias for effective_ingest_per_gb. stack ingestion cost in $/GB.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied stack ingestion cost in $/GB. When provided, rate_source=customer_supplied and dollars are populated. When omitted and no profile rate is available, rate_source=unset and the headline reports percent + bytes only (no dollars).'),
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the SAME real volumes at this destination\'s list rates instead of the connected pipeline\'s. Dollars switch to the lens list price (env-configured rates never leak across destinations); the envelope stamps siem_actual vs siem_lens. Volumes/patterns are unaffected.'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
 };
@@ -124,12 +126,13 @@ interface SavingsSummary {
 }
 
 export async function executeSavings(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; view?: 'summary' },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number; siem_lens?: string; view?: 'summary' },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
+  const lens = resolveSiemLens(args.siem_lens, env.analyzer);
   const sumOut: { data?: SavingsSummary } = {};
-  await executeSavingsInner(args, env, sumOut);
+  await executeSavingsInner(args, env, sumOut, lens);
   if (!sumOut.data) {
     const headline = 'No realized-savings metrics available for this environment yet.';
     return buildChassisEnvelope({
@@ -138,7 +141,7 @@ export async function executeSavings(
       headline,
       status: 'insufficient_data',
       decisions: { threshold_used: null, threshold_basis: 'default' },
-      source_disclosure: { bytes_source: 'tsdb' },
+      source_disclosure: { bytes_source: 'tsdb', ...lensDisclosure(lens) },
       scope: { window: args.timeRange ?? '7d', window_basis: 'auto_default' },
       payload: {},
       human_summary: headline,
@@ -149,20 +152,28 @@ export async function executeSavings(
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
-  // Percent-first headline; dollar clause is gated on rate_source !== 'unset'.
-  // When no $/GB is known we refuse to print a dollar number (no $1.0/GB lie).
+  // C-policy: percent-first headline; the dollar clause is quoted only when it
+  // is grounded in the customer's real (contracted) rate (rate_source ===
+  // 'customer_supplied'). At 'list_price' the dollar is the SIEM vendor rack
+  // rate, not their number, so the headline leads with volume (GB / %, always
+  // exact) and the chassis attaches the list-rate calibration callout (no
+  // inline caveat added here). At 'unset' there is no rate at all, so we keep
+  // the set-your-rate hint inline. No fabricated $1.0/GB lie at any source.
   let headline: string;
   if (!d.totals.has_data) {
-    headline = `No realized-savings metrics for this environment yet — pipeline has not booked any volume reduction.`;
-  } else if (d.rate_source === 'unset') {
-    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}. Pass effective_ingest_per_gb to overlay dollars.`;
-  } else {
+    headline = `No realized-savings metrics for this environment yet; pipeline has not booked any volume reduction.`;
+  } else if (d.rate_source === 'customer_supplied') {
     const realizedDisc = d.totals.realized_dollars_disclosed;
     const annualDisc = d.totals.annual_projection_dollars_disclosed;
     const dollarClause = realizedDisc != null && annualDisc != null
       ? `, ${fmtDisclosedDollar(realizedDisc)}${d.period} realized, ${fmtDisclosedDollar(annualDisc)}/yr projected`
       : '';
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
+  } else {
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}.${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to overlay dollars.' : ''}`;
+  }
+  if (lens.lensed && lens.display) {
+    headline = `[lens: ${lens.display}] ` + headline;
   }
   return buildChassisEnvelope({
     tool: 'log10x_savings',
@@ -184,6 +195,7 @@ export async function executeSavings(
     source_disclosure: {
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
+      ...lensDisclosure(lens),
     },
     scope: {
       window: d.time_range,
@@ -217,7 +229,8 @@ export async function executeSavings(
 async function executeSavingsInner(
   args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; storageCost?: number },
   env: EnvConfig,
-  sumOut?: { data?: SavingsSummary }
+  sumOut?: { data?: SavingsSummary },
+  lens?: SiemLensResolution
 ): Promise<string> {
   // Defensive defaults — match savingsSchema (timeRange:'7d').
   // Normalise '1d' legacy alias → '24h'.
@@ -231,7 +244,8 @@ async function executeSavingsInner(
   const savingsRate = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
     env,
-    destinationFromEnvAnalyzer(env),
+    lens?.effective ?? destinationFromEnvAnalyzer(env),
+    { lensed: lens?.lensed === true },
   );
   const rateSource: RateSource = savingsRate.source;
   const costPerGb: number | null = savingsRate.rate_per_gb;
@@ -358,7 +372,10 @@ async function executeSavingsInner(
   // Build disclosed mirrors up-front so emission sites can drop bare fmtDollar
   // calls. siemLabel is null in this tool — when rate_source='customer_supplied'
   // the disclosure tail is null anyway; when 'unset' the mirror itself is null.
-  const siemLabel: string | null = null;
+  // Label dollars with the destination that PRICED them: the lens-effective
+  // destination's display name (falls back to null -> generic 'SIEM' when
+  // neither a lens nor an env analyzer resolves).
+  const siemLabel: string | null = lens?.display ?? null;
   const edgeSavingsDisclosed: DisclosedDollarValue | null =
     edgeSavings != null
       ? buildDisclosedDollarValue(edgeSavings, rateSource, siemLabel, costPerGb)

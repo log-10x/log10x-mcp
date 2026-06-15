@@ -1,20 +1,22 @@
 /**
  * Local `tenx` dev CLI runner.
  *
- * Spawns the locally-installed tenx CLI with a packaged runtime config,
- * reads the resulting templates + encoded rows + aggregated summary
- * from a per-invocation temp dir. Two modes:
+ * Spawns a local Log10x engine (a native tenx CLI or a local Docker
+ * container) with a packaged runtime config, reads the resulting
+ * templates + encoded rows + aggregated summary from a per-invocation
+ * temp dir. Two modes:
  *
  *   - stdin: batch piped to stdin (log10x_resolve_batch)
  *   - file:  reads from a path/glob (log10x_extract_templates)
  *
- * Backend selection via LOG10X_TENX_MODE:
- *   - "local" (default): invoke the host-installed tenx binary.
+ * Backend selection via LOG10X_TENX_MODE (see resolveTenxMode):
+ *   - unset (default): auto-detect. Probe `docker info`; if Docker is
+ *     reachable, use it, otherwise fall back to the host-installed tenx binary.
+ *   - "local": invoke the host-installed tenx binary.
  *     Binary lookup: LOG10X_TENX_PATH env var wins; otherwise `tenx` on PATH.
  *   - "docker": `docker run --rm -i log10x/pipeline-10x:latest` (or
- *     LOG10X_TENX_IMAGE). Useful on hosts without a local tenx install,
- *     or for hermetic/offline-capable invocation. No auto-fallback —
- *     the user opts in explicitly.
+ *     LOG10X_TENX_IMAGE). Works on hosts without a native tenx install,
+ *     and for hermetic/offline-capable invocation.
  *
  * Config lookup: LOG10X_MCP_STDIN_CONFIG_PATH / LOG10X_MCP_FILE_CONFIG_PATH
  *   wins; otherwise the packaged configs shipped alongside the MCP.

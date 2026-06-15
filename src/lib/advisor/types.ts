@@ -171,7 +171,7 @@ export interface AdvisePlan {
   notes: string[];
   /**
    * Pre-rendered "Forwarder offload" markdown section (retriever only): the
-   * per-forwarder recipe to route the `isDropped` slice to the customer's own
+   * per-forwarder recipe to route the `routeState="drop"` slice to the customer's own
    * S3, the forwarder-write IAM grant, and the SIEM down-tier alternatives.
    * Populated when an input bucket + region are known. Markdown-view only;
    * the summary envelope does not surface it.

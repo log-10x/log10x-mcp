@@ -45,7 +45,7 @@ export const resolveBatchSchema = {
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
-  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a locally-installed `tenx` CLI — events never leave the machine. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If the local CLI is not installed, the call surfaces a typed not_configured envelope with an install hint.'),
+  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a local Log10x engine, so events never leave the machine. The engine can be a native `tenx` CLI (install for macOS/Linux/Windows: https://doc.log10x.com/install/) or a local Docker container (set `LOG10X_TENX_MODE=docker`); when the mode is unset, Docker is auto-detected and preferred, falling back to a native install. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If no local engine is available, the call surfaces a typed not_configured envelope with an install hint covering both options.'),
 };
 
 interface ResolveBatchSummary {

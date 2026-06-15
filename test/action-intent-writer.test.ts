@@ -17,9 +17,11 @@ import assert from 'node:assert/strict';
 import {
   writeActionIntent,
   buildActionIntentEntries,
+  deriveActionsCsv,
   type ActionIntentEntry,
 } from '../src/lib/action-intent-writer.js';
 import { parseActionIntent } from '../src/lib/action-intent-parser.js';
+import type { Action } from '../src/lib/cost.js';
 
 // ─── helpers ─────────────────────────────────────────────────────────
 
@@ -221,4 +223,39 @@ test('unknown schema_version: accepted with forward compat, entries still parse'
   assert.equal(result.json_parse_error, false);
   assert.equal(result.schema_version, '99.0');
   assert.equal(result.by_pattern.get('future1'), 'compact');
+});
+
+// ─── test 10: deriveActionsCsv mode rule (Phase 1 behavior unchanged) ─
+
+test('deriveActionsCsv: mode rule picks the most frequent action per service', () => {
+  const entries: ActionIntentEntry[] = [
+    makeEntry({ pattern_hash: 'p1', service: 'frontend', action: 'compact' }),
+    makeEntry({ pattern_hash: 'p2', service: 'frontend', action: 'compact' }),
+    makeEntry({ pattern_hash: 'p3', service: 'frontend', action: 'pass' }),
+    makeEntry({ pattern_hash: 'p4', service: 'backend', action: 'offload' }),
+  ];
+  const lines = deriveActionsCsv(entries).trim().split('\n');
+  assert.equal(lines[0], 'container,action');
+  assert.ok(lines.includes('frontend,compact'), lines.join('\n'));
+  assert.ok(lines.includes('backend,offload'), lines.join('\n'));
+});
+
+// ─── test 11: deriveActionsCsv authoritative map wins over mode (Phase 2) ─
+
+test('deriveActionsCsv: authoritative per-service action overrides the mode', () => {
+  // frontend's patterns are mostly pass, but the advisory authoritatively
+  // chose offload for that service; the authoritative action must win so the
+  // engine routes the service's regulator excess by the advised lever.
+  const entries: ActionIntentEntry[] = [
+    makeEntry({ pattern_hash: 'p1', service: 'frontend', action: 'pass' }),
+    makeEntry({ pattern_hash: 'p2', service: 'frontend', action: 'pass' }),
+    makeEntry({ pattern_hash: 'p3', service: 'frontend', action: 'compact' }),
+    makeEntry({ pattern_hash: 'p4', service: 'backend', action: 'pass' }),
+  ];
+  const authoritative = new Map<string, Action>([['frontend', 'offload']]);
+  const lines = deriveActionsCsv(entries, authoritative).trim().split('\n');
+  // frontend uses the authoritative action (offload), not its mode (pass).
+  assert.ok(lines.includes('frontend,offload'), lines.join('\n'));
+  // backend has no authoritative entry -> falls back to its mode (pass).
+  assert.ok(lines.includes('backend,pass'), lines.join('\n'));
 });

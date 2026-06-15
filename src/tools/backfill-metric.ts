@@ -1,7 +1,7 @@
 /**
  * log10x_backfill_metric: DEPRECATED, kept dark. Builds a TSDB metric from the
  * offloaded cohort in the customer's S3 overflow bucket. Not advertised: the live
- * isDropped metric surface answers overflow-volume questions as a TSDB query.
+ * routeState metric surface answers overflow-volume questions as a TSDB query.
  * Retained only for the narrow custom-dimension case.
  *
  * Reads the offloaded cohort for a pattern from the overflow bucket over a window,
@@ -204,7 +204,15 @@ export async function executeBackfillMetric(
  */
 function buildBackfillHumanSummary(d: Omit<BackfillMetricSummary, 'human_summary'>): string {
   const first = `Backfilled metric ${d.metric_name} to ${d.destination} from pattern ${d.pattern} over ${d.window_from} to ${d.window_to}.`;
-  const second = `Retriever returned ${d.events_retrieved} events in ${d.retriever_wall_ms}ms; aggregator produced ${d.points_emitted} data points across ${d.series_count} series at ${d.bucket_seconds}s buckets (aggregation ${d.aggregation}).`;
+  const coverageClause =
+    d.coverage_complete === false
+      ? ` CAVEAT: the backfilled metric under-represents true volume (${
+          typeof d.events_matched_total === 'number' && d.events_matched_total > d.events_retrieved
+            ? `${d.events_matched_total} matched, ${d.events_retrieved} re-emitted — retriever cap; narrow the window and re-run`
+            : 'worker files failed download or the engine truncated worker uploads — narrow the window and re-run'
+        }).`
+      : '';
+  const second = `Retriever returned ${d.events_retrieved} events in ${d.retriever_wall_ms}ms; aggregator produced ${d.points_emitted} data points across ${d.series_count} series at ${d.bucket_seconds}s buckets (aggregation ${d.aggregation}).${coverageClause}`;
   const view = d.view_url ? ` View at ${d.view_url}.` : '';
   const warnPart = d.warnings.length > 0 ? ` ${d.warnings.length} warning${d.warnings.length === 1 ? '' : 's'} from the destination emitter.` : '';
   return `${first} ${second}${view}${warnPart}`;
@@ -235,6 +243,10 @@ interface BackfillMetricSummary {
   group_by: string[];
   filters: string[];
   events_retrieved: number;
+  /** Full match count from the retriever; > events_retrieved means the cap bit. */
+  events_matched_total?: number;
+  /** False when the backfill re-emitted only a capped subset of the match. */
+  coverage_complete?: boolean;
   retriever_wall_ms: number;
   points_emitted: number;
   series_count: number;
@@ -315,6 +327,19 @@ async function executeBackfillMetricInner(
     );
   }
   const events = retrieverResp.events || [];
+  // Coverage honesty: the retriever caps the materialized set at `limit`,
+  // but eventsMatched reflects the full download. When they diverge, the
+  // backfilled metric under-represents the true volume — the agent must
+  // know the re-emit is a sample, not the population.
+  const eventsMatchedTotal = retrieverResp.execution?.eventsMatched ?? events.length;
+  // Coverage is incomplete on ANY of: the limit cap (matched > retrieved),
+  // failed worker-file downloads (eventsMatched itself shrank — the cap
+  // signature alone cannot see this), or engine-side per-worker truncation
+  // (eventsMatched undercounts the true match before download).
+  const failedDownloads = retrieverResp.execution?.failedWorkerFiles ?? 0;
+  const engineTruncated = retrieverResp.execution?.truncated ?? false;
+  const coverageComplete =
+    events.length >= eventsMatchedTotal && failedDownloads === 0 && !engineTruncated;
   const retrieverWallMs = Date.now() - started;
 
   if (events.length === 0) {
@@ -418,6 +443,8 @@ async function executeBackfillMetricInner(
       group_by: args.group_by ?? [],
       filters: args.filters ?? [],
       events_retrieved: events.length,
+      events_matched_total: eventsMatchedTotal,
+      coverage_complete: coverageComplete,
       retriever_wall_ms: retrieverWallMs,
       points_emitted: emission.pointsEmitted,
       series_count: aggregated.seriesCount,

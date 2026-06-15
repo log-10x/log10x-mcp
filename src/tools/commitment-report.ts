@@ -268,6 +268,8 @@ export interface WeeklyVerifyResult {
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
+    /** Human pattern name; renderers lead with this, never the hash. */
+    pattern?: string;
     action_taken?: Action;
     bytes_saved: number;
     dollars_saved?: number | null;
@@ -351,6 +353,8 @@ export interface VerifyResultLike {
    */
   per_pattern_breakdown?: Array<{
     pattern_hash: string;
+    /** Human pattern name (TSDB pattern label); falls back to the hash. */
+    pattern?: string;
     action: Action;
     delivered_bytes: number;
     expected_bytes: number | null;
@@ -424,6 +428,7 @@ export function adaptVerifyResultToWeekly(
           : dollars * (safeBytes / totalDroppedFromRows);
       return {
         pattern_hash: r.pattern_hash,
+        pattern: r.pattern,
         action_taken: r.action,
         bytes_saved: safeBytes,
         dollars_saved: dollarsSaved,
@@ -601,6 +606,8 @@ export interface CommitmentReportEnvelope {
    */
   per_pattern_rows: Array<{
     pattern_hash: string;
+    /** Human pattern name; renderers lead with this, never the hash. */
+    pattern: string;
     action_taken: Action;
     bytes_saved: number;
     dollars_saved: number | null;
@@ -880,8 +887,8 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
   if (env.tick_history.length > 0) {
     lines.push('## Tick history');
     lines.push('');
-    lines.push('| Timestamp | Status | Savings % | Delta patterns | Delta pp |');
-    lines.push('|-----------|--------|-----------|----------------|----------|');
+    lines.push('| Timestamp | Status | Projected % | Delta patterns | Delta pp |');
+    lines.push('|-----------|--------|-------------|----------------|----------|');
     for (const t of env.tick_history) {
       const ts = t.ts.slice(0, 19).replace('T', ' ');
       lines.push(
@@ -1009,7 +1016,7 @@ async function executeWeeklyDigest(
         if (r.backend) {
           // commitment.env not available in the digest path; default to
           // the env nickname or 'prod' is wrong — instead, scope only by
-          // hash + isDropped filter (the env label is required by the
+          // hash + routeState filter (the env label is required by the
           // selector). Read the env from args.environment when set;
           // otherwise omit the env filter by passing a wildcard-ish
           // env="" (callers without an explicit environment get whatever
@@ -1279,7 +1286,7 @@ export async function fetchHashDescriptors(
   const L = DEFAULT_LABELS;
   const hashList = uniq.map((h) => h.replace(/[\\"]/g, (c) => `\\${c}`)).join('|');
   const selector =
-    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",isDropped!="true"`;
+    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",routeState!="drop"`;
   const query =
     `sum by (${L.hash},${L.service},${L.pattern}) ` +
     `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;
@@ -1344,6 +1351,8 @@ function renderPatternLabel(
  */
 interface MergedPatternRow {
   pattern_hash: string;
+  /** Human pattern name; falls back to the hash when no week supplied one. */
+  pattern: string;
   action_taken: Action;
   bytes_saved: number;
   dollars_saved: number | null;
@@ -1458,6 +1467,7 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
         if (!prior) {
           merged.set(row.pattern_hash, {
             pattern_hash: row.pattern_hash,
+            pattern: row.pattern || row.pattern_hash,
             action_taken: action,
             bytes_saved: bytesSaved,
             dollars_saved: rowDollars,
@@ -1474,6 +1484,10 @@ function aggregateWeekly(weekly: WeeklyVerifyResult[]): {
           }
           // Latch the latest action_taken (last week wins).
           prior.action_taken = action;
+          // Upgrade the name if an earlier week only had the hash.
+          if (row.pattern && prior.pattern === prior.pattern_hash) {
+            prior.pattern = row.pattern;
+          }
           // Rate source: keep prior unless prior was unset.
           if (prior.rate_source === 'unset' && rowRate !== 'unset') {
             prior.rate_source = rowRate;
@@ -1954,7 +1968,7 @@ export async function executeCommitmentReport(
   });
 
   // 5b. Offload-bucket override via metric-surface stamp (§B.3).
-  // The receiver stamps `isDropped="true"` on every offloaded event;
+  // The receiver stamps `routeState="drop"` on every offloaded event;
   // getOffloadStatusBatch reads that signal. Any pattern flagged as
   // offloaded has its row's action_taken overridden to 'offload'
   // REGARDLESS of what the cap CSV said — the metric stamp is ground
@@ -2266,6 +2280,7 @@ export async function executeCommitmentReport(
     at_risk_actions: atRisk,
     per_pattern_rows: agg.per_pattern_rows.map((r) => ({
       pattern_hash: r.pattern_hash,
+      pattern: r.pattern,
       action_taken: r.action_taken,
       bytes_saved: r.bytes_saved,
       dollars_saved: r.dollars_saved,

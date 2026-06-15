@@ -187,10 +187,11 @@ export const pocFromSiemSubmitSchema = {
     .boolean()
     .default(true)
     .describe(
-      'Default true: templating runs through the locally-installed `tenx` CLI so events never leave the machine. ' +
-        'Requires `tenx` to be installed (brew install log-10x/tap/log10x, or see https://doc.log10x.com/apps/dev/); ' +
-        'the tool errors cleanly with an install hint otherwise. ' +
-        'Set to false to route through the public Log10x paste endpoint instead — intended for demo use only, ' +
+      'Default true: templating runs through a local Log10x engine so events never leave the machine. ' +
+        'The engine can be a native `tenx` CLI (install for macOS/Linux/Windows: https://doc.log10x.com/install/) ' +
+        'or a local Docker container (set LOG10X_TENX_MODE=docker); when the mode is unset, Docker is auto-detected and preferred. ' +
+        'The tool errors cleanly with an install hint covering both options otherwise. ' +
+        'Set to false to route through the public Log10x paste endpoint instead, intended for demo use only, ' +
         'not production log content (raw events are sent to a shared public Lambda).'
     ),
   environment: z.string().optional().describe('Optional environment nickname — cosmetic only, for the report header.'),

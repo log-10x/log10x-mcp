@@ -178,15 +178,41 @@ test('projectAction tier_down keeps bytes and emits routing caveat', () => {
   assert.ok(p.notes && p.notes.some((n) => /tier_down/.test(n)));
 });
 
-test('projectAction offload sends zero bytes downstream with S3 caveat', () => {
+test('projectAction offload sends zero bytes downstream, total_dollars is the netted S3 residual', () => {
   const p = projectAction({
     action: 'offload',
     bytes_in: GB,
     destination: 'splunk',
   });
+  // All bytes leave the SIEM.
   assert.equal(p.bytes_out, 0);
-  assert.equal(p.total_dollars, 0);
+  // But total_dollars is no longer 0: it is the customer's residual S3 cost
+  // (1 GB at S3 Standard $0.023/GB-mo for 1 month), surfaced separately too.
+  assert.ok(Math.abs((p.total_dollars ?? -1) - 0.023) < 1e-6, `total=${p.total_dollars}`);
+  assert.ok(Math.abs((p.s3_storage_dollars ?? -1) - 0.023) < 1e-6, `s3=${p.s3_storage_dollars}`);
   assert.ok(p.notes && p.notes.some((n) => /S3/.test(n)));
+});
+
+test('offload savings are netted: baseline minus S3, not gross', () => {
+  // On splunk ($6/GB ingest + $0.10/GB-mo storage), 1 GB baseline (pass) costs
+  // ~$6.10/mo. Offloading it removes that from the SIEM but adds ~$0.023 S3, so
+  // the net saving is ~$6.077, NOT the gross $6.10.
+  const baseline = projectAction({ action: 'pass', bytes_in: GB, destination: 'splunk' });
+  const off = projectAction({ action: 'offload', bytes_in: GB, destination: 'splunk' });
+  const netSaving = (baseline.total_dollars ?? 0) - (off.total_dollars ?? 0);
+  const grossSaving = baseline.total_dollars ?? 0;
+  assert.ok(netSaving < grossSaving, 'net must be below gross');
+  assert.ok(Math.abs(grossSaving - netSaving - 0.023) < 1e-6, `S3 delta=${grossSaving - netSaving}`);
+});
+
+test('offload S3 rate is overridable (cheaper tier)', () => {
+  const standard = projectAction({ action: 'offload', bytes_in: GB, destination: 'splunk' });
+  const glacier = projectAction({
+    action: 'offload', bytes_in: GB, destination: 'splunk',
+    customer_rate: { s3_per_gb_month_override: 0.004 },
+  });
+  assert.ok((glacier.total_dollars ?? 1) < (standard.total_dollars ?? 0));
+  assert.ok(Math.abs((glacier.s3_storage_dollars ?? -1) - 0.004) < 1e-6);
 });
 
 test('projectAction compact on clickhouse uses dict-udf-view band and stored-month basis', () => {
@@ -394,4 +420,36 @@ test('projectActionRange hoists rate_source from expected to top level', () => {
   assert.equal(range.rate_source.ingest, 'list');
   // Datadog has $0 list storage — still 'list', not 'unset'.
   assert.equal(range.rate_source.storage, 'list');
+});
+
+// ─── Phase 2: measured compact_ratio_override ────────────────────────
+
+test('compact_ratio_override on splunk uses the measured ratio across the whole band', () => {
+  // Measured 0.5 (half the input survives) overrides the static 0.08-0.15
+  // band. Splunk is envelope mode, where the on-wire size IS the billed size.
+  const r = projectActionRange({
+    action: 'compact',
+    bytes_in: GB,
+    destination: 'splunk',
+    compact_ratio_override: 0.5,
+  });
+  // The band collapses to the single measured ratio: bytes_out = 0.5 * GB.
+  assert.ok(Math.abs(r.expected.bytes_out - 0.5 * GB) < 1, `bytes_out=${r.expected.bytes_out}`);
+  assert.equal(r.low.bytes_out, r.expected.bytes_out);
+  assert.equal(r.high.bytes_out, r.expected.bytes_out);
+  // ~50% reduction, not the ~88% the static band would have given.
+  assert.ok(Math.abs(r.percent_reduction_expected - 50) < 1, `pct=${r.percent_reduction_expected}`);
+  assert.ok(r.expected.notes!.some((n) => /measured/.test(n)), r.expected.notes?.join('|'));
+});
+
+test('compact_ratio_override is ignored on a non-envelope destination (clickhouse keeps its band)', () => {
+  // ClickHouse compacts in dict-udf-view mode; the wire ratio diverges from
+  // the stored size, so the measured override must NOT drive the projection.
+  const withOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'clickhouse', compact_ratio_override: 0.5,
+  });
+  const withoutOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'clickhouse',
+  });
+  assert.equal(withOverride.expected.bytes_out, withoutOverride.expected.bytes_out);
 });

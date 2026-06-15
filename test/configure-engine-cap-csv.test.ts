@@ -50,6 +50,7 @@ function additionsFromDiff(diff: string): string[] {
 function makeRow(overrides: Partial<PerPatternRow>): PerPatternRow {
   return {
     pattern_hash: 'abc123',
+    pattern: 'ERROR_sample_pattern_name',
     current_bytes_30d: 1_000_000,
     cap_bytes_per_window: 1024,
     action: 'compact',

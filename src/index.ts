@@ -327,7 +327,7 @@ async function wrap(
   // all tools in `tools/list` (client-side tool-search ranks them per
   // query, so cognitive surface is not the concern); the gate just
   // ensures wrong-mode calls produce a useful response.
-  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode)) {
+  if (bootMode && !shouldRegisterTool(toolName, bootMode.mode, { demoFallback: bootMode.demoFallback })) {
     log.info(`tool.${toolName}.wrong_mode`, { mode: bootMode.mode });
     return {
       content: [
@@ -1020,7 +1020,7 @@ function applyToolRegistrations(
   // ignore it. Pair with `structuredContent` on every result in wrap().
   const envelopeOutputSchema = StructuredOutputSchema.shape;
   for (const t of pendingTools) {
-    const allowed = mode ? shouldRegisterTool(t.name, mode) : true;
+    const allowed = mode ? shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback }) : true;
     if (!allowed) {
       skipped.push(t.name);
       continue;
@@ -1461,8 +1461,9 @@ registerLog10xTool('log10x_pattern_detail', patternDetailSchema, (args) =>
 // ── Tool: log10x_measure_compaction ──
 //
 // Measures real per-pattern compaction ratios from live SIEM samples.
-// Requires the tenx CLI (for the engine run) and SIEM credentials (for the
-// event pull). Does not need a metrics backend — local CLI + SIEM only.
+// Requires a local Log10x engine (native tenx CLI or Docker, for the engine
+// run) and SIEM credentials (for the event pull). Does not need a metrics
+// backend: local engine + SIEM only.
 
 registerLog10xTool('log10x_measure_compaction', measureCompactionSchema, (args) =>
   wrap('log10x_measure_compaction', async () => {
@@ -1751,10 +1752,17 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
 //      baseline_window is the pre-policy reference.
 //   3. Adapts VerifyResult → WeeklyVerifyResult.
 //
-// Limitation: runEstimateVerify queries `[range]` ending at "now", so
-// every weekly loop hits the same live snapshot. Week-specific windows
-// and the per_pattern_breakdown cap-CSV join are not yet implemented;
-// this path only unblocks the not_ready hard-return.
+// Baseline anchoring: the baseline range-vector is offset back by the
+// commitment's age (baseline_offset below) so it measures PRE-policy data
+// instead of trailing to "now" over the same range as the post window. That
+// removes the degenerate-windowing wash (delivered_pct forced to 0) for the
+// commitment path. The $ view was always correct (post-window dropped bytes).
+//
+// Remaining limitation: the POST query still trails to "now", so each weekly
+// cursor measures the same recent snapshot rather than its own absolute
+// [week_start, week_end] window. Per-week absolute anchoring (a post-side
+// `@ <week_end>` modifier) is the next refinement; today the aggregate
+// delivered_pct is sound but the per-week series is not yet time-sliced.
 
 _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   const env = resolveEnv(getEnvs(), commitment.env);
@@ -1794,11 +1802,24 @@ _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
       fetchActionIntentForEnv(env).catch(() => undefined),
     ]);
   }
+  // Anchor the baseline BEFORE the policy went live. Without this the
+  // baseline range-vector trails to "now" over the same window as the post
+  // query (the policy's own output), forcing delivered_pct to 0. Offsetting
+  // by the commitment's age lands the baseline window in pre-policy data.
+  // Skipped for day-zero commitments (no pre-policy gap yet to measure).
+  const commitmentAgeDays = Math.floor(
+    (Date.now() - Date.parse(commitment.started_at)) / MS_PER_DAY
+  );
+  const baselineOffset =
+    Number.isFinite(commitmentAgeDays) && commitmentAgeDays >= 1
+      ? `${commitmentAgeDays}d`
+      : undefined;
   const vr = await runEstimateVerify(
     {
       destination: commitment.destination,
       baseline_window: commitment.baseline_window || '7d',
       post_window: `${weekDays}d`,
+      ...(baselineOffset ? { baseline_offset: baselineOffset } : {}),
       commitment_id: commitment.id,
       contract_type: commitment.contract_type,
       cap_csv_content: capCsv,
@@ -1864,7 +1885,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_retriever_query', intent: 'Read the offloaded cohort for a pattern (tenx_user_pattern) from the customer-owned overflow bucket with JS filter expressions: the events the Receiver held back from the SIEM' },
   { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
   { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
-  { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live isDropped metric surface answers overflow-volume questions as a TSDB query.' },
+  { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live routeState metric surface answers overflow-volume questions as a TSDB query.' },
   { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
@@ -1892,7 +1913,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },
   { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author — resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR.' },
-  { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `isDropped` label with cap-hit / drift / new-patterns / leakage attribution.' },
+  { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `routeState` label with cap-hit / drift / new-patterns / leakage attribution.' },
   { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
@@ -1954,9 +1975,9 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
         '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
-        '  LOG10X_TENX_MODE          `local`, `docker`, or unset (auto-detect, prefers docker) — backend for tenx-running tools (privacy-mode + compile)',
-        '  LOG10X_TENX_PATH          Path to local tenx CLI (used in local mode; compile requires the cloud flavor)',
-        '  LOG10X_TENX_IMAGE         Docker image for the streaming tools when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
+        '  LOG10X_TENX_MODE          `local` or `docker` backend for privacy-mode and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
+        '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local; compile requires the cloud flavor)',
+        '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
         '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',
         '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile); omit to use the image built-in limited license',
         '  GH_TOKEN                  GitHub token for log10x_compile github_repos pull (or pass the github_token arg; required even for public repos)',
@@ -2194,7 +2215,7 @@ async function main() {
   // in MCP-client logs without needing to call `log10x_doctor`.
   if (bootMode) {
     // eslint-disable-next-line no-console
-    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n')[0]}`);
+    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n').slice(0, 2).join(' — ')}`);
   }
 
   // Transport selection. LOG10X_MCP_HTTP_PORT → remote Streamable HTTP (the

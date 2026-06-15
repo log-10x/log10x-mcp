@@ -141,6 +141,18 @@ export function resolveRate(
   args: RateArgs | undefined,
   env: EnvConfig | undefined,
   destination: string | undefined | null,
+  opts?: {
+    /**
+     * SIEM-lens mode: the caller is pricing a DIFFERENT destination than the
+     * env's actual one. Rung 1 (explicit caller rate) still wins — that is
+     * the caller asserting their own rate for the lens — but rungs 2/3
+     * (envs.json analyzerCost / LOG10X_ANALYZER_COST) are SKIPPED because the
+     * env-configured rate belongs to the actual destination and must not
+     * price another SIEM's story. The lens therefore lands on the lens
+     * destination's list price (rung 4).
+     */
+    lensed?: boolean;
+  },
 ): ResolvedRate {
   // Rung 1: explicit caller arg. Either alias is valid; effective_ingest_per_gb
   // wins when both are passed (the deprecated alias is for back-compat only).
@@ -159,8 +171,9 @@ export function resolveRate(
     };
   }
 
-  // Rung 2: envs.json analyzerCost on the resolved env.
-  const envsJsonRate = readAnalyzerCostFromEnvConfig(env);
+  // Rung 2: envs.json analyzerCost on the resolved env. Skipped under a
+  // lens: that rate belongs to the ACTUAL destination.
+  const envsJsonRate = opts?.lensed ? undefined : readAnalyzerCostFromEnvConfig(env);
   if (envsJsonRate != null) {
     return {
       rate_per_gb: envsJsonRate,
@@ -170,8 +183,9 @@ export function resolveRate(
     };
   }
 
-  // Rung 3: LOG10X_ANALYZER_COST env var.
-  const envVarRate = readAnalyzerCostFromEnvVar();
+  // Rung 3: LOG10X_ANALYZER_COST env var. Skipped under a lens (same reason
+  // as rung 2).
+  const envVarRate = opts?.lensed ? undefined : readAnalyzerCostFromEnvVar();
   if (envVarRate != null) {
     return {
       rate_per_gb: envVarRate,

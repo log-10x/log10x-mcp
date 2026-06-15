@@ -3,7 +3,7 @@
  *
  * The Retriever's query API is two-phase:
  *
- *   1. POST /retriever/query with a body shaped like QueryRequest.java accepts.
+ *   1. POST /streamer/query with a body shaped like QueryRequest.java accepts.
  *      The body carries a client-generated `id` field which the engine uses
  *      as the canonical queryId and echoes back in the response.
  *
@@ -115,6 +115,18 @@ export interface RetrieverQueryRequest {
    * record.
    */
   writeSummaries?: boolean;
+  /**
+   * Caps the per-worker qr/ event DOWNLOAD (not the engine write — the engine
+   * always writes the full set; results_location carries it). Only takes
+   * effect when qrs/ summaries are present (they supply the whole-match count
+   * + rollups, so the client doesn't need the bulk):
+   *   - 0          → download NO qr/ events (count/aggregate served by summaries)
+   *   - N (> 0)    → download worker files until ~N events accumulate, then stop
+   *   - undefined  → download everything (legacy)
+   * With NO summaries the full set is always downloaded regardless, so the
+   * true count + rollups are never lost.
+   */
+  maxDownloadEvents?: number;
 }
 
 /**
@@ -127,6 +139,8 @@ export interface ExistingResultsResponse {
   truncated: boolean;
   /** Number of `.jsonl` worker files read. */
   jsonlObjectCount: number;
+  /** Worker files that failed to download after retries (events incomplete). */
+  failedWorkerFiles?: number;
   /** True when the `_DONE.json` marker exists. False when the query is mid-flight. */
   done: boolean;
   /** Resolved target prefix the result paths used. */
@@ -204,11 +218,19 @@ export async function fetchExistingResults(
     }
   }
 
+  // Download the per-worker JSONL results concurrently (bounded pool) with
+  // per-file retry; a file that still fails after retries degrades the fetch
+  // to partial (failedWorkerFiles > 0) instead of losing the whole query.
+  // Order-preserving + flattened, so the downstream sort + cap matches the
+  // old serial loop.
   const events: RetrieverEvent[] = [];
-  for (const key of jsonlKeys) {
-    const content = await s3Get(bucket, key);
-    events.push(...parseJsonl(content));
-  }
+  const eventDl = await mapWithConcurrencySettled(
+    jsonlKeys,
+    RETRIEVER_DOWNLOAD_CONCURRENCY,
+    async (key) => parseJsonl(await s3GetWithRetry(bucket, key)),
+  );
+  const failedWorkerFiles = eventDl.failures.length;
+  for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
 
@@ -227,7 +249,7 @@ export async function fetchExistingResults(
     }
   }
 
-  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target };
+  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
 }
 
 /**
@@ -324,6 +346,16 @@ export interface RetrieverQueryResponse {
     eventsMatched: number;
     workerFiles: number;
     truncated: boolean;
+    /**
+     * Worker JSONL files that failed to download after retries. > 0 means
+     * the event set (and event-derived rollups) are INCOMPLETE — surface a
+     * partial caveat; the full set is still intact in S3.
+     */
+    failedWorkerFiles?: number;
+    /** True when the qr/ download was capped (summaries served the rollups). */
+    downloadCapped?: boolean;
+    /** Total qr/ worker files that exist for this query (vs downloaded). */
+    totalWorkerFiles?: number;
     /** Per-slice summary record count when summaries were requested. */
     summariesMatched?: number;
     /** Distinct slice subdirs observed. */
@@ -867,6 +899,11 @@ interface S3ListEntry {
   Size: number;
 }
 
+// NOTE on pagination: `aws s3api list-objects-v2` AUTO-PAGINATES by default —
+// the CLI follows NextContinuationToken internally and merges all pages into
+// one Contents array (verified live: 54,597 keys returned on a single call vs
+// 1,000 with --no-paginate). Do NOT add manual token loops here. The real
+// ceiling is maxBuffer: ~150 bytes/key JSON means 32 MB covers ~200k keys.
 async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
   try {
     const { stdout } = await execFileP('aws', [
@@ -904,6 +941,131 @@ async function s3Get(bucket: string, key: string): Promise<string> {
   ], { maxBuffer: 64 * 1024 * 1024 });
   return stdout;
 }
+
+/**
+ * Run `fn` over `items` with at most `concurrency` calls in flight, preserving
+ * input order in the returned array. The first rejection propagates and an
+ * abort flag stops idle workers from pulling new items — so one failed S3 read
+ * aborts the whole fetch (matching the old serial loop's throw-on-error
+ * semantics) instead of silently returning a partial result set.
+ *
+ * Why bounded (not Promise.all over everything): the Retriever fans out to
+ * dozens of stream workers, each writing its own JSONL. An unbounded fan-in
+ * would spawn an `aws s3 cp` subprocess per file simultaneously (each buffering
+ * up to 64 MB) and can trip S3 503 SlowDown on a hot prefix. A small pool
+ * captures the bandwidth win without the blowup.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let aborted = false;
+  async function worker(): Promise<void> {
+    while (!aborted) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        aborted = true;
+        throw e;
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return results;
+}
+
+/**
+ * Like mapWithConcurrency but per-item failures do NOT abort the run:
+ * failed slots return undefined and are reported in `failures`. Used by the
+ * result-download paths so one persistently-failing worker file (e.g. S3
+ * 503 SlowDown that outlives retries) degrades the fetch to partial instead
+ * of losing the whole query.
+ */
+export async function mapWithConcurrencySettled<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<{ results: Array<R | undefined>; failures: Array<{ index: number; error: Error }> }> {
+  // fill() makes failed slots EXPLICIT undefined (not array holes) so
+  // consumers can rely on results.length === items.length with in-band
+  // undefined markers.
+  const results = new Array<R | undefined>(items.length).fill(undefined);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (e) {
+        failures.push({ index: i, error: e instanceof Error ? e : new Error(String(e)) });
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return { results, failures };
+}
+
+/**
+ * Download per-worker JSONL in concurrency-bounded BATCHES, stopping once
+ * `budget` events have accumulated. Order-preserving over the files actually
+ * pulled. Used to cap the qr/ download to a preview-sized sample when qrs/
+ * summaries already supply the whole-match count + rollups, so a huge match
+ * never materializes client-side.
+ */
+export async function downloadEventsUntilBudget(
+  keys: readonly string[],
+  budget: number,
+  concurrency: number,
+  fetchParse: (key: string) => Promise<RetrieverEvent[]>,
+): Promise<{ events: RetrieverEvent[]; failures: number; filesDownloaded: number; stoppedEarly: boolean }> {
+  const events: RetrieverEvent[] = [];
+  let failures = 0;
+  let filesDownloaded = 0;
+  let i = 0;
+  while (i < keys.length && events.length < budget) {
+    const batch = keys.slice(i, i + concurrency);
+    i += batch.length;
+    const dl = await mapWithConcurrencySettled(batch, concurrency, fetchParse);
+    failures += dl.failures.length;
+    for (const chunk of dl.results) {
+      if (chunk) {
+        events.push(...chunk);
+        filesDownloaded++;
+      }
+    }
+  }
+  return { events, failures, filesDownloaded, stoppedEarly: i < keys.length };
+}
+
+/**
+ * s3Get with bounded retry. S3 503 SlowDown / transient network errors on a
+ * hot prefix are retryable; two backed-off retries clear the vast majority.
+ */
+async function s3GetWithRetry(bucket: string, key: string, attempts = 3): Promise<string> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await s3Get(bucket, key);
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1) * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+/** Bounded concurrency for the per-worker S3 result downloads. */
+const RETRIEVER_DOWNLOAD_CONCURRENCY =
+  Number(process.env.LOG10X_RETRIEVER_DOWNLOAD_CONCURRENCY) || 8;
 
 function parseJsonl(content: string): RetrieverEvent[] {
   const events: RetrieverEvent[] = [];
@@ -1175,12 +1337,18 @@ export async function runRetrieverQuery(
   const writeResults = req.writeResults ?? true;
   const writeSummaries = req.writeSummaries ?? false;
 
+  // `pattern` is deprecated on this request shape, but direct callers
+  // (investigate stage-1) still pass it without `search` — and the old body
+  // builder silently dropped it, scanning UNFILTERED. Translate it here so
+  // the API layer can never silently widen a scoped query.
+  const effectiveSearch = req.search || (req.pattern ? buildPatternSearch(req.pattern) : '');
+
   const body: Record<string, unknown> = {
     id: queryId,
     name: req.name || `mcp-${queryId.slice(0, 8)}`,
     from: normalizeTimeExpression(req.from),
     to: normalizeTimeExpression(req.to || 'now'),
-    search: req.search || '',
+    search: effectiveSearch,
     filters: req.filters || [],
     ...(req.logLevels ? { logLevels: req.logLevels } : {}),
     writeResults,
@@ -1292,10 +1460,42 @@ export async function runRetrieverQuery(
     }
   }
 
+  // Part A: cap the qr/ DOWNLOAD when qrs/ summaries can serve the rollups +
+  // count, so a huge match never materializes client-side. The engine still
+  // wrote the full set (results_location carries it); we just stop pulling it.
+  // Gate on a cheap qrs/ presence probe — with NO summaries we always download
+  // everything so the true count + rollups are never lost.
+  const maxDl = req.maxDownloadEvents;
+  // The download cap is only safe to engage when summaries can serve the
+  // rollups + count — which the rollup honesty rule forbids under filters[]
+  // (the engine summary writer's filter behavior is unverified). So under
+  // filters we keep the full download; the gate uses the SAME guard the
+  // tool's selectRollups uses, or the two disagree.
+  const filtersActive = Array.isArray(req.filters) && req.filters.length > 0;
+  let summariesPresent = false;
+  if (writeSummaries && !filtersActive && (maxDl === 0 || (typeof maxDl === 'number' && maxDl > 0))) {
+    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${target}/qrs/${queryId}/`);
+    summariesPresent = qrsProbe.some((o) => o.Key.endsWith('.jsonl'));
+  }
+
   const events: RetrieverEvent[] = [];
-  for (const key of jsonlKeys) {
-    const content = await s3Get(bucket, key);
-    events.push(...parseJsonl(content));
+  let failedWorkerFiles = 0;
+  let downloadCapped = false;
+  const fetchParse = async (key: string) => parseJsonl(await s3GetWithRetry(bucket, key));
+  if (summariesPresent && maxDl === 0) {
+    // Count / aggregate served entirely by summaries — pull NO qr/ events.
+    downloadCapped = jsonlKeys.length > 0;
+  } else if (summariesPresent && typeof maxDl === 'number' && maxDl > 0) {
+    // Events format: pull only enough worker files to fill the return/preview.
+    const dl = await downloadEventsUntilBudget(jsonlKeys, maxDl, RETRIEVER_DOWNLOAD_CONCURRENCY, fetchParse);
+    for (const ev of dl.events) events.push(ev);
+    failedWorkerFiles = dl.failures;
+    downloadCapped = dl.stoppedEarly;
+  } else {
+    // Legacy / no-summaries path: full download (true count + rollups from events).
+    const eventDl = await mapWithConcurrencySettled(jsonlKeys, RETRIEVER_DOWNLOAD_CONCURRENCY, fetchParse);
+    failedWorkerFiles = eventDl.failures.length;
+    for (const chunk of eventDl.results) if (chunk) events.push(...chunk);
   }
 
   events.sort((a, b) => eventTimestampMs(a) - eventTimestampMs(b));
@@ -1312,12 +1512,22 @@ export async function runRetrieverQuery(
     const summaryObjects = await s3List(bucket, summariesPrefix);
     summaries = [];
     const distinctSlices = new Set<string>();
-    for (const obj of summaryObjects) {
-      if (!obj.Key.endsWith('.jsonl')) continue;
-      const sliceSegment = parseSliceSegment(obj.Key, summariesPrefix);
-      if (!sliceSegment) continue;
+    // Download summary files concurrently too; order-preserving so the pushed
+    // summary order matches the old serial loop.
+    const summaryFiles = summaryObjects
+      .filter((obj) => obj.Key.endsWith('.jsonl'))
+      .map((obj) => ({ obj, seg: parseSliceSegment(obj.Key, summariesPrefix) }))
+      .filter((x): x is { obj: S3ListEntry; seg: NonNullable<typeof x.seg> } => x.seg !== null);
+    const summaryDl = await mapWithConcurrencySettled(
+      summaryFiles,
+      RETRIEVER_DOWNLOAD_CONCURRENCY,
+      async ({ obj, seg }) => ({ seg, content: await s3GetWithRetry(bucket, obj.Key) }),
+    );
+    const summaryContents = summaryDl.results.filter(
+      (x): x is { seg: { fromMs: number; toMs: number }; content: string } => x !== undefined,
+    );
+    for (const { seg: sliceSegment, content } of summaryContents) {
       distinctSlices.add(`${sliceSegment.fromMs}_${sliceSegment.toMs}`);
-      const content = await s3Get(bucket, obj.Key);
       for (const line of content.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -1406,7 +1616,10 @@ export async function runRetrieverQuery(
       wallTimeMs,
       eventsMatched: events.length,
       workerFiles: jsonlKeys.length,
+      totalWorkerFiles: jsonlKeys.length,
       truncated,
+      ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}),
+      ...(downloadCapped ? { downloadCapped: true } : {}),
       ...(summaries ? { summariesMatched: summaries.length, slicesObserved } : {}),
     },
     events: finalEvents,
