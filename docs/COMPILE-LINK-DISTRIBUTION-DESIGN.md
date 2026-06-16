@@ -36,6 +36,10 @@ receiver/reporter retrieves it. The compile *producer* itself is now built (see 
 5. **Plan:** a new `log10x_place_symbols` tool, **git backend first**, reusing the
    **gitops-PR + kubectl-ConfigMap writers** that the recent *single-file control
    plane* work already unified in `configure_engine`.
+6. **Verified 2026-06-16:** shipped reporter/receiver do **not** live-reload symbols
+   (the reload unit is wired, but `@github` is off by default and delivery is one-time),
+   so Phase 1 **defaults to commit → rollout-restart**; hot-reload is opt-in and needs a
+   chart/config fix (§4 callout, §10 Q2).
 
 ---
 
@@ -130,6 +134,21 @@ Common trap: *pushing to the git repo does not update a running pod unless engin
 user's forwarder) and retriever all use these patterns; **retriever doesn't actually
 need symbols** (reads pre-indexed S3 data; the plumbing is wired but off by default).
 
+> **Verified 2026-06-16 — default deployments do NOT hot-reload symbols.** The
+> `reload`/`configLoader` unit *is* wired into every shipped run app
+> (`modules/apps/shared/config.yaml:15` includes `run/reload`), so the hot-reload
+> *machinery* is present. **But** the `@github` loop ships **disabled**
+> (`config/apps/reporter/config.yaml:30` includes `gitops`, whose
+> `config/pipelines/gitops/config.yaml` defaults `GH_ENABLED=false` with the
+> `test/*.csv` glob — no symbols), and the common k8s delivery (init-container clone /
+> PVC / baked image) is **one-time**. The engine *can* route a pulled symbol folder in
+> — it expands each `@github`-pulled path as an `@<folder>` launch macro
+> (`PipelineLaunchGitHubParser.java:275-288`) — but whether a pulled `.10x.tar` reaches
+> a `symbolPaths` glob depends on repo layout and was not confirmed end-to-end (needs a
+> live test). **Conclusion: out of the box there is no live symbol hot-reload; Phase 1
+> must default to commit → rollout-restart** (see §8), and a real hot-reload path is an
+> opt-in that also needs the chart/config fix in §10 Q2.
+
 ---
 
 ## 5. Placement backends (how the MCP writes each)
@@ -217,6 +236,12 @@ hot-reload. **No engine change needed for Phase 1.**
 - New tool **`log10x_place_symbols`** — `{ environment, library_path, backend?
   (default detect), repo?/branch?/path? overrides, dry_run }`. Implements
   `backend='git'`: commit the tar verbatim via the existing gitops-PR / commit writer.
+- **Default delivery = commit → rollout-restart** (verified §4): shipped deployments
+  don't live-reload symbols, so after committing, emit a `kubectl rollout restart` of
+  the target reporter/receiver (the one-time init-container re-clones on restart). Only
+  skip the rollout when detection confirms the live `@github` loop is active
+  (`GH_ENABLED=true` + a `symbols/*.10x.tar` glob). Treat hot-reload as opt-in, not the
+  default.
 - Keep `compile` a pure producer; add a **`compile → place_symbols`** action
   (library path pre-filled), mirroring the existing `compile → validate` handoff.
 - New env field **`symbolSource { backend, repo, branch, path, syncMode:
@@ -264,15 +289,20 @@ Lifecycle becomes **`compile → place_symbols → receiver reload`** (or
 
 ## 10. Open questions (confirm before building)
 
-1. **Does any production reporter/receiver enable the live @github/@kubernetes loop?**
-   Both ship disabled. If real deployments all use the one-time init-container / PVC /
-   baked image, **live hot-reload doesn't exist in practice** and Phase 1 must default
-   to **commit-then-rollout-restart**, not hot-reload.
-2. Should the **chart / gitops config ship a corrected default** that includes
-   `symbols/*.10x.tar` in the paths glob, so operators don't hand-edit it?
-3. Is the **reload (configLoader) unit actually wired** into the shipped reporter/
-   receiver run config, with its symbol provider pointing at the @github temp folder?
-   (Mechanisms are compatible; the concrete module wiring was not traced end-to-end.)
+1. ~~Does any production reporter/receiver enable the live @github/@kubernetes loop?~~
+   **RESOLVED 2026-06-16 (§4 callout):** No — `@github` ships disabled (`GH_ENABLED=false`,
+   `test/*.csv` glob) and the common delivery is one-time (init-container / PVC / baked).
+   **Live hot-reload does not exist by default → Phase 1 defaults to commit + rollout-restart.**
+2. **Should the chart / gitops config ship a corrected default** that includes
+   `symbols/*.10x.tar` in the paths glob (and `GH_ENABLED=true`), so the hot-reload path
+   works without operators hand-editing it? *(Now the key follow-up: this is what makes
+   the opt-in hot-reload path real. Chart/config-team item, not MCP.)*
+3. ~~Is the reload (configLoader) unit wired into the shipped run config?~~
+   **RESOLVED 2026-06-16:** Yes — `modules/apps/shared/config.yaml:15` includes
+   `run/reload` for all run apps. Residual unknown: whether an `@github`-pulled
+   `.10x.tar` actually lands on a `symbolPaths` glob (engine expands the pulled folder
+   as an `@<folder>` macro, `PipelineLaunchGitHubParser.java:275-288`, but the
+   repo-layout → `symbol.paths` bridge needs a **live test**).
 4. **Detection precedence** when live kubeconfig introspection disagrees with the
    declared `symbolSource` (operator hand-edited the deployment) — pick one + warn.
 5. **git-config-fetcher version skew** — reporter pins `1.0.0`, retriever `0.9.7`;
