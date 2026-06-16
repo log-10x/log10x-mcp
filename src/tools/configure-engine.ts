@@ -80,12 +80,6 @@ import {
   RECEIVER_DEFAULT_RESET_MS,
   scaleObservedToReceiverWindow,
 } from '../lib/window-scaling.js';
-import {
-  writeActionIntent,
-  buildActionIntentEntries,
-  deriveActionsCsv,
-  type ActionIntentEntry,
-} from '../lib/action-intent-writer.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
 import { requireWriteAccess } from '../lib/read-only-guard.js';
 import { putCommitment, type CommitmentRecord } from './commitment-report.js';
@@ -1462,53 +1456,15 @@ export async function executeConfigureEngine(
     { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
 
-  // Build action-intent.json alongside the cap CSV. The intent file is the
-  // canonical source of pattern→action mapping; the cap CSV is now the
-  // engine-only safety-floor file (no `:action` suffix).
-  const actionIntentEntries: ActionIntentEntry[] = buildActionIntentEntries(
-    rows.map((r) => ({
-      pattern_hash: r.pattern_hash,
-      action: r.action,
-      // Phase 2: under auto-recommend, key each entry by the row's k8s_container
-      // (the engine's actions.csv key). Under auto_recommend=false keep the
-      // legacy single args.service so action-intent.json stays byte-identical
-      // to the pre-Phase-2 output.
-      service: autoRecommend ? (r.container ?? args.service) : args.service,
-      reason: r.floor_reason ?? r.reason,
-    }))
-  );
-  const actionIntentJson = writeActionIntent(actionIntentEntries);
-  // Per-SERVICE action routing: under auto-recommend the engine's actions.csv
-  // per-container action is the advisory's resolved standard-tier decision (NOT
-  // a mode over mixed-tier rows, which could let audit/error patterns outvote
-  // the bulk decision). Only containers with a SURVIVING standard row (the
-  // decision's action actually reached output, not downgraded to `pass` by the
-  // target-met shortcut) get the authoritative action, so actions.csv agrees
-  // with action-intent.json on a target-met container. Every other container,
-  // and the ENTIRE auto_recommend=false legacy path, falls back to
-  // deriveActionsCsv's mode rule (byte-identical to Phase 1).
-  const authoritativeActionByService = new Map<string, Action>();
-  if (autoRecommend) {
-    const survivingStandard = new Set<string>();
-    for (const r of rows) {
-      if (!r.container) continue;
-      const dec = serviceActionByContainer.get(r.container);
-      if (dec && r.action === dec.action && r.action !== 'pass') {
-        survivingStandard.add(r.container);
-      }
-    }
-    for (const [container, decision] of serviceActionByContainer) {
-      if (survivingStandard.has(container)) {
-        authoritativeActionByService.set(container, decision.action);
-      }
-    }
-  }
-  const actionsCsv = deriveActionsCsv(actionIntentEntries, authoritativeActionByService);
+  // The cap CSV is now the single engine-fed file: each cap row carries the
+  // action folded into the value (`container,<bytes>:<action>`), so the
+  // gitops PR and the kubectl ConfigMap both deliver only caps.csv. The
+  // legacy action-intent.json / actions.csv side-files are no longer written.
 
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff, actionIntentJson, actionsCsv);
+      : renderPrCommand(args, target.resolved, csvDiff);
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -2054,11 +2010,10 @@ async function tryConsumePocSnapshot(
   const baselineCsv = args.current_csv ?? '';
   const diff = renderUnifiedDiff(baselineCsv, capCsv);
 
-  // TODO: build action-intent.json from the POC envelope once it exposes
-  // per-pattern action entries. Until then pass undefined; the PR
-  // script will write the cap CSV only.
+  // The PR script writes the cap CSV only (action is folded into each cap
+  // row); no sibling action-intent.json / actions.csv.
   const prCommand = feasibility && feasibility.feasible
-    ? renderPrCommand(args, resolved, diff, undefined)
+    ? renderPrCommand(args, resolved, diff)
     : null;
 
   let applied: ConfigureEngineData['applied'];
@@ -2913,17 +2868,11 @@ function renderUnifiedDiff(before: string, after: string): string {
 function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
-  csvDiff: string,
-  actionIntentJson?: string,
-  actionsCsv?: string
+  csvDiff: string
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
   const lookupPath = resolved.lookup_path;
-  const actionIntentPath = 'data/action-intent.json';
-  // Per-service action routing lives beside action-intent.json. The engine's
-  // ConfigMap pull driver maps this file to the `actions.csv` ConfigMap key.
-  const actionsCsvPath = 'data/actions.csv';
   const prBranch = `mcp/engine-policy-${slug(args.service)}-${Date.now()}`;
   const prTitle = `engine-policy: configure ${args.service} (${args.containers!.length} container${args.containers!.length === 1 ? '' : 's'})`;
 
@@ -2936,8 +2885,6 @@ function renderPrCommand(
   out.push(`REPO=${shellQuote(repo)}`);
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
-  out.push(`ACTION_INTENT_PATH=${shellQuote(actionIntentPath)}`);
-  if (actionsCsv) out.push(`ACTIONS_CSV_PATH=${shellQuote(actionsCsvPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -2946,38 +2893,6 @@ function renderPrCommand(
   out.push(newCsv.trimEnd());
   out.push('CSV_EOF');
   out.push('');
-
-  // action-intent.json block (written atomically before cap CSV so a
-  // partial-commit window always has intent available even if the CSV
-  // commit fails; the parser treats a missing CSV gracefully).
-  if (actionIntentJson) {
-    out.push('INTENT_TMPFILE=$(mktemp)');
-    out.push("cat > \"$INTENT_TMPFILE\" <<'INTENT_EOF'");
-    out.push(actionIntentJson.trimEnd());
-    out.push('INTENT_EOF');
-    out.push('');
-    out.push('# Resolve current action-intent.json SHA (empty if not yet created).');
-    out.push(
-      'INTENT_SHA=$(gh api "/repos/$REPO/contents/$ACTION_INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
-    );
-    out.push('');
-  }
-
-  // actions.csv block (per-service action routing). Written alongside
-  // action-intent.json: same intent, keyed by service for the engine's
-  // receiver instead of by pattern.
-  if (actionsCsv) {
-    out.push('ACTIONS_CSV_TMPFILE=$(mktemp)');
-    out.push("cat > \"$ACTIONS_CSV_TMPFILE\" <<'ACTIONS_EOF'");
-    out.push(actionsCsv.trimEnd());
-    out.push('ACTIONS_EOF');
-    out.push('');
-    out.push('# Resolve current actions.csv SHA (empty if not yet created).');
-    out.push(
-      'ACTIONS_CSV_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_CSV_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)'
-    );
-    out.push('');
-  }
 
   out.push('# Resolve current file SHA (empty if the file does not exist yet).');
   out.push(
@@ -2992,32 +2907,6 @@ function renderPrCommand(
   out.push('  -f ref="refs/heads/$BRANCH" \\');
   out.push('  -f sha="$BASE_SHA" >/dev/null 2>&1 || true');
   out.push('');
-
-  if (actionIntentJson) {
-    // Commit action-intent.json FIRST (write intent before floor).
-    out.push('# Commit action-intent.json (written before cap CSV — intent is available even on partial commit).');
-    out.push('INTENT_B64=$(base64 < "$INTENT_TMPFILE" | tr -d "\\n")');
-    out.push('INTENT_ARGS=( -X PUT "/repos/$REPO/contents/$ACTION_INTENT_PATH"');
-    out.push('  -f branch="$BRANCH"');
-    out.push('  -f message="$PR_TITLE (action-intent.json)"');
-    out.push('  -f content="$INTENT_B64" )');
-    out.push('[ -n "$INTENT_SHA" ] && INTENT_ARGS+=( -f sha="$INTENT_SHA" )');
-    out.push('gh api "${INTENT_ARGS[@]}"');
-    out.push('');
-  }
-
-  if (actionsCsv) {
-    // Commit actions.csv alongside action-intent.json (per-service routing).
-    out.push('# Commit actions.csv (per-service action routing, beside action-intent.json).');
-    out.push('ACTIONS_CSV_B64=$(base64 < "$ACTIONS_CSV_TMPFILE" | tr -d "\\n")');
-    out.push('ACTIONS_CSV_ARGS=( -X PUT "/repos/$REPO/contents/$ACTIONS_CSV_PATH"');
-    out.push('  -f branch="$BRANCH"');
-    out.push('  -f message="$PR_TITLE (actions.csv)"');
-    out.push('  -f content="$ACTIONS_CSV_B64" )');
-    out.push('[ -n "$ACTIONS_CSV_SHA" ] && ACTIONS_CSV_ARGS+=( -f sha="$ACTIONS_CSV_SHA" )');
-    out.push('gh api "${ACTIONS_CSV_ARGS[@]}"');
-    out.push('');
-  }
 
   out.push('# Commit cap CSV via the contents API.');
   out.push('CONTENT_B64=$(base64 < "$TMPFILE" | tr -d "\\n")');
