@@ -38,6 +38,11 @@ import {
   detectStaleOffloadEnvVar,
   detectStaleEnvVarForField,
 } from '../lib/env-config/resolve-cluster-config.js';
+import {
+  verifyOffloadDelivery,
+  defaultOffloadDeliveryDeps,
+  type OffloadDeliveryVerdict,
+} from '../lib/offload-delivery.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -1049,7 +1054,109 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     }
   }
 
+  // Close the loop: verify offloaded bytes actually reach the sink (and only
+  // the offload slice does). Every other check trusts the engine stamp.
+  await addOffloadDeliveryCheck(env, detectedTier, checks);
+
   return checks;
+}
+
+/**
+ * offload_delivery — close the loop between the engine's `routeState=offload`
+ * STAMP and what actually landed in the customer's offload sink (S3).
+ *
+ * Every other doctor check — and cost / savings / commitment_report — trusts
+ * the stamp (`all_events_summaryBytes_total{routeState=...}`). That hides two
+ * failure modes:
+ *   - SILENT LOSS:  the engine stamps offload but the forwarder never routes
+ *     those bytes to S3, so the sink is empty while the metric shows a saving.
+ *   - COPY-EVERYTHING (leak): the forwarder ships ALL events to the sink (and
+ *     to the SIEM), so the "offloaded" bytes never left the SIEM — the saving
+ *     is phantom (the exact shape found live on the otel demo).
+ *
+ * Graceful: skipped when no offload bucket is configured (nothing to verify);
+ * WARN (not FAIL) when AWS credentials are missing. FAIL only on a measured
+ * silent-loss or copy-everything leak.
+ */
+async function addOffloadDeliveryCheck(
+  env: EnvConfig,
+  detectedTier: 'edge' | 'cloud' | undefined,
+  checks: DoctorCheck[],
+): Promise<void> {
+  // Resolve the active offload destination. No bucket → offload isn't
+  // configured for this install; nothing to verify, skip silently.
+  let bucket: string | undefined;
+  let prefix: string | undefined;
+  try {
+    // Bind resolution to THIS env (a multi-env doctor run calls one check per
+    // env); fall back to the default resolution when the per-env identity does
+    // not resolve, so single-env installs are unaffected.
+    let resolved = await resolveClusterConfig({ envIdOrNickname: env.nickname });
+    if (!resolved.ok) resolved = await resolveClusterConfig();
+    if (resolved.ok) {
+      const active = pickActiveOffload(resolved.config);
+      bucket = active?.bucket;
+      prefix = active?.prefix;
+    }
+  } catch {
+    // Resolution failure is already surfaced by env_config_resolution; skip.
+    return;
+  }
+  if (!bucket) bucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET || undefined;
+  if (!bucket) return;
+
+  // Stamped side: engine-classified offload bytes in the last hour. Null on
+  // any query failure so the verifier degrades to liveness + purity and never
+  // raises a false silent_loss when the metric is simply unavailable.
+  const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;
+  const stampedQ = `sum(increase(all_events_summaryBytes_total{${envSel},routeState="offload"}[1h]))`;
+  const stampedFn = async (): Promise<number | null> => {
+    try {
+      const resp = await queryInstant(env, stampedQ);
+      if (resp.status !== 'success') return null;
+      const v = resp.data?.result?.[0]?.value?.[1];
+      const n = v !== undefined ? Number(v) : NaN;
+      return Number.isFinite(n) ? n : 0;
+    } catch {
+      return null;
+    }
+  };
+
+  const result = await verifyOffloadDelivery(
+    { bucket, prefix: prefix || 'app/', recencyMinutes: 60, sampleObjects: 3 },
+    defaultOffloadDeliveryDeps(stampedFn),
+  );
+
+  const FIX: Record<string, string | undefined> = {
+    silent_loss:
+      'The engine is stamping offload but bytes are not landing in the sink. Check the forwarder routeState routing (does it route routeState=="offload" to this bucket?), the s3 output plugin, the bucket name/region, and s3:PutObject on the forwarder role.',
+    leak:
+      'The forwarder is shipping more than the offload slice to the sink (copy-everything). Restrict it to route ONLY routeState=="offload" to the offload bucket, and keep pass/compact on the SIEM path. Until fixed, offload savings are overstated.',
+    unverified:
+      'Could not read the offload bucket. Grant AWS credentials with s3:ListBucket + s3:GetObject on the bucket so doctor can confirm delivery, or verify manually with `aws s3 ls s3://<bucket>/<prefix>`.',
+    stale:
+      'Offload objects exist but none are recent and nothing is being stamped now — offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.',
+  };
+
+  // Exhaustive map (compile-time check: adding a verdict without a status
+  // here is a type error, rather than silently defaulting to 'pass').
+  const STATUS_BY_VERDICT: Record<OffloadDeliveryVerdict, CheckStatus> = {
+    silent_loss: 'fail',
+    leak: 'fail',
+    unverified: 'warn',
+    stale: 'warn',
+    verified: 'pass',
+    idle: 'pass',
+    not_configured: 'pass',
+  };
+  const status: CheckStatus = STATUS_BY_VERDICT[result.verdict];
+
+  checks.push({
+    name: 'offload_delivery',
+    status,
+    message: result.message,
+    ...(FIX[result.verdict] ? { fix: FIX[result.verdict] } : {}),
+  });
 }
 
 /**

@@ -59,6 +59,15 @@ import {
 import { fmtDisclosedDollar } from '../lib/format.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
+import {
+  resolveClusterConfig,
+  pickActiveOffload,
+} from '../lib/env-config/resolve-cluster-config.js';
+import {
+  verifyOffloadDelivery,
+  defaultOffloadDeliveryDeps,
+} from '../lib/offload-delivery.js';
+import { LABELS } from '../lib/promql.js';
 import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import {
@@ -2224,6 +2233,77 @@ export async function executeCommitmentReport(
     caveats.push(
       'tier_down bytes are tagged for downstream tier swap, not removed from ingest — savings realize on the destination-side storage tier.'
     );
+  }
+
+  // Offload delivery verification — the savings claimed for the offloaded
+  // cohort are only real if those bytes actually reached the sink AND left
+  // the SIEM. Every dollar above trusts the engine `routeState` stamp; this
+  // is the one check that reads the sink. Additive + best-effort: fires only
+  // when an active offload destination resolves, only ever APPENDS a caveat
+  // (never rewrites the dollar math), and never blocks the report on an AWS
+  // hiccup. Catches the two stamp-trusting overclaim modes:
+  //   - leak (copy-everything): the sink also carries drop/pass events, so
+  //     the "offloaded" bytes never left the SIEM — the saving is phantom.
+  //   - silent_loss: the engine stamped offload but nothing landed in S3.
+  try {
+    let offloadBucket: string | undefined;
+    let offloadPrefix: string | undefined;
+    try {
+      const resolvedCfg = await resolveClusterConfig();
+      if (resolvedCfg.ok) {
+        const activeOffload = pickActiveOffload(resolvedCfg.config);
+        offloadBucket = activeOffload?.bucket;
+        offloadPrefix = activeOffload?.prefix;
+      }
+    } catch {
+      // resolution failure: fall through to env-var fallback / skip.
+    }
+    if (!offloadBucket) {
+      offloadBucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET || undefined;
+    }
+    if (offloadBucket) {
+      const stampedFn = async (): Promise<number | null> => {
+        try {
+          // Scope to the reporter tiers (edge|cloud), matching doctor — an
+          // unscoped query would sum offload bytes across every series in a
+          // multi-env backend and inflate the stamped figure.
+          const resp = await backend.queryInstant(
+            `sum(increase(all_events_summaryBytes_total{${LABELS.env}=~"edge|cloud",routeState="offload"}[1h]))`
+          );
+          // A non-success Prometheus status is "unavailable", NOT zero — return
+          // null so the verifier degrades to liveness+purity instead of falsely
+          // reading zero stamped bytes (which would mask a silent loss).
+          if (resp.status !== 'success') return null;
+          const results = resp.data?.result ?? [];
+          if (results.length === 0) return 0;
+          const v = results[0]?.value?.[1];
+          const n = v !== undefined ? Number(v) : NaN;
+          return Number.isFinite(n) ? n : 0;
+        } catch {
+          return null;
+        }
+      };
+      const dv = await verifyOffloadDelivery(
+        { bucket: offloadBucket, prefix: offloadPrefix || 'app/', recencyMinutes: 60, sampleObjects: 3 },
+        defaultOffloadDeliveryDeps(stampedFn),
+      );
+      if (dv.verdict === 'leak') {
+        caveats.push(
+          `Offload delivery OVERCLAIMED (leak) — ${dv.message} The offloaded bytes ALSO remain in the SIEM, so this offload saving did not actually happen. Fix the forwarder to route only routeState=="offload" to the sink (run log10x_doctor → offload_delivery), then re-run.`
+        );
+      } else if (dv.verdict === 'silent_loss') {
+        caveats.push(
+          `Offload delivery PHANTOM (silent loss) — ${dv.message} The bytes never reached the offload sink at all, so the offload portion of these savings is NOT realized. Check the forwarder S3 output plugin, the bucket/region, and s3:PutObject on the forwarder role.`
+        );
+      } else if (dv.verdict === 'unverified') {
+        caveats.push(
+          `Offload delivery UNVERIFIED — ${dv.message} The offload savings here rest on the engine stamp alone, not on confirmed sink delivery.`
+        );
+      }
+    }
+  } catch {
+    // Delivery verification is best-effort; a failure must never block the
+    // commitment report.
   }
 
   // Hold a backend handle reference so unused-import linters stay quiet
