@@ -1,12 +1,12 @@
 /**
  * log10x_update_settings — update user-account metadata via
  * `POST /api/v1/user`. Idempotent. Use case: change analyzer cost
- * ($/GB), AI provider settings, display name, etc., without leaving
- * chat to visit console.log10x.com.
+ * ($/GB), display name, etc., without leaving chat to visit
+ * console.log10x.com.
  *
  * Backend handler: backend/lambdas/user-service-go/cmd/user/main.go
  * (handleUpdateProfile). Documented at mksite/docs/api/manage.md
- * "Update User" + "Update AI Settings" sections.
+ * "Update User" section.
  */
 
 import { z } from 'zod';
@@ -22,9 +22,6 @@ export const updateSettingsSchema = {
     .describe(
       'Object of metadata key/value pairs to update on the user account. ' +
         'Common fields: `analyzer_cost` (number, $/GB stack cost used for cost-driver math); ' +
-        '`ai_provider` (`openai` | `anthropic` | `xai` | `custom` | empty for Log10x-managed); ' +
-        '`ai_api_key` (string, BYOK); `ai_endpoint` (string); `ai_model` (string); ' +
-        '`ai_temperature` (number 0-1); `ai_disabled` (boolean, true to disable AI entirely); ' +
         '`company` (string display name). The backend persists arbitrary keys, so additional ' +
         'documented fields can be passed through. Existing fields not in the payload are ' +
         'preserved (PATCH-like semantics on the backend).'
