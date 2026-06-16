@@ -163,11 +163,11 @@ test('renderCsvDiff: service-name==container-name fallback (no snapshot)', () =>
     paymentRow,
     `expected fallback container-keyed row for "payment-service"; got: ${additions.join(' | ')}`
   );
-  // Sanity: the row carries the cap and a reason after `::`.
+  // Sanity: the single-file row carries the cap AND the folded-in action.
   assert.match(
     paymentRow!,
-    /^payment-service,\d+::/,
-    `expected "<container>,<cap>::<reason>" shape; got: ${paymentRow}`
+    /^payment-service,\d+:compact:/,
+    `expected "<container>,<bytes>:<action>:<reason>" shape; got: ${paymentRow}`
   );
 });
 

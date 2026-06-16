@@ -1535,13 +1535,7 @@ export async function executeConfigureEngine(
     // context picks the cluster. Operator supplies namespace when not
     // 'default' (otel-demo uses 'demo' for its receiver DS).
     const ns = args.kubectl_namespace ?? 'default';
-    const result = await applyViaKubectlConfigMap(
-      newCsv,
-      actionIntentJson,
-      cmName,
-      ns,
-      actionsCsv
-    );
+    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns);
     applied = { ...result, delivery: 'kubectl_configmap' };
     if (result.ok) {
       commitmentId = persistCommitmentOnApply({
@@ -2080,7 +2074,7 @@ async function tryConsumePocSnapshot(
     const newCsv = reconstructAfterCsv(diff, args.current_csv);
     const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
     const ns = args.kubectl_namespace ?? 'default';
-    const result = await applyViaKubectlConfigMap(newCsv, undefined, cmName, ns);
+    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns);
     applied = { ...result, delivery: 'kubectl_configmap' };
     // POC path: commitment persistence skipped here. The POC's renderInput
     // doesn't carry baseline_monthly_bytes/_usd in the format the
@@ -2843,9 +2837,11 @@ export function renderCsvDiff(
 ): string {
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
-  // Container-level default row per container. Format:
-  // `<bytes>::<reason>` (no `:action` suffix — action intent lives in
-  // data/action-intent.json, not in the cap CSV).
+  // ONE entry per service: `<bytes>:<action>:<reason>`. The cap (bytes) is the
+  // trigger; the action (folded in) is the disposition of the over-budget
+  // slice. The engine reads BOTH from this single file — there is no sibling
+  // actions.csv / action-intent.json to desync, go missing (a missing action
+  // file crashed the receiver at init), or lag (silently defaulting to drop).
   //
   // KEY BINDING: The engine's rate module reads caps.csv keyed by the
   // value of `rateReceiverContainerField` (defaults to `k8s_container`).
@@ -2857,18 +2853,18 @@ export function renderCsvDiff(
   // service-name==container-name, both are identical). Anything else is
   // a dead row that the engine cannot match against any event.
   //
-  // Per-pattern action assignment (drop/compact/offload/tier_down) lives
-  // in data/action-intent.json — NOT in caps.csv. Earlier versions
-  // emitted `pat:<hash>,<cap>` rows here as "per-pattern overrides"; that
-  // was a bug — no event has `k8s_container=pat:<hash>`, so those rows
-  // never fired. They've been removed. The cap CSV is the per-container
-  // safety floor; action-intent.json is per-pattern dispatch.
+  // Cap semantics: offload/drop act on the WHOLE service (cap 0 = everything
+  // overflows). compact/sample/tier_down/pass act on the slice past the
+  // budget-derived cap.
   const avgCap = rows.length > 0
     ? Math.round(rows.reduce((s, r) => s + r.cap_bytes_per_window, 0) / rows.length)
     : 0;
-  const reason = `MCP configure_engine (${reduction}, default=${defaultAction})`;
+  const capForAction = (defaultAction === 'offload' || defaultAction === 'drop') ? 0 : avgCap;
+  const reason = `MCP configure_engine (${reduction})`;
   for (const c of containers) {
-    const value = `${avgCap}::${reason.replace(/,/g, ';')}`;
+    // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
+    // never break the `<bytes>:<action>:<reason>` parse.
+    const value = `${capForAction}:${defaultAction}:${reason.replace(/[,:]/g, ';')}`;
     merged.set(c, value);
   }
   // Preserve any existing preamble from the baseline (so refresh PRs
@@ -3314,18 +3310,22 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  */
 async function applyViaKubectlConfigMap(
   capCsv: string,
-  actionIntentJson: string | undefined,
   configMapName: string,
-  namespace: string,
-  actionsCsv?: string
+  namespace: string
 ): Promise<{
   ok: boolean;
   configmap_location?: { namespace: string; name: string; keys: string[] };
   error?: string;
 }> {
-  const data: Record<string, string> = { 'caps.csv': capCsv };
-  if (actionIntentJson) data['action-intent.json'] = actionIntentJson;
-  if (actionsCsv) data['actions.csv'] = actionsCsv;
+  // MERGE, don't replace. Read the existing ConfigMap so other services' cap
+  // rows AND any unrelated keys survive. Single-file design: the action is
+  // folded into caps.csv, so drop any legacy actions.csv / action-intent.json
+  // keys (the engine no longer reads them).
+  const existingData = await readConfigMapData(configMapName, namespace);
+  const data: Record<string, string> = { ...existingData };
+  delete data['actions.csv'];
+  delete data['action-intent.json'];
+  data['caps.csv'] = mergeCapsRows(existingData['caps.csv'], capCsv);
   const cm = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
@@ -3393,6 +3393,58 @@ async function applyViaKubectlConfigMap(
     });
     child.stdin.end(yamlOrJson);
   });
+}
+
+/** Read a ConfigMap's `.data` map. Returns `{}` if it doesn't exist yet (so
+ *  the caller creates it fresh) or on any kubectl error. */
+async function readConfigMapData(
+  name: string,
+  namespace: string
+): Promise<Record<string, string>> {
+  return await new Promise((resolve) => {
+    let stdout = '';
+    const child = spawn(
+      'kubectl',
+      ['get', 'configmap', name, '-n', namespace, '-o', 'json'],
+      { stdio: ['ignore', 'pipe', 'ignore'], env: process.env }
+    );
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      resolve({});
+    }, 15_000);
+    child.stdout.on('data', (d) => {
+      stdout += d.toString();
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({});
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve((JSON.parse(stdout).data as Record<string, string>) ?? {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+/** Merge new cap rows into the existing caps.csv: new rows win per container,
+ *  every other service's row is preserved, and the new file's preamble (the
+ *  latest target/baseline) is carried. */
+function mergeCapsRows(existingCsv: string | undefined, newCsv: string): string {
+  const merged = new Map(parseCsv(existingCsv).rows);
+  for (const [k, v] of parseCsv(newCsv).rows) merged.set(k, v);
+  return renderCsv(merged, renderPreambleFromParsed(parsePreamble(newCsv)));
 }
 
 /**

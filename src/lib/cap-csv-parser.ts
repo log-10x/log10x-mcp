@@ -207,42 +207,53 @@ interface ParsedValue {
  * `legacy_action_suffix` for diagnostics only.
  */
 function parseCapValue(value: string): ParsedValue | null {
-  const sepIdx = value.indexOf('::');
-  if (sepIdx < 0) {
-    // Treat the whole value as bytes (no reason, no action).
-    const n = Number(value);
-    if (!Number.isFinite(n) || n < 0) return null;
-    return {
-      bytes_cap: Math.max(0, Math.round(n)),
-      reason: '',
-    };
-  }
-  const bytesStr = value.substring(0, sepIdx);
-  const rest = value.substring(sepIdx + 2);
+  // Grammar (single-file design): `<bytes>:<action>:<reason>` — the action
+  // is folded into the cap entry the engine reads. `<bytes>` alone is valid
+  // (action defaults to drop at the engine). The legacy two-file grammar
+  // `<bytes>::<reason>[:<action>]` (action last) is still parsed so old CSVs
+  // round-trip. Either way, a recognized action token is surfaced on
+  // `legacy_action_suffix` and stripped from the reason.
+  const firstColon = value.indexOf(':');
+  const bytesStr = firstColon < 0 ? value : value.substring(0, firstColon);
   const bytesNum = Number(bytesStr);
   if (!Number.isFinite(bytesNum) || bytesNum < 0) return null;
   const bytes_cap = Math.max(0, Math.round(bytesNum));
+  if (firstColon < 0) return { bytes_cap, reason: '' };
 
-  // Detect and strip a legacy `:action` suffix. If the last colon-segment
-  // of `rest` is a known action token, peel it off and record it in
-  // `legacy_action_suffix`. This keeps the reason field clean for new
-  // code while remaining backward-compatible with existing CSV files.
-  const lastColon = rest.lastIndexOf(':');
-  if (lastColon >= 0) {
-    const candidate = rest.substring(lastColon + 1).trim();
-    if (LEGACY_ACTIONS.has(candidate)) {
-      return {
-        bytes_cap,
-        reason: rest.substring(0, lastColon),
-        legacy_action_suffix: candidate as Action,
-      };
+  const rest = value.substring(firstColon + 1);
+
+  // Legacy `<bytes>::<reason>[:<action>]`: the field right after bytes is
+  // EMPTY, so `rest` starts with ':'. Reason is everything after, with a
+  // trailing known-action token peeled off.
+  if (rest.startsWith(':')) {
+    const afterEmpty = rest.substring(1);
+    const lastColon = afterEmpty.lastIndexOf(':');
+    if (lastColon >= 0) {
+      const candidate = afterEmpty.substring(lastColon + 1).trim();
+      if (LEGACY_ACTIONS.has(candidate)) {
+        return {
+          bytes_cap,
+          reason: afterEmpty.substring(0, lastColon),
+          legacy_action_suffix: candidate as Action,
+        };
+      }
     }
+    return { bytes_cap, reason: afterEmpty };
   }
 
-  return {
-    bytes_cap,
-    reason: rest,
-  };
+  // New `<bytes>:<action>:<reason>`: the field right after bytes is the action.
+  const secondColon = rest.indexOf(':');
+  const actionField = (secondColon < 0 ? rest : rest.substring(0, secondColon)).trim();
+  if (LEGACY_ACTIONS.has(actionField)) {
+    return {
+      bytes_cap,
+      reason: secondColon < 0 ? '' : rest.substring(secondColon + 1),
+      legacy_action_suffix: actionField as Action,
+    };
+  }
+  // The field after bytes is not a known action — treat the whole remainder
+  // as a free-text reason (bytes-with-only-reason).
+  return { bytes_cap, reason: rest };
 }
 
 /**
