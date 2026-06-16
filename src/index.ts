@@ -155,6 +155,7 @@ import { extractTemplatesSchema, executeExtractTemplates } from './tools/extract
 import { compileToolSchema, executeCompile } from './tools/compile-run.js';
 import { compileStatusSchema, executeCompileStatus } from './tools/compile-status.js';
 import { compileLinkSchema, executeCompileLink } from './tools/compile-link.js';
+import { placeSymbolsSchema, executePlaceSymbols } from './tools/place-symbols.js';
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
@@ -1340,6 +1341,15 @@ registerLog10xTool('log10x_compile_status', compileStatusSchema, (args) =>
 
 registerLog10xTool('log10x_compile_link', compileLinkSchema, (args) =>
   wrap('log10x_compile_link', async () => executeCompileLink(args))
+);
+
+// ── Tool: log10x_place_symbols ──
+
+registerLog10xTool('log10x_place_symbols', placeSymbolsSchema, (args) =>
+  wrap('log10x_place_symbols', async () => {
+    const env = resolveEnv(getEnvs(), args.environment);
+    return executePlaceSymbols(args, env);
+  })
 );
 
 // ── Tool: log10x_extract_templates ──

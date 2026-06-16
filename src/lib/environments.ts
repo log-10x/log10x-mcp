@@ -124,6 +124,42 @@ export interface EnvConfig {
     lookupPath?: string;
   };
   /**
+   * How the deployed receiver/reporter retrieves its symbol library —
+   * consumed by `log10x_place_symbols` to deliver a freshly compiled
+   * `.10x.tar` to the source the running engine reads from. See
+   * `docs/COMPILE-LINK-DISTRIBUTION-DESIGN.md` §4–§5.
+   *
+   * Declarative source (mirrors `gitops`): loaded from `envs.json`. For the
+   * `git` backend, `repo` falls back to `gitops.repo` when absent — teams
+   * keep symbols (`symbols/*.10x.tar`) and policy (caps) in one GitOps repo.
+   */
+  symbolSource?: {
+    /**
+     * Delivery backend the receiver consumes from:
+     *   - `git`       — committed to a GitHub repo; the chart's `symbols.git`
+     *     init-container clones it (one-time) or the engine `@github` loop
+     *     pulls it (live). The default.
+     *   - `pvc`       — a PersistentVolumeClaim mounted at the symbols path.
+     *   - `configmap` — a k8s ConfigMap read by the engine `@kubernetes` loop
+     *     (small libs only, ~1 MiB cap).
+     *   - `baked`     — frozen into the image (no runtime placement possible).
+     */
+    backend: 'git' | 'pvc' | 'configmap' | 'baked';
+    /** GitHub owner/name for `git`; falls back to `gitops.repo`. */
+    repo?: string;
+    /** Branch to commit to (omit ⇒ repo default branch). */
+    branch?: string;
+    /** Folder inside the repo for the `.10x.tar` (default `symbols`). */
+    path?: string;
+    /**
+     * How the receiver picks up a change (`git` backend):
+     *   - `init`   — one-time init-container clone; needs a pod rollout. Default.
+     *   - `github` — engine `@github` live loop; hot-reloads, no rollout.
+     * Drives whether `place_symbols` emits a rollout-restart step.
+     */
+    syncMode?: 'init' | 'github';
+  };
+  /**
    * Which forwarder the customer runs. Same fallback rationale as
    * `gitops` — the kubectl-based snapshot is the authoritative source
    * when available (it classifies the running container image), but
@@ -230,6 +266,29 @@ function parseForwarderEnv(raw: string | undefined): EnvConfig['forwarder'] {
   // failing the entire env load. We don't throw because LOG10X_FORWARDER
   // is optional metadata, not auth-critical config.
   return undefined;
+}
+
+/**
+ * Validate/normalize a `symbolSource` entry from `envs.json`. Returns
+ * undefined when absent or malformed (lenient, like `parseForwarderEnv`) —
+ * symbol placement is optional metadata, never auth-critical, so a bad
+ * entry should not fail the whole env load. `backend` is the only required
+ * field; the rest are optional strings carried through verbatim.
+ */
+function parseSymbolSource(raw: EnvConfig['symbolSource'] | undefined): EnvConfig['symbolSource'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const backend = raw.backend;
+  if (backend !== 'git' && backend !== 'pvc' && backend !== 'configmap' && backend !== 'baked') {
+    return undefined;
+  }
+  const syncMode = raw.syncMode === 'github' || raw.syncMode === 'init' ? raw.syncMode : undefined;
+  return {
+    backend,
+    ...(typeof raw.repo === 'string' && raw.repo ? { repo: raw.repo } : {}),
+    ...(typeof raw.branch === 'string' && raw.branch ? { branch: raw.branch } : {}),
+    ...(typeof raw.path === 'string' && raw.path ? { path: raw.path } : {}),
+    ...(syncMode ? { syncMode } : {}),
+  };
 }
 
 /**
@@ -562,6 +621,10 @@ interface EnvsJsonEntry {
    */
   gitops?: { repo: string; lookupPath?: string };
   /**
+   * How the deployed receiver retrieves symbols — see `EnvConfig.symbolSource`.
+   */
+  symbolSource?: EnvConfig['symbolSource'];
+  /**
    * Which forwarder the customer runs — see `EnvConfig.forwarder` for
    * the full lookup-chain semantics.
    */
@@ -641,6 +704,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         : undefined;
       const forwarder = entry.forwarder ?? parseForwarderEnv(process.env.LOG10X_FORWARDER);
       const analyzer = entry.analyzer ?? parseAnalyzerEnv(process.env.LOG10X_ANALYZER);
+      const symbolSource = parseSymbolSource(entry.symbolSource);
       // analyzerCost: envs.json field wins. The env-var rung
       // (LOG10X_ANALYZER_COST) is consulted directly by the shared rate
       // resolver in lib/rate-resolution.ts, so we don't fold it in here —
@@ -657,6 +721,7 @@ async function tryReadEnvsJson(): Promise<EnvConfig[] | undefined> {
         envId,
         isDefault: entry.isDefault,
         ...(gitops ? { gitops } : {}),
+        ...(symbolSource ? { symbolSource } : {}),
         ...(forwarder ? { forwarder } : {}),
         ...(analyzer ? { analyzer } : {}),
         ...(analyzerCost !== undefined ? { analyzerCost } : {}),

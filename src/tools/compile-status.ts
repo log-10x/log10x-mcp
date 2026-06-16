@@ -284,6 +284,14 @@ export async function executeCompileStatus(
       args: { extra_args: [['symbolPaths', record.output_folder]] },
       reason: 'smoke-test the compiled library against a few sample event lines (supply input_lines)',
     });
+    if (library) {
+      actions.push({
+        tool: 'log10x_place_symbols',
+        args: { library_path: library.path },
+        reason: 'deliver the linked library to where the deployed receiver/reporter retrieves symbols (git commit + rollout, or hot-reload)',
+        role: 'optional-followup',
+      });
+    }
   }
 
   return buildChassisEnvelope({
