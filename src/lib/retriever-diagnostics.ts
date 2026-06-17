@@ -22,6 +22,7 @@ import {
   DescribeLogStreamsCommand,
   GetLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
+import type { QueryDiagnosis } from './query-funnel.js';
 
 let _cwClient: CloudWatchLogsClient | undefined;
 function cwClient(): CloudWatchLogsClient {
@@ -102,6 +103,13 @@ export interface RetrieverQueryDiagnostics {
    * the reason is reported here. Diagnostics are incomplete when set.
    */
   pollingError?: string;
+  /**
+   * Always-available funnel verdict derived from the coordinator's _DONE marker
+   * (set by the query path, not from CloudWatch). Present even when CW
+   * diagnostics are empty — which is the common case when the query-events log
+   * group is unconfigured or its buffer hasn't flushed.
+   */
+  funnel?: QueryDiagnosis;
 }
 
 interface CWEvent {
@@ -362,6 +370,13 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
   if (diag.partialResults) {
     return 'MCP poll timeout reached before the server query completed. Some results may still be ' +
       'written to S3. Retry log10x_retriever_query_status with the same queryId for an updated view.';
+  }
+
+  // Fallback: CloudWatch gave us nothing actionable, but the _DONE-marker
+  // funnel always carries a verdict. This is what fires on the demo (and any
+  // env where the query-events log group is empty).
+  if (diag.funnel) {
+    return `${diag.funnel.explanation} [${diag.funnel.verdict}] ${diag.funnel.hint}`;
   }
 
   return null;

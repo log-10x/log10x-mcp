@@ -38,6 +38,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
 import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
+import { diagnoseQuery, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 
 const execFileP = promisify(execFile);
@@ -153,6 +154,10 @@ export interface ExistingResultsResponse {
   done: boolean;
   /** Resolved target prefix the result paths used. */
   target: string;
+  /** Funnel verdict (OK / EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+   *  DISPATCHED_BLIND / NO_MARKER / INCONCLUSIVE) derived from the _DONE marker
+   *  + the events that came back. Lets the agent debug a zero-result fetch. */
+  diagnosis: QueryDiagnosis;
 }
 
 /**
@@ -205,9 +210,15 @@ export async function fetchExistingResults(
   // finished) or doesn't (engine still running). Distinguishing missing from
   // 4xx is unimportant here — both mean "not done."
   let done = false;
+  let doneMarker: DoneMarker | null = null;
   try {
-    await s3Get(bucket, doneMarkerKey);
+    const body = await s3Get(bucket, doneMarkerKey);
     done = true;
+    try {
+      doneMarker = JSON.parse(body) as DoneMarker;
+    } catch {
+      doneMarker = null; // marker present but unparseable — still "done"
+    }
   } catch {
     done = false;
   }
@@ -257,7 +268,8 @@ export async function fetchExistingResults(
     }
   }
 
-  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
+  const diagnosis = diagnoseQuery(doneMarker, events.length, { failedWorkerFiles });
+  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, diagnosis, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
 }
 
 /**
@@ -1198,6 +1210,8 @@ interface DoneMarkerBody {
   reason?: string;
   scanned?: number;
   matched?: number;
+  skippedSearch?: number;
+  skippedTemplate?: number;
   streamRequests?: number;
   streamBlobs?: number;
   submittedTasks?: number;
@@ -1656,6 +1670,15 @@ export async function runRetrieverQuery(
   // Enables zero-result classification: stale indexer vs. bloom miss vs.
   // timeout vs. field-not-indexed, pinpointed via scanStats + errors.
   await attachDiagnostics(response, started);
+
+  // Always-available funnel verdict from the coordinator's _DONE marker. The
+  // CloudWatch diagnostics above are richer but go empty when the query-events
+  // log group is unconfigured or its buffer hasn't flushed; the _DONE marker is
+  // always in S3. This guarantees every zero-result query self-reports a verdict
+  // + next step (EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+  // DISPATCHED_BLIND) instead of a bare "0 events".
+  const funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
+  response.diagnostics = { ...(response.diagnostics ?? {}), funnel };
 
   return response;
 }
