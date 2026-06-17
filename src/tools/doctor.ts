@@ -43,6 +43,7 @@ import {
   defaultOffloadDeliveryDeps,
   type OffloadDeliveryVerdict,
 } from '../lib/offload-delivery.js';
+import { verifyConfigGeneration } from '../lib/config-generation.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -1057,8 +1058,81 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // Close the loop: verify offloaded bytes actually reach the sink (and only
   // the offload slice does). Every other check trusts the engine stamp.
   await addOffloadDeliveryCheck(env, detectedTier, checks);
+  await addConfigLiveCheck(env, detectedTier, checks);
 
   return checks;
+}
+
+/**
+ * config_live — verify the running engine is executing the cap policy the MCP
+ * WROTE, not just that a ConfigMap/PR was written (the config-generation closed
+ * loop). Recompute the generation hash from the CURRENT cap ConfigMap and
+ * compare it to the `tenx_config_version` label the engine advertises on the
+ * metric surface. `live` => running the current policy; `stale` => written but
+ * the engine has not picked it up (still polling, not reloaded, or
+ * crash-looping). Best-effort: skipped when the cap ConfigMap is unreadable
+ * (no kubectl, or not this cluster).
+ */
+async function addConfigLiveCheck(
+  env: EnvConfig,
+  detectedTier: 'edge' | 'cloud' | undefined,
+  checks: DoctorCheck[],
+): Promise<void> {
+  const cmName = process.env.K8S_CONFIGMAP || 'log10x-action-intent';
+  const cmNs = process.env.K8S_NAMESPACE || 'demo';
+
+  const readCapsCsv = async (): Promise<string | null> => {
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execFileP = promisify(execFile);
+      const { stdout } = await execFileP(
+        'kubectl',
+        ['get', 'configmap', cmName, '-n', cmNs, '-o', 'jsonpath={.data.caps\\.csv}'],
+        { timeout: 10_000 },
+      );
+      return stdout && stdout.trim() ? stdout : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;
+  const readRunningGenerations = async (): Promise<string[]> => {
+    try {
+      const resp = await queryInstant(
+        env,
+        `count by (tenx_config_version) (increase(all_events_summaryBytes_total{${envSel}}[1h]))`,
+      );
+      if (resp.status !== 'success') return [];
+      return (resp.data?.result ?? [])
+        .map((r) => (r.metric as Record<string, string>)?.tenx_config_version)
+        .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    } catch {
+      return [];
+    }
+  };
+
+  const result = await verifyConfigGeneration({ readCapsCsv, readRunningGenerations });
+  // No policy to verify (not this cluster / no caps) — skip silently.
+  if (result.verdict === 'not_configured') return;
+
+  const FIX: Record<string, string | undefined> = {
+    stale:
+      'The engine is not running the cap policy you wrote — it is still polling the ConfigMap, has not reloaded, or is crash-looping. Check the receiver pod (kubectl get pods, restartCount) and its logs; once it reloads, tenx_config_version will match the written generation.',
+    unverified:
+      'A generation was written but the engine advertises none. Confirm the receiver is deployed with the config-generation stamp (the tenx_config_version enrichment field) and that the metric backend is reachable.',
+  };
+
+  const status: CheckStatus =
+    result.verdict === 'stale' ? 'fail' : result.verdict === 'unverified' ? 'warn' : 'pass';
+
+  checks.push({
+    name: 'config_live',
+    status,
+    message: result.message,
+    ...(FIX[result.verdict] ? { fix: FIX[result.verdict] } : {}),
+  });
 }
 
 /**
