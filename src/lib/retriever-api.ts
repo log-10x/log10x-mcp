@@ -73,6 +73,14 @@ export interface RetrieverQueryRequest {
   filters?: string[];
   /** Target app prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__. */
   target?: string;
+  /**
+   * Tier-1 result-sink redirect: bare-token prefix under which query OUTPUT
+   * (qr/ events, qrs/ summaries, q/ markers, _DONE.json) is written, in the
+   * SAME index bucket. Maps to the engine `queryResultTarget` option. When
+   * set, the MCP polls `tenx/{resultTarget}/qr/{queryId}/` for results; when
+   * omitted, results stay under `target` (legacy). Must be `[A-Za-z0-9_-]+`.
+   */
+  resultTarget?: string;
   /** Logical query name (appears in PERF metrics). */
   name?: string;
   /** Hard cap on total events returned after merging per-worker results. */
@@ -1305,6 +1313,13 @@ export async function runRetrieverQuery(
 ): Promise<RetrieverQueryResponse> {
   const bucket = await getRetrieverBucket();
   const target = req.target || (await getDefaultTarget());
+  // Tier-1 result-sink redirect: when set, the engine writes OUTPUT under
+  // tenx/{resultTarget}/ instead of tenx/{target}/, so every result/marker
+  // prefix the MCP polls below must use it. Reads of the durable index are
+  // engine-side and config-bound, so they are unaffected. Blank => legacy
+  // (resultTarget === target), and the body field is omitted entirely.
+  const resultTarget =
+    req.resultTarget && req.resultTarget.trim() ? req.resultTarget.trim() : target;
   const queryId = randomUUID();
   const pollMs =
     options?.pollIntervalMs ?? parseInt(process.env.LOG10X_RETRIEVER_POLL_MS || '1500', 10);
@@ -1353,6 +1368,9 @@ export async function runRetrieverQuery(
     ...(req.logLevels ? { logLevels: req.logLevels } : {}),
     writeResults,
     writeSummaries,
+    // Maps to the engine `queryResultTarget` option (body field -> query<Field>).
+    // Only sent on an actual redirect so the legacy wire shape is preserved.
+    ...(resultTarget !== target ? { resultTarget } : {}),
   };
 
   const started = Date.now();
@@ -1419,8 +1437,8 @@ export async function runRetrieverQuery(
   // their own index sub-prefix; default to `indexing-results`.
   const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
-  const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
-  const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  const markerPrefix = `${basePrefix}tenx/${resultTarget}/q/${queryId}/`;
+  const resultsPrefix = `${basePrefix}tenx/${resultTarget}/qr/${queryId}/`;
   const doneMarkerKey = `${resultsPrefix}_DONE.json`;
 
   // Prefer the coordinator-written _DONE marker. Fall back to the byte-count
@@ -1474,7 +1492,7 @@ export async function runRetrieverQuery(
   const filtersActive = Array.isArray(req.filters) && req.filters.length > 0;
   let summariesPresent = false;
   if (writeSummaries && !filtersActive && (maxDl === 0 || (typeof maxDl === 'number' && maxDl > 0))) {
-    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${target}/qrs/${queryId}/`);
+    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${resultTarget}/qrs/${queryId}/`);
     summariesPresent = qrsProbe.some((o) => o.Key.endsWith('.jsonl'));
   }
 
@@ -1508,7 +1526,7 @@ export async function runRetrieverQuery(
   let summaries: RetrieverSummary[] | undefined;
   let slicesObserved = 0;
   if (writeSummaries) {
-    const summariesPrefix = `${basePrefix}tenx/${target}/qrs/${queryId}/`;
+    const summariesPrefix = `${basePrefix}tenx/${resultTarget}/qrs/${queryId}/`;
     const summaryObjects = await s3List(bucket, summariesPrefix);
     summaries = [];
     const distinctSlices = new Set<string>();
@@ -1609,7 +1627,9 @@ export async function runRetrieverQuery(
   const wallTimeMs = Date.now() - started;
   const response: RetrieverQueryResponse = {
     queryId,
-    target,
+    // Report the prefix the result paths actually used (the redirect when set),
+    // so a caller can re-fetch via fetchExistingResults({ target }) + queryId.
+    target: resultTarget,
     from: String(body.from),
     to: String(body.to),
     execution: {

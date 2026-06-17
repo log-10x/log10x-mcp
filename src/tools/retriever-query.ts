@@ -95,6 +95,13 @@ export const retrieverQuerySchema = {
     .describe(
       'Target app/service prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__ (env var). Required if no default is configured.'
     ),
+  result_target: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, 'must be a bare token [A-Za-z0-9_-]+ (no slashes, separators, or "..")')
+    .optional()
+    .describe(
+      'Tier-1 result-sink redirect: write this query OUTPUT (events, summaries, markers) under tenx/<result_target>/ in the same bucket instead of the default target, e.g. to a prefix a SIEM connector watches. Omit to keep results under the scan target (default). Bare token [A-Za-z0-9_-]+.'
+    ),
   limit: z
     .number()
     .min(1)
@@ -314,6 +321,7 @@ export async function executeRetrieverQuery(
     to: string;
     filters?: string[];
     target?: string;
+    result_target?: string;
     limit?: number;
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
@@ -576,6 +584,7 @@ async function executeRetrieverQueryInner(
     to: string;
     filters?: string[];
     target?: string;
+    result_target?: string;
     limit?: number;
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
@@ -613,6 +622,7 @@ async function executeRetrieverQueryInner(
     search: effectiveSearch,
     filters: args.filters,
     target: args.target,
+    resultTarget: args.result_target,
     limit: args.limit,
     logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
     // Per-slice summaries cost almost nothing to write/read and give the
