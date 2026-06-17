@@ -8,7 +8,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { diagnoseQuery, formatFunnel, type DoneMarker } from '../src/lib/query-funnel.js';
+import {
+  diagnoseQuery,
+  diagnoseFromStats,
+  formatFunnel,
+  type DoneMarker,
+} from '../src/lib/query-funnel.js';
 
 // Real marker captured live from the demo (diag-test-1, severity_level==ERROR, now-2h).
 const REAL_DISPATCHED: DoneMarker = {
@@ -116,4 +121,51 @@ test('formatFunnel has no blind tag for a local (non-dispatched) query', () => {
   const line = formatFunnel(diagnoseQuery({ reason: 'bloom-miss', scanned: 5 }, 0));
   assert.doesNotMatch(line, /coordinator-blind/);
   assert.match(line, /scanned=5/);
+});
+
+// --- diagnoseFromStats: ground truth from the engine's per-stage CW events ---
+
+test('diagnoseFromStats: real dbg-2 numbers (matched, fetched 0 bytes) -> STREAM_FETCH_EMPTY', () => {
+  // The actual demo trace: scan matched 5 of 6 blobs, 2 workers ran, fetched 0 bytes.
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, streamWorkers: 2, workersComplete: 2, fetchedBytes: 0, resultEvents: 0 },
+    0,
+  );
+  assert.equal(d?.verdict, 'STREAM_FETCH_EMPTY');
+  assert.equal(d?.funnel.coordinatorBlind, false);
+  assert.match(d!.explanation, /fetched 0 bytes/);
+  assert.match(d!.hint, /object-read|read container|fetch/i);
+});
+
+test('diagnoseFromStats: scanned 0 -> EMPTY_RANGE', () => {
+  assert.equal(diagnoseFromStats({ scanned: 0, matched: 0 }, 0)?.verdict, 'EMPTY_RANGE');
+});
+
+test('diagnoseFromStats: scanned>0 matched 0 -> BLOOM_REJECTED_ALL', () => {
+  assert.equal(diagnoseFromStats({ scanned: 9, matched: 0 }, 0)?.verdict, 'BLOOM_REJECTED_ALL');
+});
+
+test('diagnoseFromStats: fetched bytes but 0 events -> FILTER_NO_MATCH', () => {
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, streamWorkers: 2, fetchedBytes: 12345, resultEvents: 0 },
+    0,
+  );
+  assert.equal(d?.verdict, 'FILTER_NO_MATCH');
+});
+
+test('diagnoseFromStats: events written but none reached caller -> DELIVERY_INCOMPLETE', () => {
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, streamWorkers: 2, fetchedBytes: 12345, resultEvents: 7 },
+    0,
+  );
+  assert.equal(d?.verdict, 'DELIVERY_INCOMPLETE');
+});
+
+test('diagnoseFromStats: events returned -> OK', () => {
+  assert.equal(diagnoseFromStats({ scanned: 6, matched: 5, fetchedBytes: 999, resultEvents: 7 }, 7)?.verdict, 'OK');
+});
+
+test('diagnoseFromStats: no stats -> null (caller falls back to marker)', () => {
+  assert.equal(diagnoseFromStats(null, 0), null);
+  assert.equal(diagnoseFromStats({}, 0), null);
 });

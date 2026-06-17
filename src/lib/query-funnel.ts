@@ -48,7 +48,10 @@ export type QueryVerdict =
   | 'NO_MARKER' //         no _DONE yet (still running / never marked)
   | 'EMPTY_RANGE' //       no index blobs for the window (no data OR time-mapping broken)
   | 'BLOOM_REJECTED_ALL' //blobs scanned, search term in none of them
-  | 'MATCHED_NO_EVENTS' // something matched but no events landed (predicate/stream)
+  | 'MATCHED_NO_EVENTS' // marker-only: something matched but no events landed
+  | 'STREAM_FETCH_EMPTY' //ground truth: matched, but stream workers fetched 0 bytes
+  | 'FILTER_NO_MATCH' //   ground truth: fetched bytes, exact predicate matched 0
+  | 'DELIVERY_INCOMPLETE' //ground truth: events written but not read back
   | 'DISPATCHED_BLIND' //  remote dispatch; coordinator can't see subquery outcome
   | 'INCONCLUSIVE'; //     finished, zero events, marker lacks detail
 
@@ -79,6 +82,104 @@ export interface QueryDiagnosis {
 
 const num = (v: number | undefined | null): number | null =>
   typeof v === 'number' && Number.isFinite(v) ? v : null;
+
+/**
+ * Per-stage stats parsed from the engine's own DEBUG/PERF CloudWatch events
+ * (retriever-diagnostics.buildDiagnostics) — the GROUND TRUTH for what each
+ * stage actually did, as opposed to the coordinator marker's blind aggregate.
+ * Every field is what the engine reported; nothing is inferred.
+ */
+export interface CloudWatchStageStats {
+  /** Index blobs the bloom scan examined. */
+  scanned?: number;
+  /** Blobs whose bloom matched the search (candidates to fetch). */
+  matched?: number;
+  /** Stream workers dispatched to fetch matched objects. */
+  streamWorkers?: number;
+  /** Stream workers that reported completion. */
+  workersComplete?: number;
+  /** Total bytes the stream workers actually read from the source objects. */
+  fetchedBytes?: number;
+  /** Events the results writer wrote after the exact predicate. */
+  resultEvents?: number;
+}
+
+/**
+ * Ground-truth verdict from the engine's per-stage CloudWatch events. Returns
+ * null when the stats are absent/empty (CW not configured, or the run wasn't
+ * DEBUG) so the caller falls back to the marker-only `diagnoseQuery`.
+ *
+ * The funnel, stage by stage, exactly as the engine reports it:
+ *   scanned -> matched(bloom) -> workers -> fetchedBytes -> resultEvents -> delivered
+ */
+export function diagnoseFromStats(
+  s: CloudWatchStageStats | null | undefined,
+  eventsReturned: number,
+): QueryDiagnosis | null {
+  if (!s) return null;
+  const scanned = num(s.scanned);
+  const matched = num(s.matched);
+  const workers = num(s.streamWorkers);
+  const fetchedBytes = num(s.fetchedBytes);
+  const resultEvents = num(s.resultEvents);
+  // Nothing parsed → no ground truth to offer.
+  if (scanned == null && matched == null && workers == null) return null;
+
+  const funnel: QueryFunnel = {
+    dispatched: workers,
+    scanned,
+    bloomMatched: matched,
+    skippedSearch: null,
+    skippedTemplate: null,
+    streamRequests: workers,
+    eventsReturned,
+    coordinatorBlind: false, // these are the workers' own reported numbers
+  };
+
+  if (eventsReturned > 0) {
+    return { verdict: 'OK', funnel, explanation: `Returned ${eventsReturned} event(s).`, hint: 'No action needed.' };
+  }
+  if ((scanned ?? 0) === 0) {
+    return {
+      verdict: 'EMPTY_RANGE',
+      funnel,
+      explanation: 'The scan examined 0 index blobs for this window.',
+      hint: 'No data in range, or the time->blob mapping returned nothing. Widen the range; if a window with known data still scans 0, the index time-mapping is the bug.',
+    };
+  }
+  if ((matched ?? 0) === 0) {
+    return {
+      verdict: 'BLOOM_REJECTED_ALL',
+      funnel,
+      explanation: `Scanned ${scanned} blob(s); the bloom matched none for this search.`,
+      hint: 'The search value is not in the index for this window. Try match-all to confirm the blobs hold events; the bloom is the source of truth for candidacy.',
+    };
+  }
+  // Matched > 0: the bloom found candidates. Now follow the bytes.
+  if ((fetchedBytes ?? 0) === 0 && (workers ?? 0) > 0) {
+    return {
+      verdict: 'STREAM_FETCH_EMPTY',
+      funnel,
+      explanation: `Bloom matched ${matched} blob(s) and ${workers} stream worker(s) ran, but they fetched 0 bytes from the source objects — so 0 events were written. The match stage is fine; the fetch read nothing.`,
+      hint: 'Stream workers read 0 bytes despite matched blobs. Verify the source objects exist/are readable at the worker; this is the object-read (fetch) stage, not the search. Engine-side: check the read container/bucket and the byte-range fetch.',
+    };
+  }
+  if ((resultEvents ?? 0) === 0) {
+    return {
+      verdict: 'FILTER_NO_MATCH',
+      funnel,
+      explanation: `Fetched ${fetchedBytes} byte(s) from ${matched} matched blob(s), but the exact predicate matched 0 events (the bloom is approximate; the precise filter is the truth).`,
+      hint: 'The blobs were bloom-candidates but no event passed the exact predicate. Check the field/value against the real data, or the bloom is producing false positives.',
+    };
+  }
+  // Wrote events but the caller got none → delivery/path gap.
+  return {
+    verdict: 'DELIVERY_INCOMPLETE',
+    funnel,
+    explanation: `The results writer wrote ${resultEvents} event(s), but ${eventsReturned} reached the caller — a delivery/read-back gap (wrong prefix, or still arriving).`,
+    hint: 'Events were written but not read back. Re-fetch by queryId; if still missing, the result prefix the caller polls differs from where the writer wrote.',
+  };
+}
 
 /**
  * Diagnose a query from its `_DONE` marker and the number of events that

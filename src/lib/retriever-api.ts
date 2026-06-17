@@ -38,7 +38,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
 import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
-import { diagnoseQuery, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
+import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
 import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 
@@ -1739,12 +1739,32 @@ export async function runRetrieverQuery(
   // DISPATCHED_BLIND) instead of a bare "0 events".
   let funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
 
-  // Active localization: a DISPATCHED_BLIND verdict means remote dispatch hid the
-  // per-stage counts. Re-submit a narrowed window that forces LOCAL dispatch so
-  // the coordinator reports precise scanned/matched/skippedSearch — pinpointing
-  // the failing stage. One extra short query, only on a zero-result blind query,
-  // never on a probe itself.
-  if (funnel.verdict === 'DISPATCHED_BLIND' && !req.__probe) {
+  // GROUND TRUTH first: the engine's own per-stage CloudWatch events (parsed by
+  // attachDiagnostics) report what each stage actually did — scanned, matched,
+  // and the bytes the stream workers fetched — for BOTH remote and local
+  // dispatch (the subqueries log under the parent queryId). When those are
+  // present they supersede the coordinator marker's blind aggregate, and
+  // pinpoint the real failing stage (e.g. STREAM_FETCH_EMPTY: matched blobs but
+  // workers fetched 0 bytes). No inference, no probe.
+  const cw = response.diagnostics;
+  const grounded = diagnoseFromStats(
+    cw
+      ? {
+          scanned: cw.scanStats?.scanned,
+          matched: cw.scanStats?.matched,
+          streamWorkers: cw.streamDispatch?.requests ?? cw.workerStats?.started,
+          workersComplete: cw.workerStats?.complete,
+          fetchedBytes: cw.workerStats?.totalFetchedBytes,
+          resultEvents: cw.workerStats?.totalResultEvents,
+        }
+      : null,
+    events.length,
+  );
+  if (grounded) {
+    funnel = grounded;
+  } else if (funnel.verdict === 'DISPATCHED_BLIND' && !req.__probe) {
+    // Fallback when CloudWatch isn't configured/available: force local dispatch
+    // with a narrowed probe so the coordinator's own counts become precise.
     const localized = await localizeBlindQuery(env, req);
     if (localized) funnel = localized;
   }
