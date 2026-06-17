@@ -47,6 +47,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
 import { readCredentials } from './credentials.js';
+import { readDemoLicense, isDemoLicenseExpired } from './demo-license.js';
 import {
   createMetricsBackend,
   MetricsBackendConfigError,
@@ -390,6 +391,15 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
         kind: 'log10x',
         apiKey: refEnv('LOG10X_API_KEY'),
         envId: refEnv('LOG10X_ENV_ID'),
+      };
+    case 'log10x_demo':
+      // Explicit single-env demo: LOG10X_METRICS_BACKEND_KIND=log10x_demo +
+      // LOG10X_LICENSE_JWT. The no-config demo path (Path 4.5) is the more
+      // common entry point; this exists for parity with the generic env-var
+      // backend selector.
+      return {
+        kind: 'log10x_demo',
+        licenseJwt: refEnv('LOG10X_LICENSE_JWT'),
       };
     case 'prometheus':
       return { kind: 'prometheus', url: refEnv('LOG10X_METRICS_URL'), auth: parseAuthFromEnv() };
@@ -783,12 +793,83 @@ async function loadLegacyLog10x(): Promise<Environments> {
     }
   }
 
+  // Path 4.5: a demo LICENSE JWT — explicit LOG10X_LICENSE_JWT, or one
+  // persisted by the install wizard / a prior demo (the SAME license the
+  // engine writes with). Unlike the shared demo key below, this reads the
+  // user's OWN demo tenant via /api/v1/demo/* with Authorization: Bearer, so
+  // a not-signed-in user can pull back exactly what their demo engine wrote.
+  const demoLicenseEnvs = await tryBuildDemoLicenseEnv();
+  if (demoLicenseEnvs) {
+    // eslint-disable-next-line no-console
+    console.info(`[log10x-mcp] metricsBackend resolved via demo license (own demo tenant, /api/v1/demo/*)`);
+    return demoLicenseEnvs;
+  }
+
   // Path 5: nothing set — pure demo mode. Public demo key so the
   // user can play without signing up. This silent fallback is slated to
   // be replaced by an explicit "not configured" state.
   // eslint-disable-next-line no-console
   console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
+}
+
+/**
+ * Build a demo-license-backed `Environments` from an explicit
+ * `LOG10X_LICENSE_JWT` env var, or a demo license persisted by the install
+ * wizard / a prior demo. Returns undefined when neither is present (so the
+ * caller falls through to the shared-key sample-data demo).
+ */
+async function tryBuildDemoLicenseEnv(): Promise<Environments | undefined> {
+  let jwt = process.env.LOG10X_LICENSE_JWT?.trim();
+  let expiresAtEpochSec: number | undefined;
+  if (!jwt) {
+    const stored = await readDemoLicense().catch(() => null);
+    if (stored && !isDemoLicenseExpired(stored)) {
+      jwt = stored.jwt;
+      expiresAtEpochSec = stored.expiresAtEpochSec;
+    }
+  }
+  if (!jwt) return undefined;
+  return buildDemoLicenseEnvironments(jwt, expiresAtEpochSec);
+}
+
+function buildDemoLicenseEnvironments(jwt: string, _expiresAtEpochSec?: number): Environments {
+  const backend = createMetricsBackend({
+    kind: 'log10x_demo',
+    licenseJwt: jwt,
+    // Honor LOG10X_API_BASE so staging / self-host point the demo reads at the
+    // right gateway (matches license-api.ts's getBase()).
+    ...(process.env.LOG10X_API_BASE ? { endpoint: process.env.LOG10X_API_BASE } : {}),
+  });
+  const env: EnvConfig = {
+    nickname: 'demo',
+    metricsBackend: backend,
+    labels: { ...DEFAULT_LABELS },
+    apiKey: '',
+    envId: demoTenantFromJwt(jwt) ?? '',
+    isDefault: true,
+    permissions: 'READ',
+  };
+  return {
+    all: [env],
+    byNickname: new Map([['demo', env]]),
+    default: env,
+    isDemoMode: true,
+  };
+}
+
+/** Best-effort decode of the `tenant_id` claim from a demo license JWT, for display only. */
+function demoTenantFromJwt(jwt: string): string | undefined {
+  try {
+    const payload = jwt.split('.')[1];
+    if (!payload) return undefined;
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+    const json = Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const claims = JSON.parse(json) as Record<string, unknown>;
+    return typeof claims.tenant_id === 'string' ? claims.tenant_id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

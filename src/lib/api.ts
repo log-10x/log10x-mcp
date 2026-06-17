@@ -121,6 +121,15 @@ export async function queryAi(
   prompt: string,
   ingestionCost: number
 ): Promise<string> {
+  // The AI route is API-key-only (it authenticates with X-10X-Auth, not the
+  // demo license Bearer) and the gateway does not expose a /api/v1/demo/query_ai
+  // variant. Refuse early with a clear message instead of sending an empty
+  // `X-10X-Auth: /` header that would 401.
+  if (env.metricsBackend.kind === 'log10x_demo') {
+    throw new Error(
+      'AI analysis (query_ai) is not available in demo mode. Sign in with an API key (log10x_signin_start) to use AI-enhanced queries.'
+    );
+  }
   const url = new URL('/api/v1/query_ai', getBase());
   url.searchParams.set('query', 'vector(0)');
   url.searchParams.set('query_result', queryResult);

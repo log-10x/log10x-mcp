@@ -39,6 +39,7 @@ import { log } from './log.js';
 import './auth-model.js';
 import { readCredentials, writeCredentials, type Credentials } from './credentials.js';
 import { refreshAuth0AccessToken } from './auth0-device-flow.js';
+import { readDemoLicense, writeDemoLicense, isDemoLicenseExpired } from './demo-license.js';
 
 const DEFAULT_BASE = 'https://prometheus.log10x.com';
 
@@ -89,6 +90,32 @@ export async function fetchDemoLicense(): Promise<LicenseResult> {
     );
   }
   return parseLicenseResponse(await res.json());
+}
+
+/**
+ * Return a usable demo license JWT, reusing the persisted one while it is
+ * still valid and minting + persisting a fresh one otherwise.
+ *
+ * Both the install wizard (which hands the JWT to the engine via helm) and the
+ * MCP query path (`environments.ts`, which reads back what the engine wrote via
+ * `/api/v1/demo/*`) call this, so they share ONE demo identity — the engine
+ * writes, and the MCP reads, the SAME demo tenant. Minting a fresh license each
+ * time would point the MCP at an empty tenant the engine never wrote to.
+ */
+export async function getOrMintDemoLicense(): Promise<LicenseResult> {
+  const existing = await readDemoLicense().catch(() => null);
+  if (existing && !isDemoLicenseExpired(existing)) {
+    return {
+      jwt: existing.jwt,
+      expiresAtEpochSec: existing.expiresAtEpochSec,
+      licenseId: existing.licenseId,
+    };
+  }
+  const fresh = await fetchDemoLicense();
+  await writeDemoLicense(fresh).catch((e) => {
+    log.warn('demo_license.persist_failed', { msg: (e as Error).message });
+  });
+  return fresh;
 }
 
 /**
@@ -207,7 +234,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
 
   // Path 4: not signed in.
   if (!creds || !creds.apiKey) {
-    const lic = await fetchDemoLicense();
+    const lic = await getOrMintDemoLicense();
     return { ...lic, isDemoLicense: true, reason: 'not-signed-in' };
   }
 
@@ -215,7 +242,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
   // Demo fallback is the honest answer; the wizard surfaces "sign in via
   // device flow to get a user-scoped license."
   if (!creds.auth0AccessToken && !creds.auth0RefreshToken) {
-    const lic = await fetchDemoLicense();
+    const lic = await getOrMintDemoLicense();
     return { ...lic, isDemoLicense: true, reason: 'pasted-key-fallback' };
   }
 
@@ -237,7 +264,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
       // Access token expired and no refresh token to recover with. Fall
       // back to demo and tell the user to sign in again.
       log.warn('license.access_token_expired_no_refresh');
-      const lic = await fetchDemoLicense();
+      const lic = await getOrMintDemoLicense();
       return { ...lic, isDemoLicense: true, reason: 'access-token-expired-no-refresh' };
     }
     try {
@@ -261,7 +288,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
     } catch (e) {
       log.warn('license.refresh_failed', { msg: (e as Error).message });
       // Refresh blew up. Demo fallback is the safe path.
-      const lic = await fetchDemoLicense();
+      const lic = await getOrMintDemoLicense();
       return { ...lic, isDemoLicense: true, reason: 'refresh-failed' };
     }
   }
@@ -270,7 +297,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
     // Defensive — should be unreachable (the needsRefresh branch above
     // either rotated `accessToken` or returned early). Treat as the
     // most-conservative "no Auth0 tokens" case.
-    const lic = await fetchDemoLicense();
+    const lic = await getOrMintDemoLicense();
     return { ...lic, isDemoLicense: true, reason: 'pasted-key-fallback' };
   }
 
@@ -281,7 +308,7 @@ export async function acquireLicenseForWizard(): Promise<AcquireLicenseResult> {
     log.warn('license.user_fetch_failed_falling_back_to_demo', {
       msg: (e as Error).message,
     });
-    const demo = await fetchDemoLicense();
+    const demo = await getOrMintDemoLicense();
     return { ...demo, isDemoLicense: true, reason: 'user-license-fetch-failed' };
   }
 }

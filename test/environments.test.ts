@@ -189,6 +189,25 @@ test('phase 3: ~/.log10x/envs.json is read when present', async () => {
   assert.equal(envs.all[1].metricsBackend.kind, 'mimir');
 });
 
+test('demo license: LOG10X_LICENSE_JWT resolves to a log10x_demo env (no api key)', async () => {
+  // payload decodes to {"tenant_id":"demo-xyz"}
+  const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
+  process.env.LOG10X_LICENSE_JWT = jwt;
+  try {
+    const envs = await loadEnvironments();
+    assert.equal(envs.all.length, 1);
+    assert.equal(envs.default.nickname, 'demo');
+    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
+    assert.equal(envs.default.metricsBackend.endpoint, 'https://prometheus.log10x.com');
+    assert.equal(envs.isDemoMode, true);
+    assert.equal(envs.default.apiKey, '');
+    // tenant id is decoded from the JWT for display
+    assert.equal(envs.default.envId, 'demo-xyz');
+  } finally {
+    delete process.env.LOG10X_LICENSE_JWT;
+  }
+});
+
 test('phase 3: both env vars AND envs.json set → MCP refuses to start', async () => {
   process.env.LOG10X_METRICS_BACKEND_KIND = 'prometheus';
   process.env.LOG10X_METRICS_URL = 'http://prom.test:9090';

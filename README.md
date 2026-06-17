@@ -179,7 +179,12 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 
 Restart Claude Desktop. The server autodiscovers every env your account can reach (default + any shared with you) — pass `environment: "<nickname>"` on any tool call to switch between them.
 
-If `LOG10X_API_KEY` is omitted, the MCP boots in **demo mode** against the public Log10x demo env (read-only). Run `log10x_signin` and the LLM will walk you through the GitHub Device Flow — it mints a real key, writes it to `~/.log10x/credentials`, and hot-reloads without an MCP-host restart.
+If `LOG10X_API_KEY` is omitted, the MCP boots in **demo mode** (read-only). Two flavors:
+
+- **Your own demo data** — if you installed a Log10x engine with an anonymous demo license (the install wizard's `license_source: "demo"`, or you set `LOG10X_LICENSE_JWT=<jwt>`), the MCP queries the data *that engine* wrote, via the `/api/v1/demo/*` routes with the same license. The MCP reuses the demo license it minted (persisted at `~/.log10x/demo-license.json`), so reads and writes share one demo tenant. Demo queries are bounded to the **last 3 hours** and rate limited; `query_ai` is unavailable.
+- **Shared sample data** — with no key and no demo license at all, the MCP falls back to the public Log10x demo env (the same sample data the console "Try Live Demo" shows).
+
+Run `log10x_signin` and the LLM will walk you through the GitHub Device Flow — it mints a real key, writes it to `~/.log10x/credentials`, and hot-reloads without an MCP-host restart.
 
 ### Claude Code
 
@@ -269,6 +274,7 @@ cart — $103 → $13K/wk (3 cost drivers)
 | Variable | Required | Description |
 |---|---|---|
 | `LOG10X_API_KEY` | No | Your Log10x API key. Omit to boot in demo mode + use `log10x_signin` to mint one via GitHub. The env list is autodiscovered from `GET /api/v1/user` — no env-id pinning needed. |
+| `LOG10X_LICENSE_JWT` | No | A demo license JWT (from `POST /api/v1/license/demo`). With no API key set, the MCP reads back the data an engine running this same license wrote, via `/api/v1/demo/*` (last 3h only, rate limited). Usually unnecessary — the install wizard persists the minted demo license to `~/.log10x/demo-license.json` and the MCP reuses it automatically. |
 | `LOG10X_API_BASE` | No | API base URL (default: `https://prometheus.log10x.com`) |
 
 ### Pasted-batch triage (`log10x_resolve_batch`)

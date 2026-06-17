@@ -56,13 +56,29 @@
  * (`POST /api/v1/write` — license_authorizer-gated), and identifying
  * itself (`/agent/whoami`).
  *
- * Persisted at: never persisted in the MCP. The license JWT lives only
- * in the helm values file the MCP emits and in the engine pod's
- * Kubernetes Secret. The MCP fetches fresh on demand when emitting an
- * install plan.
+ * **Demo-read exception (the one place the MCP itself sends a license
+ * JWT):** a not-signed-in user who installs an engine with an anonymous
+ * demo license has no api_key, so Surface A can't read their data back.
+ * For that case the MCP queries the `/api/v1/demo/*` mirror of the read
+ * endpoints with `Authorization: Bearer <demoLicenseJwt>` — the SAME demo
+ * license the engine writes with, so reads and writes share the demo
+ * tenant. These reads are bounded to the last 3h and rate limited, and
+ * `query_ai` is not available. See `metrics-backend.ts` (`log10x_demo`
+ * backend) and `environments.ts` (Path 4.5). A *user-scoped* license JWT
+ * is still engine-only and never used by the MCP for reads.
+ *
+ * Persisted at: the Auth0-minted *user* license is never persisted (it
+ * lives only in the emitted helm values + the engine pod's k8s Secret).
+ * The anonymous *demo* license IS persisted at
+ * `~/.log10x/demo-license.json` (`demo-license.ts`) so the engine-install
+ * plan and the demo-read path reuse ONE demo identity. The user license
+ * is fetched fresh on demand when emitting an install plan.
  *
  * Implementation: [license-api.ts](./license-api.ts) for the gateway
- * minting calls, used by `advise-install.ts` when emitting plans.
+ * minting calls (used by `advise-install.ts`),
+ * [demo-license.ts](./demo-license.ts) for demo-license persistence +
+ * reuse, [metrics-backend.ts](./metrics-backend.ts) for the `log10x_demo`
+ * read backend.
  *
  * ─────────────────────────────────────────────────────────────────────
  * ## Auth0 as the unified front door
@@ -103,7 +119,8 @@
  * | Auth0 access token  | `~/.log10x/credentials`            | `/api/v1/license` (mint)  |
  * | Auth0 refresh token | `~/.log10x/credentials`            | Auth0 `/oauth/token`      |
  * | api_key             | `~/.log10x/credentials` (long-lived)| MCP↔gateway user calls    |
- * | license JWT         | helm values + k8s Secret (transient)| engine pod runtime        |
+ * | license JWT (user)  | helm values + k8s Secret (transient)| engine pod runtime        |
+ * | license JWT (demo)  | `~/.log10x/demo-license.json`      | engine pod + MCP `/api/v1/demo/*` reads |
  *
  * ─────────────────────────────────────────────────────────────────────
  * ## Don't drift — quick checks
@@ -116,8 +133,10 @@
  *
  *   - Am I calling on behalf of an ENGINE (writing metrics from a pod,
  *     identifying as a runtime)? → Use license JWT, `Authorization:
- *     Bearer` header. **MCP itself doesn't call these routes** — they
- *     belong to the engine pods we instruct users to deploy.
+ *     Bearer` header. These belong to the engine pods we instruct users
+ *     to deploy. The ONE exception where the MCP sends a license JWT on
+ *     its own request is the demo-read path (`/api/v1/demo/*` with an
+ *     anonymous demo license, for not-signed-in users) — see Surface B.
  *
  *   - Am I MINTING credentials? → Use Auth0 token, `Authorization:
  *     Bearer` header. See `license-api.ts` (for license JWT) or
