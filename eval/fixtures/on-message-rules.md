@@ -52,7 +52,7 @@ POSITIONING constraints an answer must respect even when paraphrasing.
   cannot be fetched.
 - **R8 known-false identifiers**: the six actions are pass, sample,
   compact, tier_down, offload, drop. The metric series are all_events and
-  emitted_events (summaryVolume/summaryBytes, isDropped label). Asserting
+  emitted_events (summaryVolume/summaryBytes, routeState label). Asserting
   any of the following KNOWN-FALSE identifiers is a violation: a
   `tenx_action` signal; bytes_in/bytes_out/bytes_passed/bytes_offloaded/
   bytes_compacted/bytes_dropped metric series; a seventh action. Whether

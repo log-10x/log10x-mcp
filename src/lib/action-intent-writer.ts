@@ -131,6 +131,108 @@ export function writeActionIntent(
   return [...headerLines, ...entryLines, ...footerLines].join('\n') + '\n';
 }
 
+// ─── actions.csv — per-SERVICE action routing for the engine ─────────
+
+/**
+ * Most-aggressive → least-aggressive ordering, used as the tie-break when
+ * a service's patterns split evenly across two or more actions. "Aggressive"
+ * = how hard the lever cuts cost: `drop` removes the slice entirely, `offload`
+ * relocates it off the SIEM, `tier_down` cheapens its tier, `compact` shrinks
+ * it, `sample` thins it, `pass` leaves it. On a tie we pick the more
+ * cost-aggressive action so a mixed service never silently defaults to the
+ * weaker lever.
+ */
+const ACTION_AGGRESSION_ORDER: readonly Action[] = [
+  'drop',
+  'offload',
+  'tier_down',
+  'compact',
+  'sample',
+  'pass',
+];
+
+/** Rank of an action in ACTION_AGGRESSION_ORDER (0 = most aggressive). */
+function actionRank(a: Action): number {
+  const idx = ACTION_AGGRESSION_ORDER.indexOf(a);
+  // Unknown actions sort last (least aggressive) so they never win a tie.
+  return idx === -1 ? ACTION_AGGRESSION_ORDER.length : idx;
+}
+
+/**
+ * Derive the engine's per-service `actions.csv` body from the same
+ * per-pattern action-intent entries that feed `action-intent.json`.
+ *
+ * The engine's receiver reads this file keyed by k8s container (== the
+ * service) and stamps `route(<action>)` on that service's regulator-excess
+ * slice. ONE row per service. A service absent from the file defaults to
+ * `drop` engine-side, so we only emit services we actually have entries for.
+ *
+ * File shape:
+ *   container,action          ← header
+ *   frontend,compact
+ *   checkout,drop
+ *   payment,offload
+ *
+ * Per-service action rule:
+ *   1. Group entries by `service`.
+ *   2. Pick the MODE — the most frequent `action` among that service's
+ *      patterns.
+ *   3. Tie-break by the MOST AGGRESSIVE action in the order
+ *      drop > offload > tier_down > compact > sample > pass.
+ *
+ * Rows are sorted by service ASC for stable git diffs (same convention as
+ * writeActionIntent). Entries with an empty `service` are skipped — the
+ * engine keys this file by container and an empty key is meaningless (those
+ * patterns still carry their action in action-intent.json).
+ */
+export function deriveActionsCsv(
+  entries: ActionIntentEntry[],
+  authoritativeByService?: Map<string, Action>
+): string {
+  // service → (action → count)
+  const byService = new Map<string, Map<Action, number>>();
+  for (const e of entries) {
+    if (!e.service) continue; // engine keys by container; empty key is a no-op
+    let counts = byService.get(e.service);
+    if (!counts) {
+      counts = new Map<Action, number>();
+      byService.set(e.service, counts);
+    }
+    counts.set(e.action, (counts.get(e.action) ?? 0) + 1);
+  }
+
+  const services = [...byService.keys()].sort((a, b) => a.localeCompare(b));
+  const lines = ['container,action'];
+  for (const service of services) {
+    // Phase 2: when an authoritative per-service action is supplied (the
+    // advisory's resolved standard-tier decision), it wins outright. The
+    // mode rule is only the fallback for services with no authoritative
+    // entry (e.g. a container carrying only audit/error patterns).
+    const authoritative = authoritativeByService?.get(service);
+    if (authoritative !== undefined) {
+      lines.push(`${service},${authoritative}`);
+      continue;
+    }
+    const counts = byService.get(service)!;
+    let best: Action | undefined;
+    let bestCount = -1;
+    for (const [action, count] of counts.entries()) {
+      if (
+        count > bestCount ||
+        // Tie on frequency → prefer the more aggressive action.
+        (count === bestCount &&
+          best !== undefined &&
+          actionRank(action) < actionRank(best))
+      ) {
+        best = action;
+        bestCount = count;
+      }
+    }
+    if (best !== undefined) lines.push(`${service},${best}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
 // ─── helper: build entries from a pattern→action map ─────────────────
 
 /**

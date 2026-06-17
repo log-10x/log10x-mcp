@@ -3,7 +3,7 @@
  * `offload_destinations[]` list inside an environment's env-config document.
  *
  * These two tools are the in-MCP surface for editing the env document the
- * Receiver consults when it routes the `isDropped` slice. They share a single
+ * Receiver consults when it routes the `routeState="drop"` slice. They share a single
  * load/mutate/write helper and so live in one file:
  *
  *   - `log10x_offload_add` appends a new destination (s3 / gcs / azure_blob /

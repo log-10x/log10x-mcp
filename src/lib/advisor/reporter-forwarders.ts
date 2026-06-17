@@ -72,7 +72,8 @@ export interface ForwarderSpec {
   primaryContainerName: string;
   /**
    * True when this forwarder uses sidecar mode (separate `tenx`
-   * container in the pod). Currently only meaningful for Vector.
+   * container in the pod): Vector, and the standalone reporter-10x
+   * chart (fluent-bit tails, the `tenx` container runs the engine).
    */
   hasTenxSidecar: boolean;
   /** Label-selector style the chart family uses. */
@@ -1596,9 +1597,9 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   helmRepoAlias: 'log10x',
   chartRef: 'log10x/reporter-10x',
   chartAvailability: 'published',
-  primaryImageHint: 'ghcr.io/log-10x/fluent-bit-10x',
-  primaryContainerName: 'fluent-bit',
-  hasTenxSidecar: false,
+  primaryImageHint: 'log10x/edge-10x',
+  primaryContainerName: 'tenx',
+  hasTenxSidecar: true,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
   renderValues: ({ licenseJwt, isDemoLicense, licenseSecretName, licenseSecretKey, releaseName, backends, backendCredentials, airgapped }) => {
@@ -1659,14 +1660,14 @@ runtimeName: "${releaseName}"${airgappedLine}${tenxBlock}`;
         name: 'processor-alive',
         question: 'Is tenx-edge processing events (pattern fingerprinting)?',
         commands: [
-          `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
+          `kubectl -n ${namespace} logs -l ${sel} -c tenx --tail=400 | grep -iE 'tenx|10x|pattern' | head -20`,
         ],
       },
       {
         name: 'metrics-publishing',
         question: 'Is the Reporter publishing TenXSummary metrics to the log10x backend?',
         commands: [
-          `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=400 | grep -F 'Publishing TenXSummary' | head -3`,
+          `kubectl -n ${namespace} logs -l ${sel} -c tenx --tail=400 | grep -F 'Publishing TenXSummary' | head -3`,
         ],
         expectOutput: 'Publishing TenXSummary',
         timeoutSec: 300,

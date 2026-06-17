@@ -628,7 +628,7 @@ async function formatResults(
   // next call is retriever_query when the retriever is wired, otherwise
   // advise_retriever for the bucket recipe.
   if (offloadStatus && offloadStatus.is_offloaded) {
-    // HONESTY: the isDropped marker is the engine's drop/offload cohort — it
+    // HONESTY: the routeState="drop" marker is the engine's drop/offload cohort — it
     // does NOT distinguish offload-to-S3 (recoverable) from hard-drop (gone).
     // So we do not assert the bytes are archived/fetchable; we offer the fetch
     // conditionally and flag that a zero result means it was hard-dropped.
@@ -637,11 +637,11 @@ async function formatResults(
       : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is reducing this pattern but no retriever surface is configured.`;
     lines.push('');
     if (offloadStatus.kept_timed_out || offloadStatus.dropped_share_pct_24h === null || offloadStatus.kept_share_pct_24h === null) {
-      lines.push(`_Reduction status (24h): this pattern is in the receiver's drop/offload cohort (isDropped marker; kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
+      lines.push(`_Reduction status (24h): this pattern is in the receiver's drop/offload cohort (routeState="drop" marker; kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
     } else {
       const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
       const kept = fmtPct(offloadStatus.kept_share_pct_24h);
-      lines.push(`_Reduction status (24h): ${dropped} of this pattern's volume is in the receiver's drop/offload cohort (isDropped marker; ${kept} still flowing to the SIEM). ${tail}_`);
+      lines.push(`_Reduction status (24h): ${dropped} of this pattern's volume is in the receiver's drop/offload cohort (routeState="drop" marker; ${kept} still flowing to the SIEM). ${tail}_`);
     }
   }
 

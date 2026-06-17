@@ -64,8 +64,8 @@ function escapeLabel(value: string): string {
 /**
  * Filter value: either a plain string (default exact-match `=`) or an
  * object form `{op, val}` that lets callers emit `!=` selectors: the
- * `kept` cohort needs absence-tolerant `isDropped!="true"` to include
- * legacy series that pre-date the receiver's `isDropped` label stamping.
+ * `kept` cohort needs absence-tolerant `routeState!="drop"` to include
+ * legacy series that pre-date the receiver's `routeState` label stamping.
  */
 export type FilterValue = string | { op: '=' | '!='; val: string };
 
@@ -87,26 +87,71 @@ function buildSelector(
 }
 
 /**
- * Map the user-facing `include` enum to a single `isDropped`
- * filter-value (or null for the pre-decision union).
+ * Engine route-state action names. Mirrors `Action` in lib/cost.ts but is
+ * declared locally so promql.ts stays dependency-free of the cost layer.
+ * Per the per-service action-routing feature the receiver now stamps
+ * `routeState="<action>"` (drop | offload | tier_down | compact | sample |
+ * pass) instead of only `drop`/`pass`.
+ */
+export type RouteStateAction =
+  | 'pass'
+  | 'sample'
+  | 'compact'
+  | 'tier_down'
+  | 'offload'
+  | 'drop';
+
+/**
+ * The cohort a caller wants to scope to. The three legacy tokens keep their
+ * exact original semantics; any single `RouteStateAction` selects that
+ * action's stamped cohort directly.
  *
- * `kept`    → `isDropped!="true"` (absence-tolerant; matches series with
- *             no `isDropped` label AND `isDropped="false"`).
- * `dropped` → `isDropped="true"` (exact).
+ * `kept`    → `routeState!="drop"` (absence-tolerant; matches series with
+ *             no `routeState` label AND any non-drop route state).
+ * `dropped` → `routeState="drop"` (exact). Alias of passing `'drop'`.
  * `both`    → no selector; caller runs a dual query to recover the
  *             dropped slice for the `dropped_*` envelope fields.
+ * `<action>`→ `routeState="<action>"` (exact) for any other action name, so
+ *             a caller can scope to e.g. the `offload` or `tier_down` cohort.
+ */
+export type IncludeCohort = 'kept' | 'dropped' | 'both' | RouteStateAction;
+
+const ROUTE_STATE_ACTIONS: ReadonlySet<string> = new Set<RouteStateAction>([
+  'pass',
+  'sample',
+  'compact',
+  'tier_down',
+  'offload',
+  'drop',
+]);
+
+/**
+ * Map the user-facing cohort selector to a single `routeState`
+ * filter-value (or null for the pre-decision union).
+ *
+ * Back-compat: `kept` / `dropped` / `both` behave EXACTLY as before. The
+ * generalization is that any other single action name yields an exact
+ * `routeState="<action>"` selector (run alone, no dual query).
  *
  * `runBoth` tells the executor whether to issue the second
- * `isDropped="true"` query in parallel.
+ * `routeState="drop"` query in parallel (only `both` does).
  */
-export function includeToSelector(include: 'kept' | 'dropped' | 'both'): {
+export function includeToSelector(include: IncludeCohort): {
   droppedFilter: FilterValue | null;
   runBoth: boolean;
 } {
   if (include === 'kept')
-    return { droppedFilter: { op: '!=', val: 'true' }, runBoth: false };
+    return { droppedFilter: { op: '!=', val: 'drop' }, runBoth: false };
   if (include === 'dropped')
-    return { droppedFilter: { op: '=', val: 'true' }, runBoth: false };
+    return { droppedFilter: { op: '=', val: 'drop' }, runBoth: false };
+  if (include === 'both') return { droppedFilter: null, runBoth: true };
+  // Any other action name → that action's exact cohort. `drop` already
+  // returned above via the `dropped` alias path is unreachable here, but the
+  // exact `=` form below is identical for it anyway.
+  if (ROUTE_STATE_ACTIONS.has(include))
+    return { droppedFilter: { op: '=', val: include }, runBoth: false };
+  // Unknown token: fall back to the historical `both` union (no selector,
+  // dual query) so a stray value never silently filters everything out.
   return { droppedFilter: null, runBoth: true };
 }
 
@@ -351,6 +396,37 @@ export function edgeEmittedBytes(
   labels: LabelNameMap = DEFAULT_LABELS
 ): string {
   return `(sum(increase(${EMITTED_OPT_METRIC}{tenx_app="receiver",${labels.env}="edge"}[${range}])) or vector(0)) + (sum(increase(${EMITTED_METRIC}{tenx_app="receiver",${labels.env}="edge"}[${range}])) or vector(0))`;
+}
+
+/**
+ * Measured per-service (per-k8s_container) realized compaction for the Phase-2
+ * advisory: ratio = total receiver-emitted bytes / receiver-classified input
+ * bytes, over the SAME cohort on both sides (tenx_app="receiver", kept slice
+ * routeState!="drop"). Used to choose compact (compresses well, stays
+ * queryable) vs offload (compresses poorly, take the max cut).
+ *
+ * Both legs MUST share the same app + routeState cohort or the ratio is
+ * garbage: all_events_summaryBytes_total is emitted by reporter AND receiver,
+ * so an unscoped denominator double-counts a two-stage pipeline and biases the
+ * ratio low (fake compaction). The numerator sums BOTH emitted metrics the way
+ * edgeEmittedBytes does (optimized output for compacted events + full-size
+ * emitted for pass-through), so it reconciles with the kept input. This mirrors
+ * the ROI dashboard's input/emitted legs. `routeState!="drop"` also matches
+ * series with no routeState label, so it is safe on engines that do not stamp
+ * it. The caller passes an already-escaped container regex; a container missing
+ * from the optimized leg falls back to the static destination band.
+ */
+export function compressibilityPerContainer(
+  envId: string,
+  range: string,
+  containerRegex: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): { inputQ: string; optimizedQ: string } {
+  const envClause = envId ? `${labels.env}="${envId}",` : '';
+  const cohort = `${envClause}tenx_app="receiver",routeState!="drop",k8s_container=~"${containerRegex}"`;
+  const inputQ = `sum by (k8s_container)(increase(${BYTES_METRIC}{${cohort}}[${range}]))`;
+  const optimizedQ = `sum by (k8s_container)(increase(${EMITTED_OPT_METRIC}{${cohort}}[${range}]) or increase(${EMITTED_METRIC}{${cohort}}[${range}]))`;
+  return { inputQ, optimizedQ };
 }
 
 /** Bytes indexed into the customer's S3 by the Retriever. */

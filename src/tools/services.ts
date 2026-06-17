@@ -5,25 +5,26 @@
  * four action-axis columns that let an agent / FinOps reader see where
  * each service's savings are coming from:
  *
- *   - `bytes_offloaded`  : isDropped="true" bytes whose cap-CSV row's
- *                          action is `offload` (routed to customer S3)
- *   - `bytes_compacted`  : action == `compact` (in-engine encode() wins)
- *   - `bytes_dropped`    : action == `drop` (hard kill at the receiver)
- *   - `bytes_passed`     : isDropped!="true" bytes (the kept cohort)
+ *   - `bytes_offloaded`  : routeState="offload" bytes (routed to customer S3)
+ *   - `bytes_compacted`  : routeState="compact" or "tier_down" bytes
+ *                          (in-engine encode() wins + declarative down-tier)
+ *   - `bytes_dropped`    : routeState="drop" or "sample" bytes (filtered out)
+ *   - `bytes_passed`     : routeState="pass" / empty / absent bytes (kept cohort)
  *
- * The split is computed MCP-side by joining the per-(service, hash)
- * `isDropped="true"` byte sum against the cap-CSV the MCP itself wrote
- * (see `lib/cap-csv-parser.ts`). No engine label change is required;
- * `tier_down` and `sample` collapse into the action lookup but don't
- * surface as their own columns (they're rendered as `bytes_dropped` for
- * the column-axis cohort — the receiver-side action is "filter out", the
- * destination tier is the forwarder-side detail).
+ * The split is read DIRECTLY off the engine's `routeState` metric label.
+ * The receiver now stamps `routeState=<action>` (pass | offload | compact |
+ * tier_down | drop | sample) on every series, so one
+ * `sum by (service, routeState)` query gives the per-service action
+ * decomposition with no cap-CSV join. `tier_down` folds into
+ * `bytes_compacted` and `sample` into `bytes_dropped` — they don't surface
+ * as their own columns (the receiver-side action is "down-tier" / "filter
+ * out"; the destination tier is the forwarder-side detail).
  *
- * When no cap-CSV is available (no gitops repo configured, gh not
- * installed, or empty CSV) the four action columns are still populated
- * but everything dropped lands in `bytes_dropped` with the row's
- * `attribution: 'unattributed'` flag set. The kept-side bytes are always
- * accurate.
+ * The cap-CSV is still fetched for `cap_csv_status` (the gitops provenance
+ * surface), but it no longer participates in the byte attribution — the
+ * routeState label is authoritative. When a service has no routeState data
+ * at all, all its bytes fall into `bytes_passed` with the row's
+ * `attribution: 'no_drops'` flag set.
  *
  * Exception-service input (`exception_services`): when supplied, those
  * service rows are marked with `current_mode: 'pass'` as a hint — the
@@ -48,7 +49,7 @@ import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newChassisTelemetry, buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, envWithResolvedGitops, type CapCsvStatus } from '../lib/cap-csv-fetch.js';
-import { parseCapCsv, buildPatternActionLookup } from '../lib/cap-csv-parser.js';
+import { parseCapCsv } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
 
@@ -76,8 +77,7 @@ export const servicesSchema = {
 
 /**
  * Per-service action-axis figures. All bytes values are absolute over
- * `time_range`. Unattributed dropped bytes (no CSV row) are folded into
- * `bytes_dropped` with the row-level `attribution: 'unattributed'` flag.
+ * `time_range`, read directly off the engine's `routeState` metric label.
  */
 interface ServiceActionAxis {
   bytes_passed: number;
@@ -100,10 +100,13 @@ interface ServiceRow extends ServiceActionAxis {
    */
   current_mode?: Action;
   /**
-   * Whether the action-axis split came from the cap-CSV join or fell
-   * back to the unattributed path. `csv` is the fully-attributed happy
-   * path; `unattributed` means dropped bytes exist but no CSV row
-   * matched (or no CSV was fetched).
+   * Provenance of the action-axis split. `csv` here means "attributed
+   * from the engine routeState label" (the value name is kept for
+   * backward-compat with consumers that gate on it). `no_drops` means the
+   * service had no offloaded/compacted/dropped bytes in the window.
+   * `unattributed` is retained only as a fallback for a service that has
+   * non-zero non-pass action bytes but no routeState breakdown at all
+   * (should not happen once the engine stamps routeState everywhere).
    */
   attribution: 'csv' | 'unattributed' | 'no_drops';
   /** Suggested next-tool call for the agent to chain on this row. Null for tail services below the signal floor. */
@@ -176,13 +179,16 @@ export async function executeServices(
   const tailNote = tailCount > 0
     ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
-  // Headline collapses the dollar phrasing to volume-only when rate_source==='unset'
-  // (no fictitious $/GB lie). When the resolver gave us a rate, the dollar
-  // phrasing stays.
+  // C-policy: the headline quotes a dollar only when it is grounded in the
+  // customer's real (contracted) rate. At `list_price` the dollar is the SIEM
+  // vendor rack rate, not their number, so the headline leads with volume
+  // (GB / %, always exact) and the chassis attaches the list-rate calibration
+  // callout. At `unset` there is no rate at all, so we add the set-your-rate
+  // hint inline.
   const headline = top
-    ? (d.rate_source === 'unset'
-      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote} (no $/GB rate configured — pass effective_ingest_per_gb to see dollars.)`
-      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`)
+    ? (d.rate_source === 'customer_supplied'
+      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`
+      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
     : `No services with data in ${d.time_range}.`;
   return buildChassisEnvelope({
     tool: 'log10x_services',
@@ -291,36 +297,33 @@ async function executeServicesInner(
     return 'No service data available. Data appears after the first 24h of collection.';
   }
 
-  // ── Action-axis queries ──
-  // Two parallel `sum by (service, hash)` queries (kept + dropped),
-  // joined locally to the cap-CSV action lookup. We deliberately key on
-  // BOTH service + hash so a pattern that fires in two services is
-  // attributed once per (service, hash) row, not once globally.
-  //
-  // The third query — `sum by (service, hash, container)` for the
-  // dropped cohort — is what the cap-CSV's container-default rows hook
-  // into (the CSV's container key is k8s_container). Without the
-  // container we cannot fall back to the container default when no
-  // `pat:<hash>` override exists; we just leave the row unattributed.
-  const containerLabel = 'k8s_container';
-  const droppedPerServicePatternQ = `sum by (${LABELS.service}, ${LABELS.hash}, ${containerLabel}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped="true"}[${tf.range}]))`;
-  const passedPerServiceQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}",isDropped!="true"}[${tf.range}]))`;
+  // ── Action-axis query ──
+  // ONE `sum by (service, routeState)` read off the engine's stamped
+  // routeState label. The receiver now stamps routeState=<action> directly
+  // (pass | offload | compact | tier_down | drop | sample), so the
+  // per-service action decomposition is authoritative from the metric and
+  // needs no cap-CSV join. Env filter + window are built EXACTLY as the
+  // existing per-service queries do (LABELS.env / tf.range).
+  const actionAxisQ = `sum by (${LABELS.service}, routeState) (increase(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
 
   // Resolve gitops repo via the same fallback chain configure_engine /
   // pattern_mitigate use: envs.json field → LOG10X_GH_REPO env var →
   // most-recent discover_env snapshot. Without this, services reported
   // `cap_csv_status: not_configured` whenever envs.json lacked the field,
   // even when a snapshot or env-var already exposed the repo.
+  //
+  // NOTE: the cap-CSV / action-intent fetch is kept ONLY for the
+  // `cap_csv_status` provenance surface (gitops repo wiring). It no longer
+  // feeds the byte attribution — routeState is the authoritative source.
   const envForGitops = envWithResolvedGitops(env);
-  const [droppedRes, passedRes, capCsvContent, actionIntent] = await Promise.all([
-    queryInstant(env, droppedPerServicePatternQ).catch(() => null),
-    queryInstant(env, passedPerServiceQ).catch(() => null),
+  const [actionAxisRes, capCsvContent, actionIntent] = await Promise.all([
+    queryInstant(env, actionAxisQ).catch(() => null),
     fetchCapCsvForEnv(envForGitops).catch(() => undefined),
     fetchActionIntentForEnv(envForGitops).catch(() => undefined),
   ]);
 
-  // action-intent.json is the canonical source for pattern→action.
-  // Fall back to legacy cap-CSV action suffixes when action-intent is absent.
+  // action-intent.json / cap-CSV presence still drives cap_csv_status, the
+  // gitops provenance the agent uses to know whether a re-tune PR landed.
   const actionIntentLookup: Map<string, Action> = actionIntent?.by_pattern ?? new Map();
   const parsedCsv = capCsvContent ? parseCapCsv(capCsvContent) : null;
   const hasActionSource = actionIntentLookup.size > 0 || (parsedCsv !== null && parsedCsv.rows.length > 0);
@@ -336,95 +339,50 @@ async function executeServicesInner(
     hasActionSource,
   );
 
-  // Build a (service → action-axis) map from the per-(service, hash,
-  // container) dropped result, using buildPatternActionLookup to resolve
-  // each (hash, container) to its action.
-  const perService = new Map<string, ServiceActionAxis & { had_drops: boolean; had_csv_hit: boolean }>();
-
-  // Seed with passed bytes per service.
-  if (passedRes && passedRes.status === 'success') {
-    for (const r of passedRes.data.result) {
+  // Build a (service → action-axis) map directly from the
+  // (service, routeState) byte sums. routeState → axis:
+  //   pass / "" / absent → bytes_passed
+  //   offload            → bytes_offloaded
+  //   compact / tier_down→ bytes_compacted
+  //   drop / sample      → bytes_dropped
+  // had_drops := any non-pass action bytes were seen (offload+compact+drop).
+  const perService = new Map<string, ServiceActionAxis & { had_drops: boolean }>();
+  if (actionAxisRes && actionAxisRes.status === 'success') {
+    for (const r of actionAxisRes.data.result) {
       const name = r.metric[LABELS.service] || '(unknown)';
+      const routeState = r.metric['routeState'] ?? '';
       const v = parsePrometheusValue(r);
+      if (v <= 0) continue;
       const cur = perService.get(name) ?? {
         bytes_passed: 0,
         bytes_offloaded: 0,
         bytes_compacted: 0,
         bytes_dropped: 0,
         had_drops: false,
-        had_csv_hit: false,
       };
-      cur.bytes_passed += v;
+      switch (routeState) {
+        case 'offload':
+          cur.bytes_offloaded += v;
+          break;
+        case 'compact':
+        case 'tier_down':
+          cur.bytes_compacted += v;
+          break;
+        case 'drop':
+        case 'sample':
+          cur.bytes_dropped += v;
+          break;
+        // 'pass', '', and any unrecognized state → kept cohort.
+        default:
+          cur.bytes_passed += v;
+          break;
+      }
       perService.set(name, cur);
     }
-  }
-
-  // Layer dropped bytes, attributed via cap-CSV.
-  if (droppedRes && droppedRes.status === 'success') {
-    // First pass: gather (hash → container) pairs so we can resolve
-    // each hash's action with the same fallback logic the commitment
-    // report uses (pat: override → container default → unattributed).
-    const hashToContainer = new Map<string, string>();
-    interface DropRow { service: string; hash: string; container: string; bytes: number }
-    const dropRows: DropRow[] = [];
-    for (const r of droppedRes.data.result) {
-      const service = r.metric[LABELS.service] || '(unknown)';
-      const hash = r.metric[LABELS.hash] ?? '';
-      const container = r.metric[containerLabel] ?? '';
-      const bytes = parsePrometheusValue(r);
-      if (!hash || bytes <= 0) continue;
-      dropRows.push({ service, hash, container, bytes });
-      // Container-pick rule: highest bytes wins (mirrors
-      // extractHashContainerMap in estimate-savings).
-      const prior = hashToContainer.get(hash);
-      if (!prior || (container && container.localeCompare(prior) < 0)) {
-        // Cheap deterministic pick — bytes-weighted variant would need
-        // an aggregator; for services we keep the lighter lexical pick
-        // since the column is for explanation, not arithmetic
-        // attribution (the commitment_report does the heavy version).
-        if (container) hashToContainer.set(hash, container);
-      }
-    }
-    // Build legacy cap-CSV lookup for fallback when action-intent is absent.
-    const legacyActionLookup = parsedCsv
-      ? buildPatternActionLookup(parsedCsv, hashToContainer)
-      : new Map<string, Action>();
-
-    for (const row of dropRows) {
-      const cur = perService.get(row.service) ?? {
-        bytes_passed: 0,
-        bytes_offloaded: 0,
-        bytes_compacted: 0,
-        bytes_dropped: 0,
-        had_drops: false,
-        had_csv_hit: false,
-      };
-      cur.had_drops = true;
-      // Resolution order: action-intent.json (canonical) → legacy cap-CSV suffix.
-      const action =
-        actionIntentLookup.get(row.hash) ?? legacyActionLookup.get(row.hash);
-      if (action === 'offload') {
-        cur.bytes_offloaded += row.bytes;
-        cur.had_csv_hit = true;
-      } else if (action === 'compact') {
-        cur.bytes_compacted += row.bytes;
-        cur.had_csv_hit = true;
-      } else if (action === 'drop' || action === 'tier_down' || action === 'sample') {
-        cur.bytes_dropped += row.bytes;
-        cur.had_csv_hit = true;
-      } else if (action === 'pass') {
-        // `pass` shouldn't appear in the dropped cohort, but if it does
-        // the engine ignored a customer override — bucket as passed so
-        // the totals reconcile.
-        cur.bytes_passed += row.bytes;
-        cur.had_csv_hit = true;
-      } else {
-        // No CSV hit at all → unattributed; fold into bytes_dropped so
-        // the action-axis still sums to the right total. Row-level
-        // attribution flag will surface this to the agent.
-        cur.bytes_dropped += row.bytes;
-      }
-      perService.set(row.service, cur);
+    // had_drops is derived AFTER the full fold so it sees the whole row.
+    for (const axis of perService.values()) {
+      axis.had_drops =
+        axis.bytes_offloaded + axis.bytes_compacted + axis.bytes_dropped > 0;
     }
   }
 
@@ -462,11 +420,12 @@ async function executeServicesInner(
           bytes_compacted: 0,
           bytes_dropped: 0,
         };
+    // routeState is authoritative, so any service with non-pass action
+    // bytes is fully attributed ('csv' = "from engine routeState label",
+    // value name kept for backward-compat). 'no_drops' when none.
     const attribution: ServiceRow['attribution'] = !axisRaw || !axisRaw.had_drops
       ? 'no_drops'
-      : axisRaw.had_csv_hit
-        ? 'csv'
-        : 'unattributed';
+      : 'csv';
     const current_mode: Action | undefined = exceptionSet.has(name.toLowerCase()) ? 'pass' : undefined;
     // Cost collapses to null when the shared rate resolver returned 'unset'
     // (no fictitious $1/GB fallback). Renderers + the envelope gate on this.
@@ -519,17 +478,13 @@ async function executeServicesInner(
   }
 
   // Action-axis caveat surface. Render only when at least one row had
-  // dropped bytes — otherwise the whole block is noise.
+  // non-pass action bytes — otherwise the whole block is noise.
   const anyDrops = rows.some(
     (r) => r.axis.bytes_offloaded + r.axis.bytes_compacted + r.axis.bytes_dropped > 0,
   );
   if (anyDrops) {
     lines.push('');
-    if (capCsvStatus.kind === 'loaded') {
-      lines.push(`  Action axis: split via cap-CSV (${envForGitops.gitops?.repo}${envForGitops.gitops?.lookupPath ? `:${envForGitops.gitops.lookupPath}` : ''}).`);
-    } else {
-      lines.push(`  Action axis: ${capCsvStatus.reason} Dropped bytes folded into bytes_dropped (unattributed).`);
-    }
+    lines.push('  Action axis: read from the engine routeState metric label.');
   }
 
   if (exceptionServices.length > 0) {
@@ -619,14 +574,14 @@ async function executeServicesInner(
         const droppedTotal = r.axis.bytes_offloaded + r.axis.bytes_compacted + r.axis.bytes_dropped;
         let attribution_reason: string;
         if (droppedTotal <= 0) {
-          attribution_reason = 'No dropped bytes in this window for this service.';
+          attribution_reason = 'No offloaded / compacted / dropped bytes in this window for this service.';
         } else if (r.attribution === 'csv') {
-          attribution_reason = 'Drop counts available per pattern via cap-CSV / action-intent join on the receiver.';
+          attribution_reason = 'Action split read directly from the engine routeState metric label.';
         } else if (r.attribution === 'unattributed') {
           attribution_reason =
-            'Engine reported dropped bytes but no per-pattern attribution metric is available — confirm cap-CSV is configured + receiver_in_path.';
+            'Engine reported non-pass action bytes but no routeState breakdown is available — confirm receiver_in_path and routeState stamping.';
         } else {
-          attribution_reason = 'No dropped bytes in this window for this service.';
+          attribution_reason = 'No offloaded / compacted / dropped bytes in this window for this service.';
         }
         const next_action_reason = next_action === null
           ? (r.pct < 0.1 ? 'below_signal_floor' : 'tail_rank')

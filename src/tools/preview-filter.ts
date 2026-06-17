@@ -252,9 +252,9 @@ async function fetchFromTsdb(
   const metricsEnv = await resolveMetricsEnv(env);
   const timeRange = '30d';
 
-  // Scope selector — kept cohort, isDropped absence-tolerant.
+  // Scope selector — kept cohort, routeState absence-tolerant.
   const escapedService = service.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const scopeFilter = `${LABELS.service}="${escapedService}",${LABELS.env}="${metricsEnv}",isDropped!="true"`;
+  const scopeFilter = `${LABELS.service}="${escapedService}",${LABELS.env}="${metricsEnv}",routeState!="drop"`;
 
   // Top patterns scoped to service
   const topQ =
@@ -263,7 +263,7 @@ async function fetchFromTsdb(
 
   // Distinct pattern count for the pattern_count_total envelope field.
   const distinctQ = pql.distinctPatternCount(
-    { [LABELS.service]: service, isDropped: { op: '!=', val: 'true' } },
+    { [LABELS.service]: service, routeState: { op: '!=', val: 'drop' } },
     metricsEnv,
     timeRange,
   );

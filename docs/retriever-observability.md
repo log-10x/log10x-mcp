@@ -20,7 +20,7 @@ The Retriever exposes four channels for observing query execution. Each channel 
 | Per-worker fetch bytes, result events | CW queryLogGroup |
 | Query plan (templateHashes, vars, timeslice, dispatch) | CW queryLogGroup |
 | ERROR-level query failures | CW queryLogGroup + pod stdout |
-| `isDropped` cohort share | Prometheus `all_events_summaryBytes_total{isDropped="true"}` |
+| `routeState="drop"` cohort share | Prometheus `all_events_summaryBytes_total{routeState="drop"}` |
 
 ## How to enable per-query CloudWatch logging
 

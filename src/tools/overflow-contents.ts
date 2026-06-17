@@ -7,7 +7,7 @@
  * wants to REVIEW what's accumulating, not query it.
  *
  * What this tool does:
- *   - Queries `all_events_summaryBytes_total{isDropped="true"}` grouped
+ *   - Queries `all_events_summaryBytes_total{routeState="drop"}` grouped
  *     by (pattern_hash, service, k8s_container) over the requested
  *     time window.
  *   - Joins the result to the cap-CSV the MCP wrote (via
@@ -206,7 +206,7 @@ export async function executeOverflowContents(
   const serviceFilter = args.service?.trim() || null;
 
   // Build the dropped-pattern selector with optional service filter.
-  const baseFilters = [`${LABELS.env}="${metricsEnv}"`, `isDropped="true"`];
+  const baseFilters = [`${LABELS.env}="${metricsEnv}"`, `routeState="drop"`];
   if (serviceFilter) {
     baseFilters.push(`${LABELS.service}="${escapeLabel(serviceFilter)}"`);
   }

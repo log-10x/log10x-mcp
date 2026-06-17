@@ -152,20 +152,25 @@ export async function executeSavings(
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
-  // Percent-first headline; dollar clause is gated on rate_source !== 'unset'.
-  // When no $/GB is known we refuse to print a dollar number (no $1.0/GB lie).
+  // C-policy: percent-first headline; the dollar clause is quoted only when it
+  // is grounded in the customer's real (contracted) rate (rate_source ===
+  // 'customer_supplied'). At 'list_price' the dollar is the SIEM vendor rack
+  // rate, not their number, so the headline leads with volume (GB / %, always
+  // exact) and the chassis attaches the list-rate calibration callout (no
+  // inline caveat added here). At 'unset' there is no rate at all, so we keep
+  // the set-your-rate hint inline. No fabricated $1.0/GB lie at any source.
   let headline: string;
   if (!d.totals.has_data) {
-    headline = `No realized-savings metrics for this environment yet — pipeline has not booked any volume reduction.`;
-  } else if (d.rate_source === 'unset') {
-    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}. Pass effective_ingest_per_gb to overlay dollars.`;
-  } else {
+    headline = `No realized-savings metrics for this environment yet; pipeline has not booked any volume reduction.`;
+  } else if (d.rate_source === 'customer_supplied') {
     const realizedDisc = d.totals.realized_dollars_disclosed;
     const annualDisc = d.totals.annual_projection_dollars_disclosed;
     const dollarClause = realizedDisc != null && annualDisc != null
       ? `, ${fmtDisclosedDollar(realizedDisc)}${d.period} realized, ${fmtDisclosedDollar(annualDisc)}/yr projected`
       : '';
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
+  } else {
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}.${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to overlay dollars.' : ''}`;
   }
   if (lens.lensed && lens.display) {
     headline = `[lens: ${lens.display}] ` + headline;

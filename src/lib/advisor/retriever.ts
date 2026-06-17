@@ -239,7 +239,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     teardown.push(...buildTeardownSteps(releaseName, namespace));
   }
 
-  // Forwarder offload section: how to route the isDropped slice to the
+  // Forwarder offload section: how to route the routeState="drop" slice to the
   // customer's own S3 (the bucket the Retriever reads) + SIEM down-tier
   // alternatives. Only when we know the bucket + region to fill in.
   const region = snapshot.aws?.region;

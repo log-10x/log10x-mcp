@@ -9,8 +9,8 @@
  * The helper calls `queryInstant(env, promql)` which delegates to
  * `env.metricsBackend.queryInstant`. The tests stub the backend in-place
  * with a tiny fake that returns canned scalar responses keyed by which
- * cohort the query is asking for (kept = `isDropped!="true"`, dropped =
- * `isDropped="true"`).
+ * cohort the query is asking for (kept = `routeState!="drop"`, dropped =
+ * `routeState="drop"`).
  */
 
 import { test } from 'node:test';
@@ -36,9 +36,9 @@ function emptyResp(): PrometheusResponse {
 }
 
 interface StubOpts {
-  /** Bytes for the `isDropped!="true"` (kept) cohort. */
+  /** Bytes for the `routeState!="drop"` (kept) cohort. */
   kept: number;
-  /** Bytes for the `isDropped="true"` (dropped) cohort. */
+  /** Bytes for the `routeState="drop"` (dropped) cohort. */
   dropped: number;
   /** When true, `queryInstant` never resolves (forces timeout in the helper). */
   hang?: boolean;
@@ -55,19 +55,19 @@ function makeEnv(opts: StubOpts): EnvConfig {
       // Selective hang: only the kept-cohort scan stalls. Reproduces
       // the heavy-pattern tail-latency mode the demo hit on
       // AQwRuueOWbQ — dropped cohort comes back fast, kept does not.
-      if (opts.hangKept && promql.includes('isDropped!="true"')) {
+      if (opts.hangKept && promql.includes('routeState!="drop"')) {
         return await new Promise<PrometheusResponse>(() => {});
       }
-      // Discriminate by which `isDropped` filter the query carries.
+      // Discriminate by which `routeState` filter the query carries.
       // `timestamp(max(...))` queries go through the dropped branch too.
-      if (promql.includes('isDropped="true"')) {
+      if (promql.includes('routeState="drop"')) {
         if (promql.startsWith('timestamp(')) {
           // Last-seen timestamp piggyback — return a recent epoch seconds.
           return opts.dropped > 0 ? scalarResp(Math.floor(Date.now() / 1000)) : emptyResp();
         }
         return opts.dropped > 0 ? scalarResp(opts.dropped) : emptyResp();
       }
-      if (promql.includes('isDropped!="true"')) {
+      if (promql.includes('routeState!="drop"')) {
         return opts.kept > 0 ? scalarResp(opts.kept) : emptyResp();
       }
       return emptyResp();
