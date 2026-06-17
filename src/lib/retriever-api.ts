@@ -39,6 +39,7 @@ import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
 import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
 import { diagnoseQuery, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
+import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 
 const execFileP = promisify(execFile);
@@ -90,6 +91,12 @@ export interface RetrieverQueryRequest {
   processingTimeMs?: number;
   /** Max bytes the engine will ship before terminating. */
   resultSizeBytes?: number;
+  /**
+   * Internal: set on the auto-localization probe (a narrowed re-submit of a
+   * DISPATCHED_BLIND query that forces local dispatch). Prevents the probe from
+   * recursively probing itself. Not part of the public tool surface.
+   */
+  __probe?: boolean;
 
   // ── Legacy fields kept for call-site compatibility. The engine contract
   //    no longer uses `pattern` (the Bloom filter uses `search`), and
@@ -1316,6 +1323,59 @@ async function waitForMarkerStability(
   return previous.map((key) => ({ Key: key, Size: 0 }));
 }
 
+/**
+ * Localize a DISPATCHED_BLIND query by re-submitting a narrowed window that
+ * forces the coordinator into LOCAL dispatch — where its scanned / matched /
+ * skippedSearch counters are precise and pinpoint the failing stage
+ * (resolve vs bloom vs filter). The local/remote threshold varies with the
+ * configured timeslice, so we try a few shrinking windows and take the first
+ * probe whose own verdict is localized (not blind / no-marker).
+ *
+ * Costs one short query, only fires on a zero-result blind query, and never
+ * recurses (the probe carries `__probe`).
+ */
+async function localizeBlindQuery(
+  env: EnvConfig,
+  req: RetrieverQueryRequest,
+): Promise<QueryDiagnosis | null> {
+  // Start small: the local/remote threshold is ~tens of seconds on a busy
+  // index, so a 20s window usually forces local on the first try; shrink
+  // further only if it stayed remote.
+  for (const windowSec of [20, 10, 5]) {
+    // Skew the window ~120s back from the range end so it samples indexed data
+    // (the freshest seconds aren't indexed yet) and reproduces the same
+    // index/bloom failure the full query hit.
+    const w =
+      narrowWindow(String(req.from), String(req.to), windowSec, 120) ??
+      recentFallbackWindow(windowSec, 120);
+    const probeReq: RetrieverQueryRequest = {
+      ...req,
+      from: w.from,
+      to: w.to,
+      __probe: true,
+      limit: 1,
+      resultTarget: undefined, // probe writes to the default target, simplest to poll
+    };
+    let pf: QueryDiagnosis | undefined;
+    try {
+      // A localized probe runs LOCAL (synchronous) — its _DONE carries the
+      // precise counts immediately, so we don't need the full marker-stability
+      // wait that async stream results require. Cap it short.
+      const resp = await runRetrieverQuery(env, probeReq, { timeoutMs: 12_000, pollIntervalMs: 1_000 });
+      pf = resp.diagnostics?.funnel;
+    } catch {
+      continue; // probe errored — try a smaller window
+    }
+    if (pf && pf.verdict !== 'DISPATCHED_BLIND' && pf.verdict !== 'NO_MARKER') {
+      return {
+        ...pf,
+        explanation: `[localized by a ${windowSec}s local-dispatch probe over ${w.from} .. ${w.to}] ${pf.explanation}`,
+      };
+    }
+  }
+  return null;
+}
+
 export async function runRetrieverQuery(
   env: EnvConfig,
   req: RetrieverQueryRequest,
@@ -1677,7 +1737,18 @@ export async function runRetrieverQuery(
   // always in S3. This guarantees every zero-result query self-reports a verdict
   // + next step (EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
   // DISPATCHED_BLIND) instead of a bare "0 events".
-  const funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
+  let funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
+
+  // Active localization: a DISPATCHED_BLIND verdict means remote dispatch hid the
+  // per-stage counts. Re-submit a narrowed window that forces LOCAL dispatch so
+  // the coordinator reports precise scanned/matched/skippedSearch — pinpointing
+  // the failing stage. One extra short query, only on a zero-result blind query,
+  // never on a probe itself.
+  if (funnel.verdict === 'DISPATCHED_BLIND' && !req.__probe) {
+    const localized = await localizeBlindQuery(env, req);
+    if (localized) funnel = localized;
+  }
+
   response.diagnostics = { ...(response.diagnostics ?? {}), funnel };
 
   return response;

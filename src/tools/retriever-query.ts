@@ -42,6 +42,7 @@ import {
   explainZeroResults,
   type RetrieverQueryDiagnostics,
 } from '../lib/retriever-diagnostics.js';
+import type { QueryDiagnosis } from '../lib/query-funnel.js';
 import { fmtCount } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
@@ -172,6 +173,11 @@ interface RetrieverQuerySummary {
    */
   results_location?: { bucket: string; prefix: string; uri: string };
   diagnostics_zero_reason?: string;
+  /** Structured zero-result funnel: verdict + per-stage counts + actionable
+   *  hint. When the query was blind (remote dispatch), this is the LOCALIZED
+   *  verdict the MCP recovered via an auto-submitted narrowed local-dispatch
+   *  probe. Agents branch on diagnostics_funnel.verdict. */
+  diagnostics_funnel?: QueryDiagnosis;
   /**
    * Where by_severity/by_service/by_day came from:
    *  - 'qrs_summaries' — engine per-slice summaries; WHOLE-match counts.
@@ -973,6 +979,13 @@ async function executeRetrieverQueryInner(
       partial_results: partialResults,
       results_location: resultsLoc,
       diagnostics_zero_reason: eventsMatched === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      // Structured funnel verdict for a zero-result query: stage counts +
+      // verdict (OK / EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+      // DISPATCHED_BLIND / ...) + an actionable hint. When the original query
+      // was blind (remote dispatch), this carries the LOCALIZED verdict the
+      // MCP recovered by auto-submitting a narrowed local-dispatch probe.
+      // Agents branch on diagnostics_funnel.verdict.
+      diagnostics_funnel: eventsMatched === 0 ? resp.diagnostics?.funnel : undefined,
       rollup_basis: rollupBasis,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
       by_service: Object.keys(byService).length > 0 ? byService : undefined,
