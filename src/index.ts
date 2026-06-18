@@ -677,6 +677,8 @@ timestamps, and request IDs. That identity is the key to a Prometheus time serie
 so any pattern the user has ever emitted is instantly queryable by name, by history, or by sample
 line with zero prior query setup, the observability memory for their logs.
 
+VOCABULARY: the compact action minifies events losslessly, it replaces each event's repeated structure with a template-plus-values encoding so it lands smaller with every field intact. When describing it, say "compact" or "minify", never "compress" or "compression": 10x does not do binary or gzip compression, and that word misleads. (Vendor billing terms are different and fine to use as-is, e.g. a destination that bills on "compressed ingest", or Datadog's "compressed GB" rehydration price, refer to the vendor's own compression, not ours.)
+
 CUSTOMER TIER LADDER (determines which tools are available)
 
 1. Dev CLI only — free local binary, no pipeline infrastructure.
