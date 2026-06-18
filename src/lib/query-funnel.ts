@@ -46,11 +46,11 @@ export interface DoneMarker {
 export type QueryVerdict =
   | 'OK' //                events came back
   | 'NO_MARKER' //         no _DONE yet (still running / never marked)
-  | 'EMPTY_RANGE' //       no index blobs for the window (no data OR time-mapping broken)
+  | 'EMPTY_RANGE' //       resolution mapped 0 blobs for the window (no data OR time-mapping broken)
   | 'BLOOM_REJECTED_ALL' //blobs scanned, search term in none of them
   | 'MATCHED_NO_EVENTS' // marker-only: something matched but no events landed
-  | 'STREAM_FETCH_EMPTY' //ground truth: matched, but stream workers fetched 0 bytes
-  | 'FILTER_NO_MATCH' //   ground truth: fetched bytes, exact predicate matched 0
+  | 'FILTER_NO_MATCH' //   ground truth: events reached the writer, the exact predicate dropped them all (emptyFlushes>0)
+  | 'FETCH_OR_PARSE_EMPTY' //ground truth: bloom matched but no rows reached the writer; fetch vs parse can't be split from current signals
   | 'DELIVERY_INCOMPLETE' //ground truth: events written but not read back
   | 'DISPATCHED_BLIND' //  remote dispatch; coordinator can't see subquery outcome
   | 'INCONCLUSIVE'; //     finished, zero events, marker lacks detail
@@ -58,6 +58,12 @@ export type QueryVerdict =
 export interface QueryFunnel {
   /** Subqueries fanned out (submittedTasks). null when not reported. */
   dispatched: number | null;
+  /**
+   * Blobs the RESOLUTION stage mapped for the window (sum of `scan range:`
+   * submittedKeys). Ground-truth only; only set by diagnoseFromStats. 0 => the
+   * time->blob mapping returned nothing.
+   */
+  resolvedBlobs?: number | null;
   /** Blobs scanned. NOTE: coordinator-only in remote dispatch (see coordinatorBlind). */
   scanned: number | null;
   /** Blobs that passed the bloom. Coordinator-only in remote dispatch. */
@@ -65,6 +71,19 @@ export interface QueryFunnel {
   skippedSearch: number | null;
   skippedTemplate: number | null;
   streamRequests: number | null;
+  /**
+   * Volume (utf8 bytes) of events FETCHED from the matched byte-ranges, pre-filter
+   * (q/ writer "fetched N bytes"). Ground-truth only. >0 with 0 written =>
+   * FILTER_NO_MATCH (fetched but predicate wrote none); 0 => FETCH_OR_PARSE_EMPTY.
+   * Despite the engine's "fetched" label this is event volume, not S3-GET bytes.
+   */
+  fetchedVolume?: number | null;
+  /**
+   * Events that reached the results writer but were dropped by the exact
+   * predicate pre-write (results-writer emptyFlushes). Ground-truth only; a
+   * corroborator for FILTER_NO_MATCH alongside fetchedVolume.
+   */
+  filterDropped?: number | null;
   /** Events actually downloaded from qr/ — always authoritative. */
   eventsReturned: number;
   /** True => scanned/bloomMatched reflect only the coordinator, not the subqueries. */
@@ -90,6 +109,12 @@ const num = (v: number | undefined | null): number | null =>
  * Every field is what the engine reported; nothing is inferred.
  */
 export interface CloudWatchStageStats {
+  /**
+   * Index blobs the RESOLUTION stage mapped for the window (sum of `scan range:`
+   * submittedKeys). 0 => the time->blob mapping returned nothing (empty window).
+   * The ground-truth empty signal, distinct from scanned/bloom.
+   */
+  submittedKeys?: number;
   /** Index blobs the bloom scan examined. */
   scanned?: number;
   /** Blobs whose bloom matched the search (candidates to fetch). */
@@ -98,10 +123,23 @@ export interface CloudWatchStageStats {
   streamWorkers?: number;
   /** Stream workers that reported completion. */
   workersComplete?: number;
-  /** Total bytes the stream workers actually read from the source objects. */
+  /**
+   * Written-event utf8 volume from the q/ writer ("stream worker complete:
+   * fetched N bytes"). NOT the S3-read byte count — informational only; never
+   * used as a fetch success/failure signal (the engine emits no S3-read counter).
+   */
   fetchedBytes?: number;
-  /** Events the results writer wrote after the exact predicate. */
+  /** Events the results writer wrote after the exact predicate (qr/). */
   resultEvents?: number;
+  /**
+   * Flushes that reached the results writer but were empty because the exact
+   * predicate dropped the event pre-write. The distinguisher for a 0-result:
+   * >0 (with 0 written) = the filter rejected events that arrived; 0 (with 0
+   * written) = no rows reached the writer (the fetch or the parse produced none).
+   */
+  emptyFlushes?: number;
+  /** Events dropped at the results cap. */
+  resultsTruncated?: number;
 }
 
 /**
@@ -110,28 +148,41 @@ export interface CloudWatchStageStats {
  * DEBUG) so the caller falls back to the marker-only `diagnoseQuery`.
  *
  * The funnel, stage by stage, exactly as the engine reports it:
- *   scanned -> matched(bloom) -> workers -> fetchedBytes -> resultEvents -> delivered
+ *   resolved(submittedKeys) -> scanned -> matched(bloom) -> workers ->
+ *   resultEvents written / emptyFlushes dropped -> delivered
+ *
+ * The verdict turns on RESOLUTION (submittedKeys===0 => EMPTY_RANGE) and the
+ * fetch/filter split (matched>0, written===0: fetchedBytes>0 OR emptyFlushes>0 =>
+ * FILTER_NO_MATCH, i.e. events were fetched+parsed but the exact predicate wrote
+ * none; both 0 => FETCH_OR_PARSE_EMPTY). The q/ "fetched bytes" is event volume
+ * pre-filter, NOT S3-GET bytes — so >0 proves fetch+parse worked, but it can't
+ * separate a real S3-read failure from a parse miss (that needs an engine counter).
  */
 export function diagnoseFromStats(
   s: CloudWatchStageStats | null | undefined,
   eventsReturned: number,
 ): QueryDiagnosis | null {
   if (!s) return null;
+  const submittedKeys = num(s.submittedKeys);
   const scanned = num(s.scanned);
   const matched = num(s.matched);
   const workers = num(s.streamWorkers);
   const fetchedBytes = num(s.fetchedBytes);
   const resultEvents = num(s.resultEvents);
+  const emptyFlushes = num(s.emptyFlushes);
   // Nothing parsed → no ground truth to offer.
-  if (scanned == null && matched == null && workers == null) return null;
+  if (submittedKeys == null && scanned == null && matched == null && workers == null) return null;
 
   const funnel: QueryFunnel = {
     dispatched: workers,
+    resolvedBlobs: submittedKeys,
     scanned,
     bloomMatched: matched,
     skippedSearch: null,
     skippedTemplate: null,
     streamRequests: workers,
+    fetchedVolume: fetchedBytes,
+    filterDropped: emptyFlushes,
     eventsReturned,
     coordinatorBlind: false, // these are the workers' own reported numbers
   };
@@ -139,15 +190,20 @@ export function diagnoseFromStats(
   if (eventsReturned > 0) {
     return { verdict: 'OK', funnel, explanation: `Returned ${eventsReturned} event(s).`, hint: 'No action needed.' };
   }
-  if ((scanned ?? 0) === 0) {
+  // Resolution: did the time->blob mapping yield any blobs? submittedKeys is the
+  // ground-truth empty signal; fall back to scanned when scan-range wasn't parsed.
+  const resolved = submittedKeys ?? scanned;
+  if (resolved != null && resolved === 0) {
     return {
       verdict: 'EMPTY_RANGE',
       funnel,
-      explanation: 'The scan examined 0 index blobs for this window.',
-      hint: 'No data in range, or the time->blob mapping returned nothing. Widen the range; if a window with known data still scans 0, the index time-mapping is the bug.',
+      explanation: submittedKeys != null
+        ? 'The resolution stage mapped 0 index blobs for this window (every scan range reported submittedKeys=0).'
+        : 'The scan examined 0 index blobs for this window.',
+      hint: 'No data in range, or the time->blob mapping returned nothing. Widen the range; if a window with known data still resolves 0, the index time-mapping is the cause to trace.',
     };
   }
-  if ((matched ?? 0) === 0) {
+  if ((scanned ?? 0) > 0 && (matched ?? 0) === 0) {
     return {
       verdict: 'BLOOM_REJECTED_ALL',
       funnel,
@@ -155,21 +211,27 @@ export function diagnoseFromStats(
       hint: 'The search value is not in the index for this window. Try match-all to confirm the blobs hold events; the bloom is the source of truth for candidacy.',
     };
   }
-  // Matched > 0: the bloom found candidates. Now follow the bytes.
-  if ((fetchedBytes ?? 0) === 0 && (workers ?? 0) > 0) {
+  // Matched > 0 but nothing written. Was anything fetched+parsed from the blobs?
+  // fetchedBytes is the q/ writer's volume of events FETCHED from the matched
+  // byte-ranges (pre-filter); emptyFlushes corroborates that events reached the
+  // writer. Either > 0 means events WERE fetched but the exact predicate wrote
+  // none (FILTER_NO_MATCH). Both 0 means nothing materialized (FETCH_OR_PARSE_EMPTY).
+  if ((matched ?? 0) > 0 && (resultEvents ?? 0) === 0) {
+    const fetched = fetchedBytes ?? 0;
+    const flushed = emptyFlushes ?? 0;
+    if (fetched > 0 || flushed > 0) {
+      return {
+        verdict: 'FILTER_NO_MATCH',
+        funnel,
+        explanation: `Bloom matched ${matched} blob(s); ${fetched} byte(s) of events were fetched from them but the exact predicate wrote 0 (written=0${flushed > 0 ? `, emptyFlushes=${flushed}` : ''}). The bloom is approximate; the exact filter is the truth and it matched nothing.`,
+        hint: 'Events were fetched but none passed the exact predicate. Probe what the field actually carries; the search field/value most likely does not match the real data. WHY each event was dropped is not logged per-event (engine gap: QueryFilterEvaluator emits nothing) — that is the signal to add to localize this further.',
+      };
+    }
     return {
-      verdict: 'STREAM_FETCH_EMPTY',
+      verdict: 'FETCH_OR_PARSE_EMPTY',
       funnel,
-      explanation: `Bloom matched ${matched} blob(s) and ${workers} stream worker(s) ran, but reported fetched 0 bytes from the source objects, so 0 events were written. The match stage is fine; the bytes did not come back. Cause is not determined from these stats alone — this is an observation, not a root cause.`,
-      hint: 'The fetch (object-read) stage returned 0 bytes — not the search. Do NOT assume an engine fault: trace the read path in the engine source (which bucket/key/byte-range the worker reads), check the read-container config, and confirm the query + target object are well-formed before concluding where the fault is.',
-    };
-  }
-  if ((resultEvents ?? 0) === 0) {
-    return {
-      verdict: 'FILTER_NO_MATCH',
-      funnel,
-      explanation: `Fetched ${fetchedBytes} byte(s) from ${matched} matched blob(s), but the exact predicate matched 0 events (the bloom is approximate; the precise filter is the truth).`,
-      hint: 'The blobs were bloom-candidates but no event passed the exact predicate (the bloom is approximate). Check the field/value against the real data; if it does contain matches, trace the exact-filter path in the engine source before concluding a fault.',
+      explanation: `Bloom matched ${matched} blob(s) but 0 bytes of events were fetched from them (fetchedBytes=0, emptyFlushes=0, written=0) — the fetch or the parse produced nothing. The engine emits no separate S3-GET byte count, so fetch and parse cannot be split from the current signals; this is an observation, not a root cause.`,
+      hint: 'Not the search — candidates matched but no event bytes materialized. Splitting fetch (object-read returned nothing) from parse (bytes returned, no events) needs the engine to emit a real S3-read byte counter; until then trace the read+parse path in the engine source. Do NOT assume an engine fault.',
     };
   }
   // Wrote events but the caller got none → delivery/path gap.
@@ -295,16 +357,13 @@ export function diagnoseQuery(
 /** Compact one-line funnel for embedding in a query envelope / log. */
 export function formatFunnel(d: QueryDiagnosis): string {
   const f = d.funnel;
-  const p = (label: string, v: number | null): string => `${label}=${v == null ? '?' : v}`;
+  const p = (label: string, v: number | null | undefined): string => `${label}=${v == null ? '?' : v}`;
   const blind = f.coordinatorBlind ? ' [coordinator-blind: scan/bloom are not the subqueries\' counts]' : '';
-  return (
-    [
-      `verdict=${d.verdict}`,
-      p('dispatched', f.dispatched),
-      p('scanned', f.scanned),
-      p('bloomMatched', f.bloomMatched),
-      p('streamReq', f.streamRequests),
-      p('events', f.eventsReturned),
-    ].join(' ') + blind
-  );
+  const parts = [`verdict=${d.verdict}`, p('dispatched', f.dispatched)];
+  if (f.resolvedBlobs != null) parts.push(p('resolved', f.resolvedBlobs));
+  parts.push(p('scanned', f.scanned), p('bloomMatched', f.bloomMatched), p('streamReq', f.streamRequests));
+  if (f.fetchedVolume != null) parts.push(p('fetchedBytes', f.fetchedVolume));
+  if (f.filterDropped != null) parts.push(p('filterDropped', f.filterDropped));
+  parts.push(p('events', f.eventsReturned));
+  return parts.join(' ') + blind;
 }

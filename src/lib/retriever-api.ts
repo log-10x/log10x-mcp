@@ -1741,21 +1741,25 @@ export async function runRetrieverQuery(
 
   // GROUND TRUTH first: the engine's own per-stage CloudWatch events (parsed by
   // attachDiagnostics) report what each stage actually did — scanned, matched,
-  // and the bytes the stream workers fetched — for BOTH remote and local
-  // dispatch (the subqueries log under the parent queryId). When those are
-  // present they supersede the coordinator marker's blind aggregate, and
-  // pinpoint the real failing stage (e.g. STREAM_FETCH_EMPTY: matched blobs but
-  // workers fetched 0 bytes). No inference, no probe.
+  // and what the results writer wrote vs filter-dropped — for BOTH remote and
+  // local dispatch (the subqueries log under the parent queryId). When present
+  // they supersede the coordinator marker's blind aggregate and pinpoint the
+  // real failing stage: EMPTY_RANGE (submittedKeys=0), FILTER_NO_MATCH (events
+  // reached the writer, exact predicate dropped them all), or FETCH_OR_PARSE_EMPTY
+  // (matched but no rows reached the writer). No inference, no probe.
   const cw = response.diagnostics;
   const grounded = diagnoseFromStats(
     cw
       ? {
+          submittedKeys: cw.resolution?.submittedKeys,
           scanned: cw.scanStats?.scanned,
           matched: cw.scanStats?.matched,
           streamWorkers: cw.streamDispatch?.requests ?? cw.workerStats?.started,
           workersComplete: cw.workerStats?.complete,
           fetchedBytes: cw.workerStats?.totalFetchedBytes,
           resultEvents: cw.workerStats?.totalResultEvents,
+          emptyFlushes: cw.workerStats?.totalEmptyFlushes,
+          resultsTruncated: cw.workerStats?.totalResultsTruncated,
         }
       : null,
     events.length,

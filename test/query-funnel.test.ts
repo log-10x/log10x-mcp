@@ -125,32 +125,56 @@ test('formatFunnel has no blind tag for a local (non-dispatched) query', () => {
 
 // --- diagnoseFromStats: ground truth from the engine's per-stage CW events ---
 
-test('diagnoseFromStats: real dbg-2 numbers (matched, fetched 0 bytes) -> STREAM_FETCH_EMPTY', () => {
-  // The actual demo trace: scan matched 5 of 6 blobs, 2 workers ran, fetched 0 bytes.
+test('diagnoseFromStats: dbg-2 (matched, 0 bytes fetched) -> FETCH_OR_PARSE_EMPTY', () => {
+  // Demo trace: scan matched 5 of 6 blobs, 2 workers ran, but 0 bytes of events
+  // were fetched (fetchedBytes=0) and nothing reached the writer.
   const d = diagnoseFromStats(
     { scanned: 6, matched: 5, streamWorkers: 2, workersComplete: 2, fetchedBytes: 0, resultEvents: 0 },
     0,
   );
-  assert.equal(d?.verdict, 'STREAM_FETCH_EMPTY');
+  assert.equal(d?.verdict, 'FETCH_OR_PARSE_EMPTY');
   assert.equal(d?.funnel.coordinatorBlind, false);
-  assert.match(d!.explanation, /fetched 0 bytes/);
-  assert.match(d!.hint, /object-read|read container|fetch/i);
+  assert.match(d!.explanation, /0 bytes of events were fetched/);
+  assert.match(d!.hint, /fetch|parse/i);
+});
+
+test('diagnoseFromStats: real dbg-4 (matched, 816KB fetched, 0 written) -> FILTER_NO_MATCH', () => {
+  // The actual demo trace: 26 resolved, 18 bloom-matched, 9 workers fetched
+  // 816145 bytes of events, but the exact predicate wrote 0 (emptyFlushes=0).
+  // fetchedBytes>0 PROVES fetch+parse worked — so this is a filter drop, NOT
+  // fetch-empty. This case is exactly what corrected the verdict logic.
+  const d = diagnoseFromStats(
+    { submittedKeys: 26, scanned: 26, matched: 18, streamWorkers: 9, workersComplete: 9, fetchedBytes: 816145, resultEvents: 0, emptyFlushes: 0 },
+    0,
+  );
+  assert.equal(d?.verdict, 'FILTER_NO_MATCH');
+  assert.equal(d?.funnel.fetchedVolume, 816145);
+  assert.match(d!.explanation, /816145 byte\(s\) of events were fetched/);
 });
 
 test('diagnoseFromStats: scanned 0 -> EMPTY_RANGE', () => {
   assert.equal(diagnoseFromStats({ scanned: 0, matched: 0 }, 0)?.verdict, 'EMPTY_RANGE');
 });
 
+test('diagnoseFromStats: submittedKeys 0 -> EMPTY_RANGE (resolution stage, ground truth)', () => {
+  const d = diagnoseFromStats({ submittedKeys: 0, scanned: 0, matched: 0 }, 0);
+  assert.equal(d?.verdict, 'EMPTY_RANGE');
+  assert.equal(d?.funnel.resolvedBlobs, 0);
+  assert.match(d!.explanation, /resolution stage mapped 0/);
+});
+
 test('diagnoseFromStats: scanned>0 matched 0 -> BLOOM_REJECTED_ALL', () => {
   assert.equal(diagnoseFromStats({ scanned: 9, matched: 0 }, 0)?.verdict, 'BLOOM_REJECTED_ALL');
 });
 
-test('diagnoseFromStats: fetched bytes but 0 events -> FILTER_NO_MATCH', () => {
+test('diagnoseFromStats: events reached writer but exact predicate dropped all -> FILTER_NO_MATCH', () => {
   const d = diagnoseFromStats(
-    { scanned: 6, matched: 5, streamWorkers: 2, fetchedBytes: 12345, resultEvents: 0 },
+    { scanned: 6, matched: 5, streamWorkers: 2, resultEvents: 0, emptyFlushes: 12 },
     0,
   );
   assert.equal(d?.verdict, 'FILTER_NO_MATCH');
+  assert.equal(d?.funnel.filterDropped, 12);
+  assert.match(d!.explanation, /exact predicate wrote 0/);
 });
 
 test('diagnoseFromStats: events written but none reached caller -> DELIVERY_INCOMPLETE', () => {
