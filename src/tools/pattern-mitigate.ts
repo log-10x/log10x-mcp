@@ -825,7 +825,7 @@ async function executePatternMitigateInner(
   // Option 4 — Compact at 10x edge. Same gating as option 3.
   if (caps.canCompact) {
     const sourceTag = caps.gitopsSource ? ` (PR target resolved from ${caps.gitopsSource})` : '';
-    lines.push(`**4. Shrink it instead of dropping it.** Same PR + merge flow as option 3, against \`${caps.gitopsRepo}\`${sourceTag}, but the events keep flowing. The 10x engine compresses each one losslessly so it lands at your analyzer typically 5–10× smaller — still fully searchable. Pick this when you actually need the data (compliance, dashboards rely on the raw fields, etc.).`);
+    lines.push(`**4. Shrink it instead of dropping it.** Same PR + merge flow as option 3, against \`${caps.gitopsRepo}\`${sourceTag}, but the events keep flowing. The 10x engine minifies each one losslessly so it lands at your analyzer typically 50-80% smaller, still fully searchable. Pick this when you actually need the data (compliance, dashboards rely on the raw fields, etc.).`);
   } else {
     lines.push('**4. Shrink it instead of dropping it.** _Not available in this env — same setup as option 3._');
   }

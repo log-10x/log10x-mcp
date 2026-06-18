@@ -58,7 +58,7 @@ export const explainModeSchema = {
       'Which enforcement mode to explain. ' +
       '`drop` = engine hard-drops matched patterns at the Receiver before delivery. ' +
       '`sample` = engine passes 1-in-N events through to the stack. ' +
-      '`compact` = engine compresses events ~50-80% losslessly; all events still reach the stack. ' +
+      '`compact` = engine minifies events ~50-80% losslessly; all events still reach the stack. ' +
       '`tier_down` = engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
       '`offload` = engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
