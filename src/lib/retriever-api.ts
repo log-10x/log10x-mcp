@@ -38,6 +38,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
 import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
+import { isLambdaFunctionUrl, signedLambdaUrlPost } from './lambda-url-sign.js';
 import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
 import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
@@ -824,6 +825,28 @@ async function submitQuery(
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
   const base = await getRetrieverUrl();
+
+  // Lambda retriever flavor: the query role is a Lambda Function URL with
+  // AWS_IAM auth — the URL IS the endpoint (no /streamer/query path) and the
+  // POST must be SigV4-signed. Detected by hostname, so switching flavors is
+  // pure config (point the URL at the Function URL + the lambda bucket).
+  if (isLambdaFunctionUrl(base)) {
+    const jsonBody = JSON.stringify(body);
+    const resp = await signedLambdaUrlPost(base, jsonBody);
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`Retriever Function URL POST HTTP ${resp.status}: ${errText.slice(0, 500)}`);
+    }
+    // The Function URL maps the handler's return OBJECT onto the HTTP response
+    // (statusCode is consumed; the body is typically empty), so the queryId is
+    // NOT reliably in the response body. That's fine: the caller generated the
+    // queryId client-side and sent it as body.id (the handler honors a provided
+    // id), and it polls that id — submitQuery's return is discarded. So a 2xx is
+    // success; echo back the client id for completeness.
+    const qid = typeof body.id === 'string' ? body.id : '';
+    return { queryId: qid };
+  }
+
   // The engine still routes the query handler at `/streamer/query`
   // (see StreamerQuery.java) — the path will rename to `/retriever/query`
   // when the engine cuts the rename PR. `LOG10X_RETRIEVER_QUERY_PATH`
@@ -1464,6 +1487,14 @@ export async function runRetrieverQuery(
       throw err;
     }
     httpErr = err;
+  }
+
+  if (httpErr !== undefined && isLambdaFunctionUrl(await getRetrieverUrl())) {
+    // Lambda flavor: the query role is the Function URL only — there is no
+    // query SQS queue for it. The SQS fallback targets the Quarkus/pod ingress
+    // queue, so falling back would silently query the WRONG flavor. Surface the
+    // Function URL error instead.
+    throw httpErr;
   }
 
   if (httpErr !== undefined) {
