@@ -720,31 +720,28 @@ export async function executeAdviseInstall(
 
   // Elicitation path: if the client supports it, drive every missing
   // answer via `server.elicitInput` in a single tool call. The user
-  // sees one form per question with proper enum/multi-select/form UI;
-  // we never return a "re-invoke with X" markdown prompt.
+  // sees one form per question with proper enum/multi-select/form UI.
   //
   // Falls back to the markdown-question path on:
   //   - hosts without elicitation capability (older Claude Desktop, etc.)
   //   - missing `mcpServer` reference (defensive)
-  //   - elicitation request rejected/cancelled by the user
-  if (mcpServer && clientSupportsElicitation(mcpServer)) {
+  //   - a form that was dismissed or errored (`session.formsDismissed`) —
+  //     once that happens we stay on markdown for the rest of the session
+  //     so a non-rendering form can't trap the flow in a re-render loop.
+  if (mcpServer && !session.formsDismissed && clientSupportsElicitation(mcpServer)) {
     const elicitOutcome = await elicitMissingAnswers(mcpServer, snapshot, session);
-    if (elicitOutcome.kind === 'cancelled') {
-      const md = [
-        '# Install wizard — cancelled',
-        '',
-        'You closed the form before answering. Re-invoke `log10x_advise_install` with the same `snapshot_id` to pick up where you left off — answers you already gave are remembered.',
-      ].join('\n');
-      return wizardReturn({
-        mode: 'cancelled',
-        ok: false,
-        snapshot_id: args.snapshot_id,
-        markdown: md,
-      });
-    }
-    if (elicitOutcome.kind === 'failed') {
-      // Elicitation errored mid-flow — fall back to markdown questions.
-      // The session has accumulated whatever was answered before the error.
+    // A dismissed (`cancelled`) or errored (`failed`) form can't be made to
+    // render by retrying: some clients declare the `elicitation` capability
+    // but never paint the form, so `elicitInput` resolves as cancelled at
+    // once. Re-invoking would loop on the same dead form (the symptom we're
+    // fixing). Mark the session so every later call in this flow skips
+    // elicitation, then fall back to the markdown-question path — the agent
+    // drives the wizard by passing each answer as a tool arg, reading
+    // `shape.answer_field` from the next_question envelope, exactly as
+    // clients without elicitation already do. Clients whose forms work
+    // never reach here, so their behaviour is unchanged.
+    if (elicitOutcome.kind === 'cancelled' || elicitOutcome.kind === 'failed') {
+      updateWizardSession(args.snapshot_id, { formsDismissed: true });
       const next = nextQuestion(snapshot, session);
       if (next.kind === 'ask') {
         return wizardReturn({
@@ -756,6 +753,8 @@ export async function executeAdviseInstall(
           shape: next.shape,
         });
       }
+      // No question left to ask — every answer was captured before the
+      // dismissal — so fall through to license + plan emission below.
     }
   } else {
     // Markdown-fallback path: ask one question, return markdown, wait

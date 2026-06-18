@@ -55,6 +55,7 @@ import {
   type CustomerMetricsBackend,
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
+import { computeGeneration, renderGenerationCsv } from '../lib/config-generation.js';
 import { LABELS, compressibilityPerContainer } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
@@ -3215,6 +3216,11 @@ async function applyViaKubectlConfigMap(
   delete data['actions.csv'];
   delete data['action-intent.json'];
   data['caps.csv'] = mergeCapsRows(existingData['caps.csv'], capCsv);
+  // Stamp the policy generation alongside it: a hash of the merged caps that the
+  // engine reads + advertises as the tenx_config_version label, so the MCP can
+  // later verify the running engine is executing THIS policy (config-generation
+  // closed loop), not just that the ConfigMap was written.
+  data['config-generation.csv'] = renderGenerationCsv(computeGeneration(data['caps.csv']));
   const cm = {
     apiVersion: 'v1',
     kind: 'ConfigMap',

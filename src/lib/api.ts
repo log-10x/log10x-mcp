@@ -331,10 +331,9 @@ export async function fetchUserProfile(apiKey: string): Promise<RemoteUserProfil
  * calls with the same payload converge to the same state. The response
  * contains the full updated user profile.
  *
- * Use cases include analyzer-cost ($/GB) update, AI provider settings
- * (`ai_provider`, `ai_api_key`, etc.), display-name / company changes.
- * The set of accepted metadata keys is governed by the backend; the MCP
- * passes through whatever the caller supplies.
+ * Use cases include analyzer-cost ($/GB) update and display-name / company
+ * changes. The set of accepted metadata keys is governed by the backend; the
+ * MCP passes through whatever the caller supplies.
  */
 export async function updateUserMetadata(
   apiKey: string,
