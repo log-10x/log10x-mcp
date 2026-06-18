@@ -136,6 +136,7 @@ import {
   offloadArchiveSchema,
   executeOffloadArchive,
 } from './tools/offload-manage.js';
+import { siemConnectorSchema, executeSiemConnector } from './tools/siem-connector.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
@@ -1212,6 +1213,12 @@ registerLog10xTool('log10x_offload_add', offloadAddSchema, (args) =>
   })
 );
 
+registerLog10xTool('log10x_siem_connector', siemConnectorSchema, (args) =>
+  wrap('log10x_siem_connector', async () => {
+    return executeSiemConnector(args);
+  })
+);
+
 // ── Tool: log10x_offload_archive ──
 // Flip one destination's status to `archived` (kept in the list as a
 // historical reference). Refuses when the target is the last active
@@ -1930,6 +1937,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
+  { name: 'log10x_siem_connector', intent: 'Emit the SIEM<-S3 connector config (Datadog Forwarder Lambda / Splunk Add-on SQS-based S3 input) for an offload bucket: terraform for the SNS fan-out + IAM, the SIEM-native input config, and verified caveats. The destination/ingest side — 10x lands NDJSON in the customer bucket; the SIEM pulls it.' },
   { name: 'log10x_compile', intent: 'Compile a symbol library from any mix of sources, waiting inline for the result when it is quick and handing back a pollable job_id when it is not (max_wait_ms, default 45s; 0 = fire-and-forget). Small compiles and re-runs (which reuse prior units via the pinned output) return the library + diagnostics in ONE call; a long first compile of a large tree returns a job_id to poll with log10x_compile_status (or just call again later — the output is pinned, so a finished run is collected near-instantly). Sources combine freely: a local source folder, GitHub repos, docker/OCI images, Helm charts, and Artifactory artifacts, via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image and Helm-referenced-image pull are daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds; Helm bare repo/chart names need helm_repos (OCI/URL resolve standalone); Artifactory needs artifactory_instance + artifactory_repo + a token. Edge flavor is refused.' },
   { name: 'log10x_compile_status', intent: 'Poll a compile or link job by job_id (handed back by log10x_compile / log10x_compile_link when they overran their inline wait): job_status (running/completed/failed/timed_out), units produced + linked .10x.tar, and the engine diagnostics that make the compiler not a black box at scale — per-language scan-failure counts with capped samples, and the link report (merge/exclude counts + symbol-type histogram). Captures the exit code and frees the container on first terminal poll; repeat polls stay readable.' },
   { name: 'log10x_compile_link', intent: 'Link an existing folder of .10x.json symbol units into a single .10x.tar library, with NO source scan — the same compiler invoked with link-only args (units folder as outputSymbolFolder, no source), so it reuses on-disk units and merges them. Waits inline for the result (linking is usually fast; max_wait_ms, default 45s) and otherwise hands back a job_id to poll with log10x_compile_status. Use to re-link after editing/pruning units or to rebuild a library from a units tree (e.g. the output folder of a prior log10x_compile).' },
