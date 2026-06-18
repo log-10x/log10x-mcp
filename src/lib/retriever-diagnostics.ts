@@ -58,6 +58,10 @@ export interface RetrieverQueryDiagnostics {
     vars: number;
     timeslice: number;
     dispatch: 'local' | 'remote' | 'unknown';
+    /** The bloom pre-filter expression (querySearch), when the engine reports it. */
+    search?: string;
+    /** The exact in-memory predicate applied to fetched events (queryFilters). */
+    filter?: string;
   };
   /** Populated when isEmptyQuery() returned true — no parseable search tokens. */
   emptyReason?: string;
@@ -116,6 +120,13 @@ export interface RetrieverQueryDiagnostics {
     totalEmptyFlushes: number;
     /** Events the results writer dropped because the result cap was hit. */
     totalResultsTruncated: number;
+    /**
+     * Bytes actually read from the source objects (S3 GET), summed across workers,
+     * from "stream worker fetch complete: s3BytesRead". The REAL fetch counter (vs
+     * totalFetchedBytes, which is pre-filter event volume). 0 when the engine
+     * predates the counter; > 0 distinguishes a parse miss from a fetch-empty.
+     */
+    totalS3BytesRead: number;
   };
   /** Main coordinator pipeline elapsed time (NOT full query wall time). */
   coordinatorElapsedMs?: number;
@@ -234,6 +245,8 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
   let totalResultEvents = 0;
   let totalEmptyFlushes = 0;
   let totalResultsTruncated = 0;
+  let totalS3BytesRead = 0;
+  let sawS3Read = false;
   let submittedKeys = 0;
   let submittedTasks = 0;
   let sawScanRange = false;
@@ -249,6 +262,8 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
         vars: (data.vars as number) ?? 0,
         timeslice: (data.timeslice as number) ?? 0,
         dispatch: (dispatch === 'local' || dispatch === 'remote') ? dispatch : 'unknown',
+        ...(typeof data.search === 'string' ? { search: data.search } : {}),
+        ...(typeof data.filter === 'string' ? { filter: data.filter } : {}),
       };
     } else if (msg.startsWith('query empty:')) {
       diag.emptyReason = (data.reason as string) || 'no_template_hashes_or_vars';
@@ -280,6 +295,11 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
       if (diag.coordinatorElapsedMs === undefined) {
         diag.coordinatorElapsedMs = data.elapsedMs as number;
       }
+    } else if (msg.startsWith('stream worker fetch complete:')) {
+      // Real S3-GET byte count per worker (distinct from the q/ "stream worker
+      // complete: fetched N bytes" event below, which is pre-filter event volume).
+      sawS3Read = true;
+      totalS3BytesRead += (data.s3BytesRead as number) || 0;
     } else if (msg.startsWith('stream worker started:')) {
       workersStarted++;
     } else if (msg.startsWith('stream worker complete:')) {
@@ -300,7 +320,7 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
     diag.resolution = { submittedKeys, submittedTasks };
   }
 
-  if (workersStarted > 0 || workersComplete > 0) {
+  if (workersStarted > 0 || workersComplete > 0 || sawS3Read) {
     diag.workerStats = {
       started: workersStarted,
       complete: workersComplete,
@@ -308,6 +328,7 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
       totalResultEvents,
       totalEmptyFlushes,
       totalResultsTruncated,
+      totalS3BytesRead,
     };
   }
 

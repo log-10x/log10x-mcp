@@ -152,6 +152,43 @@ test('diagnoseFromStats: real dbg-4 (matched, 816KB fetched, 0 written) -> FILTE
   assert.match(d!.explanation, /816145 byte\(s\) of events were fetched/);
 });
 
+test('diagnoseFromStats: FILTER_NO_MATCH surfaces the exact predicate when present', () => {
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, fetchedBytes: 816145, resultEvents: 0, filterExpr: 'severity_level == "INFO"' },
+    0,
+  );
+  assert.equal(d?.verdict, 'FILTER_NO_MATCH');
+  assert.match(d!.explanation, /Filter applied: `severity_level == "INFO"`/);
+});
+
+test('diagnoseFromStats: s3BytesRead==0 (matched, nothing parsed) -> FETCH_EMPTY', () => {
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, fetchedBytes: 0, emptyFlushes: 0, resultEvents: 0, s3BytesRead: 0 },
+    0,
+  );
+  assert.equal(d?.verdict, 'FETCH_EMPTY');
+  assert.equal(d?.funnel.s3BytesRead, 0);
+  assert.match(d!.explanation, /object read returned 0 bytes/);
+});
+
+test('diagnoseFromStats: s3BytesRead>0 but 0 parsed -> PARSE_EMPTY', () => {
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, fetchedBytes: 0, emptyFlushes: 0, resultEvents: 0, s3BytesRead: 4096 },
+    0,
+  );
+  assert.equal(d?.verdict, 'PARSE_EMPTY');
+  assert.match(d!.explanation, /returned 4096 byte\(s\), but 0 events were parsed/);
+});
+
+test('diagnoseFromStats: s3BytesRead absent -> FETCH_OR_PARSE_EMPTY (graceful fallback)', () => {
+  // Engine that predates the s3BytesRead counter: cannot split fetch vs parse.
+  const d = diagnoseFromStats(
+    { scanned: 6, matched: 5, fetchedBytes: 0, emptyFlushes: 0, resultEvents: 0 },
+    0,
+  );
+  assert.equal(d?.verdict, 'FETCH_OR_PARSE_EMPTY');
+});
+
 test('diagnoseFromStats: scanned 0 -> EMPTY_RANGE', () => {
   assert.equal(diagnoseFromStats({ scanned: 0, matched: 0 }, 0)?.verdict, 'EMPTY_RANGE');
 });

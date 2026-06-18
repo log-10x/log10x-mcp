@@ -49,8 +49,10 @@ export type QueryVerdict =
   | 'EMPTY_RANGE' //       resolution mapped 0 blobs for the window (no data OR time-mapping broken)
   | 'BLOOM_REJECTED_ALL' //blobs scanned, search term in none of them
   | 'MATCHED_NO_EVENTS' // marker-only: something matched but no events landed
-  | 'FILTER_NO_MATCH' //   ground truth: events reached the writer, the exact predicate dropped them all (emptyFlushes>0)
-  | 'FETCH_OR_PARSE_EMPTY' //ground truth: bloom matched but no rows reached the writer; fetch vs parse can't be split from current signals
+  | 'FILTER_NO_MATCH' //   ground truth: events reached the writer, the exact predicate dropped them all (fetchedVolume/emptyFlushes>0)
+  | 'FETCH_EMPTY' //       ground truth: object read returned 0 bytes (s3BytesRead==0)
+  | 'PARSE_EMPTY' //       ground truth: object bytes read (s3BytesRead>0) but 0 events parsed
+  | 'FETCH_OR_PARSE_EMPTY' //ground truth: bloom matched but no rows reached the writer; s3BytesRead unavailable to split fetch vs parse
   | 'DELIVERY_INCOMPLETE' //ground truth: events written but not read back
   | 'DISPATCHED_BLIND' //  remote dispatch; coordinator can't see subquery outcome
   | 'INCONCLUSIVE'; //     finished, zero events, marker lacks detail
@@ -78,6 +80,8 @@ export interface QueryFunnel {
    * Despite the engine's "fetched" label this is event volume, not S3-GET bytes.
    */
   fetchedVolume?: number | null;
+  /** Bytes read from the source object (S3 GET). The real fetch counter; splits FETCH_EMPTY from PARSE_EMPTY. */
+  s3BytesRead?: number | null;
   /**
    * Events that reached the results writer but were dropped by the exact
    * predicate pre-write (results-writer emptyFlushes). Ground-truth only; a
@@ -140,6 +144,21 @@ export interface CloudWatchStageStats {
   emptyFlushes?: number;
   /** Events dropped at the results cap. */
   resultsTruncated?: number;
+  /**
+   * Bytes actually read from the source object (S3 GET), from the engine's
+   * "stream worker fetch complete: s3BytesRead" PERF event. The REAL fetch
+   * counter (unlike fetchedBytes, which is pre-filter event volume). When
+   * present it splits a 0-result cleanly: ==0 => FETCH_EMPTY (read returned
+   * nothing); >0 with 0 events parsed => PARSE_EMPTY. Absent on engines that
+   * predate the counter (the funnel falls back to FETCH_OR_PARSE_EMPTY).
+   */
+  s3BytesRead?: number;
+  /**
+   * The exact in-memory predicate applied to fetched events (queryFilters), from
+   * the "query plan" event's filter= field. Surfaced in a FILTER_NO_MATCH
+   * explanation so the agent sees what was matched, not just that nothing passed.
+   */
+  filterExpr?: string;
 }
 
 /**
@@ -170,6 +189,7 @@ export function diagnoseFromStats(
   const fetchedBytes = num(s.fetchedBytes);
   const resultEvents = num(s.resultEvents);
   const emptyFlushes = num(s.emptyFlushes);
+  const s3BytesRead = num(s.s3BytesRead);
   // Nothing parsed → no ground truth to offer.
   if (submittedKeys == null && scanned == null && matched == null && workers == null) return null;
 
@@ -181,6 +201,7 @@ export function diagnoseFromStats(
     skippedSearch: null,
     skippedTemplate: null,
     streamRequests: workers,
+    s3BytesRead,
     fetchedVolume: fetchedBytes,
     filterDropped: emptyFlushes,
     eventsReturned,
@@ -215,23 +236,42 @@ export function diagnoseFromStats(
   // fetchedBytes is the q/ writer's volume of events FETCHED from the matched
   // byte-ranges (pre-filter); emptyFlushes corroborates that events reached the
   // writer. Either > 0 means events WERE fetched but the exact predicate wrote
-  // none (FILTER_NO_MATCH). Both 0 means nothing materialized (FETCH_OR_PARSE_EMPTY).
+  // none (FILTER_NO_MATCH). Otherwise nothing materialized — and s3BytesRead, when
+  // present, splits a true fetch-empty (==0) from a parse miss (>0).
   if ((matched ?? 0) > 0 && (resultEvents ?? 0) === 0) {
     const fetched = fetchedBytes ?? 0;
     const flushed = emptyFlushes ?? 0;
     if (fetched > 0 || flushed > 0) {
+      const filterClause = s.filterExpr ? ` Filter applied: \`${s.filterExpr}\`.` : '';
       return {
         verdict: 'FILTER_NO_MATCH',
         funnel,
-        explanation: `Bloom matched ${matched} blob(s); ${fetched} byte(s) of events were fetched from them but the exact predicate wrote 0 (written=0${flushed > 0 ? `, emptyFlushes=${flushed}` : ''}). The bloom is approximate; the exact filter is the truth and it matched nothing.`,
-        hint: 'Events were fetched but none passed the exact predicate. Probe what the field actually carries; the search field/value most likely does not match the real data. WHY each event was dropped is not logged per-event (engine gap: QueryFilterEvaluator emits nothing) — that is the signal to add to localize this further.',
+        explanation: `Bloom matched ${matched} blob(s); ${fetched} byte(s) of events were fetched from them but the exact predicate wrote 0 (written=0${flushed > 0 ? `, emptyFlushes=${flushed}` : ''}).${filterClause} The bloom is approximate; the exact filter is the truth and it matched nothing.`,
+        hint: 'Events were fetched but none passed the exact predicate. Probe what the field actually carries; the search field/value most likely does not match the real data.',
+      };
+    }
+    // Nothing reached the writer. Use the real S3-read counter to localize.
+    if (s3BytesRead != null && s3BytesRead === 0) {
+      return {
+        verdict: 'FETCH_EMPTY',
+        funnel,
+        explanation: `Bloom matched ${matched} blob(s) but the object read returned 0 bytes (s3BytesRead=0) — nothing came back from storage to parse or filter.`,
+        hint: 'The fetch itself returned nothing. Check the read container/bucket, the byte-range, and that the matched object still exists in storage; this is the object-read stage, not the search.',
+      };
+    }
+    if (s3BytesRead != null && s3BytesRead > 0) {
+      return {
+        verdict: 'PARSE_EMPTY',
+        funnel,
+        explanation: `Bloom matched ${matched} blob(s) and the object read returned ${s3BytesRead} byte(s), but 0 events were parsed from them (fetchedVolume=0) — the bytes came back but the parser produced no events.`,
+        hint: 'Bytes were read but parsed into zero events — a parse/format issue, not the search. Confirm the object encoding matches the reader (e.g. NDJSON vs the expected line format) before concluding a fault.',
       };
     }
     return {
       verdict: 'FETCH_OR_PARSE_EMPTY',
       funnel,
-      explanation: `Bloom matched ${matched} blob(s) but 0 bytes of events were fetched from them (fetchedBytes=0, emptyFlushes=0, written=0) — the fetch or the parse produced nothing. The engine emits no separate S3-GET byte count, so fetch and parse cannot be split from the current signals; this is an observation, not a root cause.`,
-      hint: 'Not the search — candidates matched but no event bytes materialized. Splitting fetch (object-read returned nothing) from parse (bytes returned, no events) needs the engine to emit a real S3-read byte counter; until then trace the read+parse path in the engine source. Do NOT assume an engine fault.',
+      explanation: `Bloom matched ${matched} blob(s) but 0 bytes of events were fetched from them (fetchedBytes=0, emptyFlushes=0, written=0) — the fetch or the parse produced nothing. This engine does not emit s3BytesRead, so fetch and parse cannot be split here; this is an observation, not a root cause.`,
+      hint: 'Not the search — candidates matched but no event bytes materialized. Splitting fetch from parse needs the engine s3BytesRead counter (added but may not be deployed here); until then trace the read+parse path. Do NOT assume an engine fault.',
     };
   }
   // Wrote events but the caller got none → delivery/path gap.
@@ -362,6 +402,7 @@ export function formatFunnel(d: QueryDiagnosis): string {
   const parts = [`verdict=${d.verdict}`, p('dispatched', f.dispatched)];
   if (f.resolvedBlobs != null) parts.push(p('resolved', f.resolvedBlobs));
   parts.push(p('scanned', f.scanned), p('bloomMatched', f.bloomMatched), p('streamReq', f.streamRequests));
+  if (f.s3BytesRead != null) parts.push(p('s3BytesRead', f.s3BytesRead));
   if (f.fetchedVolume != null) parts.push(p('fetchedBytes', f.fetchedVolume));
   if (f.filterDropped != null) parts.push(p('filterDropped', f.filterDropped));
   parts.push(p('events', f.eventsReturned));

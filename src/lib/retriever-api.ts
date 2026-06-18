@@ -1760,6 +1760,8 @@ export async function runRetrieverQuery(
           resultEvents: cw.workerStats?.totalResultEvents,
           emptyFlushes: cw.workerStats?.totalEmptyFlushes,
           resultsTruncated: cw.workerStats?.totalResultsTruncated,
+          s3BytesRead: cw.workerStats?.totalS3BytesRead,
+          filterExpr: cw.queryPlan?.filter,
         }
       : null,
     events.length,
