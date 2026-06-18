@@ -40,50 +40,64 @@ receiver/reporter retrieves it. The compile *producer* itself is now built (see 
    (the reload unit is wired, but `@github` is off by default and delivery is one-time),
    so Phase 1 **defaults to commit → rollout-restart**; hot-reload is opt-in and needs a
    chart/config fix (§4 callout, §10 Q2).
-7. **Simplification 2026-06-18 (read §0 first).** The default library is already
-   bundled in every `*-10x` image, and `symbol.paths` is a LIST, so adding custom
-   symbols is just *appending a path* — the engine reads default + custom, you never
-   replace. `place_symbols` and the git transport are conveniences for the k8s case,
-   not the mental model. §3-§9 are the detailed/advanced transports.
+7. **Simplification + correction 2026-06-18 (read §0 first).** The default library is
+   already bundled in every `*-10x` image — but at `/etc/tenx/symbols` via the
+   `TENX_SYMBOLS_PATH` env var (validated), and the config-relative `data/shared/symbols`
+   slot is empty in the stock image. `symbol.paths` is a LIST so adding symbols *can* be
+   additive, **but the chart's `symbols.volume`/`symbols.git` modes overmount/repoint
+   `TENX_SYMBOLS_PATH` and therefore REPLACE the default, not add to it.** Staying
+   additive means adding a file/path without clobbering `/etc/tenx/symbols` (subPath
+   mount, extra `-symbolPaths`, or a pre-seeded PVC). This is the real gap to close.
 
 ---
 
 ## 0. The simple model (start here)
 
-The earlier sections framed this as elaborate "placement." After review, the actual
-model is simple:
+The mental model is simple, but one detail is load-bearing and was **validated against
+the engine Dockerfiles + `config_build` on 2026-06-18** (an earlier draft got it wrong).
 
-1. **The default library ships in the image.** `log10x/edge-10x`, `quarkus-10x`, and
-   `pipeline-10x` already bake the ~150-framework default library at
-   `data/shared/symbols` (relative to `TENX_CONFIG`). So **every reporter / receiver /
-   retriever install recognizes the common frameworks out of the box, zero config.**
-   There is nothing to build for the default case.
+1. **The default library ships in the image, at `/etc/tenx/symbols` via the
+   `TENX_SYMBOLS_PATH` env var.** Every `*-10x` image (`edge-10x`, `quarkus-10x`,
+   `pipeline-10x`, the forwarder images, `compiler-10x`) bakes the precompiled
+   ~150-framework library as a `.10x.tar` at `/etc/tenx/symbols` and sets
+   `ENV TENX_SYMBOLS_PATH=/etc/tenx/symbols` (`engine/docker/*/Dockerfile`). So
+   **common frameworks work out of the box, zero config** — loaded via
+   `TENX_SYMBOLS_PATH`.
 
-2. **Adding your own symbols is ADDITIVE, never a replace.** The run engine reads
-   `symbol.paths`, which is a **list**:
+2. **The other `symbol.paths` entry is empty in the stock image.** The run config reads
    `[ path("data/shared/symbols"), path("<TENX_SYMBOLS_PATH>") ]`
-   (`config/pipelines/run/symbol/config.yaml`). So the engine loads the **bundled
-   default AND** whatever you add. Adding symbols = *concat into the symbol paths*, or
-   *drop the file into a directory already on the path*.
+   (`config/pipelines/run/symbol/config.yaml`). The first entry, `data/shared/symbols`
+   (relative to `TENX_CONFIG`), is the **local / GitOps slot** — but the precompiled lib
+   is **gitignored** in the config repo and `config_build` tars config with
+   `--exclude='.*'`, so the **config tarball ships no library**. In the stock image only
+   the `TENX_SYMBOLS_PATH` entry carries the default.
 
-3. **The simple mechanisms:**
-   - **Local / CLI:** `tenx … -symbolPaths /path/to/your.10x.tar` (appended to the
-     defaults), or copy the `.10x.tar` into `$TENX_CONFIG/data/shared/symbols/`.
-   - **k8s:** `symbols.volume` (a PVC mounted at `/etc/tenx/symbols` → becomes
-     `TENX_SYMBOLS_PATH`) or `symbols.git` (init-container clone). **Both ADD a second
-     path; the baked default stays on `symbol.paths`.** (Verified against the reporter
-     `daemonset.yaml` env logic.)
+3. **CAUTION — the chart's current custom-symbol modes REPLACE the default, they do not
+   add to it.** Because the default lives at `TENX_SYMBOLS_PATH=/etc/tenx/symbols`:
+   - **`symbols.volume`** mounts a PVC *over* `/etc/tenx/symbols` → shadows the baked
+     default (lost unless the PVC also contains it).
+   - **`symbols.git`** repoints `TENX_SYMBOLS_PATH` to the git clone → the baked default
+     is on no path (lost unless the repo also contains it).
+   Neither is additive today. **This is the real gap** between "all installs keep the
+   default" and what the chart does.
 
-4. **The one gotcha — don't move the whole config dir.** Enabling `config.git` (pulling
-   the *entire* config from git) overrides `TENX_CONFIG`, so `data/shared/symbols` then
-   resolves *inside the git repo* — if that repo doesn't carry the default library, you
-   lose it. Keep **symbol** delivery separate from **full-config** delivery, or include
-   the default library in that repo. (This is the only path that drops the default.)
+4. **The additive recipes (what we actually want — "concat into the paths, or mount into
+   the existing ones"):**
+   - **Local / CLI:** `tenx … -symbolPaths /path/to/your.10x.tar` (adds a path; the
+     image default at `TENX_SYMBOLS_PATH` stays), or drop your `.10x.tar` **into**
+     `/etc/tenx/symbols` next to the baked `symbols.10x.tar` (the dir is scanned, so both
+     load).
+   - **k8s:** mount your custom tar as a **single file** into the existing dir via
+     `subPath` (e.g. `/etc/tenx/symbols/custom.10x.tar`) so the baked sibling survives;
+     **or** pre-seed the PVC with default + custom; **or** add an extra `-symbolPaths`
+     arg pointing at a second mounted dir. The key is: **never overmount the whole dir or
+     repoint `TENX_SYMBOLS_PATH` away from the default.**
 
-**So `log10x_place_symbols` (§5) is just a convenience** that lands your custom
-`.10x.tar` in one of the additive spots above and reminds you to roll the pod. It does
-**not** replace the default library. Everything below (§3-§9) is the detailed mechanics
-of *which* spot and *whether a restart is needed* — useful, but secondary to this model.
+**So `log10x_place_symbols` (§5) lands the file; to stay additive the receiver must ADD
+it (subPath / extra path / pre-seeded PVC), not the chart's overmount/repoint modes.**
+The cleanest fix for the gap is a chart option that mounts an *extra* symbols file/dir
+without clobbering `/etc/tenx/symbols` (a helm-charts change). §3-§9 detail the
+transports; this section is the model.
 
 ---
 

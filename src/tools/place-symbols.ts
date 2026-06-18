@@ -185,13 +185,18 @@ export async function executePlaceSymbols(
   }
   warnings.push('The emitted script needs `gh` authenticated with write (Contents + PR) access to the repo.');
 
-  // ── 6. Additive reassurance + rollout vs hot-reload guidance ──
-  // symbol.paths is a LIST, so this ADDS the custom library; the bundled default
-  // (the ~150 common frameworks baked into the *-10x image) stays on the path.
-  const additiveNote =
-    'This is additive: the engine keeps the default symbol library bundled in its image and reads ' +
-    'this custom one too (symbol.paths is a list). The only way to lose the default is to override the ' +
-    'whole config dir via config.git - keep symbol delivery separate from full-config delivery.';
+  // ── 6. Default-library caveat + rollout vs hot-reload guidance ──
+  // Validated 2026-06-18: the bundled default library lives at /etc/tenx/symbols via
+  // TENX_SYMBOLS_PATH. The chart's symbols.git mode REPOINTS TENX_SYMBOLS_PATH to the
+  // git clone, so committing only the custom tar DROPS the default unless the default
+  // is ALSO present on a symbol path. So this is NOT additive by itself.
+  const defaultLibNote =
+    'IMPORTANT - keep the default library: the ~150-framework default ships at ' +
+    '/etc/tenx/symbols (TENX_SYMBOLS_PATH). The chart symbols.git mode repoints ' +
+    'TENX_SYMBOLS_PATH to this repo, so committing ONLY your tar DROPS the default. To keep both, ' +
+    'either also commit the default symbols.10x.tar into this repo folder, mount your tar as an ' +
+    'extra file (subPath) into /etc/tenx/symbols, or add a second -symbolPaths entry. symbol.paths ' +
+    'is a list, so multiple .10x.tar files all load.';
   const branchNote = placement.branch ? `branch \`${placement.branch}\`` : 'the default branch';
   const rolloutHint =
     'kubectl rollout restart -n <namespace> daemonset/<reporter-release>   ' +
@@ -220,7 +225,7 @@ export async function executePlaceSymbols(
     '',
     liveNote,
     '',
-    additiveNote,
+    defaultLibNote,
   ]
     .filter((l) => l !== undefined)
     .join('\n');
@@ -248,8 +253,10 @@ export async function executePlaceSymbols(
       library_path: libPath,
       library_bytes: size,
       file_name: fileName,
-      additive: true,
-      preserves_default_library: true,
+      // The chart symbols.git mode repoints TENX_SYMBOLS_PATH, so the bundled default
+      // is NOT automatically preserved; the caller must also keep it on a path.
+      preserves_default_library: false,
+      default_library_note: defaultLibNote,
       script,
       notes: placement.notes,
       human_summary,
