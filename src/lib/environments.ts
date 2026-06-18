@@ -754,6 +754,19 @@ async function loadLegacyLog10x(): Promise<Environments> {
     }
   }
 
+  // Path 3.5: explicit `LOG10X_LICENSE_JWT` — a demo license the caller
+  // deliberately provided. Beats a persisted login (Path 4): "use THIS demo
+  // license" is explicit intent, and the install-e2e / demo flows rely on it
+  // overriding ~/.log10x/credentials. (A persisted demo license, by contrast,
+  // stays below credentials — see Path 4.5 — so a signed-in user is never
+  // silently downgraded to old demo data.)
+  const envDemoLicense = await tryBuildDemoLicenseEnv('env');
+  if (envDemoLicense) {
+    // eslint-disable-next-line no-console
+    console.info(`[log10x-mcp] metricsBackend resolved via demo license (LOG10X_LICENSE_JWT, /api/v1/demo/*)`);
+    return envDemoLicense;
+  }
+
   // Path 4: persistent credentials at ~/.log10x/credentials, written
   // by log10x_signin_complete.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
@@ -793,16 +806,17 @@ async function loadLegacyLog10x(): Promise<Environments> {
     }
   }
 
-  // Path 4.5: a demo LICENSE JWT — explicit LOG10X_LICENSE_JWT, or one
-  // persisted by the install wizard / a prior demo (the SAME license the
-  // engine writes with). Unlike the shared demo key below, this reads the
-  // user's OWN demo tenant via /api/v1/demo/* with Authorization: Bearer, so
-  // a not-signed-in user can pull back exactly what their demo engine wrote.
-  const demoLicenseEnvs = await tryBuildDemoLicenseEnv();
-  if (demoLicenseEnvs) {
+  // Path 4.5: a demo license PERSISTED by the install wizard / a prior demo
+  // (the SAME license the engine writes with). Only reached when NOT signed in
+  // (Path 4 returns first for a real account). Unlike the shared demo key
+  // below, this reads the user's OWN demo tenant via /api/v1/demo/* with
+  // Authorization: Bearer, so a not-signed-in user can pull back exactly what
+  // their demo engine wrote.
+  const persistedDemoLicense = await tryBuildDemoLicenseEnv('persisted');
+  if (persistedDemoLicense) {
     // eslint-disable-next-line no-console
-    console.info(`[log10x-mcp] metricsBackend resolved via demo license (own demo tenant, /api/v1/demo/*)`);
-    return demoLicenseEnvs;
+    console.info(`[log10x-mcp] metricsBackend resolved via demo license (persisted, own demo tenant, /api/v1/demo/*)`);
+    return persistedDemoLicense;
   }
 
   // Path 5: nothing set — pure demo mode. Public demo key so the
@@ -814,15 +828,21 @@ async function loadLegacyLog10x(): Promise<Environments> {
 }
 
 /**
- * Build a demo-license-backed `Environments` from an explicit
- * `LOG10X_LICENSE_JWT` env var, or a demo license persisted by the install
- * wizard / a prior demo. Returns undefined when neither is present (so the
- * caller falls through to the shared-key sample-data demo).
+ * Build a demo-license-backed `Environments` from one source:
+ *   - `'env'`       → the explicit `LOG10X_LICENSE_JWT` env var (Path 3.5)
+ *   - `'persisted'` → a demo license saved by the install wizard / a prior
+ *                     demo at ~/.log10x/demo-license.json (Path 4.5)
+ *
+ * Returns undefined when that source is absent/expired, so the caller falls
+ * through to the next path. Splitting the two sources is deliberate: an
+ * explicit env var beats a persisted login, a persisted file does not.
  */
-async function tryBuildDemoLicenseEnv(): Promise<Environments | undefined> {
-  let jwt = process.env.LOG10X_LICENSE_JWT?.trim();
+async function tryBuildDemoLicenseEnv(source: 'env' | 'persisted'): Promise<Environments | undefined> {
+  let jwt: string | undefined;
   let expiresAtEpochSec: number | undefined;
-  if (!jwt) {
+  if (source === 'env') {
+    jwt = process.env.LOG10X_LICENSE_JWT?.trim() || undefined;
+  } else {
     const stored = await readDemoLicense().catch(() => null);
     if (stored && !isDemoLicenseExpired(stored)) {
       jwt = stored.jwt;

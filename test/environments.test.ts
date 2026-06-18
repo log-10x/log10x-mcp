@@ -208,6 +208,25 @@ test('demo license: LOG10X_LICENSE_JWT resolves to a log10x_demo env (no api key
   }
 });
 
+test('demo license: explicit LOG10X_LICENSE_JWT wins over a persisted login (~/.log10x/credentials)', async () => {
+  // A signed-in user (credentials present) who explicitly passes a demo license
+  // must get the demo env — explicit intent beats the stored login. Path 3.5
+  // returns before Path 4, so the (fake) credentials key is never network-validated.
+  const dir = join(tmpHome!, '.log10x');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'credentials'), JSON.stringify({ apiKey: 'stored-login-key' }));
+  const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
+  process.env.LOG10X_LICENSE_JWT = jwt;
+  try {
+    const envs = await loadEnvironments();
+    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
+    assert.equal(envs.isDemoMode, true);
+    assert.equal(envs.default.envId, 'demo-xyz');
+  } finally {
+    delete process.env.LOG10X_LICENSE_JWT;
+  }
+});
+
 test('phase 3: both env vars AND envs.json set → MCP refuses to start', async () => {
   process.env.LOG10X_METRICS_BACKEND_KIND = 'prometheus';
   process.env.LOG10X_METRICS_URL = 'http://prom.test:9090';
