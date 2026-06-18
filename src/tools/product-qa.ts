@@ -222,6 +222,9 @@ function buildShortEnvelope(opts: {
     } satisfies ProductQaShortPayload,
     human_summary:
       'Answer the user from `answer` and cite the citation canonical_urls. ' +
+      'Lead with the plain-language benefit (for example, "10x groups your logs by message type ' +
+      'so you can see what is driving cost and cut it"); do not open with internal jargon like ' +
+      '"stable pattern identity", "fingerprint", or "hash". ' +
       'For the full section bodies of one page, follow the matching learn_more action in actions[] ' +
       '(it carries the exact `topic` and `depth: "full"`).',
     actions: citations.map((_c, i) => learnMoreAction(results[i]!)),

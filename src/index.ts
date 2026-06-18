@@ -662,11 +662,20 @@ const SERVER_OPTIONS = {
 
 NEGATION: DO NOT call log10x_estimate_savings, log10x_cost_options, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
 
-Log10x is the observability memory for the user's logs. Every log line the pipeline
-has ever seen is fingerprinted into a stable pattern identity (the hash of a representing-token subset, so many template variants collapse to one) that stays constant across
-deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
-time series of volume and cost, so any pattern the user has ever emitted is instantly queryable by
-name, by history, or by sample line — with zero prior query setup.
+Log10x groups a user's logs by message type. The same messages repeat over and over with
+only the timestamp or request ID changing, so 10x collapses each flood of near-identical lines
+into one message type and ranks them by the volume and cost each one drives. The user sees exactly
+what is filling their bill and can cut the noise, with no regex or rules to write.
+
+When explaining this to a user, lead with that outcome in plain language ("10x groups your logs by
+message type so you can see what's driving cost and cut it"); do not open with internal jargon like
+"stable pattern identity", "fingerprint", or "hash".
+
+Under the hood, each message type gets a stable identity (the hash of a representing-token subset,
+so many template variants collapse to one) that stays constant across deploys, restarts, pod names,
+timestamps, and request IDs. That identity is the key to a Prometheus time series of volume and cost,
+so any pattern the user has ever emitted is instantly queryable by name, by history, or by sample
+line with zero prior query setup, the observability memory for their logs.
 
 CUSTOMER TIER LADDER (determines which tools are available)
 
