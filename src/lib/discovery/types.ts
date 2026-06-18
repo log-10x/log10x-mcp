@@ -356,6 +356,17 @@ export interface WizardSession {
    *     `license_jwt_paste`
    */
   licenseSource?: 'signin' | 'demo' | 'paste';
+  /**
+   * `true` once a native elicitation form was dismissed or errored in this
+   * session. Some clients (certain Claude Desktop builds) declare the
+   * `elicitation` capability but never paint the form, so `elicitInput`
+   * resolves as cancelled immediately — retrying just loops on the dead
+   * form. Once set, `advise_install` stops trying forms for the rest of
+   * this session and asks via markdown questions instead, so the agent can
+   * drive the wizard by passing each answer as a tool arg. Clients whose
+   * forms render never set this, so their behaviour is unchanged.
+   */
+  formsDismissed?: boolean;
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }
