@@ -116,6 +116,20 @@ Persistent state for the campaign:
 - `demo` (default): hardcoded OTel demo env (`6aa99191-…`), public gateway. Reproducible, free, but cost_drivers can't show growth (continuous replay = stable cost).
 - `customer`: `~/.log10x/credentials` first, then `LOG10X_API_KEY` env var. Real customer data; expect rate limits.
 - `ci`: `LOG10X_API_KEY` env only; aborts if missing. For GitHub-Actions-style runs.
+- `demo-license`: `LOG10X_LICENSE_JWT` (a self-minted demo license). Queries `/api/v1/demo/*` via the MCP's `log10x_demo` backend — the caller's OWN demo tenant, last 3h. Used by the install→validate close-the-loop e2e below; the runner mints + sets the JWT for you.
+
+## Close-the-loop install e2e (`bin/run-install-e2e.mjs`)
+
+The full thing: a not-signed-in user installs the engine on a real cluster with a demo license, the engine writes to the SaaS Prometheus, and the MCP reads it back via the demo-license query path. Gated on `LOG10X_E2E=1` (else dry-run: preflight + license mint, no cluster). Defaults to **minikube** (`LOG10X_E2E_PROVIDER=existing` to use the current kube-context instead).
+
+```bash
+npm run build                                  # build the MCP (the e2e imports build/lib/*)
+node eval/bin/run-install-e2e.mjs --dry-run    # preflight + mint, no cluster
+LOG10X_E2E=1 node eval/bin/run-install-e2e.mjs # mint → minikube → helm install log10x/reporter-10x
+                                               # → poll /api/v1/demo/* → assert tenx_pipeline_up → teardown
+```
+
+The engine install and the validation query use the SAME minted demo license, so reads and writes hit one demo tenant. `LOG10X_E2E_KEEP=1` skips teardown for debugging.
 
 ## File layout
 
