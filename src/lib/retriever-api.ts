@@ -38,6 +38,9 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
 import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
+import { isLambdaFunctionUrl, signedLambdaUrlPost } from './lambda-url-sign.js';
+import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
+import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 
 const execFileP = promisify(execFile);
@@ -73,6 +76,14 @@ export interface RetrieverQueryRequest {
   filters?: string[];
   /** Target app prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__. */
   target?: string;
+  /**
+   * Tier-1 result-sink redirect: bare-token prefix under which query OUTPUT
+   * (qr/ events, qrs/ summaries, q/ markers, _DONE.json) is written, in the
+   * SAME index bucket. Maps to the engine `queryResultTarget` option. When
+   * set, the MCP polls `tenx/{resultTarget}/qr/{queryId}/` for results; when
+   * omitted, results stay under `target` (legacy). Must be `[A-Za-z0-9_-]+`.
+   */
+  resultTarget?: string;
   /** Logical query name (appears in PERF metrics). */
   name?: string;
   /** Hard cap on total events returned after merging per-worker results. */
@@ -81,6 +92,12 @@ export interface RetrieverQueryRequest {
   processingTimeMs?: number;
   /** Max bytes the engine will ship before terminating. */
   resultSizeBytes?: number;
+  /**
+   * Internal: set on the auto-localization probe (a narrowed re-submit of a
+   * DISPATCHED_BLIND query that forces local dispatch). Prevents the probe from
+   * recursively probing itself. Not part of the public tool surface.
+   */
+  __probe?: boolean;
 
   // ── Legacy fields kept for call-site compatibility. The engine contract
   //    no longer uses `pattern` (the Bloom filter uses `search`), and
@@ -145,6 +162,10 @@ export interface ExistingResultsResponse {
   done: boolean;
   /** Resolved target prefix the result paths used. */
   target: string;
+  /** Funnel verdict (OK / EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+   *  DISPATCHED_BLIND / NO_MARKER / INCONCLUSIVE) derived from the _DONE marker
+   *  + the events that came back. Lets the agent debug a zero-result fetch. */
+  diagnosis: QueryDiagnosis;
 }
 
 /**
@@ -197,9 +218,15 @@ export async function fetchExistingResults(
   // finished) or doesn't (engine still running). Distinguishing missing from
   // 4xx is unimportant here — both mean "not done."
   let done = false;
+  let doneMarker: DoneMarker | null = null;
   try {
-    await s3Get(bucket, doneMarkerKey);
+    const body = await s3Get(bucket, doneMarkerKey);
     done = true;
+    try {
+      doneMarker = JSON.parse(body) as DoneMarker;
+    } catch {
+      doneMarker = null; // marker present but unparseable — still "done"
+    }
   } catch {
     done = false;
   }
@@ -249,7 +276,8 @@ export async function fetchExistingResults(
     }
   }
 
-  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
+  const diagnosis = diagnoseQuery(doneMarker, events.length, { failedWorkerFiles });
+  return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, diagnosis, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
 }
 
 /**
@@ -797,6 +825,28 @@ async function submitQuery(
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
   const base = await getRetrieverUrl();
+
+  // Lambda retriever flavor: the query role is a Lambda Function URL with
+  // AWS_IAM auth — the URL IS the endpoint (no /streamer/query path) and the
+  // POST must be SigV4-signed. Detected by hostname, so switching flavors is
+  // pure config (point the URL at the Function URL + the lambda bucket).
+  if (isLambdaFunctionUrl(base)) {
+    const jsonBody = JSON.stringify(body);
+    const resp = await signedLambdaUrlPost(base, jsonBody);
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`Retriever Function URL POST HTTP ${resp.status}: ${errText.slice(0, 500)}`);
+    }
+    // The Function URL maps the handler's return OBJECT onto the HTTP response
+    // (statusCode is consumed; the body is typically empty), so the queryId is
+    // NOT reliably in the response body. That's fine: the caller generated the
+    // queryId client-side and sent it as body.id (the handler honors a provided
+    // id), and it polls that id — submitQuery's return is discarded. So a 2xx is
+    // success; echo back the client id for completeness.
+    const qid = typeof body.id === 'string' ? body.id : '';
+    return { queryId: qid };
+  }
+
   // The engine still routes the query handler at `/streamer/query`
   // (see StreamerQuery.java) — the path will rename to `/retriever/query`
   // when the engine cuts the rename PR. `LOG10X_RETRIEVER_QUERY_PATH`
@@ -1190,6 +1240,8 @@ interface DoneMarkerBody {
   reason?: string;
   scanned?: number;
   matched?: number;
+  skippedSearch?: number;
+  skippedTemplate?: number;
   streamRequests?: number;
   streamBlobs?: number;
   submittedTasks?: number;
@@ -1294,6 +1346,59 @@ async function waitForMarkerStability(
   return previous.map((key) => ({ Key: key, Size: 0 }));
 }
 
+/**
+ * Localize a DISPATCHED_BLIND query by re-submitting a narrowed window that
+ * forces the coordinator into LOCAL dispatch — where its scanned / matched /
+ * skippedSearch counters are precise and pinpoint the failing stage
+ * (resolve vs bloom vs filter). The local/remote threshold varies with the
+ * configured timeslice, so we try a few shrinking windows and take the first
+ * probe whose own verdict is localized (not blind / no-marker).
+ *
+ * Costs one short query, only fires on a zero-result blind query, and never
+ * recurses (the probe carries `__probe`).
+ */
+async function localizeBlindQuery(
+  env: EnvConfig,
+  req: RetrieverQueryRequest,
+): Promise<QueryDiagnosis | null> {
+  // Start small: the local/remote threshold is ~tens of seconds on a busy
+  // index, so a 20s window usually forces local on the first try; shrink
+  // further only if it stayed remote.
+  for (const windowSec of [20, 10, 5]) {
+    // Skew the window ~120s back from the range end so it samples indexed data
+    // (the freshest seconds aren't indexed yet) and reproduces the same
+    // index/bloom failure the full query hit.
+    const w =
+      narrowWindow(String(req.from), String(req.to), windowSec, 120) ??
+      recentFallbackWindow(windowSec, 120);
+    const probeReq: RetrieverQueryRequest = {
+      ...req,
+      from: w.from,
+      to: w.to,
+      __probe: true,
+      limit: 1,
+      resultTarget: undefined, // probe writes to the default target, simplest to poll
+    };
+    let pf: QueryDiagnosis | undefined;
+    try {
+      // A localized probe runs LOCAL (synchronous) — its _DONE carries the
+      // precise counts immediately, so we don't need the full marker-stability
+      // wait that async stream results require. Cap it short.
+      const resp = await runRetrieverQuery(env, probeReq, { timeoutMs: 12_000, pollIntervalMs: 1_000 });
+      pf = resp.diagnostics?.funnel;
+    } catch {
+      continue; // probe errored — try a smaller window
+    }
+    if (pf && pf.verdict !== 'DISPATCHED_BLIND' && pf.verdict !== 'NO_MARKER') {
+      return {
+        ...pf,
+        explanation: `[localized by a ${windowSec}s local-dispatch probe over ${w.from} .. ${w.to}] ${pf.explanation}`,
+      };
+    }
+  }
+  return null;
+}
+
 export async function runRetrieverQuery(
   env: EnvConfig,
   req: RetrieverQueryRequest,
@@ -1305,6 +1410,13 @@ export async function runRetrieverQuery(
 ): Promise<RetrieverQueryResponse> {
   const bucket = await getRetrieverBucket();
   const target = req.target || (await getDefaultTarget());
+  // Tier-1 result-sink redirect: when set, the engine writes OUTPUT under
+  // tenx/{resultTarget}/ instead of tenx/{target}/, so every result/marker
+  // prefix the MCP polls below must use it. Reads of the durable index are
+  // engine-side and config-bound, so they are unaffected. Blank => legacy
+  // (resultTarget === target), and the body field is omitted entirely.
+  const resultTarget =
+    req.resultTarget && req.resultTarget.trim() ? req.resultTarget.trim() : target;
   const queryId = randomUUID();
   const pollMs =
     options?.pollIntervalMs ?? parseInt(process.env.LOG10X_RETRIEVER_POLL_MS || '1500', 10);
@@ -1353,6 +1465,9 @@ export async function runRetrieverQuery(
     ...(req.logLevels ? { logLevels: req.logLevels } : {}),
     writeResults,
     writeSummaries,
+    // Maps to the engine `queryResultTarget` option (body field -> query<Field>).
+    // Only sent on an actual redirect so the legacy wire shape is preserved.
+    ...(resultTarget !== target ? { resultTarget } : {}),
   };
 
   const started = Date.now();
@@ -1372,6 +1487,14 @@ export async function runRetrieverQuery(
       throw err;
     }
     httpErr = err;
+  }
+
+  if (httpErr !== undefined && isLambdaFunctionUrl(await getRetrieverUrl())) {
+    // Lambda flavor: the query role is the Function URL only — there is no
+    // query SQS queue for it. The SQS fallback targets the Quarkus/pod ingress
+    // queue, so falling back would silently query the WRONG flavor. Surface the
+    // Function URL error instead.
+    throw httpErr;
   }
 
   if (httpErr !== undefined) {
@@ -1419,8 +1542,8 @@ export async function runRetrieverQuery(
   // their own index sub-prefix; default to `indexing-results`.
   const indexSubpath = (process.env.LOG10X_RETRIEVER_INDEX_SUBPATH || 'indexing-results').replace(/^\/+|\/+$/g, '');
   const basePrefix = indexSubpath ? `${indexSubpath}/` : '';
-  const markerPrefix = `${basePrefix}tenx/${target}/q/${queryId}/`;
-  const resultsPrefix = `${basePrefix}tenx/${target}/qr/${queryId}/`;
+  const markerPrefix = `${basePrefix}tenx/${resultTarget}/q/${queryId}/`;
+  const resultsPrefix = `${basePrefix}tenx/${resultTarget}/qr/${queryId}/`;
   const doneMarkerKey = `${resultsPrefix}_DONE.json`;
 
   // Prefer the coordinator-written _DONE marker. Fall back to the byte-count
@@ -1474,7 +1597,7 @@ export async function runRetrieverQuery(
   const filtersActive = Array.isArray(req.filters) && req.filters.length > 0;
   let summariesPresent = false;
   if (writeSummaries && !filtersActive && (maxDl === 0 || (typeof maxDl === 'number' && maxDl > 0))) {
-    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${target}/qrs/${queryId}/`);
+    const qrsProbe = await s3List(bucket, `${basePrefix}tenx/${resultTarget}/qrs/${queryId}/`);
     summariesPresent = qrsProbe.some((o) => o.Key.endsWith('.jsonl'));
   }
 
@@ -1508,7 +1631,7 @@ export async function runRetrieverQuery(
   let summaries: RetrieverSummary[] | undefined;
   let slicesObserved = 0;
   if (writeSummaries) {
-    const summariesPrefix = `${basePrefix}tenx/${target}/qrs/${queryId}/`;
+    const summariesPrefix = `${basePrefix}tenx/${resultTarget}/qrs/${queryId}/`;
     const summaryObjects = await s3List(bucket, summariesPrefix);
     summaries = [];
     const distinctSlices = new Set<string>();
@@ -1609,7 +1732,9 @@ export async function runRetrieverQuery(
   const wallTimeMs = Date.now() - started;
   const response: RetrieverQueryResponse = {
     queryId,
-    target,
+    // Report the prefix the result paths actually used (the redirect when set),
+    // so a caller can re-fetch via fetchExistingResults({ target }) + queryId.
+    target: resultTarget,
     from: String(body.from),
     to: String(body.to),
     execution: {
@@ -1636,6 +1761,52 @@ export async function runRetrieverQuery(
   // Enables zero-result classification: stale indexer vs. bloom miss vs.
   // timeout vs. field-not-indexed, pinpointed via scanStats + errors.
   await attachDiagnostics(response, started);
+
+  // Always-available funnel verdict from the coordinator's _DONE marker. The
+  // CloudWatch diagnostics above are richer but go empty when the query-events
+  // log group is unconfigured or its buffer hasn't flushed; the _DONE marker is
+  // always in S3. This guarantees every zero-result query self-reports a verdict
+  // + next step (EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+  // DISPATCHED_BLIND) instead of a bare "0 events".
+  let funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
+
+  // GROUND TRUTH first: the engine's own per-stage CloudWatch events (parsed by
+  // attachDiagnostics) report what each stage actually did — scanned, matched,
+  // and what the results writer wrote vs filter-dropped — for BOTH remote and
+  // local dispatch (the subqueries log under the parent queryId). When present
+  // they supersede the coordinator marker's blind aggregate and pinpoint the
+  // real failing stage: EMPTY_RANGE (submittedKeys=0), FILTER_NO_MATCH (events
+  // reached the writer, exact predicate dropped them all), or FETCH_OR_PARSE_EMPTY
+  // (matched but no rows reached the writer). No inference, no probe.
+  const cw = response.diagnostics;
+  const grounded = diagnoseFromStats(
+    cw
+      ? {
+          submittedKeys: cw.resolution?.submittedKeys,
+          scanned: cw.scanStats?.scanned,
+          matched: cw.scanStats?.matched,
+          streamWorkers: cw.streamDispatch?.requests ?? cw.workerStats?.started,
+          workersComplete: cw.workerStats?.complete,
+          fetchedBytes: cw.workerStats?.totalFetchedBytes,
+          resultEvents: cw.workerStats?.totalResultEvents,
+          emptyFlushes: cw.workerStats?.totalEmptyFlushes,
+          resultsTruncated: cw.workerStats?.totalResultsTruncated,
+          s3BytesRead: cw.workerStats?.totalS3BytesRead,
+          filterExpr: cw.queryPlan?.filter,
+        }
+      : null,
+    events.length,
+  );
+  if (grounded) {
+    funnel = grounded;
+  } else if (funnel.verdict === 'DISPATCHED_BLIND' && !req.__probe) {
+    // Fallback when CloudWatch isn't configured/available: force local dispatch
+    // with a narrowed probe so the coordinator's own counts become precise.
+    const localized = await localizeBlindQuery(env, req);
+    if (localized) funnel = localized;
+  }
+
+  response.diagnostics = { ...(response.diagnostics ?? {}), funnel };
 
   return response;
 }

@@ -22,6 +22,7 @@ import {
   DescribeLogStreamsCommand,
   GetLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
+import type { QueryDiagnosis } from './query-funnel.js';
 
 let _cwClient: CloudWatchLogsClient | undefined;
 function cwClient(): CloudWatchLogsClient {
@@ -57,9 +58,24 @@ export interface RetrieverQueryDiagnostics {
     vars: number;
     timeslice: number;
     dispatch: 'local' | 'remote' | 'unknown';
+    /** The bloom pre-filter expression (querySearch), when the engine reports it. */
+    search?: string;
+    /** The exact in-memory predicate applied to fetched events (queryFilters). */
+    filter?: string;
   };
   /** Populated when isEmptyQuery() returned true — no parseable search tokens. */
   emptyReason?: string;
+  /**
+   * Resolution stage: index blobs the scan mapped for the window, summed across
+   * every `scan range:` event (sub-queries included). This is the ground-truth
+   * empty-window signal: submittedKeys===0 on all slices means the time->blob
+   * mapping returned no blobs (no data indexed for the range) — distinct from
+   * "blobs were scanned but the bloom rejected them all".
+   */
+  resolution?: {
+    submittedKeys: number;
+    submittedTasks: number;
+  };
   /** Aggregated Bloom filter scan stats across all sub-queries. */
   scanStats?: {
     scanned: number;
@@ -85,8 +101,32 @@ export interface RetrieverQueryDiagnostics {
   workerStats?: {
     started: number;
     complete: number;
+    /**
+     * The engine's "stream worker complete: fetched N bytes", summed. NOTE: this
+     * is the WRITTEN-event utf8 volume from the q/ byte-count writer, NOT the
+     * bytes S3 returned. The engine emits no separate S3-read byte count, so this
+     * must never be read as a fetch success/failure signal.
+     */
     totalFetchedBytes: number;
+    /** Events the results writer wrote after the exact predicate (qr/). */
     totalResultEvents: number;
+    /**
+     * Flushes that reached the results writer but were EMPTY because the exact
+     * predicate dropped the event pre-write. The distinguisher for a 0-result:
+     * >0 with totalResultEvents===0 => the filter rejected events that DID arrive
+     * (FILTER_NO_MATCH); ===0 with totalResultEvents===0 => no rows reached the
+     * writer at all, so the fetch or the parse produced nothing.
+     */
+    totalEmptyFlushes: number;
+    /** Events the results writer dropped because the result cap was hit. */
+    totalResultsTruncated: number;
+    /**
+     * Bytes actually read from the source objects (S3 GET), summed across workers,
+     * from "stream worker fetch complete: s3BytesRead". The REAL fetch counter (vs
+     * totalFetchedBytes, which is pre-filter event volume). 0 when the engine
+     * predates the counter; > 0 distinguishes a parse miss from a fetch-empty.
+     */
+    totalS3BytesRead: number;
   };
   /** Main coordinator pipeline elapsed time (NOT full query wall time). */
   coordinatorElapsedMs?: number;
@@ -102,6 +142,13 @@ export interface RetrieverQueryDiagnostics {
    * the reason is reported here. Diagnostics are incomplete when set.
    */
   pollingError?: string;
+  /**
+   * Always-available funnel verdict derived from the coordinator's _DONE marker
+   * (set by the query path, not from CloudWatch). Present even when CW
+   * diagnostics are empty — which is the common case when the query-events log
+   * group is unconfigured or its buffer hasn't flushed.
+   */
+  funnel?: QueryDiagnosis;
 }
 
 interface CWEvent {
@@ -196,6 +243,13 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
   let workersComplete = 0;
   let totalFetchedBytes = 0;
   let totalResultEvents = 0;
+  let totalEmptyFlushes = 0;
+  let totalResultsTruncated = 0;
+  let totalS3BytesRead = 0;
+  let sawS3Read = false;
+  let submittedKeys = 0;
+  let submittedTasks = 0;
+  let sawScanRange = false;
 
   for (const ev of cwEvents) {
     const msg = ev.message;
@@ -208,9 +262,17 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
         vars: (data.vars as number) ?? 0,
         timeslice: (data.timeslice as number) ?? 0,
         dispatch: (dispatch === 'local' || dispatch === 'remote') ? dispatch : 'unknown',
+        ...(typeof data.search === 'string' ? { search: data.search } : {}),
+        ...(typeof data.filter === 'string' ? { filter: data.filter } : {}),
       };
     } else if (msg.startsWith('query empty:')) {
       diag.emptyReason = (data.reason as string) || 'no_template_hashes_or_vars';
+    } else if (msg.startsWith('scan range:')) {
+      // Resolution stage: how many blobs each time-slice mapped. submittedKeys===0
+      // across all slices is the ground-truth empty-window signal.
+      sawScanRange = true;
+      submittedKeys += (data.submittedKeys as number) || 0;
+      submittedTasks += (data.submittedTasks as number) || 0;
     } else if (msg.startsWith('scan complete:')) {
       if (!diag.scanStats) {
         diag.scanStats = { scanned: 0, matched: 0, skippedSearch: 0, skippedTemplate: 0, skippedDuplicate: 0 };
@@ -233,6 +295,11 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
       if (diag.coordinatorElapsedMs === undefined) {
         diag.coordinatorElapsedMs = data.elapsedMs as number;
       }
+    } else if (msg.startsWith('stream worker fetch complete:')) {
+      // Real S3-GET byte count per worker (distinct from the q/ "stream worker
+      // complete: fetched N bytes" event below, which is pre-filter event volume).
+      sawS3Read = true;
+      totalS3BytesRead += (data.s3BytesRead as number) || 0;
     } else if (msg.startsWith('stream worker started:')) {
       workersStarted++;
     } else if (msg.startsWith('stream worker complete:')) {
@@ -240,6 +307,8 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
       totalFetchedBytes += (data.fetchedBytes as number) || 0;
     } else if (msg.startsWith('results writer complete:')) {
       totalResultEvents += (data.resultEvents as number) || 0;
+      totalEmptyFlushes += (data.emptyFlushes as number) || 0;
+      totalResultsTruncated += (data.resultsTruncated as number) || 0;
     }
 
     if (ev.level === 'ERROR') {
@@ -247,8 +316,20 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
     }
   }
 
-  if (workersStarted > 0 || workersComplete > 0) {
-    diag.workerStats = { started: workersStarted, complete: workersComplete, totalFetchedBytes, totalResultEvents };
+  if (sawScanRange) {
+    diag.resolution = { submittedKeys, submittedTasks };
+  }
+
+  if (workersStarted > 0 || workersComplete > 0 || sawS3Read) {
+    diag.workerStats = {
+      started: workersStarted,
+      complete: workersComplete,
+      totalFetchedBytes,
+      totalResultEvents,
+      totalEmptyFlushes,
+      totalResultsTruncated,
+      totalS3BytesRead,
+    };
   }
 
   if (errors.length > 0) {
@@ -332,15 +413,29 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
         `${diag.scanStats.skippedSearch} skipped by search filter, ${diag.scanStats.skippedTemplate} by template filter. ` +
         'The search tokens do not exist in the archive for this time range.';
     }
-    // Bloom matched but no result events — distinguish timeout from false-positive
+    // Bloom matched but no result events. Distinguish, in order:
+    //  (a) workers still running when polled (incomplete),
+    //  (b) events reached the writer but the exact predicate dropped them all
+    //      (emptyFlushes>0 => bloom false positives / predicate mismatch),
+    //  (c) no rows reached the writer at all (emptyFlushes===0 => fetch or parse
+    //      produced nothing — the engine can't split those two from its signals).
     if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
       if (diag.workerStats && diag.workerStats.complete < diag.workerStats.started) {
         return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${diag.workerStats.started} workers were dispatched, ` +
           `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving — ` +
           `retry log10x_retriever_query_status with the same queryId, or rerun the query.`;
       }
-      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but stream workers decoded 0 matching events. ` +
-        'Most likely cause: Bloom filter false positives — the search tokens exist in the index but the actual events do not match the full search expression.';
+      const emptyFlushes = diag.workerStats?.totalEmptyFlushes ?? 0;
+      const fetchedBytes = diag.workerStats?.totalFetchedBytes ?? 0;
+      if (fetchedBytes > 0 || emptyFlushes > 0) {
+        return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${fetchedBytes} byte(s) of events were fetched from them, ` +
+          'but the exact predicate wrote none. The Bloom is approximate; the exact filter is the source of truth and it matched ' +
+          'nothing — the search field/value most likely does not match the real events. Probe what the field actually carries. ' +
+          '(Why each event was dropped is not logged per-event — that engine signal is missing.)';
+      }
+      return `The Bloom filter matched ${diag.scanStats.matched} index objects, but 0 bytes of events were fetched from them ` +
+        '(fetchedBytes=0, emptyFlushes=0). The fetch (object read) or the parse produced nothing. The engine emits no separate ' +
+        'S3-GET byte count, so these two sub-stages cannot be separated from the current signals — trace the read+parse path before concluding a cause.';
     }
   }
 
@@ -362,6 +457,13 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
   if (diag.partialResults) {
     return 'MCP poll timeout reached before the server query completed. Some results may still be ' +
       'written to S3. Retry log10x_retriever_query_status with the same queryId for an updated view.';
+  }
+
+  // Fallback: CloudWatch gave us nothing actionable, but the _DONE-marker
+  // funnel always carries a verdict. This is what fires on the demo (and any
+  // env where the query-events log group is empty).
+  if (diag.funnel) {
+    return `${diag.funnel.explanation} [${diag.funnel.verdict}] ${diag.funnel.hint}`;
   }
 
   return null;
