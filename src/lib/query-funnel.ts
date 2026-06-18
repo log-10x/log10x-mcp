@@ -160,8 +160,8 @@ export function diagnoseFromStats(
     return {
       verdict: 'STREAM_FETCH_EMPTY',
       funnel,
-      explanation: `Bloom matched ${matched} blob(s) and ${workers} stream worker(s) ran, but they fetched 0 bytes from the source objects — so 0 events were written. The match stage is fine; the fetch read nothing.`,
-      hint: 'Stream workers read 0 bytes despite matched blobs. Verify the source objects exist/are readable at the worker; this is the object-read (fetch) stage, not the search. Engine-side: check the read container/bucket and the byte-range fetch.',
+      explanation: `Bloom matched ${matched} blob(s) and ${workers} stream worker(s) ran, but reported fetched 0 bytes from the source objects, so 0 events were written. The match stage is fine; the bytes did not come back. Cause is not determined from these stats alone — this is an observation, not a root cause.`,
+      hint: 'The fetch (object-read) stage returned 0 bytes — not the search. Do NOT assume an engine fault: trace the read path in the engine source (which bucket/key/byte-range the worker reads), check the read-container config, and confirm the query + target object are well-formed before concluding where the fault is.',
     };
   }
   if ((resultEvents ?? 0) === 0) {
@@ -169,7 +169,7 @@ export function diagnoseFromStats(
       verdict: 'FILTER_NO_MATCH',
       funnel,
       explanation: `Fetched ${fetchedBytes} byte(s) from ${matched} matched blob(s), but the exact predicate matched 0 events (the bloom is approximate; the precise filter is the truth).`,
-      hint: 'The blobs were bloom-candidates but no event passed the exact predicate. Check the field/value against the real data, or the bloom is producing false positives.',
+      hint: 'The blobs were bloom-candidates but no event passed the exact predicate (the bloom is approximate). Check the field/value against the real data; if it does contain matches, trace the exact-filter path in the engine source before concluding a fault.',
     };
   }
   // Wrote events but the caller got none → delivery/path gap.
