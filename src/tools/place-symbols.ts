@@ -185,7 +185,13 @@ export async function executePlaceSymbols(
   }
   warnings.push('The emitted script needs `gh` authenticated with write (Contents + PR) access to the repo.');
 
-  // ── 6. Rollout vs hot-reload guidance ──
+  // ── 6. Additive reassurance + rollout vs hot-reload guidance ──
+  // symbol.paths is a LIST, so this ADDS the custom library; the bundled default
+  // (the ~150 common frameworks baked into the *-10x image) stays on the path.
+  const additiveNote =
+    'This is additive: the engine keeps the default symbol library bundled in its image and reads ' +
+    'this custom one too (symbol.paths is a list). The only way to lose the default is to override the ' +
+    'whole config dir via config.git - keep symbol delivery separate from full-config delivery.';
   const branchNote = placement.branch ? `branch \`${placement.branch}\`` : 'the default branch';
   const rolloutHint =
     'kubectl rollout restart -n <namespace> daemonset/<reporter-release>   ' +
@@ -213,6 +219,8 @@ export async function executePlaceSymbols(
     '```',
     '',
     liveNote,
+    '',
+    additiveNote,
   ]
     .filter((l) => l !== undefined)
     .join('\n');
@@ -240,6 +248,8 @@ export async function executePlaceSymbols(
       library_path: libPath,
       library_bytes: size,
       file_name: fileName,
+      additive: true,
+      preserves_default_library: true,
       script,
       notes: placement.notes,
       human_summary,

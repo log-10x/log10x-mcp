@@ -40,6 +40,50 @@ receiver/reporter retrieves it. The compile *producer* itself is now built (see 
    (the reload unit is wired, but `@github` is off by default and delivery is one-time),
    so Phase 1 **defaults to commit → rollout-restart**; hot-reload is opt-in and needs a
    chart/config fix (§4 callout, §10 Q2).
+7. **Simplification 2026-06-18 (read §0 first).** The default library is already
+   bundled in every `*-10x` image, and `symbol.paths` is a LIST, so adding custom
+   symbols is just *appending a path* — the engine reads default + custom, you never
+   replace. `place_symbols` and the git transport are conveniences for the k8s case,
+   not the mental model. §3-§9 are the detailed/advanced transports.
+
+---
+
+## 0. The simple model (start here)
+
+The earlier sections framed this as elaborate "placement." After review, the actual
+model is simple:
+
+1. **The default library ships in the image.** `log10x/edge-10x`, `quarkus-10x`, and
+   `pipeline-10x` already bake the ~150-framework default library at
+   `data/shared/symbols` (relative to `TENX_CONFIG`). So **every reporter / receiver /
+   retriever install recognizes the common frameworks out of the box, zero config.**
+   There is nothing to build for the default case.
+
+2. **Adding your own symbols is ADDITIVE, never a replace.** The run engine reads
+   `symbol.paths`, which is a **list**:
+   `[ path("data/shared/symbols"), path("<TENX_SYMBOLS_PATH>") ]`
+   (`config/pipelines/run/symbol/config.yaml`). So the engine loads the **bundled
+   default AND** whatever you add. Adding symbols = *concat into the symbol paths*, or
+   *drop the file into a directory already on the path*.
+
+3. **The simple mechanisms:**
+   - **Local / CLI:** `tenx … -symbolPaths /path/to/your.10x.tar` (appended to the
+     defaults), or copy the `.10x.tar` into `$TENX_CONFIG/data/shared/symbols/`.
+   - **k8s:** `symbols.volume` (a PVC mounted at `/etc/tenx/symbols` → becomes
+     `TENX_SYMBOLS_PATH`) or `symbols.git` (init-container clone). **Both ADD a second
+     path; the baked default stays on `symbol.paths`.** (Verified against the reporter
+     `daemonset.yaml` env logic.)
+
+4. **The one gotcha — don't move the whole config dir.** Enabling `config.git` (pulling
+   the *entire* config from git) overrides `TENX_CONFIG`, so `data/shared/symbols` then
+   resolves *inside the git repo* — if that repo doesn't carry the default library, you
+   lose it. Keep **symbol** delivery separate from **full-config** delivery, or include
+   the default library in that repo. (This is the only path that drops the default.)
+
+**So `log10x_place_symbols` (§5) is just a convenience** that lands your custom
+`.10x.tar` in one of the additive spots above and reminds you to roll the pod. It does
+**not** replace the default library. Everything below (§3-§9) is the detailed mechanics
+of *which* spot and *whether a restart is needed* — useful, but secondary to this model.
 
 ---
 
