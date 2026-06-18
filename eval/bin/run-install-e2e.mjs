@@ -41,6 +41,14 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const BUILD = join(HERE, '..', '..', 'build', 'lib'); // log10x-mcp/build/lib
 
 const DRY = process.argv.includes('--dry-run') || process.env.LOG10X_E2E !== '1';
+// Conversational mode: drive the install through the MCP wizard with an
+// autonomous LLM (the "what the user actually does" leg). On by default when an
+// ANTHROPIC_API_KEY is present; --no-conversation forces the deterministic-only
+// loop. The deterministic demo-query poll is always the PASS/FAIL gate, so the
+// test is reliable whether or not the LLM leg runs.
+const CONVERSATIONAL =
+  process.argv.includes('--conversational') ||
+  (!!process.env.ANTHROPIC_API_KEY && !process.argv.includes('--no-conversation'));
 const PROVIDER = process.env.LOG10X_E2E_PROVIDER || 'minikube';
 const PROFILE = process.env.LOG10X_E2E_PROFILE || 'log10x-e2e';
 const NAMESPACE = process.env.LOG10X_E2E_NAMESPACE || 'log10x-e2e';
@@ -54,9 +62,9 @@ const CHART = 'log10x/reporter-10x';
 function log(phase, msg) {
   console.log(`\n\x1b[1m[${phase}]\x1b[0m ${msg}`);
 }
-function sh(cmd, args, { capture = false, allowFail = false } = {}) {
+function sh(cmd, args, { capture = false, allowFail = false, cwd } = {}) {
   console.log(`  $ ${cmd} ${args.join(' ')}`);
-  const r = spawnSync(cmd, args, { stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8' });
+  const r = spawnSync(cmd, args, { stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8', cwd });
   if (r.status !== 0 && !allowFail) {
     throw new Error(`${cmd} ${args.join(' ')} exited ${r.status}: ${r.stderr || ''}`);
   }
@@ -105,7 +113,7 @@ spec:
 `;
 
 async function main() {
-  log('plan', `${DRY ? 'DRY-RUN (set LOG10X_E2E=1 for the real loop)' : 'LIVE'} — provider=${PROVIDER} profile=${PROFILE} ns=${NAMESPACE} base=${API_BASE}`);
+  log('plan', `${DRY ? 'DRY-RUN (set LOG10X_E2E=1 for the real loop)' : 'LIVE'} — provider=${PROVIDER} profile=${PROFILE} ns=${NAMESPACE} base=${API_BASE} conversational=${CONVERSATIONAL}`);
 
   // ── Phase 0: preflight ────────────────────────────────────────────────
   log('preflight', 'checking tooling');
@@ -125,7 +133,7 @@ async function main() {
   process.env.LOG10X_EVAL_ENV = 'demo-license';
 
   if (DRY) {
-    log('plan', 'would now: provision cluster → helm install + log-gen → poll demo-query → assert → teardown');
+    log('plan', `would now: cull+recreate cluster → ${CONVERSATIONAL ? 'LLM↔MCP install conversation → ' : ''}helm install + log-gen → poll demo-query → assert → teardown`);
     console.log(`  helm install ${RELEASE} ${CHART} -n ${NAMESPACE} --create-namespace \\`);
     console.log(`    --set log10xLicenseJwt='<jwt>' --set runtimeName=${PROFILE} --set airgapped=false`);
     console.log(`  then poll: GET ${API_BASE}/api/v1/demo/query?query=tenx_pipeline_up  (Bearer the same jwt)`);
@@ -137,12 +145,32 @@ async function main() {
   try {
     // ── Phase 2: provision ──────────────────────────────────────────────
     if (PROVIDER === 'minikube') {
-      log('cluster', `minikube start -p ${PROFILE}`);
+      // Cull any stale profile first, then recreate — a fresh cluster every run
+      // so we never collide with leftover pods / releases / data from a prior run.
+      log('cluster', `culling + recreating minikube profile ${PROFILE} (fresh cluster, no stale data)`);
+      sh('minikube', ['delete', '-p', PROFILE], { allowFail: true });
       sh('minikube', ['start', '-p', PROFILE, '--wait=all']);
       provisioned = true;
       sh('kubectl', ['config', 'use-context', PROFILE]);
     } else {
       log('cluster', `using existing kube-context: ${sh('kubectl', ['config', 'current-context'], { capture: true }).stdout.trim()}`);
+    }
+
+    // ── Phase 2.5: conversational install guidance (the "user talks to the MCP") ──
+    // An autonomous LLM converses with the MCP wizard (log10x_discover_env ->
+    // log10x_advise_install, license_source=demo) against the just-provisioned
+    // cluster, exactly as a real user would. The wizard reuses the SAME demo
+    // license persisted above, so its recommended install matches what we then
+    // execute. Demonstrative — the deterministic poll below is the gate.
+    if (CONVERSATIONAL) {
+      log('conversation', 'user ↔ MCP: driving the install through the wizard (autonomous LLM tool-use)');
+      const r = sh('node', ['bin/run-scenario.mjs', 'fixtures/install-e2e-demo-license.json', '--mode', 'autonomous', '--no-judge'],
+        { cwd: join(HERE, '..'), allowFail: true });
+      console.log(`  conversation ${r.status === 0
+        ? 'OK — the MCP guided the user to a reporter-10x + demo-license install plan'
+        : 'did not exit clean; see eval/reports/ (continuing — the deterministic poll is the gate)'}`);
+    } else {
+      log('conversation', 'SKIPPED — set ANTHROPIC_API_KEY to drive the install conversationally (user ↔ MCP wizard). Proceeding with the deterministic install + validate loop.');
     }
 
     // ── Phase 3: install engine + log generator ─────────────────────────

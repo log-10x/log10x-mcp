@@ -120,16 +120,25 @@ Persistent state for the campaign:
 
 ## Close-the-loop install e2e (`bin/run-install-e2e.mjs`)
 
-The full thing: a not-signed-in user installs the engine on a real cluster with a demo license, the engine writes to the SaaS Prometheus, and the MCP reads it back via the demo-license query path. Gated on `LOG10X_E2E=1` (else dry-run: preflight + license mint, no cluster). Defaults to **minikube** (`LOG10X_E2E_PROVIDER=existing` to use the current kube-context instead).
+The full thing — what a first-time user actually does: talk to the MCP about installing on a cluster, let it guide the install, then validate the metrics. A not-signed-in user installs the engine on a real cluster with a demo license, the engine writes to the SaaS Prometheus, and the MCP reads it back via the demo-license query path. Gated on `LOG10X_E2E=1` (else dry-run: preflight + license mint, no cluster). Defaults to **minikube** (`LOG10X_E2E_PROVIDER=existing` to use the current kube-context instead).
 
 ```bash
 npm run build                                  # build the MCP (the e2e imports build/lib/*)
 node eval/bin/run-install-e2e.mjs --dry-run    # preflight + mint, no cluster
-LOG10X_E2E=1 node eval/bin/run-install-e2e.mjs # mint → minikube → helm install log10x/reporter-10x
+
+# Full deterministic loop (no API key needed):
+LOG10X_E2E=1 node eval/bin/run-install-e2e.mjs # cull+recreate minikube → helm install log10x/reporter-10x
                                                # → poll /api/v1/demo/* → assert tenx_pipeline_up → teardown
+
+# + the LLM↔MCP install conversation (the "what the user does" leg):
+ANTHROPIC_API_KEY=… LOG10X_E2E=1 node eval/bin/run-install-e2e.mjs   # adds an autonomous wizard conversation
+                                                                     # (run-scenario.mjs fixtures/install-e2e-demo-license.json)
+                                                                     # before the install. --no-conversation to force off.
 ```
 
-The engine install and the validation query use the SAME minted demo license, so reads and writes hit one demo tenant. `LOG10X_E2E_KEEP=1` skips teardown for debugging.
+Phases: cull + **recreate** the minikube profile (fresh cluster every run — never collide with old pods/releases/data) → mint one demo license → *(conversational)* drive `discover_env → advise_install(license_source=demo)` via an autonomous LLM → `helm install` the published `log10x/reporter-10x` chart with that license + a JSON log generator → poll `/api/v1/demo/*` (in `LOG10X_EVAL_ENV=demo-license`) until `tenx_pipeline_up` appears → assert → teardown.
+
+The wizard's recommended install, the executed install, and the validation query all use the SAME persisted demo license, so everything hits one demo tenant. The deterministic poll is always the PASS/FAIL gate, so the test is reliable whether or not the LLM leg runs. `LOG10X_E2E_KEEP=1` skips teardown for debugging.
 
 ## File layout
 
