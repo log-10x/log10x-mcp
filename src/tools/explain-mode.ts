@@ -14,7 +14,7 @@
  *                            user explicitly picks one.
  *
  * routes_to:
- *   Apply   → configure_engine  (drop / sample / compact / tier_down / offload)
+ *   Apply   → configure_engine  (compact / offload / tier_down / sample / drop)
  *             null              (observe_only — no apply step)
  *   Preview → log10x_preview_filter
  */
@@ -35,12 +35,15 @@ import type { MustAskUser } from './log10x-start.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
+// Ordered keep-everything levers first (compact, offload, tier_down), then
+// the lossy opt-ins (sample, drop), then observe_only. The non-lossy options
+// are the value proposition and lead every enumeration.
 export const EXPLAIN_MODES = [
-  'drop',
-  'sample',
   'compact',
-  'tier_down',
   'offload',
+  'tier_down',
+  'sample',
+  'drop',
   'observe_only',
 ] as const;
 
@@ -55,12 +58,12 @@ export const explainModeSchema = {
   mode: z
     .enum(EXPLAIN_MODES)
     .describe(
-      'Which enforcement mode to explain. ' +
-      '`drop` = engine hard-drops matched patterns at the Receiver before delivery. ' +
-      '`sample` = engine passes 1-in-N events through to the stack. ' +
-      '`compact` = engine minifies events ~50-80% losslessly; all events still reach the stack. ' +
-      '`tier_down` = engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
-      '`offload` = engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
+      'Which enforcement mode to explain. Keep-everything levers come first, then the lossy opt-ins. ' +
+      '`compact` = keeps everything: engine minifies events ~50-80% losslessly; all events still reach the stack. ' +
+      '`offload` = keeps everything: engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
+      '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      '`sample` = lossy opt-in: engine passes 1-in-N events through to the stack; the rest are discarded. ' +
+      '`drop` = lossy opt-in: engine hard-drops matched patterns at the Receiver before delivery. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
     ),
   destination: z
@@ -101,7 +104,8 @@ function isModeCompatible(mode: ExplainMode, destination: string | null): boolea
 
 function getSuggestedModes(mode: ExplainMode, destination: string | null): ExplainMode[] {
   if (!destination) return [];
-  return (['drop', 'sample', 'offload', 'tier_down'] as ExplainMode[]).filter(
+  // Keep-everything levers first, lossy opt-ins last.
+  return (['compact', 'offload', 'tier_down', 'sample', 'drop'] as ExplainMode[]).filter(
     (m) => m !== mode && isModeCompatible(m, destination),
   );
 }

@@ -113,7 +113,7 @@ test('at receiver tier, 6 outcome-first modes render in order', () => {
   const modes = buildModes(caps, 'splunk', {});
   assert.equal(modes.length, 6, 'receiver tier must have exactly 6 modes');
   const ids = modes.map((m) => m.id);
-  assert.deepEqual(ids, ['drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only']);
+  assert.deepEqual(ids, ['compact', 'offload', 'tier_down', 'sample', 'drop', 'observe_only']);
 });
 
 // ── Mode ID assertions ────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ test('mode ids at receiver tier are the 6 values in order', () => {
   const caps = fullCaps();
   const modes = buildModes(caps, 'splunk', {});
   const ids = modes.map((m) => m.id);
-  assert.deepEqual(ids, ['drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only']);
+  assert.deepEqual(ids, ['compact', 'offload', 'tier_down', 'sample', 'drop', 'observe_only']);
 });
 
 test('no manual mode exists at any tier', () => {

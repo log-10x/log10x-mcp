@@ -291,13 +291,13 @@ function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] 
     tier === 'receiver' || tier === 'retriever'
       ? {
           action: 'explore_receiver',
-          label: 'Explore the Receiver: compact, sample, drop, tier down, offload',
+          label: 'Explore the Receiver: compact, offload, tier down (keep everything), or sample/drop',
           applicable: true,
           routes_to: 'log10x_explain_mode',
         }
       : {
           action: 'install_receiver',
-          label: 'Deploy the Receiver so 10x can compact / sample / drop in-flight',
+          label: 'Deploy the Receiver so 10x can compact, offload, or tier down in-flight (keep everything), or sample/drop',
           applicable: tier === 'reporter',
           gated_reason:
             tier === 'reporter'
