@@ -1030,7 +1030,18 @@ function applyToolRegistrations(
   // We declare it uniformly here so MCP hosts that honor `outputSchema`
   // (Claude Desktop, ChatGPT Desktop) get a contract; hosts that don't,
   // ignore it. Pair with `structuredContent` on every result in wrap().
-  const envelopeOutputSchema = StructuredOutputSchema.shape;
+  //
+  // Register the FULL schema, not `.shape`: the chassis lifts extra top-level
+  // fields (status / invocation_id / performance — see chassis-envelope.ts) onto
+  // the envelope, which `StructuredOutputSchema`'s `.passthrough()` permits.
+  // Passing `.shape` drops the passthrough — the SDK then advertises
+  // `additionalProperties: false`, and a spec-honoring CLIENT (Claude Desktop,
+  // Cursor) that lists tools then validates a tool result Ajv-rejects those
+  // lifted fields with "data must NOT have additional properties", breaking the
+  // tool. The full schema advertises `additionalProperties: true`, so the
+  // lifted fields validate. (Server-side Zod stripped them and never noticed;
+  // only the client-side advertised-schema validation catches it.)
+  const envelopeOutputSchema = StructuredOutputSchema;
   for (const t of pendingTools) {
     const allowed = mode ? shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback }) : true;
     if (!allowed) {
