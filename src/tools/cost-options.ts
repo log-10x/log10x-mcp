@@ -355,7 +355,7 @@ function buildModes(
     },
     {
       id: 'compact',
-      label: 'Compact: compress events ~50-80% smaller. All events still land in the stack.',
+      label: 'Compact: minify events ~50-80% smaller, losslessly. All events still land in the stack.',
       description:
         'Engine encodes events into the 10x compact wire format (~50-80% smaller, lossless). All events arrive in the stack; fields stay searchable.',
       who_enforces: 'engine',

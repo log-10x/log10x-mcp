@@ -595,7 +595,7 @@ export async function executeLog10xStart(
     ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting user pick before any further tool call.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

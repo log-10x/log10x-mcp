@@ -21,7 +21,7 @@
  *
  * Intended callers: agents preparing PRs to the config repo or proposing
  * engine-adjacent JS changes. NOT a general "run my log pipeline" tool —
- * use the existing log10x_resolve_batch (privacy_mode=true) for that.
+ * use the existing log10x_resolve_batch for that.
  */
 
 import { z } from 'zod';

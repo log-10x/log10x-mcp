@@ -59,11 +59,6 @@ export const pocFromLocalSchema = {
     .optional()
     .default(20)
     .describe('Cap on number of pods sampled. Default 20.'),
-  privacy_mode: z
-    .boolean()
-    .optional()
-    .default(true)
-    .describe('Templatize via a local Log10x engine (native `tenx`, or local Docker via `LOG10X_TENX_MODE=docker`) when true, or the public Log10x paste endpoint when false. Default true.'),
   target_percent_reduction: z
     .number()
     .min(0)
@@ -105,7 +100,6 @@ export interface PocFromLocalArgs {
   window?: string;
   per_pod_limit?: number;
   max_pods?: number;
-  privacy_mode?: boolean;
   ai_prettify?: boolean;
   target_percent_reduction?: number;
   exception_services?: string[];
@@ -286,10 +280,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
-  const extraction = await extractPatterns(sample.events, {
-    privacyMode: args.privacy_mode ?? true,
-    autoBatch: true,
-  });
+  const extraction = await extractPatterns(sample.events);
 
   // Project the sampled-window bytes to a daily figure.
   const windowHours = parseWindowHours(opts.window!);

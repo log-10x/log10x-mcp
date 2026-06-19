@@ -802,40 +802,40 @@ function syntheticSkew(): ExtractedPatterns {
     variables: { verb: ['get', 'post'] },
     slotDistinctCounts: { verb: 2 },
   };
-  return { patterns: [pattern], totalEvents: 100, totalBytes: 6400, inputLineCount: 100, templaterWallTimeMs: 0, executionMode: 'paste_lambda' };
+  return { patterns: [pattern], totalEvents: 100, totalBytes: 6400, inputLineCount: 100, templaterWallTimeMs: 0, executionMode: 'local_cli' };
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// SECTION 1 — PASTE-MODE cases (no env, no backend).
+// SECTION 1 — LOCAL-ENGINE cases (no env, no backend).
 // ════════════════════════════════════════════════════════════════════════
 
-// paste-mode resolve_batch / extract_templates submit to the LIVE Paste Lambda.
-// A transient 5xx / network error from that external service is not an envelope
-// invariant violation — skip rather than red the hermetic sweep on infra flake.
+// resolve_batch / extract_templates run the local engine. CI has no tenx
+// binary, so they return a not_configured envelope (a conformant terminal
+// chassis envelope) rather than success. Either is acceptable here.
 function isExternalUnavailable(e: unknown): boolean {
   const m = e instanceof Error ? e.message : String(e);
   return /HTTP 5\d\d|Service Unavailable|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(m);
 }
 
-test('invariants §1 resolve_batch (success, paste-mode)', async (t) => {
+test('invariants §1 resolve_batch (success or not_configured, local engine)', async (t) => {
   const events = ['GET /api/users 200', 'GET /api/users 200', 'POST /api/orders 201', 'POST /api/orders 201', 'GET /api/users 200'];
   let out;
   try {
-    out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: true, privacy_mode: false });
+    out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: true });
   } catch (e) {
-    if (isExternalUnavailable(e)) return void t.skip(`Paste Lambda unavailable: ${(e as Error).message}`);
+    if (isExternalUnavailable(e)) return void t.skip(`engine unavailable: ${(e as Error).message}`);
     throw e;
   }
   runInvariants({ tool: 'log10x_resolve_batch', out: asEnvelope(out, 'resolve_batch') }, (m) => t.diagnostic(m));
 });
 
-test('invariants §1 extract_templates (success or not_configured, paste-mode)', async (t) => {
+test('invariants §1 extract_templates (success or not_configured, local engine)', async (t) => {
   const events = ['user 1 logged in from IP', 'user 2 logged in from IP', 'user 3 logged in from IP'];
   let out;
   try {
     out = await executeExtractTemplates({ source: 'events', events, top_n: 10 });
   } catch (e) {
-    if (isExternalUnavailable(e)) return void t.skip(`Paste Lambda unavailable: ${(e as Error).message}`);
+    if (isExternalUnavailable(e)) return void t.skip(`engine unavailable: ${(e as Error).message}`);
     throw e;
   }
   // not_configured (no local tenx) is a conformant terminal chassis envelope.

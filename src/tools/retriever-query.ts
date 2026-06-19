@@ -42,6 +42,7 @@ import {
   explainZeroResults,
   type RetrieverQueryDiagnostics,
 } from '../lib/retriever-diagnostics.js';
+import type { QueryDiagnosis } from '../lib/query-funnel.js';
 import { fmtCount } from '../lib/format.js';
 import { renderNextActions, type NextAction } from '../lib/next-actions.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
@@ -94,6 +95,13 @@ export const retrieverQuerySchema = {
     .optional()
     .describe(
       'Target app/service prefix to scope the index scan. Defaults to __SAVE_LOG10X_RETRIEVER_TARGET__ (env var). Required if no default is configured.'
+    ),
+  result_target: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]+$/, 'must be a bare token [A-Za-z0-9_-]+ (no slashes, separators, or "..")')
+    .optional()
+    .describe(
+      'Tier-1 result-sink redirect: write this query OUTPUT (events, summaries, markers) under tenx/<result_target>/ in the same bucket instead of the default target, e.g. to a prefix a SIEM connector watches. Omit to keep results under the scan target (default). Bare token [A-Za-z0-9_-]+.'
     ),
   limit: z
     .number()
@@ -165,6 +173,11 @@ interface RetrieverQuerySummary {
    */
   results_location?: { bucket: string; prefix: string; uri: string };
   diagnostics_zero_reason?: string;
+  /** Structured zero-result funnel: verdict + per-stage counts + actionable
+   *  hint. When the query was blind (remote dispatch), this is the LOCALIZED
+   *  verdict the MCP recovered via an auto-submitted narrowed local-dispatch
+   *  probe. Agents branch on diagnostics_funnel.verdict. */
+  diagnostics_funnel?: QueryDiagnosis;
   /**
    * Where by_severity/by_service/by_day came from:
    *  - 'qrs_summaries' — engine per-slice summaries; WHOLE-match counts.
@@ -314,6 +327,7 @@ export async function executeRetrieverQuery(
     to: string;
     filters?: string[];
     target?: string;
+    result_target?: string;
     limit?: number;
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
@@ -576,6 +590,7 @@ async function executeRetrieverQueryInner(
     to: string;
     filters?: string[];
     target?: string;
+    result_target?: string;
     limit?: number;
     format?: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
     bucket_size?: string;
@@ -613,6 +628,7 @@ async function executeRetrieverQueryInner(
     search: effectiveSearch,
     filters: args.filters,
     target: args.target,
+    resultTarget: args.result_target,
     limit: args.limit,
     logLevels: args.debug ? 'ERROR,INFO,PERF,DEBUG' : undefined,
     // Per-slice summaries cost almost nothing to write/read and give the
@@ -963,6 +979,13 @@ async function executeRetrieverQueryInner(
       partial_results: partialResults,
       results_location: resultsLoc,
       diagnostics_zero_reason: eventsMatched === 0 && resp.diagnostics ? (explainZeroResults(resp.diagnostics) ?? undefined) : undefined,
+      // Structured funnel verdict for a zero-result query: stage counts +
+      // verdict (OK / EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
+      // DISPATCHED_BLIND / ...) + an actionable hint. When the original query
+      // was blind (remote dispatch), this carries the LOCALIZED verdict the
+      // MCP recovered by auto-submitting a narrowed local-dispatch probe.
+      // Agents branch on diagnostics_funnel.verdict.
+      diagnostics_funnel: eventsMatched === 0 ? resp.diagnostics?.funnel : undefined,
       rollup_basis: rollupBasis,
       by_severity: Object.keys(bySeverity).length > 0 ? bySeverity : undefined,
       by_service: Object.keys(byService).length > 0 ? byService : undefined,

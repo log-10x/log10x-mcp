@@ -136,6 +136,7 @@ import {
   offloadArchiveSchema,
   executeOffloadArchive,
 } from './tools/offload-manage.js';
+import { siemConnectorSchema, executeSiemConnector } from './tools/siem-connector.js';
 import { rotateApiKeySchema, executeRotateApiKey } from './tools/rotate-api-key.js';
 import { servicesSchema, executeServices } from './tools/services.js';
 import { overflowContentsSchema, executeOverflowContents } from './tools/overflow-contents.js';
@@ -551,7 +552,7 @@ function isAuthRecoverableError(e: unknown): boolean {
  * Prepend a banner to the tool result when the MCP is in
  * demo-fallback mode (user supplied an API key but it failed). The
  * goal is hard-to-miss notification — but the wording matters: only
- * account-scoped tools return demo data; local-only templater tools
+ * account-scoped tools return demo data; local-only engine tools
  * (resolve_batch, extract_templates) operate on the caller's own
  * input regardless of credential state. So the banner describes the
  * MCP's *mode*, not "this tool's data."
@@ -658,15 +659,26 @@ const SERVER_OPTIONS = {
     // capability is correct hygiene and unblocks any other tool that
     // wants to use the channel on hosts that do support it.
     capabilities: { logging: {} },
-    instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question.
+    instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question. ANTI-LOOP: call log10x_start at most ONCE per session, on the first message only. After it returns the menu, treat the user's next message as their ANSWER: match it to the corresponding action_menu item and call that item's routes_to tool. Do NOT call log10x_start again or re-render the menu, even when the answer contains cost, savings, drop, compact, offload, or tier_down, because those words are in the menu labels themselves (e.g. "Explore the Receiver: compact, sample, drop, tier down, offload") and a menu selection is not a new fresh-session request.
 
 NEGATION: DO NOT call log10x_estimate_savings, log10x_cost_options, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
 
-Log10x is the observability memory for the user's logs. Every log line the pipeline
-has ever seen is fingerprinted into a stable pattern identity (the hash of a representing-token subset, so many template variants collapse to one) that stays constant across
-deploys, restarts, pod names, timestamps, and request IDs. That identity is the key to a Prometheus
-time series of volume and cost, so any pattern the user has ever emitted is instantly queryable by
-name, by history, or by sample line — with zero prior query setup.
+Log10x groups a user's logs by message type. The same messages repeat over and over with
+only the timestamp or request ID changing, so 10x collapses each flood of near-identical lines
+into one message type and ranks them by the volume and cost each one drives. The user sees exactly
+what is filling their bill and can cut the noise, with no regex or rules to write.
+
+When explaining this to a user, lead with that outcome in plain language ("10x groups your logs by
+message type so you can see what's driving cost and cut it"); do not open with internal jargon like
+"stable pattern identity", "fingerprint", or "hash".
+
+Under the hood, each message type gets a stable identity (the hash of a representing-token subset,
+so many template variants collapse to one) that stays constant across deploys, restarts, pod names,
+timestamps, and request IDs. That identity is the key to a Prometheus time series of volume and cost,
+so any pattern the user has ever emitted is instantly queryable by name, by history, or by sample
+line with zero prior query setup, the observability memory for their logs.
+
+VOCABULARY: the compact action minifies events losslessly, it replaces each event's repeated structure with a template-plus-values encoding so it lands smaller with every field intact. When describing it, say "compact" or "minify", never "compress" or "compression": 10x does not do binary or gzip compression, and that word misleads. (Vendor billing terms are different and fine to use as-is, e.g. a destination that bills on "compressed ingest", or Datadog's "compressed GB" rehydration price, refer to the vendor's own compression, not ours.)
 
 CUSTOMER TIER LADDER (determines which tools are available)
 
@@ -1203,6 +1215,12 @@ registerLog10xTool('log10x_offload_add', offloadAddSchema, (args) =>
   })
 );
 
+registerLog10xTool('log10x_siem_connector', siemConnectorSchema, (args) =>
+  wrap('log10x_siem_connector', async () => {
+    return executeSiemConnector(args);
+  })
+);
+
 // ── Tool: log10x_offload_archive ──
 // Flip one destination's status to `archived` (kept in the list as a
 // historical reference). Refuses when the target is the last active
@@ -1624,7 +1642,7 @@ registerLog10xTool('log10x_metric_overlay', metricOverlaySchema, (args) =>
 
 // ── Tool: log10x_poc_from_siem_submit / _status ──
 //
-// Async pair: submit kicks off a background pull + templatize + render;
+// Async pair: submit kicks off a background pull + analyze + render;
 // status polls for progress and returns the final markdown once done.
 // Supports 8 SIEMs (cloudwatch, datadog, sumo, gcp-logging, elasticsearch,
 // azure-monitor, splunk, clickhouse) with auto-discovery of credentials.
@@ -1635,7 +1653,6 @@ registerLog10xTool('log10x_poc_from_siem_submit', pocFromSiemSubmitSchema, (args
       window: args.window ?? '7d',
       target_event_count: args.target_event_count ?? 250_000,
       max_pull_minutes: args.max_pull_minutes ?? 5,
-      privacy_mode: args.privacy_mode ?? true,
       ai_prettify: args.ai_prettify ?? true,
       total_daily_gb: args.total_daily_gb,
       total_monthly_gb: args.total_monthly_gb,
@@ -1686,7 +1703,6 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       window: args.window ?? '1h',
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
-      privacy_mode: args.privacy_mode ?? true,
       target_percent_reduction: args.target_percent_reduction,
       exception_services: args.exception_services,
     })
@@ -1886,7 +1902,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
   { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
   { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live routeState metric surface answers overflow-volume questions as a TSDB query.' },
-  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
+  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, local engine, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
   { name: 'log10x_signin_complete', intent: 'Step 2 of sign-in: pass back the device_code from log10x_signin_start to finish the browser flow, OR pass api_key directly for pasted-key sign-in (no browser). Hot-reloads envs (no MCP-host restart needed)' },
@@ -1906,7 +1922,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_metrics_that_moved', intent: 'Deterministic phase-aware filter — given an anchor and N candidates, return only candidates whose mean during the anchor\'s incident phase differs from its quiet-phase mean by ≥15%. First step of the cross-pillar investigation; kills diurnal/seasonal confounders before any correlation runs' },
   { name: 'log10x_rank_by_shape_similarity', intent: 'Rank candidates by Pearson + signed lag against an anchor. Returns raw arithmetic — pearson_signed, lag_seconds (negative = leads, possible cause), lag_tightness, lag_at_bound, anchor_phase_aligned. No tier, no causal framing — agent applies its own filter using the surfaced fields' },
   { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side — the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
-  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
+  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, analyze, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
@@ -1921,6 +1937,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list.' },
   { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
+  { name: 'log10x_siem_connector', intent: 'Emit the SIEM<-S3 connector config (Datadog Forwarder Lambda / Splunk Add-on SQS-based S3 input) for an offload bucket: terraform for the SNS fan-out + IAM, the SIEM-native input config, and verified caveats. The destination/ingest side — 10x lands NDJSON in the customer bucket; the SIEM pulls it.' },
   { name: 'log10x_compile', intent: 'Compile a symbol library from any mix of sources, waiting inline for the result when it is quick and handing back a pollable job_id when it is not (max_wait_ms, default 45s; 0 = fire-and-forget). Small compiles and re-runs (which reuse prior units via the pinned output) return the library + diagnostics in ONE call; a long first compile of a large tree returns a job_id to poll with log10x_compile_status (or just call again later — the output is pinned, so a finished run is collected near-instantly). Sources combine freely: a local source folder, GitHub repos, docker/OCI images, Helm charts, and Artifactory artifacts, via the Cloud-flavor Compiler app (Docker log10x/compiler-10x or a local cloud tenx) — scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image and Helm-referenced-image pull are daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds; Helm bare repo/chart names need helm_repos (OCI/URL resolve standalone); Artifactory needs artifactory_instance + artifactory_repo + a token. Edge flavor is refused.' },
   { name: 'log10x_compile_status', intent: 'Poll a compile or link job by job_id (handed back by log10x_compile / log10x_compile_link when they overran their inline wait): job_status (running/completed/failed/timed_out), units produced + linked .10x.tar, and the engine diagnostics that make the compiler not a black box at scale — per-language scan-failure counts with capped samples, and the link report (merge/exclude counts + symbol-type histogram). Captures the exit code and frees the container on first terminal poll; repeat polls stay readable.' },
   { name: 'log10x_compile_link', intent: 'Link an existing folder of .10x.json symbol units into a single .10x.tar library, with NO source scan — the same compiler invoked with link-only args (units folder as outputSymbolFolder, no source), so it reuses on-disk units and merges them. Waits inline for the result (linking is usually fast; max_wait_ms, default 45s) and otherwise hands back a job_id to poll with log10x_compile_status. Use to re-link after editing/pruning units or to rebuild a library from a units tree (e.g. the output folder of a prior log10x_compile).' },
@@ -1974,8 +1991,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin_start` then `log10x_signin_complete` to mint one via Auth0 Device Flow)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
-        '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
-        '  LOG10X_TENX_MODE          `local` or `docker` backend for privacy-mode and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
+        '  LOG10X_TENX_MODE          `local` or `docker` backend for the local engine and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local; compile requires the cloud flavor)',
         '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
         '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',

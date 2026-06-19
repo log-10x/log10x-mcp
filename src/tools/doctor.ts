@@ -223,7 +223,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   // 2. Infrastructure-wide informational checks (retriever, datadog, paste).
   //    These don't depend on a specific env so they live in globalChecks.
   await addInfrastructureChecks(globalChecks);
-  await addPasteEndpointCheck(globalChecks);
+  await addEngineCheck(globalChecks);
   await addSiemDiscoveryCheck(globalChecks);
   addNetworkEgressInventory(globalChecks, envs);
 
@@ -994,7 +994,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
 
   // Detect retriever false-negatives. We cannot run a real retriever
   // query here without side effects, but we CAN check whether the
-  // retriever endpoint is configured AND whether the paste endpoint's
+  // retriever endpoint is configured AND whether the retriever's
   // health probe reports retriever index coverage for recent windows.
   // Live retriever probe: fire a lightweight count query (limit=1, last
   // 1h window) and check whether the pipeline responds. Replaces an older
@@ -1316,56 +1316,27 @@ function scaleFormatNumber(n: number): string {
 }
 
 /**
- * Check the templating backend the tools will actually use by default:
- * the local `tenx` CLI. Falls back to checking the public paste endpoint
- * only as a demo-mode fallback status, with an explicit warning so users
- * don't assume it's production-ready.
+ * Check the engine the tools will actually use: the local `tenx` CLI
+ * (or local Docker). The MCP always runs the engine locally, so this is
+ * the only path — events never leave the machine.
  */
-async function addPasteEndpointCheck(globalChecks: DoctorCheck[]): Promise<void> {
-  // 1. Primary path: local tenx CLI (privacy_mode: true, the default).
+async function addEngineCheck(globalChecks: DoctorCheck[]): Promise<void> {
   const tenxBinary = process.env.LOG10X_TENX_PATH || 'tenx';
   const tenxAvailable = await isTenxAvailable(tenxBinary);
   if (tenxAvailable.ok) {
     globalChecks.push({
-      name: 'templater_local_tenx',
+      name: 'engine_local_tenx',
       status: 'pass',
-      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). Templating will run locally — events never leave the box.`,
+      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). The engine runs locally — events never leave the box.`,
     });
   } else {
     globalChecks.push({
-      name: 'templater_local_tenx',
+      name: 'engine_local_tenx',
       status: 'warn',
       message:
         'Local tenx CLI is not installed (or not on PATH / LOG10X_TENX_PATH). ' +
-        'privacy_mode: true (the default) will fail until tenx is available locally or via docker.',
+        'Paste tools (resolve_batch, find_skew, POC) will fail until tenx is available locally or via docker.',
       fix: tenxAvailabilityHint(),
-    });
-  }
-
-  // 2. Fallback path: paste endpoint — informational only. It's public,
-  // rate-limited, and not intended for production log content. Flag as
-  // warn regardless of reachability so users don't treat it as a green
-  // pass on a production install.
-  try {
-    const url = process.env.LOG10X_PASTE_URL || 'https://meljpepqpd.execute-api.us-east-1.amazonaws.com/paste';
-    const res = await fetch(url, { method: 'OPTIONS' });
-    const reachable = res.ok || res.status === 204 || res.status === 405;
-    globalChecks.push({
-      name: 'templater_paste_endpoint_fallback',
-      status: 'warn',
-      message:
-        reachable
-          ? 'Paste endpoint reachable (demo fallback for privacy_mode: false). Do NOT use with production log content — events leave the caller\'s machine and hit a shared public Lambda.'
-          : `Paste endpoint returned HTTP ${res.status}. privacy_mode: false calls will fail; install the local tenx CLI and keep privacy_mode: true (the default).`,
-      fix: tenxAvailable.ok
-        ? undefined
-        : 'For production use, install tenx locally (see templater_local_tenx fix) and leave privacy_mode at its default of true.',
-    });
-  } catch (e) {
-    globalChecks.push({
-      name: 'templater_paste_endpoint_fallback',
-      status: 'warn',
-      message: `Paste endpoint unreachable: ${(e as Error).message}. privacy_mode: false will fail; this is expected on air-gapped installs and only matters if you intended to use the demo endpoint.`,
     });
   }
 }
@@ -1547,23 +1518,22 @@ export function renderDoctorReport(report: DoctorReport): string {
   } else if (report.overall === 'warn') {
     lines.push('The MCP will function but some tools may be unavailable or degraded. See the warnings above.');
     // Prioritized triage: a cold review flagged that doctor raised
-    // several WARNs with no order to address them. Privacy/egress
-    // risks first, then capability-expanding setup, then informational.
+    // several WARNs with no order to address them. Capability-affecting
+    // setup first (local engine, retriever, backend), then informational.
     const allWarns = [
       ...report.globalChecks,
       ...Object.values(report.perEnvChecks).flat(),
     ].filter(c => c.status === 'warn');
     if (allWarns.length > 0) {
       const rank = (n: string): number =>
-        /paste|egress|privacy/.test(n) ? 0
-        : /retriever|cross_pillar|backend|destination/.test(n) ? 1
-        : 2;
+        /engine|retriever|cross_pillar|backend|destination/.test(n) ? 0
+        : 1;
       const ordered = allWarns
         .map((c, i) => ({ c, i }))
         .sort((a, b) => rank(a.c.name) - rank(b.c.name) || a.i - b.i);
       lines.push('');
       lines.push('### Address these warnings (in order)');
-      lines.push('_None block core cost / investigation tools. Privacy/egress first, then capability setup, then informational._');
+      lines.push('_None block core cost / investigation tools. Capability setup first, then informational._');
       ordered.forEach(({ c }, n) => {
         const fixHead = (c.fix || '').split(/(?<=[.)])\s/)[0].trim();
         lines.push(`  ${n + 1}. \`${c.name}\`${fixHead ? `: ${fixHead}` : ''}`);

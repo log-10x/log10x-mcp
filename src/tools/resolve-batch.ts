@@ -1,10 +1,9 @@
 /**
- * log10x_resolve_batch — templatize a batch of events and return per-pattern triage.
+ * log10x_resolve_batch — run a batch of events through the engine and return per-pattern triage.
  *
  * The tool accepts raw events from three sources (file path, inline array,
  * or a Bash-fetched SIEM dump — the model provides the text) and runs the
- * Log10x templater on the batch via the paste Lambda (default) or a local
- * `tenx` CLI when the caller requests privacy_mode.
+ * local 10x engine on the batch. Events never leave the machine.
  *
  * Output is a structured markdown report ranking patterns by interestingness
  * (volume × severity × variable-concentration strength), with per-pattern
@@ -15,7 +14,6 @@
 
 import { promises as fs } from 'fs';
 import { z } from 'zod';
-import { submitPaste, PASTE_MAX_BYTES, type PasteResponse } from '../lib/paste-api.js';
 import { runDevCli, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
 import {
@@ -45,7 +43,13 @@ export const resolveBatchSchema = {
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
   environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
-  privacy_mode: z.boolean().default(true).describe('When true (default), the batch is processed by a local Log10x engine, so events never leave the machine. The engine can be a native `tenx` CLI (install for macOS/Linux/Windows: https://doc.log10x.com/install/) or a local Docker container (set `LOG10X_TENX_MODE=docker`); when the mode is unset, Docker is auto-detected and preferred, falling back to a native install. Set to false to route through the public Log10x paste Lambda instead (100 KB limit, requires network). If no local engine is available, the call surfaces a typed not_configured envelope with an install hint covering both options.'),
+};
+
+/** Engine output file set, keyed the way cli-output-parser consumes it. */
+type EngineFileOutput = {
+  'templates.json': string;
+  'encoded.log': string;
+  'aggregated.csv': string;
 };
 
 interface ResolveBatchSummary {
@@ -56,7 +60,7 @@ interface ResolveBatchSummary {
   accounted_events: number;
   dropped_events: number;
   drop_rate: number;
-  execution_mode: 'local_cli' | 'paste_lambda';
+  execution_mode: 'local_cli';
   cli_wall_time_ms: number;
   severity_mix: Record<string, number>;
   overfit_warning: boolean;
@@ -89,12 +93,12 @@ interface ResolveBatchSummary {
 function buildResolveBatchHumanSummary(d: Omit<ResolveBatchSummary, 'human_summary'>): string {
   const top = d.patterns[0];
   const patternsWord = d.resolved_pattern_count === 1 ? 'pattern' : 'patterns';
-  const first = `Resolved ${fmtCount(d.input_line_count)} events into ${d.resolved_pattern_count} ${patternsWord} via the ${d.execution_mode === 'local_cli' ? 'local tenx CLI' : 'paste Lambda'} (wall time ${d.cli_wall_time_ms}ms).`;
+  const first = `Resolved ${fmtCount(d.input_line_count)} events into ${d.resolved_pattern_count} ${patternsWord} via the local 10x engine (wall time ${d.cli_wall_time_ms}ms).`;
   const second = top
     ? `The top contributor is ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of the batch${top.dominant_severity ? `, dominant severity ${top.dominant_severity}` : ''}.`
     : 'No ranked patterns were produced.';
   const third = d.drop_rate >= 0.2
-    ? `Warning: the templater dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as a partial triage.`
+    ? `Warning: the engine dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as a partial triage.`
     : d.overfit_warning
       ? 'Tiny-batch note: every event resolved to its own template; paste at least 50 events for a converged triage.'
       : `${d.shown_pattern_count} of ${d.resolved_pattern_count} ${patternsWord} shown in the ranked output.`;
@@ -109,7 +113,6 @@ export async function executeResolveBatch(args: {
   top_n_patterns: number;
   include_next_actions: boolean;
   environment?: string;
-  privacy_mode: boolean;
   view?: 'summary';
 }): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
@@ -125,6 +128,10 @@ export async function executeResolveBatch(args: {
       });
     }
     if (e instanceof DevCliConfigMissingError) {
+      // The missing field is the engine API key (LOG10X_API_KEY), an
+      // env-var fix no MCP tool performs. Do NOT suggest log10x_configure_env
+      // here — that configures a metrics backend, not the engine key, so it
+      // would be a misleading dead-end action. The hint spells out the fix.
       return buildChassisErrorEnvelope({
         tool: 'log10x_resolve_batch',
         err: {
@@ -133,7 +140,6 @@ export async function executeResolveBatch(args: {
           suggested_backoff_ms: null,
           hint: e.hint,
         },
-        actions: [{ tool: 'log10x_configure_env', args: {}, reason: 'configure the missing field' }],
       });
     }
     if (e instanceof DevCliRunError) {
@@ -162,14 +168,14 @@ export async function executeResolveBatch(args: {
       scope: { window: 'paste_batch', window_basis: 'auto_default' },
       payload: { precondition: 'no_patterns' },
       human_summary: headline,
-      warnings: ['resolve_batch produced no per-pattern summary. Either the templater returned no patterns (check that events are raw log lines, one per line, not pre-formatted JSON), or the local engine image emits an output format this MCP build cannot parse (engine/MCP version skew). Run log10x_doctor to check the engine image version.'],
+      warnings: ['resolve_batch produced no per-pattern summary. Either the engine returned no patterns (check that events are raw log lines, one per line, not pre-formatted JSON), or the local engine image emits an output format this MCP build cannot parse (engine/MCP version skew). Run log10x_doctor to check the engine image version.'],
     });
   }
   const base = sumOut.data;
   const human_summary = buildResolveBatchHumanSummary(base);
   const d: ResolveBatchSummary = { ...base, human_summary };
   const top = d.patterns[0];
-  const dropWarning = d.drop_rate >= 0.2 ? ` (${Math.round(d.drop_rate * 100)}% of input lines dropped by templater)` : '';
+  const dropWarning = d.drop_rate >= 0.2 ? ` (${Math.round(d.drop_rate * 100)}% of input lines dropped by the engine)` : '';
   const headline = `${fmtCount(d.input_line_count)} events → ${d.resolved_pattern_count} pattern${d.resolved_pattern_count !== 1 ? 's' : ''}${top ? `, top: ${top.symbol_message ?? top.template_hash} at ${Math.round(top.share_pct)}% of batch` : ''}${dropWarning}.`;
   return buildChassisEnvelope({
     tool: 'log10x_resolve_batch',
@@ -187,7 +193,7 @@ export async function executeResolveBatch(args: {
     payload: d,
     human_summary,
     truncated: d.shown_pattern_count < d.resolved_pattern_count,
-    warnings: d.drop_rate >= 0.2 ? [`templater dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as partial triage`] : [],
+    warnings: d.drop_rate >= 0.2 ? [`the engine dropped ${Math.round(d.drop_rate * 100)}% of input lines, treat as partial triage`] : [],
     actions: top && top.symbol_message
       ? [
           { tool: 'log10x_event_lookup', args: { pattern: top.symbol_message }, reason: 'look up the top pattern against the live Reporter' },
@@ -205,7 +211,6 @@ async function executeResolveBatchInner(args: {
   top_n_patterns: number;
   include_next_actions: boolean;
   environment?: string;
-  privacy_mode: boolean;
 }, sumOut?: { data?: Omit<ResolveBatchSummary, 'human_summary'> }): Promise<string> {
   // ── 1. Materialize input text ──
   const text = await materialize(args);
@@ -220,59 +225,41 @@ async function executeResolveBatchInner(args: {
     throw new Error('Input contained no non-empty lines.');
   }
 
-  // ── 2. Run the templater ──
-  // Two execution paths:
-  //   - privacy_mode: true  → local `tenx` CLI, events never leave the machine
-  //   - privacy_mode: false → public paste Lambda (default), 100 KB limit
-  let resp: PasteResponse;
+  // ── 2. Run the local 10x engine ──
+  // Always local: events never leave the machine.
+  let resp: EngineFileOutput;
   let cliWallTimeMs: number;
-  let executionMode: 'local_cli' | 'paste_lambda';
+  const executionMode = 'local_cli' as const;
 
-  if (args.privacy_mode) {
-    try {
-      const local = await runDevCli(text);
-      resp = {
-        'templates.json': local.templatesJson,
-        'encoded.log': local.encodedLog,
-        'aggregated.csv': local.aggregatedCsv,
-      };
-      cliWallTimeMs = local.wallTimeMs;
-      executionMode = 'local_cli';
-    } catch (e) {
-      if (e instanceof DevCliNotInstalledError) {
-        // PORT: precondition (local tenx CLI not installed). Rethrow so the
-        // outer executeResolveBatch catches at the tool boundary and converts
-        // to buildNotConfiguredEnvelope (kind='generic'). The chokepoint
-        // doesn't need a framework name-match — the boundary catch keeps the
-        // not-configured contract self-contained to this tool.
-        throw e;
-      }
-      if (e instanceof DevCliConfigMissingError) {
-        // Rethrow typed so the outer executeResolveBatch converts it to a
-        // config_missing chassis envelope (FIX 68-residual).
-        throw e;
-      }
-      if (e instanceof DevCliRunError) {
-        // Rethrow typed so the outer executeResolveBatch can wrap it in a
-        // chassis error envelope instead of emitting raw stderr text.
-        throw e;
-      }
-      // KEEP: internal-state (CLI invocation failed unexpectedly). Caught by wrap().
-      throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
+  try {
+    const local = await runDevCli(text);
+    resp = {
+      'templates.json': local.templatesJson,
+      'encoded.log': local.encodedLog,
+      'aggregated.csv': local.aggregatedCsv,
+    };
+    cliWallTimeMs = local.wallTimeMs;
+  } catch (e) {
+    if (e instanceof DevCliNotInstalledError) {
+      // PORT: precondition (local tenx CLI not installed). Rethrow so the
+      // outer executeResolveBatch catches at the tool boundary and converts
+      // to buildNotConfiguredEnvelope (kind='generic'). The chokepoint
+      // doesn't need a framework name-match — the boundary catch keeps the
+      // not-configured contract self-contained to this tool.
+      throw e;
     }
-  } else {
-    if (bytes > PASTE_MAX_BYTES) {
-      // KEEP: schema-violation (input size limit). Caught by wrap().
-      throw new Error(
-        `Batch too large: ${(bytes / 1024).toFixed(1)} KB exceeds the 100 KB paste Lambda limit. ` +
-          `Trim to ~1-2K events, paginate across multiple calls, or set privacy_mode=true to route through ` +
-          `a locally-installed tenx CLI (no 100 KB limit).`
-      );
+    if (e instanceof DevCliConfigMissingError) {
+      // Rethrow typed so the outer executeResolveBatch converts it to a
+      // config_missing chassis envelope (FIX 68-residual).
+      throw e;
     }
-    const started = Date.now();
-    resp = await submitPaste(text);
-    cliWallTimeMs = Date.now() - started;
-    executionMode = 'paste_lambda';
+    if (e instanceof DevCliRunError) {
+      // Rethrow typed so the outer executeResolveBatch can wrap it in a
+      // chassis error envelope instead of emitting raw stderr text.
+      throw e;
+    }
+    // KEEP: internal-state (CLI invocation failed unexpectedly). Caught by wrap().
+    throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
   }
 
   // ── 3. Parse outputs ──
@@ -281,7 +268,7 @@ async function executeResolveBatchInner(args: {
   const aggregated = parseAggregated(resp['aggregated.csv']);
 
   if (templates.size === 0 || encoded.length === 0) {
-    return `No patterns resolved from ${lineCount} line(s). Either the templater rejected the input (check that events are raw log lines, one per line, not pre-formatted JSON), or the engine output format does not match this MCP build (version skew).`;
+    return `No patterns resolved from ${lineCount} line(s). Either the engine rejected the input (check that events are raw log lines, one per line, not pre-formatted JSON), or the engine output format does not match this MCP build (version skew).`;
   }
 
   // ── 4. Per-pattern concentration ──
@@ -291,7 +278,7 @@ async function executeResolveBatchInner(args: {
 
   // ── 5. Merge in severity from aggregated.csv ──
   // aggregated.csv is keyed by `message_pattern` (a symbolMessage-style name)
-  // and the paste Lambda does NOT emit it in the same order as templates.json.
+  // and the engine does NOT emit it in the same order as templates.json.
   // We also can't compute the exact canonical because the Reporter's identity
   // rule strips some literal values (e.g., `tenant=a` → `tenant`) that are
   // visible in the template body. The robust match is **token-set Jaccard
@@ -324,9 +311,9 @@ async function executeResolveBatchInner(args: {
   const lines: string[] = [];
   lines.push(`## Batch Triage`);
   lines.push('');
-  const modeLabel = executionMode === 'local_cli' ? 'local tenx CLI (privacy mode — no network egress)' : 'Log10x paste endpoint';
+  const modeLabel = 'local 10x engine (no network egress)';
 
-  // The engine-side templatizer has a known limitation where it silently
+  // The engine has a known limitation where it silently
   // drops some input lines under certain conditions (up to ~70% of a
   // 30-line batch on the otel-demo env). The tool previously trusted
   // `concentrations` as the authoritative count without comparing against
@@ -335,15 +322,14 @@ async function executeResolveBatchInner(args: {
   // leaving 21 input lines silently vanished with no warning. This compares
   // the sum of pattern counts against the input line count and surfaces any
   // gap as an explicit "uncategorized events" number so a caller cannot be
-  // misled. It does NOT fix the underlying templatizer (an engine-side
-  // limitation).
+  // misled. It does NOT fix the underlying engine limitation.
   const accountedEvents = encoded.length;
   const droppedEvents = Math.max(0, lineCount - accountedEvents);
   const dropRate = lineCount > 0 ? droppedEvents / lineCount : 0;
 
   lines.push(
     `${fmtCount(lineCount)} events, resolved into ${concentrations.length} distinct pattern${concentrations.length === 1 ? '' : 's'}. ` +
-      `Templater wall time: ${cliWallTimeMs}ms. Input size: ${fmtBytes(bytes)}. Execution: ${modeLabel}.`
+      `Engine wall time: ${cliWallTimeMs}ms. Input size: ${fmtBytes(bytes)}. Execution: ${modeLabel}.`
   );
   if (droppedEvents > 0) {
     const pctLabel = `${Math.round(dropRate * 100)}%`;
@@ -351,9 +337,9 @@ async function executeResolveBatchInner(args: {
       lines.push('');
       // User-visible: the data-quality fact. The user must see this.
       lines.push(
-        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the templatizer.** ` +
+        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the engine.** ` +
           `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the input line count (${fmtCount(lineCount)}). ` +
-          `Known engine-side limitation: the templatizer silently drops lines under certain conditions ` +
+          `Known engine-side limitation: the engine silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
           `The dropped lines may contain the most important signals.`
       );
@@ -366,7 +352,7 @@ async function executeResolveBatchInner(args: {
       ));
     } else if (dropRate >= 0.05) {
       lines.push(
-        `_Note: ${fmtCount(droppedEvents)} lines (${pctLabel}) were not accounted for by the templatizer. Minor drop, likely tiny-batch overfitting._`
+        `_Note: ${fmtCount(droppedEvents)} lines (${pctLabel}) were not accounted for by the engine. Minor drop, likely tiny-batch overfitting._`
       );
     }
   }
@@ -382,8 +368,8 @@ async function executeResolveBatchInner(args: {
   }
 
   // Tiny-batch warning: when every event resolves to its own pattern and the
-  // template bodies are mostly the same tokens, the templater saw too few
-  // samples to identify which tokens vary. That's not a bug — the templater
+  // template bodies are mostly the same tokens, the engine saw too few
+  // samples to identify which tokens vary. That's not a bug — the engine
   // is statistical and needs repeated occurrences per slot to generalize.
   // With a 5-event batch of 5 distinct templates, one-slot variations (e.g.
   // user names) stay baked into the template body and inflate pattern count.
@@ -392,14 +378,14 @@ async function executeResolveBatchInner(args: {
     lines.push(
       `> **Tiny-batch note**: ${concentrations.length} distinct templates ` +
       `across ${totalEvents} events with ~${Math.round(overfit.sharedPct * 100)}% token overlap ` +
-      `between pairs suggests the templater had too few samples to generalize ` +
+      `between pairs suggests the engine had too few samples to generalize ` +
       `variable slots. Recurring tokens (usernames, order IDs, short identifiers) ` +
       `stay in the template body without repeated occurrences to mark them as ` +
       `variables. For statistically-converged templates on the same events, ` +
       `use \`log10x_top_patterns\` / \`log10x_event_lookup\` against the live ` +
       `Reporter — the production pipeline has seen millions of samples and ` +
       `generalizes cleanly. For one-shot batch triage, pasting ≥50 events tends ` +
-      `to cross the templater's confidence floor.`
+      `to cross the engine's confidence floor.`
     );
     lines.push('');
   }
@@ -555,12 +541,12 @@ async function materialize(args: {
 // ── Ranking ──
 
 /**
- * Detect a batch where the templater was statistically under-sampled.
+ * Detect a batch where the engine was statistically under-sampled.
  *
  * Signal: N_templates == N_events (every event is its own template) AND the
  * average pairwise token overlap between template bodies is high (the
  * templates differ by only one or two tokens — a name, an ID). This is the
- * classic "I pasted 5 lines and got 5 templates back" case. The templater
+ * classic "I pasted 5 lines and got 5 templates back" case. The engine
  * correctly preserves identity on small samples; the note is advisory.
  *
  * Returns null when the batch doesn't match the signature (so the note is
@@ -711,7 +697,7 @@ function buildStructuredNextActions(
 /**
  * Compute the `message_pattern` symbolMessage from a raw template body.
  *
- * Matches the paste Lambda / Reporter pipeline convention used in
+ * Matches the Reporter pipeline convention used in
  * aggregated.csv's `message_pattern` column:
  *
  *   1. Strip `$(...)` format specs entirely (timestamps, typed formats)

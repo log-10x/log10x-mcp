@@ -1,7 +1,7 @@
 /**
  * log10x_poc_from_siem — async MCP tool pair.
  *
- * The submit tool kicks off the pull + templatize + render pipeline in the
+ * The submit tool kicks off the pull + analyze + render pipeline in the
  * background and returns a `snapshot_id`. The status tool reports progress
  * and returns the final markdown once done.
  *
@@ -183,17 +183,6 @@ export const pocFromSiemSubmitSchema = {
     .max(32000)
     .default(8000)
     .describe('Output token cap for the host-agent enrichment call. Default 8000.'),
-  privacy_mode: z
-    .boolean()
-    .default(true)
-    .describe(
-      'Default true: templating runs through a local Log10x engine so events never leave the machine. ' +
-        'The engine can be a native `tenx` CLI (install for macOS/Linux/Windows: https://doc.log10x.com/install/) ' +
-        'or a local Docker container (set LOG10X_TENX_MODE=docker); when the mode is unset, Docker is auto-detected and preferred. ' +
-        'The tool errors cleanly with an install hint covering both options otherwise. ' +
-        'Set to false to route through the public Log10x paste endpoint instead, intended for demo use only, ' +
-        'not production log content (raw events are sent to a shared public Lambda).'
-    ),
   environment: z.string().optional().describe('Optional environment nickname — cosmetic only, for the report header.'),
   target_percent_reduction: z
     .number()
@@ -270,7 +259,7 @@ export const pocFromSiemStatusSchema = {
 
 // ── Async state ──
 
-type Status = 'pulling' | 'templatizing' | 'analyzing' | 'rendering' | 'complete' | 'failed';
+type Status = 'pulling' | 'analyzing' | 'rendering' | 'complete' | 'failed';
 
 interface Snapshot {
   id: string;
@@ -371,7 +360,6 @@ export interface PocSubmitArgs {
   ai_prettify: boolean;
   enrich_with_host_agent?: boolean;
   enrich_max_tokens?: number;
-  privacy_mode: boolean;
   environment?: string;
   /** Customer-specified target reduction (0-100). Triggers feasibility + commitment artifact emission. */
   target_percent_reduction?: number;
@@ -448,7 +436,7 @@ export async function executePocSubmit(args: PocSubmitArgs): Promise<import('../
       max_pull_minutes: args.max_pull_minutes,
       ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }),
     },
-    actions: sidMatch ? [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: sidMatch[1] }, reason: 'poll POC progress; phases: pulling -> templatizing -> rendering -> complete' }] : [],
+    actions: sidMatch ? [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: sidMatch[1] }, reason: 'poll POC progress; phases: pulling -> analyzing -> rendering -> complete' }] : [],
   });
 }
 
@@ -509,14 +497,14 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     '### Phases',
     '',
     `1. \`pulling\` — fetching events from ${SIEM_DISPLAY_NAMES[connector.id]} (typical 1-3 min)`,
-    `2. \`templatizing\` — extracting patterns from the sample (typical 3-8 min depending on event count)`,
+    `2. \`analyzing\` — extracting patterns from the sample (typical 3-8 min depending on event count)`,
     `3. \`rendering\` — building the final report (<5s)`,
     `4. \`complete\` — full report available; call status with \`view: "summary"\` (default), \`"yaml"\`, \`"configs"\`, \`"top"\`, or \`"pattern"\`.`,
     '',
     '### Polling',
     '',
     `Call \`log10x_poc_from_siem_status({snapshot_id: "${snapshot.id}"})\` every ~30s while the pipeline runs.`,
-    `During \`templatizing\`, the snapshot exposes \`partialPatternsFound\` — when that number stabilizes, the templater is winding down and the report is close to ready.`,
+    `During \`analyzing\`, the snapshot exposes \`partialPatternsFound\` — when that number stabilizes, the engine is winding down and the report is close to ready.`,
     `Hard ceiling on pull time: ${args.max_pull_minutes} min (per the submit \`max_pull_minutes\` arg).`,
   ].join('\n');
 
@@ -795,8 +783,8 @@ async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
   const phaseHint =
     s.status === 'pulling'
       ? 'Pulling phase typically takes 1-3 min; partial patterns surface only after pull completes.'
-      : s.status === 'templatizing'
-      ? 'Templatizing phase typically takes 3-8 min. `partial_patterns_found` updates as patterns resolve; when it stops growing, render is close.'
+      : s.status === 'analyzing'
+      ? 'Analyzing phase typically takes 3-8 min. `partial_patterns_found` updates as patterns resolve; when it stops growing, render is close.'
       : s.status === 'rendering'
       ? 'Rendering takes <5s; the next poll should return `complete`.'
       : '';
@@ -873,11 +861,11 @@ export async function runPipeline(
     return;
   }
 
-  // ── Templatize + parallel volume detection ──
+  // ── Analyze + parallel volume detection ──
   // Both are independent of each other's output so we race them.
   // Volume detection timeout: 15s; never blocks the report.
-  snapshot.status = 'templatizing';
-  snapshot.stepDetail = `templating ${pullResult.events.length} events`;
+  snapshot.status = 'analyzing';
+  snapshot.stepDetail = `analyzing ${pullResult.events.length} events`;
   snapshot.progressPct = Math.max(snapshot.progressPct, 60);
   const templStart = Date.now();
 
@@ -895,15 +883,12 @@ export async function runPipeline(
       }
       return sum + 200;
     }, 0);
-    const chunkParallel = args.privacy_mode === true && approxRawBytes > 64 * 1024 * 1024;
+    const chunkParallel = approxRawBytes > 64 * 1024 * 1024;
     extraction = await extractPatterns(pullResult.events, {
-      privacyMode: args.privacy_mode,
-      autoBatch: true,
       // POC pulls scale to 100K-1M events. Route through the file-
-      // output engine app (@apps/mcp-file) so the templater can stream
-      // results to disk instead of buffering in stdout. Falls back to
-      // stdin-based runner when privacy_mode=false (paste lambda).
-      useFileOutput: args.privacy_mode === true,
+      // output engine app (@apps/mcp-file) so the engine can stream
+      // results to disk instead of buffering in stdout.
+      useFileOutput: true,
       // For GB-scale inputs (over 64 MB raw), split events into
       // chunks and run N tenx processes in parallel. Outputs merge
       // by templateHash + tenx_hash. JVM cold-start makes this a
@@ -912,8 +897,8 @@ export async function runPipeline(
     });
   } catch (e) {
     snapshot.status = 'failed';
-    snapshot.error = `templatize_failed: ${(e as Error).message}`;
-    snapshot.retryHint = 'Try smaller target_event_count, enable privacy_mode with local tenx installed, or reduce window size.';
+    snapshot.error = `analyze_failed: ${(e as Error).message}`;
+    snapshot.retryHint = 'Try smaller target_event_count, ensure a local tenx engine is installed, or reduce window size.';
     snapshot.finishedAt = new Date().toISOString();
     return;
   }
@@ -926,7 +911,7 @@ export async function runPipeline(
   extraction.patterns = collapseBySymbolMessage(extraction.patterns);
   snapshot.partialPatternsFound = extraction.patterns.length;
 
-  // Await volume detect AFTER templating — the templater is the long pole
+  // Await volume detect AFTER templating — the engine is the long pole
   // and volume detection likely finished during it.
   const volumeResult = await volumeDetectPromise;
 

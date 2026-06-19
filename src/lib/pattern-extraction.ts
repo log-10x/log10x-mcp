@@ -1,20 +1,18 @@
 /**
- * Shared pattern-extraction lib — templatize a batch of events.
+ * Shared pattern-extraction lib — run a batch of events through the engine.
  *
  * Used by log10x_resolve_batch and log10x_poc_from_siem. Both tools feed
  * raw log lines through this and get back a structured list of per-pattern
  * records with aggregated counts, bytes, severity, service, and sample
  * event bodies.
  *
- * Honors `privacyMode`:
- *   - false (default): route through the paste Lambda (events leave the box)
- *   - true: shell out to a locally-installed `tenx` binary (events stay local)
+ * Always runs the local 10x engine (a locally-installed `tenx` binary, or
+ * local Docker via LOG10X_TENX_MODE=docker). Events never leave the machine.
  *
- * Under the hood this uses the existing paste-api + dev-cli + cli-output-parser
- * machinery so the templater contract stays single-source.
+ * Under the hood this uses the existing dev-cli + cli-output-parser
+ * machinery so the engine contract stays single-source.
  */
 
-import { submitPaste, PASTE_MAX_BYTES } from './paste-api.js';
 import { runDevCli, runDevCliFileOutput, DevCliNotInstalledError } from './dev-cli.js';
 import { runChunkedTemplater } from './poc-chunked-templater.js';
 import {
@@ -71,9 +69,8 @@ export interface ExtractedPattern {
    * Measured, not estimated. Used to compute the real compact-byte
    * ratio in Section 6.
    *
-   * Optional: missing when the engine didn't emit encoded lines
-   * (paste-lambda fallback path, older CLI without anchored encoded
-   * layout). Consumers treat missing as 0.
+   * Optional: missing on older CLI builds without anchored encoded
+   * layout. Consumers treat missing as 0.
    */
   encodedBytes?: number;
   /** One representative raw event (from the first encoded match). */
@@ -107,24 +104,16 @@ export interface ExtractedPatterns {
   totalBytes: number;
   /** Number of raw input lines the caller passed in. */
   inputLineCount: number;
-  /** Wall time spent in the templater (network + CLI). */
+  /** Wall time spent in the engine (CLI). */
   templaterWallTimeMs: number;
-  /** `paste_lambda` or `local_cli`. */
-  executionMode: 'paste_lambda' | 'local_cli';
+  /** Always `local_cli` — the engine runs on the caller's machine. */
+  executionMode: 'local_cli';
 }
 
 export interface ExtractPatternsOptions {
-  /** Route through the local `tenx` CLI instead of the paste Lambda. */
-  privacyMode?: boolean;
   /**
-   * When true, automatically batch the input through multiple paste-Lambda
-   * calls if it exceeds PASTE_MAX_BYTES. Merges results by templateHash.
-   * Default false to preserve existing `resolve_batch` semantics.
-   */
-  autoBatch?: boolean;
-  /**
-   * When true (only meaningful with `privacyMode=true`), route the
-   * templater run through the file-output engine app (@apps/mcp-file)
+   * When true, route the engine run through the file-output engine app
+   * (@apps/mcp-file)
    * instead of the stdout-based @apps/mcp. The CLI writes templates,
    * encoded events, and aggregated rows to disk; the parser reads
    * them after the process exits. Scales to multi-million-event pulls
@@ -135,7 +124,7 @@ export interface ExtractPatternsOptions {
    */
   useFileOutput?: boolean;
   /**
-   * When true (with `privacyMode=true` and `useFileOutput=true`),
+   * When true (with `useFileOutput=true`),
    * split the input into chunks and run multiple tenx processes in
    * parallel. Each chunk gets its own LOG10X_MCP_RUNTIME_NAME so
    * output directories don't clash; outputs are merged by
@@ -183,10 +172,6 @@ export async function extractPatterns(
   events: unknown[],
   opts: ExtractPatternsOptions = {}
 ): Promise<ExtractedPatterns> {
-  if (opts.privacyMode) {
-    // Fail fast if tenx isn't installed — don't silently degrade.
-    // The DevCliNotInstalledError shape has a user-actionable install hint.
-  }
   // Pair each line with an "enrichment" record extracted from the envelope
   // before we drop it. Fluent-bit / k8s envelopes carry service and severity
   // labels the templated text loses, so we keep them alongside for later
@@ -211,7 +196,7 @@ export async function extractPatterns(
       totalBytes: 0,
       inputLineCount: 0,
       templaterWallTimeMs: 0,
-      executionMode: opts.privacyMode ? 'local_cli' : 'paste_lambda',
+      executionMode: 'local_cli',
     };
   }
 
@@ -219,10 +204,10 @@ export async function extractPatterns(
   const mergedEncoded: EncodedEvent[] = [];
   const mergedAggregated: AggregatedRow[] = [];
   let totalWallTimeMs = 0;
-  let executionMode: 'paste_lambda' | 'local_cli' = opts.privacyMode ? 'local_cli' : 'paste_lambda';
+  const executionMode = 'local_cli' as const;
 
-  if (opts.privacyMode) {
-    // Local CLI can absorb the full batch in one shot.
+  // The local 10x engine absorbs the full batch in one shot.
+  {
     const text = lines.join('\n');
     try {
       // useFileOutput routes through @apps/mcp-file (engine writes
@@ -251,28 +236,6 @@ export async function extractPatterns(
     } catch (e) {
       if (e instanceof DevCliNotInstalledError) throw e;
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
-    }
-  } else {
-    // Paste Lambda has a 100 KB body limit. Split by lines into chunks.
-    const chunks = opts.autoBatch ? chunkByBytes(lines, PASTE_MAX_BYTES) : [lines.join('\n')];
-    for (const chunk of chunks) {
-      const size = Buffer.byteLength(chunk, 'utf8');
-      if (size > PASTE_MAX_BYTES) {
-        // Only possible when autoBatch=false and the caller passed an oversize batch.
-        throw new Error(
-          `Batch too large: ${(size / 1024).toFixed(1)} KB exceeds the 100 KB paste Lambda limit. ` +
-            `Set autoBatch=true (the tool layer does this automatically) or privacy_mode=true to ` +
-            `route through a locally-installed tenx CLI.`
-        );
-      }
-      const started = Date.now();
-      const resp = await submitPaste(chunk);
-      totalWallTimeMs += Date.now() - started;
-      for (const [hash, tpl] of parseTemplates(resp['templates.json'])) {
-        if (!mergedTemplates.has(hash)) mergedTemplates.set(hash, tpl);
-      }
-      for (const ev of parseEncoded(resp['encoded.log'])) mergedEncoded.push(ev);
-      for (const row of parseAggregated(resp['aggregated.csv'])) mergedAggregated.push(row);
     }
   }
 
@@ -451,8 +414,8 @@ export async function extractPatterns(
  * `symbolMessage`, not on templateHash).
  *
  * Pass each `ExtractedPattern[]` through this before rendering or
- * enriching. Patterns without a `symbolMessage` (older CLI, paste-lambda
- * fallback) are left as-is, keyed by their templateHash.
+ * enriching. Patterns without a `symbolMessage` (older CLI) are left
+ * as-is, keyed by their templateHash.
  */
 export function collapseBySymbolMessage(patterns: ExtractedPattern[]): ExtractedPattern[] {
   const groups = new Map<string, ExtractedPattern[]>();
@@ -613,7 +576,7 @@ function coerceObjectToLine(obj: Record<string, unknown>, opts: { preserveEnvelo
     // If the candidate is itself a JSON envelope (common on Splunk `_raw`
     // and CloudWatch `message` fields from fluent-bit forwarders), descend
     // once more to unwrap. Keeps templating focused on the actual log text
-    // instead of paying for 3× byte count through the paste Lambda.
+    // instead of paying for 3× byte count.
     const t = cand.trim();
     if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
       if (opts.preserveEnvelope) {
@@ -641,30 +604,6 @@ function coerceObjectToLine(obj: Record<string, unknown>, opts: { preserveEnvelo
   } catch {
     return '';
   }
-}
-
-/** Split lines into chunks whose serialized form fits in maxBytes. */
-function chunkByBytes(lines: string[], maxBytes: number): string[] {
-  const chunks: string[] = [];
-  let cur: string[] = [];
-  let curBytes = 0;
-  for (const line of lines) {
-    const lineBytes = Buffer.byteLength(line, 'utf8') + 1; // +1 for newline
-    if (curBytes + lineBytes > maxBytes && cur.length > 0) {
-      chunks.push(cur.join('\n'));
-      cur = [];
-      curBytes = 0;
-    }
-    // Single-line-exceeds-limit: truncate to avoid infinite loop.
-    if (lineBytes > maxBytes) {
-      chunks.push(line.slice(0, maxBytes - 1));
-      continue;
-    }
-    cur.push(line);
-    curBytes += lineBytes;
-  }
-  if (cur.length > 0) chunks.push(cur.join('\n'));
-  return chunks;
 }
 
 function tokenize(s: string): Set<string> {

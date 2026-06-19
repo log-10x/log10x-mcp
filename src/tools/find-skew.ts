@@ -3,7 +3,7 @@
  * (sampling opportunity).
  *
  * Stage 1 implementation: accepts an `events` paste (the same shape as
- * `log10x_resolve_batch`) and runs the local templater + skew detector.
+ * `log10x_resolve_batch`) and runs the local 10x engine + skew detector.
  * Env-mode auto-pull (query customer TSDB for top patterns, fetch sample
  * events, run detector) is a follow-up feature in Stage 2.
  *
@@ -57,7 +57,6 @@ export const findSkewSchema = {
     .describe(
       'Sampling rate N for the savings projection (1/N of the dominant case kept). Default 10. Same calibration caveat — sample_n=10 is a defensible starting point but not validated for any specific cost target.'
     ),
-  privacy_mode: z.boolean().default(false).describe('Route events through a local Log10x engine (native `tenx`, or local Docker via `LOG10X_TENX_MODE=docker`) instead of the paste Lambda.'),
 };
 
 export type FindSkewArgs = {
@@ -70,7 +69,6 @@ export type FindSkewArgs = {
    * in-process callers; the markdown view was removed from the public
    * schema in favor of the structured `human_summary` field. */
   view?: 'summary' | 'markdown';
-  privacy_mode?: boolean;
 };
 
 /**
@@ -79,7 +77,7 @@ export type FindSkewArgs = {
  *   - `no_signal`: candidates evaluated, NONE crossed the floor. Stop searching.
  *   - `insufficient_data`: not enough events to bother analyzing OR no
  *     pattern had ≥ min_events after templating.
- *   - `error`: structural failure (templater crash, input validation failed).
+ *   - `error`: structural failure (engine crash, input validation failed).
  */
 export type FindSkewStatus = 'success' | 'no_signal' | 'insufficient_data' | 'error';
 
@@ -140,12 +138,12 @@ interface FindSkewSummary {
 }
 
 /**
- * Templater seam (dependency injection).
+ * Engine seam (dependency injection).
  *
- * `executeFindSkew` runs the local templater via `extractPatterns`, which
- * routes events through the paste Lambda (network) or a local `tenx` CLI.
- * Neither is available deterministically in CI / offline test runs, and
- * the paste-templater's literal-token handling makes it impossible to
+ * `executeFindSkew` runs the local 10x engine via `extractPatterns`, which
+ * shells out to a locally-installed `tenx` binary (or local Docker).
+ * That is not available deterministically in CI / offline test runs, and
+ * the engine's literal-token handling makes it impossible to
  * hand-craft an event string that yields a genuine intra-pattern slot
  * with a controllable dominant percentage.
  *
@@ -162,7 +160,7 @@ type ExtractPatternsFn = (
 
 let extractPatternsImpl: ExtractPatternsFn = extractPatterns;
 
-/** Test-only seam: override the templater. Pass nothing to reset. */
+/** Test-only seam: override the engine. Pass nothing to reset. */
 export function _setExtractPatterns(impl?: ExtractPatternsFn): void {
   extractPatternsImpl = impl ?? extractPatterns;
 }
@@ -195,10 +193,10 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     });
   }
 
-  // ── Local templater pass ───────────────────────────────────────────
+  // ── Local engine pass ──────────────────────────────────────────────
   let extraction: Awaited<ReturnType<typeof extractPatterns>>;
   try {
-    extraction = await extractPatternsImpl(args.events, { privacyMode: args.privacy_mode });
+    extraction = await extractPatternsImpl(args.events);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return errorEnvelope({
