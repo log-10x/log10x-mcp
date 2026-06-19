@@ -38,6 +38,7 @@ import {
 } from '../lib/chassis-envelope.js';
 import { oneLine } from '../lib/siem/sample.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,9 @@ export const patternDetailSchema = {
     .default('7d')
     .describe('Time window for the volume trend and sample events lookback. Default 7d. Pattern: ^\\d+[mhd]$.'),
   environment: z.string().optional().describe('Environment nickname for multi-env setups.'),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
+  ),
 };
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -84,6 +88,11 @@ export interface PatternDetailEnvelope {
   trend_time_series: Array<{ ts: number; bytes_per_sec: number }>;
   /** Full sample events, capped at 2048 chars each. Up to 3 shown. */
   sample_events: string[];
+  /**
+   * Volume projection lens resolution. {lensed:false,factor:1} on a normal
+   * (measured) run — the stamp + headline prefix only fire when lensed.
+   */
+  volume_lens: VolumeLensResolution;
   must_render_verbatim: string;
   must_ask_user: { question: string; options: string[] };
 }
@@ -202,6 +211,26 @@ async function fetchServiceBreakdown(
     }));
   } catch {
     return [];
+  }
+}
+
+/**
+ * Fetch the ENV-WIDE total bytes over 30d (the volume-lens basis). MUST be
+ * env-wide, not this pattern's own total — scaling against the pattern's own
+ * bytes would blow a single pattern up to the whole stated volume. Returns 0
+ * on any failure (=> resolveVolumeLens treats it as no_basis).
+ */
+async function fetchEnvMonthlyBytes(env: EnvConfig, metricsEnv: string): Promise<number> {
+  try {
+    const q =
+      `sum(increase(all_events_summaryBytes_total{` +
+      `${LABELS.env}="${metricsEnv}"}[30d]))`;
+    const res = await queryInstant(env, q);
+    if (res.status !== 'success' || res.data.result.length === 0) return 0;
+    const v = parsePrometheusValue(res.data.result[0]);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -433,6 +462,7 @@ export async function executePatternDetail(args: {
   include_samples?: boolean;
   timeRange?: string;
   environment?: string;
+  monthly_volume_gb?: number;
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
 
@@ -524,14 +554,41 @@ export async function executePatternDetail(args: {
     resolvedHash = fromMetrics;
   }
 
-  // Fetch all data in parallel
-  const [patternName, services, firstSeenAgeSeconds, trendSeries] = await Promise.all([
+  // The env-wide total is ONLY the volume-lens basis. Resolving the metrics
+  // env (an edge/cloud probe query) AND fetching the total are BOTH wasted
+  // work when no projection was requested, so gate the whole chain on
+  // monthly_volume_gb. When lensed it runs concurrently with the main batch;
+  // when off it costs zero queries, keeping the hot path identical to today.
+  const basisPromise: Promise<number> = args.monthly_volume_gb
+    ? resolveMetricsEnv(env).then((metricsEnv) => fetchEnvMonthlyBytes(env, metricsEnv))
+    : Promise.resolve(0);
+
+  // Fetch all data in parallel.
+  const [patternName, services, firstSeenAgeSeconds, trendSeries, envMonthlyBytes] = await Promise.all([
     resolvePatternName(env, resolvedHash),
     fetchServiceBreakdown(env, resolvedHash),
     fetchFirstSeen(env, resolvedHash),
     fetchTrend(env, resolvedHash, timeRange),
+    basisPromise,
   ]);
   recordQuery(telemetry);
+
+  // ── Volume projection lens. ─────────────────────────────────────
+  // Resolve ONCE against the ENV-WIDE monthly bytes (NOT this pattern's own
+  // total — that would blow one pattern up to the whole stated volume). When
+  // lensed, scale every absolute magnitude (per-service bytes, trend
+  // bytes/sec) by the uniform factor BEFORE total_bytes / shares / severity
+  // breakdown are derived, so shares stay invariant by construction. Sample
+  // event bodies are REAL captured text and are left untouched. factor 1 (no
+  // monthly_volume_gb, or no basis) => byte-for-byte identical to today.
+  const volumeLens = resolveVolumeLens(args.monthly_volume_gb, envMonthlyBytes);
+  if (volumeLens.factor !== 1) {
+    for (const s of services) {
+      s.bytes *= volumeLens.factor;
+      s.bytes_display = fmtBytes(s.bytes);
+    }
+    for (const p of trendSeries) p.bytes_per_sec *= volumeLens.factor;
+  }
 
   const { events: sampleEvents, siemKind } = includeSamples
     ? await fetchSampleEvents(resolvedHash, patternName, timeRange)
@@ -568,10 +625,17 @@ export async function executePatternDetail(args: {
   // when no service breakdown came back either. The hash never appears in
   // prose; it stays in payload.pattern_hash + actions[].args.
   const descriptor = patternDescriptor(patternName, services, '(no metrics in window)');
-  const headline =
+  let headline =
     `pattern_detail(${descriptor}): ` +
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
     `${sampleEvents.length} sample event(s) fetched.`;
+  // Volume projection lens: mark the headline so a lensed run is never
+  // mistaken for measured volume.
+  if (volumeLens.lensed) {
+    const pg = (volumeLens.projected_monthly_bytes ?? 0) / 1_000_000_000;
+    const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+    headline = `[Projected to ${lab}/mo] ${headline}`;
+  }
 
   const human_summary =
     `Pattern ${descriptor} ` +
@@ -587,6 +651,7 @@ export async function executePatternDetail(args: {
     first_seen_age_seconds: firstSeenAgeSeconds,
     trend_time_series: trendSeries,
     sample_events: sampleEvents,
+    volume_lens: volumeLens,
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
   };
@@ -612,6 +677,7 @@ export async function executePatternDetail(args: {
     source_disclosure: {
       bytes_source: 'tsdb',
       siem_vendor: siemKind === 'resolved' ? 'detected' : undefined,
+      ...volumeLensDisclosure(volumeLens),
     },
     scope: {
       window: timeRange,
@@ -621,6 +687,9 @@ export async function executePatternDetail(args: {
     },
     payload: envelope,
     human_summary,
+    warnings: volumeLens.lensed && volumeLens.disclosure
+      ? [volumeLens.disclosure]
+      : undefined,
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     actions: [

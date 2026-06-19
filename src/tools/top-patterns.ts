@@ -17,6 +17,7 @@ import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
@@ -59,6 +60,9 @@ export const topPatternsSchema = {
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('stack scope for the verbatim sample line on the top rows.'),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s list rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
+  ),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   verbose: z
     .boolean()
@@ -126,6 +130,7 @@ export async function executeTopPatterns(
     include?: 'kept' | 'dropped' | 'both';
     include_chart?: boolean;
     siem_lens?: string;
+    monthly_volume_gb?: number;
   },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
@@ -260,6 +265,23 @@ export async function executeTopPatterns(
       : Promise.resolve(null),
   ]);
 
+  // Volume projection lens. Resolve ONCE against the env's measured monthly
+  // bytes (the in-scope total normalized to a 30-day month: rawTotalBytes is
+  // the window total, ×720/windowHours scales window-hours to month-hours).
+  // volScale folds into every RAW byte/event chokepoint below BEFORE any
+  // derived share/cost is computed, so shares and ratios stay invariant by
+  // construction and only absolute magnitudes move. factor 1 (no
+  // monthly_volume_gb, or no basis) => byte-for-byte identical to today.
+  const rawTotalBytes =
+    totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0
+      ? parsePrometheusValue(totalRes.data.result[0])
+      : 0;
+  const volRes = resolveVolumeLens(
+    args.monthly_volume_gb,
+    windowHours > 0 ? (rawTotalBytes * 720) / windowHours : 0,
+  );
+  const volScale = volRes.factor;
+
   if (res.status !== 'success' || res.data.result.length === 0) {
     // When include='dropped', the empty-result cause is ambiguous:
     //   A. enrichment_not_wired — receiver does not emit the routeState label at all.
@@ -362,6 +384,7 @@ export async function executeTopPatterns(
           bytes_source: 'tsdb',
           rate_source: 'none',
           ...lensDisclosure(lens),
+          ...volumeLensDisclosure(volRes),
           pattern_count_source: {
             kind: 'top_n_above_threshold',
             count: 0,
@@ -394,7 +417,7 @@ export async function executeTopPatterns(
         headline: message,
         status: 'insufficient_data',
         decisions: { threshold_used: null, threshold_basis: 'default' },
-        source_disclosure: { bytes_source: 'tsdb', rate_source: 'none', ...lensDisclosure(lens) },
+        source_disclosure: { bytes_source: 'tsdb', rate_source: 'none', ...lensDisclosure(lens), ...volumeLensDisclosure(volRes) },
         scope: { window: tf.range, window_basis: args.timeRange ? 'explicit' : 'auto_default' },
         payload: {},
         human_summary: message,
@@ -414,7 +437,7 @@ export async function executeTopPatterns(
         r.metric[LABELS.severity] || ''
       );
       const v = parsePrometheusValue(r);
-      if (Number.isFinite(v) && v > 0) eventsByKey.set(k, v);
+      if (Number.isFinite(v) && v > 0) eventsByKey.set(k, v * volScale);
     }
   }
 
@@ -431,7 +454,7 @@ export async function executeTopPatterns(
         r.metric[LABELS.severity] || ''
       );
       const v = parsePrometheusValue(r);
-      if (Number.isFinite(v) && v > 0) droppedBytesByKey.set(k, v);
+      if (Number.isFinite(v) && v > 0) droppedBytesByKey.set(k, v * volScale);
     }
   }
   // Env-wide dropped total — used by the totals block + headline when
@@ -440,7 +463,7 @@ export async function executeTopPatterns(
   // include='kept' this is null.
   const droppedTotalBytes: number | null = runBoth
     ? droppedTotalRes && droppedTotalRes.status === 'success' && droppedTotalRes.data.result.length > 0
-      ? parsePrometheusValue(droppedTotalRes.data.result[0])
+      ? parsePrometheusValue(droppedTotalRes.data.result[0]) * volScale
       : 0
     : null;
 
@@ -457,7 +480,7 @@ export async function executeTopPatterns(
     const p = r.metric[LABELS.pattern] || '';
     const s = r.metric[LABELS.service] || '';
     const sv = r.metric[LABELS.severity] || '';
-    const b = parsePrometheusValue(r);
+    const b = parsePrometheusValue(r) * volScale;
     return {
       pattern: p,
       service: s,
@@ -545,7 +568,7 @@ export async function executeTopPatterns(
     if (trendRes && trendRes.status === 'success' && Array.isArray(trendRes.data.result) && trendRes.data.result[0]?.values) {
       trendVals = (trendRes.data.result[0].values as [number, string][]).map(([, v]) => {
         const n = Number(v);
-        return Number.isFinite(n) ? n : 0;
+        return (Number.isFinite(n) ? n : 0) * volScale;
       });
     }
     const events = eventsByHash.get(r.hash) ?? [];
@@ -567,7 +590,13 @@ export async function executeTopPatterns(
     // looks "new" on the baseline horizon) don't render misleading
     // NEW badges for established patterns.
     const baselineKey = `${r.pattern}|${r.service}|${r.severity}`;
-    const baselineSamples = baselineByKey.get(baselineKey) ?? [];
+    // Scale the baseline samples by the SAME volScale as the current-window
+    // bytes (r.bytes is already scaled). classifyBadge computes a trajectory
+    // RATIO (current vs baseline); the factor must cancel so the badge kind —
+    // and the trend window/scope/glyph it selects downstream — stays
+    // volume-independent under a lens. Scaling only current would multiply the
+    // ratio by the factor and corrupt the trend SHAPE (a non-scalable signal).
+    const baselineSamples = (baselineByKey.get(baselineKey) ?? []).map((v) => v * volScale);
     const firstSeenSec = fsRes?.ageSeconds ?? null;
     const badgeInfo = classifyBadge(r.bytes, baselineSamples, firstSeenSec);
     const trendDelta = computeTrendDelta(badgeInfo.kind, trendVals, firstSeenSec);
@@ -619,7 +648,7 @@ export async function executeTopPatterns(
 
   // Totals + analyzer detection
   const totalBytes = totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0
-    ? parsePrometheusValue(totalRes.data.result[0])
+    ? parsePrometheusValue(totalRes.data.result[0]) * volScale
     : renderRows.reduce((s, r) => s + r.bytes, 0);
   // Total cost nulls out when the rate is unset (no honest dollar to display).
   // Renderer falls back to a 0-coerced version below so the existing markdown
@@ -656,7 +685,7 @@ export async function executeTopPatterns(
   if (serviceRollupRes && serviceRollupRes.status === 'success' && totalBytes > 0) {
     for (const r of serviceRollupRes.data.result) {
       const svc = r.metric[LABELS.service] || '(unattributed)';
-      const b = parsePrometheusValue(r);
+      const b = parsePrometheusValue(r) * volScale;
       if (Number.isFinite(b) && b > 0) {
         serviceRollup.push({ service: svc, bytes: b, pct: b / totalBytes });
       }
@@ -1180,6 +1209,7 @@ export async function executeTopPatterns(
   }
   const topPatternsPayload = {
     rate_source,
+    volume_lens: volRes,
     // Prior envelope tagged rate_source='customer_supplied' but didn't
     // expose the underlying $/GB scalar: the entire dollar surface was
     // computed from an undisclosed value. Surface it so a CFO can audit
@@ -1343,6 +1373,14 @@ export async function executeTopPatterns(
   if (lens.lensed && lens.display) {
     headline = `[lens: ${lens.display}] ` + headline;
   }
+  // Volume projection lens: mark the headline so a lensed run is never
+  // mistaken for measured volume. Full provenance is in source_disclosure
+  // + warnings + payload.volume_lens.
+  if (volRes.lensed) {
+    const pg = (volRes.projected_monthly_bytes ?? 0) / 1_000_000_000;
+    const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+    headline = `[Projected to ${lab}/mo] ` + headline;
+  }
   return buildChassisEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
@@ -1376,6 +1414,7 @@ export async function executeTopPatterns(
       },
       siem_vendor: (lens.lensed ? lens.display : siemLabel) ?? undefined,
       ...lensDisclosure(lens),
+      ...volumeLensDisclosure(volRes),
     },
     scope: {
       window: tf.label,
@@ -1419,6 +1458,7 @@ export async function executeTopPatterns(
         ? { chart: 'timeseries', units: 'bytes/mo' }
         : { chart: 'timeseries', units: '$/mo' },
     truncated,
+    warnings: volRes.lensed && volRes.disclosure ? [volRes.disclosure] : undefined,
     images,
     // Back-compat: spread legacy flat fields alongside chassis so existing
     // callers reading data.status / data.query_count / data.human_summary /

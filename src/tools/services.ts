@@ -52,6 +52,7 @@ import { fetchCapCsvForEnv, fetchActionIntentForEnv, buildCapCsvStatus, envWithR
 import { parseCapCsv } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 
 /**
  * The rank cutoff that gates whether a service gets a next_action vs is
@@ -72,6 +73,9 @@ export const servicesSchema = {
     .max(50)
     .optional()
     .describe('Customer-flagged services that must stay in the SIEM with full retention (audit / regulatory / executive). Per row, marks current_mode="pass" and points next_action at pattern_mitigate instead of the configure_engine bulk path.'),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
+  ),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.services[], data.totals). Field retained for backward-compat.'),
 };
 
@@ -137,11 +141,16 @@ interface ServicesSummary {
   cap_csv_status: CapCsvStatus;
   /** Echo of the exception_services input so downstream UIs can highlight. */
   exception_services: string[];
+  /**
+   * Volume projection lens resolution. {lensed:false,factor:1} on a normal
+   * (measured) run — the stamp + headline prefix only fire when lensed.
+   */
+  volume_lens: VolumeLensResolution;
   services: ServiceRow[];
 }
 
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
@@ -185,11 +194,18 @@ export async function executeServices(
   // (GB / %, always exact) and the chassis attaches the list-rate calibration
   // callout. At `unset` there is no rate at all, so we add the set-your-rate
   // hint inline.
-  const headline = top
+  let headline = top
     ? (d.rate_source === 'customer_supplied'
       ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`
       : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
     : `No services with data in ${d.time_range}.`;
+  // Volume projection lens: mark the headline so a lensed run is never
+  // mistaken for measured volume.
+  if (d.volume_lens.lensed) {
+    const pg = (d.volume_lens.projected_monthly_bytes ?? 0) / 1_000_000_000;
+    const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+    headline = `[Projected to ${lab}/mo] ${headline}`;
+  }
   return buildChassisEnvelope({
     tool: 'log10x_services',
     view: 'summary',
@@ -223,6 +239,7 @@ export async function executeServices(
         denominator_meaning:
           'Services emitting >= 1 KB/s in the window (wait-for-* + low-volume init containers filtered)',
       },
+      ...volumeLensDisclosure(d.volume_lens),
     },
     scope: {
       window: d.time_range,
@@ -257,12 +274,15 @@ export async function executeServices(
           { tool: 'log10x_investigate', args: { starting_point: top.name }, reason: 'causal-chain analysis on the top service' },
         ]
       : [],
+    warnings: d.volume_lens.lensed && d.volume_lens.disclosure
+      ? [d.volume_lens.disclosure]
+      : undefined,
     telemetry,
   });
 }
 
 async function executeServicesInner(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[] },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number },
   env: EnvConfig,
   sumOut?: { data?: ServicesSummary }
 ): Promise<string> {
@@ -432,6 +452,31 @@ async function executeServicesInner(
     rows.push({ name, bytes, cost: costPerGb != null ? bytesToCost(bytes, costPerGb) : null, pct: 0, axis, attribution, current_mode });
   }
 
+  // ── Volume projection lens. ─────────────────────────────────────
+  // Resolve ONCE against the env's measured monthly bytes (the in-scope
+  // window total normalized to a 30-day month: totalBytes × 30/tf.days).
+  // The action-axis remainder reconciliation already ran UPSTREAM (the
+  // per-row loop above derived bytes_passed = bytes − offload − compact −
+  // drop), so scaling every magnitude by the SAME factor here keeps
+  // parts-sum-to-whole intact (derive-then-scale). Folding the factor into
+  // each raw byte/cost BEFORE the pct loop keeps shares invariant by
+  // construction. factor 1 (no monthly_volume_gb, or no basis) =>
+  // byte-for-byte identical to today.
+  const baseMonthly = tf.days > 0 ? 30 / tf.days : 0;
+  const volumeLens = resolveVolumeLens(args.monthly_volume_gb, totalBytes * baseMonthly);
+  const f = volumeLens.factor;
+  if (f !== 1) {
+    for (const r of rows) {
+      r.bytes *= f;
+      r.axis.bytes_passed *= f;
+      r.axis.bytes_offloaded *= f;
+      r.axis.bytes_compacted *= f;
+      r.axis.bytes_dropped *= f;
+      if (r.cost != null) r.cost *= f;
+    }
+    totalBytes *= f;
+  }
+
   // Calculate percentages
   for (const r of rows) {
     r.pct = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
@@ -540,6 +585,7 @@ async function executeServicesInner(
       top_n_share_pct: topShare,
       cap_csv_status: capCsvStatus,
       exception_services: exceptionServices,
+      volume_lens: volumeLens,
       services: rows.map((r, i) => {
         const rank = i + 1;
         // Per-row next_action — tier-aware routing:

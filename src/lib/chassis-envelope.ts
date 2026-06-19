@@ -314,6 +314,18 @@ export const SourceDisclosureSchema = z.object({
   siem_actual: z.string().optional(),
   siem_lens: z.string().optional(),
   siem_lens_basis: z.enum(['requested', 'detected', 'none']).optional(),
+  /**
+   * Volume projection lens (what-if forecast). Emitted by volumeLensDisclosure()
+   * ONLY when a run is lensed (a positive monthly_volume_gb was supplied AND a
+   * real byte basis existed). A scaled magnitude WITHOUT this stamp is a leak;
+   * these keys MUST survive the chassis schema so the receipt is auditable.
+   * `volume_actual_gb` is the env's measured monthly volume, `volume_projected_gb`
+   * the caller's stated scale, `volume_scale_factor` the uniform multiplier.
+   */
+  volume_actual_gb: z.number().nullable().optional(),
+  volume_projected_gb: z.number().nullable().optional(),
+  volume_scale_factor: z.number().optional(),
+  volume_projection_note: z.string().nullable().optional(),
 });
 export type SourceDisclosure = z.infer<typeof SourceDisclosureSchema>;
 

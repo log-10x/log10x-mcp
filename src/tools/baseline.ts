@@ -56,6 +56,7 @@ import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { resolveRate } from '../lib/rate-resolution.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 
@@ -193,6 +194,12 @@ export interface BaselineEnvelopeData {
     horizon_total_growth_percent: number;
   };
   top_contributors: BaselineTopContributor[];
+  /**
+   * Volume projection lens resolution. {lensed:false,factor:1} on a normal
+   * (measured) run — the source_disclosure stamp + headline prefix only fire
+   * when lensed. Always present so callers can read it without a guard.
+   */
+  volume_lens: VolumeLensResolution;
   recommended_target_range?: {
     low_pct: number;
     expected_pct: number;
@@ -257,6 +264,9 @@ export const baselineSchema = {
     .string()
     .optional()
     .describe('Environment nickname for multi-env setups.'),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
+  ),
   view: z
     .literal('summary')
     .default('summary')
@@ -274,6 +284,7 @@ export async function executeBaseline(
     destination?: SiemId;
     statedDailyGb?: number;
     effectiveIngestPerGb?: number;
+    monthly_volume_gb?: number;
     view?: 'summary';
   },
   env: EnvConfig
@@ -323,6 +334,7 @@ export async function executeBaseline(
       bytes_source: 'tsdb',
       rate_source: rateSourceMapped,
       ...envDisclosure,
+      ...volumeLensDisclosure(result.volume_lens),
     },
     scope: {
       window: horizon,
@@ -340,6 +352,9 @@ export async function executeBaseline(
     },
     payload: result,
     human_summary: headline,
+    warnings: result.volume_lens.lensed && result.volume_lens.disclosure
+      ? [result.volume_lens.disclosure]
+      : undefined,
     telemetry,
   });
 }
@@ -352,6 +367,7 @@ async function computeBaseline(
     destination?: SiemId;
     statedDailyGb?: number;
     effectiveIngestPerGb?: number;
+    monthly_volume_gb?: number;
   },
   env: EnvConfig,
   horizon: BaselineHorizon
@@ -487,8 +503,23 @@ async function computeBaseline(
     });
   }
 
+  // ── Volume projection lens. ─────────────────────────────────────
+  // Resolve ONCE against the env's measured monthly bytes (mean daily ×
+  // 30). The factor folds into a SCALED copy of the daily series so every
+  // downstream magnitude (percentiles, mean, total, monthly $, 90d
+  // projection, per-contributor $) inherits it, while coverage_pct stays
+  // on the UNSCALED observed volume and growth_pct / shares stay on the
+  // UNSCALED series — those are ratios the uniform factor cancels in.
+  // factor 1 (no monthly_volume_gb, or no basis) => scaledDays == validDays
+  // => byte-for-byte identical to today.
+  const actualMonthlyBytes = (totalBytes / Math.max(1, validDays.length)) * DAYS_PER_MONTH;
+  const volumeLens = resolveVolumeLens(args.monthly_volume_gb, actualMonthlyBytes);
+  const f = volumeLens.factor;
+  const scaledDays = validDays.map((d) => d * f);
+  const totalBytesScaled = totalBytes * f;
+
   // ── All gates passed. Compute the baseline. ─────────────────────
-  const sorted = [...validDays].sort((a, b) => a - b);
+  const sorted = [...scaledDays].sort((a, b) => a - b);
   const p50 = percentile(sorted, 0.5);
   const p90 = percentile(sorted, 0.9);
 
@@ -513,10 +544,12 @@ async function computeBaseline(
   //      monthly_usd) equals current.monthly_usd within float tolerance.
   //      p50 stays as bytes_per_day_p50 for tail planning, p90 stays for
   //      capacity.
-  const meanDailyBytes = totalBytes / Math.max(1, validDays.length);
+  const meanDailyBytes = totalBytesScaled / Math.max(1, validDays.length);
   const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH);
   const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
 
+  // growth_pct is a tail-ratio of the daily series — factor-invariant under
+  // uniform scaling, so compute it from the UNSCALED validDays explicitly.
   const growthPct = computeGrowthPct(validDays);
   const monthlyUsdIn90d = monthlyUsd * Math.pow(1 + growthPct, 3);
 
@@ -524,9 +557,10 @@ async function computeBaseline(
     env,
     metricsEnv,
     horizonDays,
-    totalBytes,
+    totalBytesScaled,
     destination,
-    ingestPerGb
+    ingestPerGb,
+    f
   );
 
   const recommended = recommendTargetRange(top);
@@ -556,8 +590,8 @@ async function computeBaseline(
     rate_source: rateSource,
     effective_per_gb: rateSource === 'unset' ? null : ingestPerGb,
     current: {
-      bytes_window: totalBytes,
-      bytes_window_display: fmtBytes(totalBytes),
+      bytes_window: totalBytesScaled,
+      bytes_window_display: fmtBytes(totalBytesScaled),
       bytes_per_day_p50: p50,
       bytes_per_day_p50_display: fmtBytes(p50),
       bytes_per_day_p90: p90,
@@ -591,6 +625,7 @@ async function computeBaseline(
           : 0,
     },
     top_contributors: top,
+    volume_lens: volumeLens,
     recommended_target_range: recommended,
   };
 }
@@ -752,7 +787,13 @@ async function fetchTopContributors(
   horizonDays: number,
   totalBytes: number,
   destination: SiemId,
-  ingestPerGb: number
+  ingestPerGb: number,
+  // Volume-lens factor. 1 on a measured run. Scales per-contributor bytes
+  // (and therefore monthly_usd) but NOT avg_event_size_bytes (computed from
+  // raw bytes/events — bytes/event is invariant under uniform scaling) and
+  // NOT share_pct (totalBytes is passed already-scaled, so numerator and
+  // denominator scale together).
+  factor: number = 1,
 ): Promise<BaselineTopContributor[]> {
   const labels = env.labels;
   const range = `${horizonDays}d`;
@@ -780,8 +821,11 @@ async function fetchTopContributors(
   const out: BaselineTopContributor[] = [];
 
   for (const r of bytesRes?.data?.result ?? []) {
-    const bytes = parsePrometheusValue(r);
-    if (bytes <= 0) continue;
+    const rawBytes = parsePrometheusValue(r);
+    if (rawBytes <= 0) continue;
+    // Scaled bytes drive share_pct (denom passed pre-scaled) and monthly_usd.
+    // avg_event_size_bytes below uses rawBytes/rawEvents so it never moves.
+    const bytes = rawBytes * factor;
     // Drop rows where both pattern_hash and message_pattern are empty strings.
     // These are aggregate or per-container rollup series (emitted by
     // tenx_app="reporter|receiver") that carry no per-pattern labels and would
@@ -793,7 +837,10 @@ async function fetchTopContributors(
     if (rawHash === '') continue;
     const key = topKey(r.metric, labels);
     const events = eventsByKey.get(key) ?? 0;
-    const avgSize = events > 0 ? bytes / events : 0;
+    // avg_event_size_bytes is bytes/event — invariant under uniform scaling.
+    // Compute from RAW bytes/events so a lensed run reports the same per-event
+    // size as the measured run (the canonical leak trap).
+    const avgSize = events > 0 ? rawBytes / events : 0;
     const sharePct = totalBytes > 0 ? (bytes / totalBytes) * 100 : 0;
 
     // Monthly $ = (window_bytes ÷ horizonDays) × 30 × $/GB. Uses the rate
@@ -950,6 +997,15 @@ function buildNotReadyEnvelope(opts: {
       horizon_total_growth_percent: 0,
     },
     top_contributors: [],
+    // not_ready gates never scale anything; the lens is a clean no-op here.
+    volume_lens: {
+      actual_monthly_bytes: null,
+      projected_monthly_bytes: null,
+      factor: 1,
+      lensed: false,
+      basis: 'none',
+      disclosure: null,
+    },
     remediation: opts.remediation,
   };
 }
@@ -988,7 +1044,15 @@ function headlineFor(d: BaselineEnvelopeData): string {
     const tail = disclosure ? ` ${disclosure}` : '';
     dollarClause = ` · ${curAmt}/mo current, ${futAmt}/mo projected 90d no-action${tail}`;
   }
-  return `Baseline ready: ${band} · ${volume}${dollarClause}.`;
+  let headline = `Baseline ready: ${band} · ${volume}${dollarClause}.`;
+  // Volume projection lens: mark the headline so a lensed run is never
+  // mistaken for measured volume.
+  if (d.volume_lens.lensed) {
+    const pg = (d.volume_lens.projected_monthly_bytes ?? 0) / 1_000_000_000;
+    const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+    headline = `[Projected to ${lab}/mo] ${headline}`;
+  }
+  return headline;
 }
 
 // Re-export Action so callers that want to type per-contributor tier choices

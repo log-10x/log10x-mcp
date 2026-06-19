@@ -25,6 +25,7 @@ import {
   recordQuery,
 } from '../lib/chassis-envelope.js';
 import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 
 export const trendSchema = {
   pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash — pattern_hash is preferred when available (skips a metrics lookup).'),
@@ -41,6 +42,9 @@ export const trendSchema = {
     ),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB'),
   environment: z.string().optional().describe('Environment nickname'),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
+  ),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
   // dropped flag. Three states: `kept` (default, pre-PL-12 behavior)
@@ -120,10 +124,15 @@ interface PatternTrendSummary {
   dropped_bytes_total: number | null;
   dropped_share_pct: number | null;
   dropped_time_series: Array<{ ts: number; bytes: number }> | null;
+  /**
+   * Volume projection lens resolution. {lensed:false,factor:1} on a normal
+   * (measured) run — the stamp + headline prefix only fire when lensed.
+   */
+  volume_lens: VolumeLensResolution;
 }
 
 export async function executeTrend(
-  args: { pattern?: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean },
+  args: { pattern?: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; view?: 'summary'; include?: 'kept' | 'dropped' | 'both'; include_chart?: boolean; monthly_volume_gb?: number },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newTelemetry();
@@ -256,6 +265,15 @@ export async function executeTrend(
   } else {
     headline = `\`${shortPattern}\` over ${d.window}: ${fmtBytes(d.total_bytes)}, change ${changeSign}${d.change_pct}% (last quarter vs first quarter run-rate)${dollarClause}${spikeClause}`;
   }
+  // Volume projection lens: mark the headline so a lensed run is never
+  // mistaken for measured volume. Applied across all three include branches
+  // AND inherited by must_render_verbatim's chartLines[0] (which reuses
+  // `headline`) below.
+  if (d.volume_lens.lensed) {
+    const pg = (d.volume_lens.projected_monthly_bytes ?? 0) / 1_000_000_000;
+    const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+    headline = `[Projected to ${lab}/mo] ${headline}`;
+  }
   // FIX 1 — Gate chart PNG behind include_chart opt-in (default false) to
   // avoid consuming response-token budget on every call.
   let images: import('../lib/output-types.js').InlineImage[] | undefined;
@@ -368,6 +386,7 @@ export async function executeTrend(
       bytes_source: 'tsdb',
       rate_source: rateSourceForChassis,
       siem_vendor: undefined,
+      ...volumeLensDisclosure(d.volume_lens),
     },
     scope: {
       window: d.window,
@@ -375,6 +394,9 @@ export async function executeTrend(
     },
     payload: { ...d, ...buildUnifiedFields({ status: 'success', telemetry, humanSummary: headline }) },
     human_summary,
+    warnings: d.volume_lens.lensed && d.volume_lens.disclosure
+      ? [d.volume_lens.disclosure]
+      : undefined,
     must_render_verbatim: mustRenderVerbatim,
     actions: trendActions,
     render_hint: { chart: 'timeseries', units: 'bytes/sec' },
@@ -384,7 +406,7 @@ export async function executeTrend(
 }
 
 async function executeTrendInner(
-  args: { pattern: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both' },
+  args: { pattern: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both'; monthly_volume_gb?: number },
   env: EnvConfig,
   sumOut?: { data?: PatternTrendSummary }
 ): Promise<string> {
@@ -441,12 +463,37 @@ async function executeTrendInner(
     primaryQuery = baseQuery;
   }
   const droppedQuery = runBoth ? spliceRouteState(baseQuery, '=', 'drop') : null;
-  const [res, droppedRes] = await Promise.all([
+  // Volume-lens basis: the ENV-WIDE total (NOT this pattern's own total —
+  // a single-pattern view; scaling against the pattern's own bytes would blow
+  // one pattern up to the whole stated volume). Splice routeState!="drop" into
+  // pql.totalBytes (which has no cohort filter) so the denominator matches the
+  // kept cohort and the factor isn't skewed by dropped bytes.
+  const envTotalQuery = spliceRouteState(
+    pql.totalBytes(metricsEnv, tf.range, env.labels),
+    '!=',
+    'drop',
+  );
+  const [res, droppedRes, envTotalRes] = await Promise.all([
     queryRange(env, primaryQuery, start, now, stepSeconds),
     droppedQuery
       ? queryRange(env, droppedQuery, start, now, stepSeconds).catch(() => null)
       : Promise.resolve(null),
+    // env-total is ONLY the volume-lens basis; skip the query entirely when no
+    // projection was requested (its result is unused at factor 1).
+    args.monthly_volume_gb
+      ? queryInstant(env, envTotalQuery).catch(() => null)
+      : Promise.resolve(null),
   ]);
+  // Resolve the volume projection lens ONCE. envMonthlyBytes normalizes the
+  // window total to a 30-day month. factor 1 (no monthly_volume_gb, or no
+  // basis) => byte-for-byte identical to today.
+  const envWindowBytes =
+    envTotalRes && envTotalRes.status === 'success' && envTotalRes.data.result.length > 0
+      ? parsePrometheusValue(envTotalRes.data.result[0])
+      : 0;
+  const envMonthlyBytes = tf.days > 0 ? envWindowBytes * (30 / tf.days) : 0;
+  const volumeLens = resolveVolumeLens(args.monthly_volume_gb, envMonthlyBytes);
+  const factor = volumeLens.factor;
 
   if (res.status !== 'success' || res.data.result.length === 0) {
     return `No trend data for pattern "${pattern}" in the ${tf.label}.`;
@@ -463,6 +510,14 @@ async function executeTrendInner(
     return `No data points for pattern "${pattern}".`;
   }
 
+  // Volume projection lens: one uniform multiply on every primary point folds
+  // into totalBytes / avg / max / min / baseline / recent / cost / chart by
+  // construction. change_pct, spike detection, share %, and timestamps stay
+  // invariant (they are ratios / positions the factor cancels in).
+  if (factor !== 1) {
+    for (const p of points) p.bytes *= factor;
+  }
+
   // PL-12b — extract the dropped-cohort series when `include === 'both'`.
   // When `include === 'dropped'`, the primary series already IS the
   // dropped slice; we mirror it into `droppedPoints` so the envelope's
@@ -473,7 +528,7 @@ async function executeTrendInner(
   if (include === 'both' && droppedRes && droppedRes.status === 'success' && droppedRes.data.result.length > 0) {
     droppedPoints = [];
     for (const [ts, val] of (droppedRes.data.result[0].values || [])) {
-      droppedPoints.push({ ts, bytes: parseFloat(val) || 0 });
+      droppedPoints.push({ ts, bytes: (parseFloat(val) || 0) * factor });
     }
     droppedBytesTotal = droppedPoints.reduce((s, p) => s + p.bytes, 0);
   } else if (include === 'both') {
@@ -621,6 +676,7 @@ async function executeTrendInner(
       dropped_bytes_total: droppedBytesTotalOut,
       dropped_share_pct: droppedSharePct,
       dropped_time_series: droppedTimeSeriesOut,
+      volume_lens: volumeLens,
     };
     void stepSecs;
   }

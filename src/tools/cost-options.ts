@@ -71,6 +71,19 @@ export const costOptionsSchema = {
     .describe(
       'What-if destination lens (alias of `destination` with provenance stamping): gate the 6-mode menu and downstream pricing for THIS destination while the connected pipeline keeps its actual one. The envelope stamps siem_actual vs siem_lens so receipts show the lens.'
     ),
+  // THREAD-ONLY pass-through. cost_options emits a capability/gating MENU with
+  // no bytes/dollars/event counts, so it applies NO volume scaling and stamps
+  // NO volume provenance (a stamp without a scaled magnitude would itself be a
+  // leak). This value is forwarded verbatim into every mode's
+  // routes_to.args so the downstream estimate_savings call — where the lens
+  // actually lives — inherits the projection and the session stays coherent.
+  monthly_volume_gb: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'What-if volume lens (forecast mode), forwarded to the estimate_savings this menu routes to. cost_options scales nothing itself; it carries this value into routes_to.args so the projection survives the hop. See log10x_estimate_savings for the projection semantics.'
+    ),
 };
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -237,9 +250,9 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string }
+  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string; monthly_volume_gb?: number }
 ): CostOptionItem[] {
-  const { target_percent, service, pattern_hash } = args;
+  const { target_percent, service, pattern_hash, monthly_volume_gb } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
   // The caller-supplied destination (e.g. baseline established datadog as
   // the target) must win over the env-auto-detected siem (which may be the
@@ -266,6 +279,9 @@ function buildModes(
     const out: Record<string, unknown> = {};
     if (effectiveDestination) out.destination = effectiveDestination;
     if (service !== undefined) out.service = service;
+    // Forward the volume lens verbatim so the downstream estimate_savings
+    // inherits the projection. cost_options itself scales/stamps nothing.
+    if (monthly_volume_gb !== undefined) out.monthly_volume_gb = monthly_volume_gb;
     if (pattern_hash) {
       // Explicit single-pattern route: use proposed_config so estimate_savings
       // doesn't need target_percent.
@@ -483,6 +499,7 @@ export async function executeCostOptions(args: {
   pattern_hash?: string;
   destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
   siem_lens?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
+  monthly_volume_gb?: number;
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();
   // siem_lens is a stamped alias of destination: same gating override, plus
