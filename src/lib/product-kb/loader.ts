@@ -6,7 +6,7 @@
  *
  *   topic         — path relative to docs root, sans .md
  *   category      — first segment of topic (faq / apps / engine / api / …)
- *   canonical_url — https://docs.log10x.com/<topic>/
+ *   canonical_url — https://doc.log10x.com/<topic>/
  *   summary       — first non-empty prose paragraph from the body
  *   last_reviewed — frontmatter `last_reviewed:` if present, else file mtime
  *   chunks        — chunker output
@@ -27,7 +27,7 @@ import { join, relative, sep } from 'node:path';
 import { chunkMarkdown } from './chunker.js';
 import type { Page } from './types.js';
 
-const DOCS_PUBLIC_BASE = 'https://docs.log10x.com';
+const DOCS_PUBLIC_BASE = 'https://doc.log10x.com'; // singular — "docs" plural does NOT resolve
 
 /**
  * Frontmatter parse result.
