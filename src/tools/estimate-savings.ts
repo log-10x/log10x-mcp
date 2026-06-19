@@ -61,6 +61,7 @@ import {
 import type { SiemId } from '../lib/siem/pricing.js';
 import { resolveRate } from '../lib/rate-resolution.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
+import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 import {
   type StructuredOutput,
 } from '../lib/output-types.js';
@@ -165,6 +166,9 @@ export const estimateSavingsSchema = {
   ),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe(
     'What-if destination lens (alias of `destination` with provenance stamping): price the projection for THIS destination while the pipeline keeps its actual one. Envelope stamps siem_actual vs siem_lens.'
+  ),
+  monthly_volume_gb: z.number().positive().optional().describe(
+    'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with `siem_lens`. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller\'s real patterns.'
   ),
   es_pruned: z
     .boolean()
@@ -271,6 +275,8 @@ export interface ForecastRow {
 
 export interface ForecastResult {
   mode: 'forecast';
+  /** Volume projection lens result. `lensed:false` when the env's real volume was used. */
+  volume_lens: VolumeLensResolution;
   destination: SiemId;
   es_pruned?: boolean;
   service?: string;
@@ -732,6 +738,13 @@ export interface RunForecastArgs {
    */
   effective_ingest_per_gb?: number;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
   lensed?: boolean;
+  /**
+   * Volume projection lens: model the env at this monthly volume (decimal
+   * GB/month) instead of its measured volume. Scales the byte basis by a
+   * uniform factor (per-pattern shares + coverage unchanged). Omit for the
+   * real measured volume. configure-engine never sets it.
+   */
+  monthly_volume_gb?: number;
 }
 
 /**
@@ -878,7 +891,14 @@ export async function runEstimateForecast(
   const eventsByHash = parsePromResult(eventsRes, env.labels.hash);
   const totalBytesObserved = parseScalarSum(totalRes);
   // Scale observation to a 30-day month (the forecast quotes monthly dollars).
-  const scale = MONTH_DAYS / obsDays;
+  const baseMonthly = MONTH_DAYS / obsDays;
+  // Volume projection lens: when the caller states a monthly volume, scale the
+  // real basis to it with one uniform factor. Because the factor is uniform,
+  // per-pattern shares and coverage_of_env_pct are unchanged by construction;
+  // only absolute bytes/dollars move. `lensed:false` (factor 1) for the
+  // measured-volume path.
+  const volumeLens = resolveVolumeLens(args.monthly_volume_gb, totalBytesObserved * baseMonthly);
+  const scale = baseMonthly * volumeLens.factor;
 
   // Build hash → (service, descriptor) maps for per_service rollup AND for
   // enriching per_pattern rows with the user-facing symbol_message + service.
@@ -1302,6 +1322,7 @@ export async function runEstimateForecast(
 
   return {
     mode: 'forecast',
+    volume_lens: volumeLens,
     destination: args.destination,
     es_pruned: args.es_pruned,
     service: args.service,
@@ -1981,6 +2002,7 @@ export async function executeEstimateSavings(
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
           observation_window: explicitObservationWindow,
+          monthly_volume_gb: args.monthly_volume_gb,
         },
         env
       );
@@ -2070,6 +2092,15 @@ export async function executeEstimateSavings(
           : `Forecast (${destination}): ${savedVol}/mo (${bytePctReduced}) expected reduction${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
       }
 
+      // Volume projection lens: mark the headline so a lensed run is never
+      // mistaken for measured volume. Full provenance is in source_disclosure
+      // + warnings + payload.volume_lens.
+      if (result.volume_lens.lensed) {
+        const pg = (result.volume_lens.projected_monthly_bytes ?? 0) / 1_000_000_000;
+        const lab = pg >= 1000 ? `${(pg / 1000).toFixed(pg >= 10000 ? 0 : 1)} TB` : `${pg.toFixed(pg >= 10 ? 0 : 1)} GB`;
+        headline = `[Projected to ${lab}/mo] ${headline}`;
+      }
+
       const human_summary = buildForecastHumanSummary(result, destination, args.enforcement_mode, actionMix);
       // Compute threshold_basis from rate_source for the decisions block.
       const thresholdBasis = result.rate_source === 'customer_supplied'
@@ -2086,6 +2117,7 @@ export async function executeEstimateSavings(
         },
         source_disclosure: {
           ...lensDisclosure(lensRes),
+          ...volumeLensDisclosure(result.volume_lens),
           bytes_source: 'tsdb',
           rate_source: result.rate_source === 'customer_supplied' ? 'customer_supplied' : 'list_price',
           ...(await labelForVendor(destination)),
@@ -2110,7 +2142,9 @@ export async function executeEstimateSavings(
             reason: 'Turn this forecast into a per-pattern cap PR (configure_engine emits the gh command).',
           },
         ],
-        warnings: result.caveats,
+        warnings: result.volume_lens.lensed && result.volume_lens.disclosure
+          ? [result.volume_lens.disclosure, ...result.caveats]
+          : result.caveats,
         telemetry,
       });
     }
