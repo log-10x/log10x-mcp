@@ -144,7 +144,7 @@ describe('log10x_product_qa', () => {
     assert.equal(p.citations![0]!.topic, 'faq/apps/receiver');
     assert.equal(p.resolved_mode, 'topic');
     assert.ok(
-      p.citations![0]!.canonical_url.startsWith('https://docs.log10x.com/'),
+      p.citations![0]!.canonical_url.startsWith('https://doc.log10x.com/'),
       'canonical_url present',
     );
     assert.ok((p.answer ?? '').length > 0, 'short answer present');

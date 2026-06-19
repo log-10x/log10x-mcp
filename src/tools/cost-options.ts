@@ -3,8 +3,9 @@
  *
  * Called after the user picks option 1 ("Show me what cutting costs would
  * look like") from log10x_start. Returns a structured menu of the six
- * enforcement modes (drop / sample / compact / tier_down / offload /
- * observe_only), each gated by the customer's detected capabilities.
+ * enforcement modes, led by the keep-everything levers (compact / offload /
+ * tier_down), then the lossy opt-ins (sample / drop), then observe_only,
+ * each gated by the customer's detected capabilities.
  *
  * At Receiver tier: 6 modes.
  * At Reporter-only or Dev tier: 2-item collapsed menu (observe_only +
@@ -295,9 +296,9 @@ function buildModes(
       },
       {
         id: 'install_receiver',
-        label: 'Install the 10x Receiver: unlocks drop / sample / compact / tier_down / offload.',
+        label: 'Install the 10x Receiver: unlocks compact / offload / tier_down (keep everything), plus sample / drop.',
         description:
-          'Drop / sample / compact / tier_down / offload require the Receiver in-path. Install it first to unlock the rest.',
+          'Compact / offload / tier_down / sample / drop all require the Receiver in-path. Install it first to unlock them.',
         who_enforces: 'engine',
         applicable: true,
         what_survives: 'N/A. This option routes to the install wizard.',
@@ -330,32 +331,15 @@ function buildModes(
       ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
 
+  // Menu order is deliberate: lead with the keep-everything levers (compact,
+  // offload, tier_down), then the lossy opt-ins (sample, drop), then the
+  // observe-only baseline. The non-lossy options are the value proposition,
+  // so they come first; sample and drop are presented as choices the user
+  // opts into, never as the default.
   return [
     {
-      id: 'drop',
-      label: 'Drop: stop events at the forwarder. Nothing reaches the stack.',
-      description:
-        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the stack.',
-      who_enforces: 'engine',
-      applicable: true,
-      what_survives:
-        'No events reach the stack. Events are gone (or offloaded to S3 if offload action used instead).',
-      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('drop') },
-    },
-    {
-      id: 'sample',
-      label: 'Sample: keep 1 in N events. Trends stay valid.',
-      description:
-        'Engine passes 1 in N events (default 1 in 10) through to the stack. Aggregate alerting remains valid.',
-      who_enforces: 'engine',
-      applicable: true,
-      what_survives:
-        '1 in N events reach the stack (default 1 in 10). Trend and alerting remain valid at reduced volume.',
-      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('sample') },
-    },
-    {
       id: 'compact',
-      label: 'Compact: minify events ~50-80% smaller, losslessly. All events still land in the stack.',
+      label: 'Compact (keeps everything): minify events ~50-80% smaller, losslessly. Every event still lands in the stack, fully searchable.',
       description:
         'Engine encodes events into the 10x compact wire format (~50-80% smaller, lossless). All events arrive in the stack; fields stay searchable.',
       who_enforces: 'engine',
@@ -366,20 +350,8 @@ function buildModes(
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {
-      id: 'tier_down',
-      label: 'Tier-down: stack stores events at a cheaper storage tier.',
-      description:
-        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
-      who_enforces: 'SIEM',
-      applicable: tierDownApplicable,
-      gated_reason: tierDownGatedReason,
-      what_survives:
-        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
-      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
-    },
-    {
       id: 'offload',
-      label: 'Offload: events route to your S3 bucket instead of the stack.',
+      label: 'Offload (keeps everything): events route to your own S3 bucket instead of the stack, readable on demand.',
       description:
         'Engine diverts engine-marked events to a customer-owned S3 bucket. The offloaded events stay readable via log10x_retriever_query for inspection and to verify the decision.',
       who_enforces: 'engine',
@@ -394,8 +366,42 @@ function buildModes(
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
     {
+      id: 'tier_down',
+      label: 'Tier-down (keeps everything): the stack stores events at a cheaper storage tier, still queryable.',
+      description:
+        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+      who_enforces: 'SIEM',
+      applicable: tierDownApplicable,
+      gated_reason: tierDownGatedReason,
+      what_survives:
+        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
+      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
+    },
+    {
+      id: 'sample',
+      label: 'Sample (lossy, opt-in): keep 1 in N events. Trends stay valid; the events you do not keep are gone.',
+      description:
+        'Engine passes 1 in N events (default 1 in 10) through to the stack. Aggregate alerting remains valid.',
+      who_enforces: 'engine',
+      applicable: true,
+      what_survives:
+        '1 in N events reach the stack (default 1 in 10). Trend and alerting remain valid at reduced volume.',
+      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('sample') },
+    },
+    {
+      id: 'drop',
+      label: 'Drop (lossy, opt-in): stop events at the forwarder. Nothing reaches the stack.',
+      description:
+        'Engine caps the pattern at 0 bytes/s. Events are discarded at the Receiver before reaching the stack.',
+      who_enforces: 'engine',
+      applicable: true,
+      what_survives:
+        'No events reach the stack. Events are gone (or offloaded to S3 if offload action used instead).',
+      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('drop') },
+    },
+    {
       id: 'observe_only',
-      label: 'Observe only: 10x marks patterns in metrics; nothing is dropped. Use this to baseline volume before committing to a mode.',
+      label: 'Observe only: 10x marks patterns in metrics; nothing is changed. Use this to baseline volume before committing to a mode.',
       description:
         'All events pass unchanged. Run this to get the baseline volume before committing to any mode.',
       who_enforces: 'engine',

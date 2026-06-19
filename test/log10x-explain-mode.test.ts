@@ -70,8 +70,8 @@ async function runMode(
 test('EXPLAIN_MODES has exactly 6 entries matching the outcome-first shape', () => {
   assert.deepEqual(
     [...EXPLAIN_MODES],
-    ['drop', 'sample', 'compact', 'tier_down', 'offload', 'observe_only'],
-    'EXPLAIN_MODES must match the 6-mode outcome-first enum',
+    ['compact', 'offload', 'tier_down', 'sample', 'drop', 'observe_only'],
+    'EXPLAIN_MODES must match the 6-mode outcome-first enum (keep-everything levers first)',
   );
 });
 
