@@ -84,11 +84,11 @@ function syntheticPatterns(opts: {
     totalBytes: opts.count * 64,
     inputLineCount: opts.count,
     templaterWallTimeMs: 0,
-    executionMode: 'paste_lambda',
+    executionMode: 'local_cli',
   };
 }
 
-/** Install a fixed synthetic templater result for the next call. */
+/** Install a fixed synthetic engine result for the next call. */
 function stubTemplater(result: ExtractedPatterns): void {
   _setExtractPatterns(async () => result);
 }

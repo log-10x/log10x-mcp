@@ -894,9 +894,9 @@ export function renderPocReport(input: RenderInput): RenderResult {
     if (dropRate >= 0.2) {
       // User-facing fact about the dropped lines.
       lines.push(
-        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the templater.** ` +
+        `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the engine.** ` +
           `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the sample line count (${fmtCount(lineCount)}). ` +
-          `Known engine-side bug (GAPS G11) — the templater silently drops lines under certain conditions ` +
+          `Known engine-side bug (GAPS G11) — the engine silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
           `The dropped lines may contain the highest-volume patterns, so the savings projection below should be treated as a lower bound.`
       );
@@ -909,7 +909,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       lines.push('');
     } else if (dropRate >= 0.05) {
       lines.push(
-        `_Note: ${fmtCount(droppedEvents)} sample lines (${pctLabel}) were not accounted for by the templater. Minor drop, likely tiny-batch overfitting._`
+        `_Note: ${fmtCount(droppedEvents)} sample lines (${pctLabel}) were not accounted for by the engine. Minor drop, likely tiny-batch overfitting._`
       );
       lines.push('');
     }
@@ -1036,7 +1036,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('');
   const topN = Math.min(patterns.length, 20);
   if (topN === 0) {
-    lines.push('_No patterns resolved from the pulled events — the templater returned zero. This is usually a sign the events are pre-aggregated JSON blobs rather than raw log lines. Try a narrower `query` or the `privacy_mode: true` path with a locally-installed tenx CLI._');
+    lines.push('_No patterns resolved from the pulled events — the engine returned zero. This is usually a sign the events are pre-aggregated JSON blobs rather than raw log lines. Try a narrower `query`, and make sure a local tenx CLI is installed._');
     lines.push('');
   } else {
     lines.push(
@@ -1152,7 +1152,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
     if (measured.length === 0) {
       lines.push(
-        `_No measured compact bytes available. The local tenx CLI did not emit encoded lines for these events (older CLI build, or non-privacy-mode paste path). Re-run with \`privacy_mode: true\` on a tenx CLI ≥ 1.1.0 to see the real per-pattern ratio._`
+        `_No measured compact bytes available. The local tenx CLI did not emit encoded lines for these events (older CLI build). Re-run on a tenx CLI ≥ 1.1.0 to see the real per-pattern ratio._`
       );
       lines.push('');
     } else {
@@ -1263,7 +1263,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Methodology');
   lines.push('');
   lines.push(
-    '- **Pattern identity** is the engine\'s Reporter-tier `message_pattern` when the templater produced one (a stable symbol-lookup name; same identity across deploys, restarts, pod names, timestamps, and request IDs). When the templater did not produce one, identity falls back to the engine\'s short `templateHash`. Identity values shown here are emitted by the engine, never derived from the log body by this report.'
+    '- **Pattern identity** is the engine\'s Reporter-tier `message_pattern` when the engine produced one (a stable symbol-lookup name; same identity across deploys, restarts, pod names, timestamps, and request IDs). When the engine did not produce one, identity falls back to the engine\'s short `templateHash`. Identity values shown here are emitted by the engine, never derived from the log body by this report.'
   );
   lines.push(
     '- **Cost model**: `bytes × analyzer_cost_per_gb` over the pulled window. Window cost is projected to weekly cost via `$/window × (168h / window_hours)`.'
@@ -1282,7 +1282,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push(`- **finished**: ${input.finishedAt}`);
   lines.push(`- **mcp_version**: ${input.mcpVersion}`);
   lines.push(
-    `- **pull_wall_time_ms**: ${input.pullWallTimeMs} (templater ${input.templateWallTimeMs}ms)`
+    `- **pull_wall_time_ms**: ${input.pullWallTimeMs} (engine ${input.templateWallTimeMs}ms)`
   );
   lines.push(
     `- **events_analyzed**: ${fmtCount(input.extraction.totalEvents)} / target ${fmtCount(input.targetEventCount)} (${input.reasonStopped})`

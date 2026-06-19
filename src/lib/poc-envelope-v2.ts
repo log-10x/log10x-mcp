@@ -63,7 +63,7 @@ export interface PocInput {
     distinct_patterns_surfaced: number;
     services_observed: number;
     pull_wall_time_seconds: number;
-    templater_wall_time_seconds: number;
+    engine_wall_time_seconds: number;
   };
   stop: {
     reason: string;
@@ -76,7 +76,7 @@ export interface PocInput {
     events_with_severity_attribution_pct: number;
   };
   methodology: {
-    templater: 'engine_fingerprint' | 'paste_lambda';
+    engine: 'engine_fingerprint';
     fingerprint_determinism: 'stable_across_deploys' | 'sample_lexical';
     cost_calculation: 'measured_bytes_x_analyzer_rate';
     growth_calculation: 'last_24h_rate_over_window_avg_rate';
@@ -592,7 +592,7 @@ export function buildPocEnvelopeV2(
         distinct_patterns_surfaced: input.extraction.patterns.length,
         services_observed: countDistinctServices(input.extraction.patterns),
         pull_wall_time_seconds: Math.round(input.pullWallTimeMs / 1000),
-        templater_wall_time_seconds: Math.round(input.templateWallTimeMs / 1000),
+        engine_wall_time_seconds: Math.round(input.templateWallTimeMs / 1000),
       },
       stop: {
         reason: input.reasonStopped,
@@ -605,7 +605,7 @@ export function buildPocEnvelopeV2(
         events_with_severity_attribution_pct: ratio(withSeverity / totalPatterns),
       },
       methodology: {
-        templater: input.extraction.executionMode === 'local_cli' ? 'engine_fingerprint' : 'paste_lambda',
+        engine: 'engine_fingerprint',
         fingerprint_determinism: 'stable_across_deploys',
         cost_calculation: 'measured_bytes_x_analyzer_rate',
         growth_calculation: 'last_24h_rate_over_window_avg_rate',

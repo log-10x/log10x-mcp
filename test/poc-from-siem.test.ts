@@ -1,15 +1,14 @@
 /**
  * Integration-style test for the async poc-from-siem flow.
  *
- * We can't hit a real SIEM or the paste Lambda in CI, so the test
- * substitutes an in-memory SIEM connector that returns a fixed event
- * stream, and we run the pipeline in privacy_mode: true which itself
- * also doesn't hit the network (it shells out to `tenx`). Since `tenx`
- * isn't installed in CI either, the templating step cleanly fails
- * with the documented install hint — we assert on the failure surface.
+ * We can't hit a real SIEM in CI, so the test substitutes an in-memory
+ * SIEM connector that returns a fixed event stream. The pipeline runs the
+ * local engine (it shells out to `tenx`). Since `tenx` isn't installed in
+ * CI, the analyze step cleanly fails with the documented install hint —
+ * we assert on the failure surface.
  *
  * This covers: snapshot lifecycle, progress callbacks, file path
- * generation, failure surface (templatize_failed), and the `unknown
+ * generation, failure surface (analyze_failed), and the `unknown
  * snapshot_id` rejection path.
  */
 
@@ -71,7 +70,7 @@ test('executePocStatus returns a typed input_invalid envelope for unknown snapsh
   assert.match(data.error?.hint ?? '', /Unknown snapshot_id/);
 });
 
-test('runPipeline surfaces templatize failure cleanly when privacy_mode without tenx', async () => {
+test('runPipeline surfaces analyze failure cleanly when local engine missing', async () => {
   _resetSnapshots();
   const id = randomUUID();
   const snap: Parameters<typeof runPipeline>[1] = {
@@ -100,13 +99,12 @@ test('runPipeline surfaces templatize failure cleanly when privacy_mode without 
     window: '1h',
     target_event_count: 100,
     max_pull_minutes: 1,
-    privacy_mode: true,
     ai_prettify: false,
   };
 
   await runPipeline(connector, snap, args);
   assert.equal(snap.status, 'failed');
-  assert.ok(snap.error && /templatize_failed/.test(snap.error));
+  assert.ok(snap.error && /analyze_failed/.test(snap.error));
   assert.ok(snap.retryHint);
 });
 
@@ -132,7 +130,6 @@ test('runPipeline pull-error surfaces failure without crashing', async () => {
     window: '1h',
     target_event_count: 100,
     max_pull_minutes: 1,
-    privacy_mode: false,
     ai_prettify: false,
   });
   assert.equal(snap.status, 'failed');
@@ -168,7 +165,6 @@ test('runPipeline zero-event pull is treated as error', async () => {
     window: '24h',
     target_event_count: 100,
     max_pull_minutes: 1,
-    privacy_mode: false,
     ai_prettify: false,
   });
   assert.equal(snap.status, 'failed');

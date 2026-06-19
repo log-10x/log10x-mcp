@@ -19,12 +19,12 @@ test('investigate-specific: unresolved anchor suggests event_lookup', () => {
   assert.match(out, /log10x_event_lookup/);
 });
 
-test('resolve_batch: too-large batch suggests pagination or privacy_mode', () => {
+test('resolve_batch: missing local CLI suggests installing tenx', () => {
   const out = describeToolError(
     'log10x_resolve_batch',
-    new Error('Batch too large: 250.0 KB exceeds the 100 KB paste Lambda limit')
+    new Error('tenx CLI is not installed')
   );
-  assert.match(out, /paginate|privacy_mode/);
+  assert.match(out, /install|tenx/i);
 });
 
 test('retriever_query: not-configured suggests deployment URL', () => {

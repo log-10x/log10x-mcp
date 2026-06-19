@@ -40,25 +40,26 @@ afterEach(() => {
   else process.env.LOG10X_MCP_FILE_CONFIG_PATH = ORIG_FILE_CONFIG;
 });
 
-// We can't hit the paste Lambda from CI; the test focuses on coercion +
-// error paths + empty-input handling that run entirely in-process.
+// The engine always runs locally; CI has no tenx binary, so the test
+// focuses on coercion + error paths + empty-input handling that run
+// entirely in-process.
 
 test('extractPatterns returns empty result for empty input', async () => {
-  const out = await extractPatterns([], { privacyMode: false });
+  const out = await extractPatterns([]);
   assert.equal(out.totalEvents, 0);
   assert.equal(out.patterns.length, 0);
   assert.equal(out.inputLineCount, 0);
 });
 
 test('extractPatterns returns empty result for only blank strings', async () => {
-  const out = await extractPatterns(['', '   ', '\n'], { privacyMode: false });
+  const out = await extractPatterns(['', '   ', '\n']);
   assert.equal(out.totalEvents, 0);
   assert.equal(out.patterns.length, 0);
 });
 
 test('extractPatterns coerces object events by common fields', async () => {
-  // privacyMode: true but the CLI is not installed — we expect a clean error.
-  // That proves the object-coercion reached the execution path.
+  // The CLI is not installed in CI — we expect a clean error. That proves
+  // the object-coercion reached the execution path.
   await assert.rejects(
     async () => {
       await extractPatterns(
@@ -69,15 +70,14 @@ test('extractPatterns coerces object events by common fields', async () => {
           { body: 'q' },
           { _raw: 'r' },
         ],
-        { privacyMode: true }
       );
     },
     (e: Error) => /tenx.*not (installed|available)|CLI.*run failed/i.test(e.message)
   );
 });
 
-test('extractPatterns privacy_mode without a usable local CLI throws a precondition error', async () => {
-  // privacy_mode=true routes through the local tenx CLI. Two preconditions
+test('extractPatterns without a usable local CLI throws a precondition error', async () => {
+  // Patterns always run through the local tenx CLI. Two preconditions
   // gate that path, and either is a valid "can't run locally" failure:
   //   1. runDevCliStdin's API-key guard (DevCliConfigMissingError) fires first
   //      when LOG10X_API_KEY/TENX_API_KEY are unset — as they are in CI. That
@@ -86,26 +86,11 @@ test('extractPatterns privacy_mode without a usable local CLI throws a precondit
   //      lookup to throw DevCliNotInstalledError.
   await assert.rejects(
     async () => {
-      await extractPatterns(['ERROR something broke'], { privacyMode: true });
+      await extractPatterns(['ERROR something broke']);
     },
     (e: Error) =>
       e.name === 'DevCliNotInstalledError' ||
       /not installed/i.test(e.message) ||
       /CLI run failed|not configured/i.test(e.message)
-  );
-});
-
-test('extractPatterns rejects oversize batch without autoBatch', async () => {
-  // Craft an input larger than the 100 KB paste-lambda limit.
-  const bigLine = 'x'.repeat(1024);
-  const lines: string[] = [];
-  for (let i = 0; i < 200; i++) lines.push(`${bigLine} line ${i}`);
-  // This should error because we're not in privacy mode AND autoBatch is false.
-  // Since the network is blocked in CI, we actually expect *either* the size
-  // check to trigger or the fetch to fail — we accept either.
-  await assert.rejects(
-    async () => {
-      await extractPatterns(lines, { privacyMode: false, autoBatch: false });
-    }
   );
 });

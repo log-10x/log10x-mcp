@@ -552,7 +552,7 @@ function isAuthRecoverableError(e: unknown): boolean {
  * Prepend a banner to the tool result when the MCP is in
  * demo-fallback mode (user supplied an API key but it failed). The
  * goal is hard-to-miss notification — but the wording matters: only
- * account-scoped tools return demo data; local-only templater tools
+ * account-scoped tools return demo data; local-only engine tools
  * (resolve_batch, extract_templates) operate on the caller's own
  * input regardless of credential state. So the banner describes the
  * MCP's *mode*, not "this tool's data."
@@ -1642,7 +1642,7 @@ registerLog10xTool('log10x_metric_overlay', metricOverlaySchema, (args) =>
 
 // ── Tool: log10x_poc_from_siem_submit / _status ──
 //
-// Async pair: submit kicks off a background pull + templatize + render;
+// Async pair: submit kicks off a background pull + analyze + render;
 // status polls for progress and returns the final markdown once done.
 // Supports 8 SIEMs (cloudwatch, datadog, sumo, gcp-logging, elasticsearch,
 // azure-monitor, splunk, clickhouse) with auto-discovery of credentials.
@@ -1653,7 +1653,6 @@ registerLog10xTool('log10x_poc_from_siem_submit', pocFromSiemSubmitSchema, (args
       window: args.window ?? '7d',
       target_event_count: args.target_event_count ?? 250_000,
       max_pull_minutes: args.max_pull_minutes ?? 5,
-      privacy_mode: args.privacy_mode ?? true,
       ai_prettify: args.ai_prettify ?? true,
       total_daily_gb: args.total_daily_gb,
       total_monthly_gb: args.total_monthly_gb,
@@ -1704,7 +1703,6 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       window: args.window ?? '1h',
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
-      privacy_mode: args.privacy_mode ?? true,
       target_percent_reduction: args.target_percent_reduction,
       exception_services: args.exception_services,
     })
@@ -1904,7 +1902,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
   { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
   { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live routeState metric surface answers overflow-volume questions as a TSDB query.' },
-  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, paste endpoint, cross-pillar enrichment floor' },
+  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, local engine, cross-pillar enrichment floor' },
   { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
   { name: 'log10x_signin_complete', intent: 'Step 2 of sign-in: pass back the device_code from log10x_signin_start to finish the browser flow, OR pass api_key directly for pasted-key sign-in (no browser). Hot-reloads envs (no MCP-host restart needed)' },
@@ -1924,7 +1922,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_metrics_that_moved', intent: 'Deterministic phase-aware filter — given an anchor and N candidates, return only candidates whose mean during the anchor\'s incident phase differs from its quiet-phase mean by ≥15%. First step of the cross-pillar investigation; kills diurnal/seasonal confounders before any correlation runs' },
   { name: 'log10x_rank_by_shape_similarity', intent: 'Rank candidates by Pearson + signed lag against an anchor. Returns raw arithmetic — pearson_signed, lag_seconds (negative = leads, possible cause), lag_tightness, lag_at_bound, anchor_phase_aligned. No tier, no causal framing — agent applies its own filter using the surfaced fields' },
   { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side — the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
-  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, templatize, and render a full cost-optimization POC report (async)' },
+  { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, analyze, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
@@ -1993,8 +1991,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin_start` then `log10x_signin_complete` to mint one via Auth0 Device Flow)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
         '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
-        '  LOG10X_PASTE_URL          Override Log10x paste endpoint (optional)',
-        '  LOG10X_TENX_MODE          `local` or `docker` backend for privacy-mode and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
+        '  LOG10X_TENX_MODE          `local` or `docker` backend for the local engine and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local; compile requires the cloud flavor)',
         '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',
         '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile (default: log10x/compiler-10x:latest; falls back to LOG10X_TENX_IMAGE)',

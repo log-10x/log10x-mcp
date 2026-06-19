@@ -640,7 +640,7 @@ async function executePatternExamplesInner(
     // event is the only reliably-populated source of searchable words
     // for the probe.
     try {
-      const resolved = await extractPatterns([args.pattern], { privacyMode: true, useFileOutput: true, preserveEnvelope: true });
+      const resolved = await extractPatterns([args.pattern], { useFileOutput: true, preserveEnvelope: true });
       if (resolved.patterns[0]) {
         const p = resolved.patterns[0];
         canonicalPattern = p.hash;
@@ -758,11 +758,11 @@ async function executePatternExamplesInner(
     return graceful(`Pattern Examples — no events in ${args.timeRange} window`, lines);
   }
 
-  // ── 5. Templatize the probe batch ──────────────────────────────────
+  // ── 5. Run the probe batch through the engine ──────────────────────
   const inputLineCount = probe.events.length;
   let extracted;
   try {
-    extracted = await extractPatterns(probe.events, { privacyMode: true, useFileOutput: true, preserveEnvelope: true, bucketHashHint: hashKey });
+    extracted = await extractPatterns(probe.events, { useFileOutput: true, preserveEnvelope: true, bucketHashHint: hashKey });
   } catch (e) {
     return graceful('Pattern Examples — pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,

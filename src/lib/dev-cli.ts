@@ -55,10 +55,7 @@ export interface DevCliResult {
 
 export class DevCliNotInstalledError extends Error {
   constructor() {
-    super(
-      tenxAvailabilityHint() +
-        '\n\nOr bypass templating entirely: set privacy_mode=false to route the batch through the public Log10x paste endpoint.'
-    );
+    super(tenxAvailabilityHint());
     this.name = 'DevCliNotInstalledError';
   }
 }
@@ -205,7 +202,7 @@ async function runAppsMcpFileViaLocalBinary(
   if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
     throw new DevCliConfigMissingError(
       'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
     );
   }
   const env: NodeJS.ProcessEnv = {
@@ -292,7 +289,7 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
   if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
     throw new DevCliConfigMissingError(
       'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
     );
   }
 
@@ -526,7 +523,7 @@ async function runAppsMcpViaLocalBinary(
   if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
     throw new DevCliConfigMissingError(
       'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
     );
   }
 
@@ -701,7 +698,7 @@ async function runViaLocalBinary(
   if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
     throw new DevCliConfigMissingError(
       'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. paste-flow tools (resolve_batch, extract_templates) require a real API key. Either set LOG10X_API_KEY in the MCP server env, or pass privacy_mode=false to route through the public paste lambda.'
+      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
     );
   }
   const env: NodeJS.ProcessEnv = {

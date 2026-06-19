@@ -10,7 +10,7 @@ function fixture(): ExtractedPatterns {
     totalBytes: 80 * 1024 * 1024, // 80 MB
     inputLineCount: 50_000,
     templaterWallTimeMs: 1200,
-    executionMode: 'paste_lambda',
+    executionMode: 'local_cli',
     patterns: [
       {
         hash: 'h_a',
@@ -116,7 +116,7 @@ test('renderPocReport flags low-confidence when <10k events pulled', () => {
     totalBytes: 250_000,
     inputLineCount: 500,
     templaterWallTimeMs: 50,
-    executionMode: 'paste_lambda',
+    executionMode: 'local_cli',
     patterns: [
       {
         hash: 'h',
@@ -242,7 +242,7 @@ test('renderPocReport handles zero patterns gracefully', () => {
     totalBytes: 0,
     inputLineCount: 0,
     templaterWallTimeMs: 0,
-    executionMode: 'paste_lambda',
+    executionMode: 'local_cli',
     patterns: [],
   };
   const out = renderPocReport({

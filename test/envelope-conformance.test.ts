@@ -91,7 +91,7 @@ test('envelope conformance: resolve_batch carries the unified fields on success'
     'POST /api/orders 201',
     'GET /api/users 200',
   ];
-  const out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: false, privacy_mode: false });
+  const out = await executeResolveBatch({ source: 'events', events, top_n_patterns: 10, include_next_actions: false });
   if (typeof out === 'string') throw new Error('expected envelope');
   assertUnifiedFields(out, 'resolve_batch');
 });

@@ -48,7 +48,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
 
     case 'log10x_event_lookup':
       if (/No data found/i.test(msg)) {
-        return 'The pattern was not found in this environment. Try `log10x_resolve_batch` with a sample line to see how the templater normalizes it, or call `log10x_list_by_label({ label: \'tenx_user_service\' })` to list known services.';
+        return 'The pattern was not found in this environment. Try `log10x_resolve_batch` with a sample line to see how the engine normalizes it, or call `log10x_list_by_label({ label: \'tenx_user_service\' })` to list known services.';
       }
       return 'If you pasted a multi-line batch, use `log10x_resolve_batch` instead — event_lookup is for single-line resolution.';
 
@@ -59,12 +59,8 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
       return 'If costs look unexpectedly flat, run `log10x_doctor` to confirm the Reporter tier is detected. If only Cloud Reporter is deployed, sampling can mask short cost spikes.';
 
     case 'log10x_resolve_batch':
-      if (/too large/i.test(msg)) {
-        return 'Batch exceeds the 100 KB paste Lambda limit. Either trim to ~1-2K events, paginate across multiple calls, or set privacy_mode=true with a locally-installed `tenx` CLI for unlimited size.';
-      }
       if (/CLI is not installed|tenx/i.test(msg)) {
-        return tenxAvailabilityHint() +
-          '\n\nOr bypass: set privacy_mode=false to route through the public paste endpoint.';
+        return tenxAvailabilityHint();
       }
       if (/No events provided/i.test(msg)) {
         return 'Pass `source: "text"` with the raw events as a `text` argument, or `source: "file"` with `path`, or `source: "events"` with an inline array.';
