@@ -47,6 +47,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { fetchUserProfile, type Permission, type RemoteUserProfile } from './api.js';
 import { readCredentials } from './credentials.js';
+import { readDemoLicense, isDemoLicenseExpired } from './demo-license.js';
 import {
   createMetricsBackend,
   MetricsBackendConfigError,
@@ -390,6 +391,15 @@ function parseMetricsBackendFromEnv(kind: MetricsBackendConfig['kind']): Metrics
         kind: 'log10x',
         apiKey: refEnv('LOG10X_API_KEY'),
         envId: refEnv('LOG10X_ENV_ID'),
+      };
+    case 'log10x_demo':
+      // Explicit single-env demo: LOG10X_METRICS_BACKEND_KIND=log10x_demo +
+      // LOG10X_LICENSE_JWT. The no-config demo path (Path 4.5) is the more
+      // common entry point; this exists for parity with the generic env-var
+      // backend selector.
+      return {
+        kind: 'log10x_demo',
+        licenseJwt: refEnv('LOG10X_LICENSE_JWT'),
       };
     case 'prometheus':
       return { kind: 'prometheus', url: refEnv('LOG10X_METRICS_URL'), auth: parseAuthFromEnv() };
@@ -744,6 +754,19 @@ async function loadLegacyLog10x(): Promise<Environments> {
     }
   }
 
+  // Path 3.5: explicit `LOG10X_LICENSE_JWT` — a demo license the caller
+  // deliberately provided. Beats a persisted login (Path 4): "use THIS demo
+  // license" is explicit intent, and the install-e2e / demo flows rely on it
+  // overriding ~/.log10x/credentials. (A persisted demo license, by contrast,
+  // stays below credentials — see Path 4.5 — so a signed-in user is never
+  // silently downgraded to old demo data.)
+  const envDemoLicense = await tryBuildDemoLicenseEnv('env');
+  if (envDemoLicense) {
+    // eslint-disable-next-line no-console
+    console.info(`[log10x-mcp] metricsBackend resolved via demo license (LOG10X_LICENSE_JWT, /api/v1/demo/*)`);
+    return envDemoLicense;
+  }
+
   // Path 4: persistent credentials at ~/.log10x/credentials, written
   // by log10x_signin_complete.
   let creds: Awaited<ReturnType<typeof readCredentials>>;
@@ -783,12 +806,90 @@ async function loadLegacyLog10x(): Promise<Environments> {
     }
   }
 
+  // Path 4.5: a demo license PERSISTED by the install wizard / a prior demo
+  // (the SAME license the engine writes with). Only reached when NOT signed in
+  // (Path 4 returns first for a real account). Unlike the shared demo key
+  // below, this reads the user's OWN demo tenant via /api/v1/demo/* with
+  // Authorization: Bearer, so a not-signed-in user can pull back exactly what
+  // their demo engine wrote.
+  const persistedDemoLicense = await tryBuildDemoLicenseEnv('persisted');
+  if (persistedDemoLicense) {
+    // eslint-disable-next-line no-console
+    console.info(`[log10x-mcp] metricsBackend resolved via demo license (persisted, own demo tenant, /api/v1/demo/*)`);
+    return persistedDemoLicense;
+  }
+
   // Path 5: nothing set — pure demo mode. Public demo key so the
   // user can play without signing up. This silent fallback is slated to
   // be replaced by an explicit "not configured" state.
   // eslint-disable-next-line no-console
   console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
+}
+
+/**
+ * Build a demo-license-backed `Environments` from one source:
+ *   - `'env'`       → the explicit `LOG10X_LICENSE_JWT` env var (Path 3.5)
+ *   - `'persisted'` → a demo license saved by the install wizard / a prior
+ *                     demo at ~/.log10x/demo-license.json (Path 4.5)
+ *
+ * Returns undefined when that source is absent/expired, so the caller falls
+ * through to the next path. Splitting the two sources is deliberate: an
+ * explicit env var beats a persisted login, a persisted file does not.
+ */
+async function tryBuildDemoLicenseEnv(source: 'env' | 'persisted'): Promise<Environments | undefined> {
+  let jwt: string | undefined;
+  let expiresAtEpochSec: number | undefined;
+  if (source === 'env') {
+    jwt = process.env.LOG10X_LICENSE_JWT?.trim() || undefined;
+  } else {
+    const stored = await readDemoLicense().catch(() => null);
+    if (stored && !isDemoLicenseExpired(stored)) {
+      jwt = stored.jwt;
+      expiresAtEpochSec = stored.expiresAtEpochSec;
+    }
+  }
+  if (!jwt) return undefined;
+  return buildDemoLicenseEnvironments(jwt, expiresAtEpochSec);
+}
+
+function buildDemoLicenseEnvironments(jwt: string, _expiresAtEpochSec?: number): Environments {
+  const backend = createMetricsBackend({
+    kind: 'log10x_demo',
+    licenseJwt: jwt,
+    // Honor LOG10X_API_BASE so staging / self-host point the demo reads at the
+    // right gateway (matches license-api.ts's getBase()).
+    ...(process.env.LOG10X_API_BASE ? { endpoint: process.env.LOG10X_API_BASE } : {}),
+  });
+  const env: EnvConfig = {
+    nickname: 'demo',
+    metricsBackend: backend,
+    labels: { ...DEFAULT_LABELS },
+    apiKey: '',
+    envId: demoTenantFromJwt(jwt) ?? '',
+    isDefault: true,
+    permissions: 'READ',
+  };
+  return {
+    all: [env],
+    byNickname: new Map([['demo', env]]),
+    default: env,
+    isDemoMode: true,
+  };
+}
+
+/** Best-effort decode of the `tenant_id` claim from a demo license JWT, for display only. */
+function demoTenantFromJwt(jwt: string): string | undefined {
+  try {
+    const payload = jwt.split('.')[1];
+    if (!payload) return undefined;
+    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+    const json = Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const claims = JSON.parse(json) as Record<string, unknown>;
+    return typeof claims.tenant_id === 'string' ? claims.tenant_id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

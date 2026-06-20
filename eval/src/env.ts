@@ -12,9 +12,17 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 export interface EvalEnv {
-  mode: 'demo' | 'customer' | 'ci';
+  mode: 'demo' | 'customer' | 'ci' | 'demo-license';
   envId: string;
   apiKey: string;
+  /**
+   * Demo license JWT (Bearer) — only set in `demo-license` mode. The MCP's
+   * Path 4.5 resolves a `log10x_demo` backend from it, querying the
+   * `/api/v1/demo/*` routes for the caller's own self-minted demo tenant. Used
+   * by the install→validate close-the-loop e2e: the freshly-installed engine
+   * writes with this same license, and the harness reads its data back.
+   */
+  licenseJwt?: string;
   apiBase: string;
   retrieverUrl?: string;
   region: string;
@@ -81,6 +89,28 @@ export function loadEvalEnv(): EvalEnv {
     );
   }
 
+  if (mode === 'demo-license') {
+    // The demo tenant is encoded in the JWT and resolved server-side; there is
+    // no api_key and no envId to pin. The install-e2e runner mints + persists a
+    // demo license (the same one the engine installs with) and sets this var.
+    const jwt = process.env.LOG10X_LICENSE_JWT;
+    if (!jwt) {
+      throw new Error(
+        'LOG10X_EVAL_ENV=demo-license requires LOG10X_LICENSE_JWT (a demo license JWT from ' +
+          'POST /api/v1/license/demo). The install-e2e runner mints + persists one and sets it for you.'
+      );
+    }
+    return {
+      mode,
+      envId: '',
+      apiKey: '',
+      licenseJwt: jwt,
+      apiBase: process.env.LOG10X_API_BASE || 'https://prometheus.log10x.com',
+      region: process.env.AWS_REGION || 'us-east-1',
+      notes: ['demo-license env: /api/v1/demo/* via a self-minted demo license (Bearer); reads the engine’s own demo tenant'],
+    };
+  }
+
   if (mode === 'ci') {
     if (!process.env.LOG10X_API_KEY) {
       throw new Error('LOG10X_EVAL_ENV=ci requires LOG10X_API_KEY env var.');
@@ -96,7 +126,7 @@ export function loadEvalEnv(): EvalEnv {
     };
   }
 
-  throw new Error(`Unknown LOG10X_EVAL_ENV=${mode}; expected demo|customer|ci`);
+  throw new Error(`Unknown LOG10X_EVAL_ENV=${mode}; expected demo|customer|ci|demo-license`);
 }
 
 /**
@@ -104,6 +134,18 @@ export function loadEvalEnv(): EvalEnv {
  * reads process.env) sees them. Idempotent.
  */
 export function applyEvalEnvToProcess(env: EvalEnv): void {
+  if (env.mode === 'demo-license') {
+    // The MCP resolves a log10x_demo backend from LOG10X_LICENSE_JWT (Path 4.5).
+    // It must NOT see a LOG10X_API_KEY — that would win the resolution chain and
+    // route queries to the api-key surface instead of /api/v1/demo/*.
+    if (env.licenseJwt && !process.env.LOG10X_LICENSE_JWT) {
+      process.env.LOG10X_LICENSE_JWT = env.licenseJwt;
+    }
+    if (!process.env.LOG10X_API_BASE) {
+      process.env.LOG10X_API_BASE = env.apiBase;
+    }
+    return;
+  }
   if (!process.env.LOG10X_API_KEY) {
     process.env.LOG10X_API_KEY = env.apiKey;
   }

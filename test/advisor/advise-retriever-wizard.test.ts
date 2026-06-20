@@ -29,6 +29,11 @@ import { SNAPSHOT_SCHEMA_VERSION } from '../../src/lib/discovery/types.js';
 // Redirect disk state to a temp subdir per test run so tests don't collide.
 const TEST_STATE_DIR = join(tmpdir(), `retriever-wizard-test-${randomUUID()}`);
 process.env.LOG10X_ADVISOR_STATE_DIR = TEST_STATE_DIR;
+// This wizard does a live demo-license fetch, and getOrMintDemoLicense()
+// persists the result. Redirect that write to a throwaway temp path so it never
+// lands in the shared default (~/.log10x/demo-license.json) and leak a demo env
+// into other tests' environment resolution (e.g. preview_filter).
+process.env.LOG10X_DEMO_LICENSE_PATH = join(TEST_STATE_DIR, 'demo-license.json');
 
 // ── Snapshot factories ────────────────────────────────────────────────────────
 

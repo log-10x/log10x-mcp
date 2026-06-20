@@ -208,6 +208,69 @@ test('log10x adapter: listLabelValues with window adds start/end', async () => {
   assert.ok(url.searchParams.get('end'));
 });
 
+// ── log10x_demo adapter (Bearer demo license → /api/v1/demo/*) ────────────
+
+const DEMO_JWT = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
+
+test('createMetricsBackend: dispatches log10x_demo kind', () => {
+  const b = createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT });
+  assert.equal(b.kind, 'log10x_demo');
+  assert.equal(b.endpoint, 'https://prometheus.log10x.com');
+});
+
+test('log10x_demo: does NOT trip the literal-secret guard on the JWT', () => {
+  // A JWT is long + alphanumeric; the demo path must be exempt from the guard.
+  assert.doesNotThrow(() =>
+    createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT })
+  );
+});
+
+test('log10x_demo: queryInstant hits /api/v1/demo/query with Bearer auth', async () => {
+  const { calls } = setupMockFetch([jsonResponse(PROM_OK)]);
+  const b = createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT });
+  await b.queryInstant('up');
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, '/api/v1/demo/query');
+  assert.equal(url.searchParams.get('query'), 'up');
+  const headers = calls[0].init?.headers as Record<string, string>;
+  assert.equal(headers['Authorization'], `Bearer ${DEMO_JWT}`);
+  assert.equal(headers['X-10X-Auth'], undefined);
+});
+
+test('log10x_demo: queryRange uses the demo path and clamps start into the 3h window', async () => {
+  const { calls } = setupMockFetch([jsonResponse(PROM_OK)]);
+  const b = createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT });
+  const now = Math.floor(Date.now() / 1000);
+  // Ask for 24h of data; the backend must clamp start to ~now-3h.
+  await b.queryRange('up', now - 24 * 3600, now, 60);
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, '/api/v1/demo/query_range');
+  const start = Number(url.searchParams.get('start'));
+  const minStart = now - 3 * 3600;
+  assert.ok(start >= minStart - 5, `start ${start} should be clamped to ~${minStart}`);
+});
+
+test('log10x_demo: queryRange refuses a range entirely older than the window', async () => {
+  setupMockFetch([jsonResponse(PROM_OK)]);
+  const b = createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT });
+  const now = Math.floor(Date.now() / 1000);
+  await assert.rejects(
+    () => b.queryRange('up', now - 10 * 3600, now - 6 * 3600, 60),
+    /demo window|last 3 hours/i
+  );
+});
+
+test('log10x_demo: listLabelValues bounds the window to 3h max', async () => {
+  const { calls } = setupMockFetch([jsonResponse(LABEL_LIST_OK)]);
+  const b = createMetricsBackend({ kind: 'log10x_demo', licenseJwt: DEMO_JWT });
+  await b.listLabelValues('service', { windowSeconds: 24 * 3600 });
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, '/api/v1/demo/label/service/values');
+  const start = Number(url.searchParams.get('start'));
+  const end = Number(url.searchParams.get('end'));
+  assert.ok(end - start <= 3 * 3600 + 5, `window ${end - start}s must be <= 3h`);
+});
+
 // ── prometheus adapter: auth modes ───────────────────────────────────────
 
 test('prometheus adapter (none auth): no Authorization header', async () => {

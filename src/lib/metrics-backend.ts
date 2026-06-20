@@ -48,6 +48,11 @@ export type PromAuth =
  */
 export type MetricsBackendConfig =
   | { kind: 'log10x'; apiKey: string; envId: string }
+  // Hosted log10x DEMO surface — a self-minted 14-day demo license JWT (no
+  // api_key) reading its OWN demo tenant via `Authorization: Bearer` against
+  // the `/api/v1/demo/*` routes. For not-signed-in users who installed with a
+  // demo license. `endpoint` overrides the default prometheus.log10x.com base.
+  | { kind: 'log10x_demo'; licenseJwt: string; endpoint?: string }
   | { kind: 'prometheus'; url: string; auth: PromAuth }
   | { kind: 'mimir'; url: string; auth: PromAuth; orgId?: string }
   | { kind: 'cortex'; url: string; auth: PromAuth; orgId: string }
@@ -215,6 +220,12 @@ function normalizeAndGuard(config: MetricsBackendConfig): MetricsBackendConfig {
         apiKey: guardSecret('log10x.apiKey', c.apiKey),
         envId: resolveVarReference(c.envId),
       };
+    case 'log10x_demo':
+      // The license JWT is a short-lived (14-day) demo credential supplied via
+      // env var or self-minted, never a committed account secret, so it is
+      // resolved (for ${VAR} support) but exempt from the literal-secret guard
+      // that long-lived account keys get.
+      return { ...c, licenseJwt: resolveVarReference(c.licenseJwt) };
     case 'prometheus':
     case 'mimir':
     case 'cortex':
@@ -323,6 +334,8 @@ export function createMetricsBackend(config: MetricsBackendConfig): MetricsBacke
   switch (safe.kind) {
     case 'log10x':
       return new Log10xBackend(safe);
+    case 'log10x_demo':
+      return new Log10xDemoBackend(safe);
     case 'prometheus':
       return new PrometheusBackend(safe);
     case 'mimir':
@@ -427,6 +440,92 @@ class Log10xBackend implements MetricsBackend {
     }
     const res = await promJsonFetch<{ status: string; data: string[] }>('log10x', url, {}, { 'X-10X-Auth': this.auth });
     return res.data || [];
+  }
+}
+
+/** 3h — must match the gateway's `demoMaxLookback` for the /api/v1/demo/* routes. */
+const DEMO_WINDOW_SEC = 3 * 60 * 60;
+
+/**
+ * Hosted log10x DEMO backend — for a not-signed-in user who installed an
+ * engine with an anonymous demo license JWT and has no api_key. It queries the
+ * `/api/v1/demo/*` mirror of the read endpoints with `Authorization: Bearer
+ * <licenseJwt>`, scoped server-side to that license's own demo tenant — so the
+ * MCP reads exactly the data the same-license engine writes.
+ *
+ * Every read is bounded to the last `DEMO_WINDOW_SEC` seconds: the gateway
+ * rejects demo reads older than that (HTTP 400), so we clamp the lower bound
+ * client-side to stay inside the window. A range that is *entirely* older than
+ * the window is refused locally with a clear message rather than bounced.
+ */
+class Log10xDemoBackend implements MetricsBackend {
+  readonly kind = 'log10x_demo' as const;
+  readonly endpoint: string;
+  private readonly authHeaders: Record<string, string>;
+
+  constructor(config: Extract<MetricsBackendConfig, { kind: 'log10x_demo' }>) {
+    this.endpoint = config.endpoint || 'https://prometheus.log10x.com';
+    this.authHeaders = { Authorization: `Bearer ${config.licenseJwt}` };
+  }
+
+  async queryInstant(promql: string): Promise<PrometheusResponse> {
+    const url = new URL('/api/v1/demo/query', this.endpoint);
+    url.searchParams.set('query', promql);
+    return this.demoFetch(url);
+  }
+
+  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
+    const nowS = Math.floor(Date.now() / 1000);
+    const minStart = nowS - DEMO_WINDOW_SEC;
+    const end = Math.min(endSec, nowS);
+    if (end <= minStart) {
+      throw new Error(
+        `log10x_demo: the requested range ends outside the ${DEMO_WINDOW_SEC / 3600}h demo window — ` +
+          `demo data only covers the last ${DEMO_WINDOW_SEC / 3600} hours. Sign in for full history.`
+      );
+    }
+    const start = Math.max(startSec, minStart);
+    const url = new URL('/api/v1/demo/query_range', this.endpoint);
+    url.searchParams.set('query', promql);
+    url.searchParams.set('start', String(start));
+    url.searchParams.set('end', String(end));
+    url.searchParams.set('step', String(stepSec));
+    return this.demoFetch(url);
+  }
+
+  async listLabels(): Promise<string[]> {
+    const url = new URL('/api/v1/demo/labels', this.endpoint);
+    const res = await this.demoFetch<{ status: string; data: string[] }>(url);
+    return res.data || [];
+  }
+
+  async listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]> {
+    const url = new URL(`/api/v1/demo/label/${encodeURIComponent(label)}/values`, this.endpoint);
+    const nowS = Math.floor(Date.now() / 1000);
+    // Always bound to the demo window; a wider requested window is clamped down.
+    const windowSec = Math.min(opts?.windowSeconds ?? DEMO_WINDOW_SEC, DEMO_WINDOW_SEC);
+    url.searchParams.set('start', String(nowS - windowSec));
+    url.searchParams.set('end', String(nowS));
+    const res = await this.demoFetch<{ status: string; data: string[] }>(url);
+    return res.data || [];
+  }
+
+  // Wraps the shared fetch to give demo callers actionable messages on the two
+  // demo-specific failures. The gateway's 400 body already explains the 3h
+  // window, so it passes through unchanged.
+  private async demoFetch<T = PrometheusResponse>(url: URL): Promise<T> {
+    try {
+      return await promJsonFetch<T>('log10x_demo', url, {}, this.authHeaders);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('HTTP 401') || msg.includes('HTTP 403')) {
+        throw new Error(`log10x_demo: the demo license was rejected (expired or invalid) — mint a fresh one. (${msg})`);
+      }
+      if (msg.includes('HTTP 429')) {
+        throw new Error(`log10x_demo: demo query rate limit hit — slow down, or sign in for higher limits. (${msg})`);
+      }
+      throw e;
+    }
   }
 }
 

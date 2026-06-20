@@ -112,10 +112,22 @@ class AnthropicAgentClient implements AgentClient {
   }
 
   async call(req: AgentRequest): Promise<AgentResponse> {
+    // Prompt-cache the stable prefix. Render order is tools -> system ->
+    // messages, so one cache_control breakpoint on the system block caches the
+    // tool catalog too (~55k tokens for the MCP's 65 schemas). Within a
+    // conversation, calls 2..N re-read that prefix at ~0.1x input price instead
+    // of re-billing it in full each turn — the dominant cost of a multi-call
+    // run. Prompt caching is GA, so it works on the regular messages.create
+    // path without a beta header; SDK 0.30.1 lacks the cache_control type on
+    // the non-beta params, but the field passes through the existing cast.
+    // Eval-only: real MCP hosts manage their own tool-definition caching.
+    const system = req.system
+      ? [{ type: 'text', text: req.system, cache_control: { type: 'ephemeral' } }]
+      : req.system;
     const createParams = {
       model: this.modelId,
       max_tokens: req.maxTokens,
-      system: req.system,
+      system,
       tools: req.tools,
       messages: req.messages,
     } as unknown as Parameters<typeof this.client.messages.create>[0];
