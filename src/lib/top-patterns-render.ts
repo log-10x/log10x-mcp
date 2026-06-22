@@ -42,6 +42,7 @@
 import { lineChart } from './line-chart.js';
 import { agentOnly } from './agent-only.js';
 import { patternDescriptor, descriptorFromSample } from './pattern-descriptor.js';
+import type { DisplayToken } from './pattern-df.js';
 import {
   dropRuleSnippet,
   otherForwarders,
@@ -93,6 +94,14 @@ export interface TopPatternRow {
   /** Datadog ingest-exclusion query for this hash. Set when the env's
    * analyzer is Datadog; folded inline as a pre-meter drop option. */
   datadogAnalyzerQuery?: string;
+  /** RENDER-ONLY (Layer 2): discriminator-first display name derived from
+   * `pattern` (symbolMessage) over the shared env df-map. Identity fields
+   * (`pattern`, `hash`) are untouched. Absent => renderer falls back to the
+   * sample/descriptor path. */
+  display_name?: string;
+  /** RENDER-ONLY: per-token {text, distinctive} classification of `pattern`,
+   * for the homepage widget to emphasize discriminators. */
+  display_tokens?: DisplayToken[];
 }
 
 export interface TopPatternsRenderOpts {
@@ -212,9 +221,13 @@ export function renderTopPatterns(
   out.push(...renderCostByService(opts));
 
   // Descriptors computed once here, shared by the incident detector and
-  // the list (so we don't run descriptorFromSample twice per row).
+  // the list (so we don't run descriptorFromSample twice per row). Prefer
+  // the Layer 2 discriminator-first display_name (the symbolMessage rendered
+  // over the shared env df-map) when the caller threaded it in; fall back to
+  // the sample-content / df-less descriptor otherwise.
   const descriptors = rows.map(
     r =>
+      (r.display_name && r.display_name.length > 0 ? r.display_name : null) ??
       descriptorFromSample(r.sample?.logJson, 80) ??
       patternDescriptor(r.pattern, r.sample?.logLine ?? '', 80)
   );
@@ -566,9 +579,14 @@ function renderCard(
 ): string[] {
   const lines: string[] = [];
   // Card header gets a longer descriptor budget (80 chars) than the
-  // table row (44) — more room to breathe in the card title.
+  // table row (44) — more room to breathe in the card title. Prefer the
+  // Layer 2 display_name (symbolMessage rendered over the shared df-map)
+  // when present, else the sample-content / df-less descriptor.
   const sampled = descriptorFromSample(r.sample?.logJson, 80);
-  const desc = sampled ?? patternDescriptor(r.pattern, r.sample?.logLine ?? '');
+  const desc =
+    (r.display_name && r.display_name.length > 0 ? r.display_name : null) ??
+    sampled ??
+    patternDescriptor(r.pattern, r.sample?.logLine ?? '');
   const sev = r.severity || '(no severity)';
   const svc = r.service || '(unattributed)';
   const namespace = r.sample?.k8s?.namespace;

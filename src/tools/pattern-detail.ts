@@ -23,6 +23,14 @@ import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
+import {
+  getEnvDfContext,
+  buildDisplayName,
+  DEFAULT_NAME_WIDTH,
+  type DfContext,
+  type DisplayToken,
+} from '../lib/pattern-df.js';
+import { extractPatterns } from '../lib/pattern-extraction.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { queryInstant, queryRange } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
@@ -72,6 +80,11 @@ export interface PatternDetailEnvelope {
   pattern_hash: string;
   /** Resolved pattern name (Symbol Message). Null if not resolvable from metrics. */
   pattern_name: string | null;
+  /** RENDER-ONLY (Layer 2): discriminator-first display name over the shared
+   * env df-map — the SAME label top_patterns shows. Identity is pattern_name. */
+  display_name?: string;
+  /** RENDER-ONLY: per-token {text, distinctive} classification of pattern_name. */
+  display_tokens?: DisplayToken[];
   /** Per-service bytes breakdown. */
   services: Array<{
     service: string;
@@ -113,13 +126,17 @@ function patternDescriptor(
   patternName: string | null,
   services: Array<{ service: string; severity?: string }>,
   fallbackLabel: string,
+  df?: DfContext | null,
 ): string {
-  // Delegates to the shared formatPatternLabelFromServices helper.
+  // Delegates to the shared formatPatternLabelFromServices helper. When a
+  // df-context is threaded in, the hint is the discriminator-first
+  // display_name (Layer 2) — the SAME label top_patterns shows.
   // See lib/pattern-label.ts for the burned-rule rationale.
   return formatPatternLabelFromServices({
     symbol_message: patternName,
     services: services.map((s) => ({ name: s.service, severity: s.severity })),
     fallback: fallbackLabel,
+    df,
   });
 }
 
@@ -337,20 +354,50 @@ function renderVerbatim(args: {
   sampleEvents: string[];
   timeRange: string;
   siemKind: 'resolved' | 'unresolved';
+  /** Layer 2 discriminator-first name (shared with top_patterns). */
+  displayName?: string;
+  /** Layer 3 grounding: representative $-marked template from the templater. */
+  groundingTemplate?: string;
+  /** Layer 3 grounding: captured slot names from the templater. */
+  groundingSlots?: string[];
 }): string {
   const { patternName, hash, services, totalBytes, firstSeenAgeSeconds, trendSeries, sampleEvents, timeRange, siemKind } = args;
 
   const lines: string[] = [];
 
-  // Header — descriptor (name), not hash. Prefer Symbol Message; fall back
-  // to the top emitting service; final fallback is a generic "(unnamed
-  // pattern)" so we never leak a raw hash slice into prose. The hash is
-  // still available in payload.pattern_hash for round-trip identity.
-  const displayName = patternDescriptor(patternName, services, '(unnamed pattern)');
+  // Header (Layer 2/3) — the discriminator-first display_name, the SAME
+  // label top_patterns shows for this pattern. Falls back to the df-less
+  // service-led label, never a raw hash slice.
+  const displayName =
+    args.displayName && args.displayName.length > 0
+      ? args.displayName
+      : patternDescriptor(patternName, services, '(unnamed pattern)');
   lines.push(`Pattern: ${displayName}`);
   if (firstSeenAgeSeconds !== null) {
     const days = Math.round(firstSeenAgeSeconds / 86400);
     lines.push(`First seen: ${days} day${days !== 1 ? 's' : ''} ago`);
+  }
+
+  // Layer 3 grounding — drill-in proof, all VERBATIM, nothing synthesized.
+  // The display_name above is a derived label; these lines anchor it to the
+  // real identity + a real example so the reader can trust the name:
+  //   - full untouched symbolMessage as a monospace secondary id
+  //   - pattern_hash on a metadata line (the stable identity behind it)
+  //   - the templater's $-marked template + captured slot names (when the
+  //     local templater is reachable)
+  //   - a verbatim representative example line from the fetched samples
+  if (patternName) {
+    lines.push(`  symbol message: \`${patternName}\``);
+  }
+  lines.push(`  pattern_hash: \`${hash}\``);
+  if (args.groundingTemplate) {
+    lines.push(`  template: \`${args.groundingTemplate}\``);
+  }
+  if (args.groundingSlots && args.groundingSlots.length > 0) {
+    lines.push(`  captured slots: ${args.groundingSlots.join(', ')}`);
+  }
+  if (sampleEvents.length > 0) {
+    lines.push(`  example: ${sampleEvents[0]}`);
   }
   lines.push('');
 
@@ -600,6 +647,41 @@ export async function executePatternDetail(args: {
 
   const totalBytes = services.reduce((s, r) => s + r.bytes, 0);
 
+  // RENDER-ONLY pattern naming (Layer 2) — the SAME shared env df-map
+  // top_patterns uses, so the drill-in header matches the list row. Degrades
+  // to Layer 1 on any backend hiccup (zero-corpus df).
+  const metricsEnvForDf = await resolveMetricsEnv(env);
+  const dfCtx: DfContext = await getEnvDfContext(env, metricsEnvForDf);
+  const topSvc = services[0];
+  const built = patternName
+    ? buildDisplayName(patternName, {
+        df: dfCtx,
+        service: topSvc?.service,
+        severity: topSvc?.severity,
+        width: DEFAULT_NAME_WIDTH,
+      })
+    : { display_name: '', display_tokens: [] as DisplayToken[] };
+  const displayName = built.display_name;
+
+  // Layer 3 grounding — best-effort templater pass over the fetched samples
+  // for the representative $-marked template + captured slot names. Local CLI
+  // only; on any failure (hosted MCP, no local engine) Layer 3 degrades to
+  // identity + example, never failing the tool. Nothing synthesized.
+  let groundingTemplate: string | undefined;
+  let groundingSlots: string[] = [];
+  if (sampleEvents.length > 0) {
+    try {
+      const ext = await extractPatterns(sampleEvents.slice(0, 20));
+      const match = ext.patterns.find((p) => p.symbolMessage === patternName) ?? ext.patterns[0];
+      if (match) {
+        groundingTemplate = match.template;
+        groundingSlots = Object.keys(match.variables ?? {});
+      }
+    } catch {
+      // local templater unreachable — grounding degrades silently.
+    }
+  }
+
   const verbatim = renderVerbatim({
     patternName,
     hash: resolvedHash,
@@ -610,6 +692,9 @@ export async function executePatternDetail(args: {
     sampleEvents,
     timeRange,
     siemKind,
+    displayName,
+    groundingTemplate,
+    groundingSlots,
   });
 
   const mustAskUser = {
@@ -624,7 +709,10 @@ export async function executePatternDetail(args: {
   // Descriptor preference: patternName > top service > "(no metrics in window)"
   // when no service breakdown came back either. The hash never appears in
   // prose; it stays in payload.pattern_hash + actions[].args.
-  const descriptor = patternDescriptor(patternName, services, '(no metrics in window)');
+  const descriptor =
+    displayName && displayName.length > 0
+      ? displayName
+      : patternDescriptor(patternName, services, '(no metrics in window)', dfCtx);
   let headline =
     `pattern_detail(${descriptor}): ` +
     `${services.length} service(s), ${fmtBytes(totalBytes)}/mo (30d). ` +
@@ -645,6 +733,10 @@ export async function executePatternDetail(args: {
   const envelope: PatternDetailEnvelope = {
     pattern_hash: resolvedHash,
     pattern_name: patternName,
+    // RENDER-ONLY output contract (consumed by the homepage chat widget),
+    // additive to the unchanged pattern_name (raw symbolMessage) + pattern_hash.
+    display_name: displayName || (patternName ?? ''),
+    display_tokens: built.display_tokens,
     services,
     total_bytes: totalBytes,
     total_bytes_display: fmtBytes(totalBytes),

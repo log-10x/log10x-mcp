@@ -4,29 +4,27 @@
  * description" leak — that string is machine identity, unusable as a
  * human label.
  *
- * Strategy: take the underscored pattern, strip leading boilerplate
- * tokens (otel / open-telemetry prefixes, vendor names), then pack as
- * many tokens as fit in `maxChars`. This is deterministic and never
- * synthesizes content — every token shown is verbatim from the
+ * Strategy: pack as many DISTINCT tokens as fit in `maxChars`, deduping
+ * repeats, then codepoint-safe mid-ellipsis the result. Deterministic and
+ * never synthesizes content — every token shown is verbatim from the
  * engine-extracted pattern.
  *
- * Falls back to the sample event's first 60 chars if the tokenized
- * pattern is empty.
+ * This is the df-LESS fallback used wherever a per-env document-frequency
+ * context is not threaded in (pattern-diff, commitment-report at-risk
+ * rollups, top_patterns incident detection). The discriminator-first
+ * `display_name` (lib/pattern-df.ts `buildDisplayName`) is the richer,
+ * vendor-neutral naming used on the primary surfaces (top_patterns rows,
+ * pattern_detail header) where the env df-map IS available. NOTE: the
+ * previous hardcoded OTel/vendor `PREFIX_SKIP` denylist was deleted — it
+ * was OTel-only and silently wrong for Java/MDC, k8s, Datadog, and
+ * arbitrary apps. Boilerplate is now learned from cross-pattern frequency
+ * in pattern-df.ts, not from a strip-list.
+ *
+ * Falls back to the sample event's first chars if the tokenized pattern
+ * is empty.
  */
 
-const PREFIX_SKIP = new Set([
-  'open',
-  'telemetry',
-  'opentelemetry',
-  'collector',
-  'contrib',
-  'tenx',
-  'log10x',
-  'com',
-  'the',
-  'a',
-  'an',
-]);
+import { midEllipsis } from './text-crop.js';
 
 export function patternDescriptor(
   messagePattern: string,
@@ -34,22 +32,11 @@ export function patternDescriptor(
   maxChars = 44
 ): string {
   if (!messagePattern) {
-    return sampleLog ? sampleLog.slice(0, 60) : '(no descriptor)';
+    return sampleLog ? midEllipsis(sampleLog, 60) : '(no descriptor)';
   }
-  const tokens = messagePattern.split('_');
-  // Strip up to 6 leading boilerplate tokens
-  let cursor = 0;
-  while (
-    cursor < tokens.length &&
-    cursor < 6 &&
-    PREFIX_SKIP.has(tokens[cursor].toLowerCase())
-  ) {
-    cursor++;
-  }
-  const meaningful = tokens.slice(cursor);
-  if (meaningful.length === 0) {
-    // All tokens were prefix-skip; fall back to the raw head
-    return tokens.slice(0, 5).join(' ').slice(0, maxChars);
+  const tokens = messagePattern.split('_').filter((t) => t.length > 0);
+  if (tokens.length === 0) {
+    return sampleLog ? midEllipsis(sampleLog, 60) : '(no descriptor)';
   }
   // Pack tokens until we'd exceed maxChars, deduping repeats. Engine
   // names for package-path patterns repeat tokens (the otel collector's
@@ -59,7 +46,7 @@ export function patternDescriptor(
   const out: string[] = [];
   const seen = new Set<string>();
   let len = 0;
-  for (const t of meaningful) {
+  for (const t of tokens) {
     const key = t.toLowerCase();
     if (seen.has(key)) continue;
     const newLen = len + t.length + (out.length > 0 ? 1 : 0);
@@ -68,7 +55,11 @@ export function patternDescriptor(
     seen.add(key);
     len = newLen;
   }
-  if (out.length === 0) out.push(...meaningful.slice(0, 3));
+  if (out.length === 0) {
+    // First token alone exceeds the budget — mid-ellipsis the spaced name
+    // (keeps head AND tail; codepoint-safe) rather than a raw front-slice.
+    return midEllipsis(tokens.join(' '), maxChars);
+  }
   return out.join(' ');
 }
 
