@@ -93,6 +93,14 @@ export interface SearchIndex {
    * push a token into many chunk postings.
    */
   pageDf: Map<string, number>;
+  /**
+   * Per-chunk token count (pageIdx → chunkIdx → token count, heading
+   * counted 3x to mirror indexing). Used to length-normalize a result by
+   * the size of the chunks that actually matched, not the whole page — so
+   * a focused chunk on a large reference page is not buried under the
+   * page's total length.
+   */
+  chunkTotalTokens: number[][];
 }
 
 /**
@@ -104,11 +112,13 @@ export function buildIndex(pages: Page[]): SearchIndex {
   const df = new Map<string, number>();
   const pageDf = new Map<string, number>();
   const pageTotalTokens: number[] = new Array(pages.length).fill(0);
+  const chunkTotalTokens: number[][] = new Array(pages.length);
   let totalChunks = 0;
   for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
     const page = pages[pageIdx]!;
     const pageTokensSeen = new Set<string>();
     let pageTokenCount = 0;
+    chunkTotalTokens[pageIdx] = new Array(page.chunks.length).fill(0);
     for (let chunkIdx = 0; chunkIdx < page.chunks.length; chunkIdx++) {
       const chunk = page.chunks[chunkIdx]!;
       totalChunks += 1;
@@ -121,6 +131,7 @@ export function buildIndex(pages: Page[]): SearchIndex {
         // Boost heading tokens by counting them 3x in TF.
         tf.set(tok, (tf.get(tok) ?? 0) + 3);
       }
+      let chunkTokenCount = 0;
       for (const [tok, count] of tf) {
         let list = postings.get(tok);
         if (!list) {
@@ -131,14 +142,16 @@ export function buildIndex(pages: Page[]): SearchIndex {
         df.set(tok, (df.get(tok) ?? 0) + 1);
         pageTokensSeen.add(tok);
         pageTokenCount += count;
+        chunkTokenCount += count;
       }
+      chunkTotalTokens[pageIdx]![chunkIdx] = chunkTokenCount;
     }
     pageTotalTokens[pageIdx] = pageTokenCount;
     for (const tok of pageTokensSeen) {
       pageDf.set(tok, (pageDf.get(tok) ?? 0) + 1);
     }
   }
-  return { pages, postings, df, totalChunks, pageTotalTokens, pageDf };
+  return { pages, postings, df, totalChunks, pageTotalTokens, pageDf, chunkTotalTokens };
 }
 
 /** Score one chunk against a tokenised query using TF-IDF. */
@@ -322,15 +335,19 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
     chunkScores.sort((a, b) => b.score - a.score);
     const topChunks = chunkScores.slice(0, maxChunksPerPage);
     const rawPageScore = topChunks.reduce((a, b) => a + b.score, 0);
-    // Document-length normalization (BM25-style |d|^0.5). Without this
-    // a long body-heavy page like apps/receiver/deploy that mentions
-    // many query tokens many times wins over a short focused FAQ page
-    // that is actually on-topic. Use a sqrt rather than linear |d| so
-    // we still reward pages that carry strong evidence in absolute
-    // terms — pure linear normalization over-penalizes legitimately
-    // dense pages.
-    const totalTokens = index.pageTotalTokens[pageIdx] ?? 1;
-    const pageScore = rawPageScore / Math.sqrt(Math.max(totalTokens, 1));
+    // Length-normalize by the MATCHED chunks' own size, not the whole
+    // page's. Page-total normalization (sqrt of every token on the page)
+    // buried each chunk of a large reference page like apps/receiver/deploy
+    // under sqrt(~30k) ≈ 173, so a focused on-topic section lost to a tiny
+    // tool page with one slug-token match. Now that sections are chunked to
+    // ~4 KB, a chunk competes on its own length regardless of how big its
+    // parent page is. Still a sqrt (BM25-style |d|^0.5) so dense, evidence-
+    // rich chunks are not over-penalized.
+    const matchedTokens = topChunks.reduce(
+      (sum, c) => sum + (index.chunkTotalTokens[pageIdx]?.[c.chunkIdx] ?? 1),
+      0,
+    );
+    const pageScore = rawPageScore / Math.sqrt(Math.max(matchedTokens, 1));
 
     // ── Heading boost (post-normalization) ───────────────────────────
     // Max over the page's top chunks: the page should win because ONE
@@ -383,13 +400,20 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
         }
       }
     }
-    // (c) Per-matched-slug-token boost. Raised from +5 to +10 so a
-    // 2-of-3 slug overlap is meaningful even without the superset boost.
-    let perTokenBoost = 0;
+    // (c) Per-matched-slug-token boost, scaled by query coverage. A single
+    // slug-token match on a long query is weak evidence (e.g. "overlay" in
+    // the metric-overlay tool slug for the 5-token "what does the kustomize
+    // overlay patch — which containers and volumes" how-to query) and must
+    // not outweigh a focused multi-token body + heading match on the page
+    // that actually answers it. A fully-covered short query (e.g. "receiver"
+    // wholly in the slug) keeps the full per-token weight. Coverage =
+    // matched slug tokens / query tokens, so 2-of-3 ≈ 13, 1-of-5 ≈ 2.
+    let slugMatches = 0;
     for (const qt of queryTokens) {
-      if (slugTokenSet.has(qt)) perTokenBoost += 10;
+      if (slugTokenSet.has(qt)) slugMatches += 1;
     }
-    boost += perTokenBoost;
+    const slugCoverage = slugMatches / queryTokens.length;
+    boost += 10 * slugMatches * slugCoverage;
 
     const finalScore = pageScore + boost + hBoost;
     if (finalScore < minScore) continue;
@@ -412,20 +436,45 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
  * Exact slug lookup. Returns the matching page wrapped as a
  * SearchResult, or null when no page has that topic.
  *
- * Used by the `topic` arg path of the product_qa tool. We carry the
- * first 3 chunks as matched_chunks so the agent has immediate context
- * without a follow-up call.
+ * Used by the `topic` arg path of the product_qa tool. When a `query` is
+ * supplied alongside the topic, the page's chunks are ranked by that query
+ * and the top `maxChunks` are returned, so drilling into a known
+ * multi-section page (e.g. the Receiver deploy guide) lands on the
+ * asked-about section rather than the page intro. With no query, the first
+ * `maxChunks` chunks are returned (immediate context, no follow-up call).
  */
-export function lookupTopic(index: SearchIndex, topic: string): SearchResult | null {
+export function lookupTopic(
+  index: SearchIndex,
+  topic: string,
+  query?: string,
+  maxChunks = 3,
+): SearchResult | null {
   const norm = topic.toLowerCase().replace(/^\/+|\/+$/g, '');
-  const page = index.pages.find((p) => p.topic.toLowerCase() === norm);
-  if (!page) return null;
+  const pageIdx = index.pages.findIndex((p) => p.topic.toLowerCase() === norm);
+  if (pageIdx < 0) return null;
+  const page = index.pages[pageIdx]!;
+
+  let chunks: Chunk[];
+  const qTokens = query ? tokenize(query) : [];
+  if (qTokens.length > 0) {
+    const scored = page.chunks.map((c, chunkIdx) => ({
+      chunkIdx,
+      score: scoreChunk(index, { pageIdx, chunkIdx }, qTokens) + headingBoost(c.heading, qTokens),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const hits = scored.filter((s) => s.score > 0).slice(0, maxChunks);
+    const picked = hits.length > 0 ? hits : scored.slice(0, maxChunks);
+    chunks = picked.map((s) => page.chunks[s.chunkIdx]!);
+  } else {
+    chunks = page.chunks.slice(0, maxChunks);
+  }
+
   return {
     topic: page.topic,
     category: page.category,
     canonical_url: page.canonical_url,
     summary: page.summary,
-    matched_chunks: page.chunks.slice(0, 3),
+    matched_chunks: chunks,
     score: 100, // exact-hit sentinel
   };
 }

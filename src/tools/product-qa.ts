@@ -53,16 +53,17 @@ export const productQaSchema = {
     .string()
     .optional()
     .describe(
-      'Exact docs slug to fetch. Example: "faq/security/data-protection" or "apps/receiver". ' +
-      'When provided, bypasses search and returns the page directly.',
+      'Exact docs slug to fetch a known page. Example: "faq/security/data-protection" or ' +
+      '"apps/receiver/deploy". For a multi-section page, ALSO pass `query` to get the ' +
+      'asked-about section instead of the page intro.',
     ),
   query: z
     .string()
     .optional()
     .describe(
-      'Natural-language query. Examples: "what data leaves my network", ' +
-      '"how is pattern_hash computed", "does the Reporter modify data". ' +
-      'Ignored when `topic` is set.',
+      'Natural-language query — prefer this for how-to / content questions. Examples: ' +
+      '"what does the kustomize overlay patch", "how is pattern_hash computed". ' +
+      'When `topic` is also set, ranks that page\'s sections by this query.',
     ),
   category: z
     .string()
@@ -277,9 +278,11 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
 
   const kb = getKnowledgeBase();
 
-  // Branch 1 — exact topic lookup.
+  // Branch 1 — exact topic lookup. A `query` alongside `topic` ranks that
+  // page's sections by the query (so a drill-in lands on the asked-about
+  // section, not the page intro); `full` depth returns more of them.
   if (args.topic) {
-    const hit = lookupTopic(kb.index, args.topic);
+    const hit = lookupTopic(kb.index, args.topic, args.query, depth === 'full' ? 8 : 3);
     if (hit) {
       // Optional category filter on the exact hit.
       if (args.category && hit.category !== args.category) {

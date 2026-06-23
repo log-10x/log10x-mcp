@@ -40,6 +40,17 @@ import type { Chunk } from './types.js';
 const OVERLAP_MAX_CHARS = 200;
 
 /**
+ * Max characters in a chunk body before the chunker sub-splits it on its
+ * internal structure. mkdocs reference pages pack many forwarders/vendors
+ * into one admonition via content tabs; without a size guard a single
+ * section (e.g. the Receiver deploy page's "Step 3", ~40 KB across 8
+ * forwarders) becomes one chunk that length-normalised TF-IDF buries and
+ * that no answer budget can read past the top of. ~4 KB keeps a sub-chunk
+ * comparable to a normal section so it both ranks and fits the response.
+ */
+const MAX_CHUNK_CHARS = 4000;
+
+/**
  * Returns true when `line` opens or closes a fenced code block
  * (``` or ~~~). The chunker tracks fence depth to avoid mistaking
  * "## " inside a code sample for a heading.
@@ -130,6 +141,169 @@ function buildOverlapTail(nextBody: string): string {
   return (space > 0 ? cut.slice(0, space) : cut).trim();
 }
 
+/** A pre-chunk section: a heading plus the raw body lines under it. */
+interface Section {
+  heading: string;
+  bodyLines: string[];
+}
+
+/** Trimmed character length of a section body. */
+function sectionLen(lines: string[]): number {
+  return lines.join('\n').trim().length;
+}
+
+/**
+ * mkdocs Material content-tab marker: `=== "Title"` (optionally `===!` /
+ * `===+`), at any indent. Returns the indent width and cleaned label, or
+ * null. Content tabs nest inside admonitions and are indented, so the
+ * H2/H3/admonition splitter never sees them — this is what lets an
+ * oversized tabbed section sub-split one chunk per tab.
+ */
+function parseTabMarker(line: string): { indent: number; label: string } | null {
+  const m = line.match(/^(\s*)===[!+]?\s+"(.*?)"\s*(?:\{[^}]*\})?\s*$/);
+  if (!m) return null;
+  return { indent: m[1]!.length, label: cleanHeadingText(m[2]!.replace(/\\"/g, '"')) };
+}
+
+/**
+ * A leading bold run used as a sub-heading inside a tab body, e.g.
+ * `**a. Values file.**` or `**:material-git: Git Repository.**`. Returns
+ * the cleaned label or null.
+ */
+function parseBoldLabel(line: string): string | null {
+  const m = line.trim().match(/^\*\*(.+?)\*\*/);
+  if (!m) return null;
+  const label = cleanHeadingText(m[1]!);
+  return label.length > 0 ? label : null;
+}
+
+/**
+ * Partition body lines on a structural marker, fence-aware. `detect`
+ * returns a child-heading suffix for a boundary line, or null for a body
+ * line. Lines before the first boundary form a preamble that keeps the
+ * parent heading. Returns null when fewer than two boundaries exist (not
+ * worth splitting on this marker).
+ */
+function partitionOn(
+  heading: string,
+  bodyLines: string[],
+  detect: (line: string) => string | null,
+): Section[] | null {
+  let inFence = false;
+  let count = 0;
+  for (const line of bodyLines) {
+    if (isCodeFence(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence && detect(line) !== null) count++;
+  }
+  if (count < 2) return null;
+
+  const buckets: Section[] = [];
+  let cur: Section = { heading, bodyLines: [] };
+  inFence = false;
+  for (const line of bodyLines) {
+    if (isCodeFence(line)) {
+      inFence = !inFence;
+      cur.bodyLines.push(line);
+      continue;
+    }
+    const suffix = inFence ? null : detect(line);
+    if (suffix !== null) {
+      if (sectionLen(cur.bodyLines) > 0) buckets.push(cur);
+      cur = { heading: heading + ' / ' + suffix, bodyLines: [line] };
+    } else {
+      cur.bodyLines.push(line);
+    }
+  }
+  if (sectionLen(cur.bodyLines) > 0) buckets.push(cur);
+  return buckets.length >= 2 ? buckets : null;
+}
+
+/**
+ * Split on content tabs at the shallowest indent level that actually
+ * groups (>= 2 tabs), so nested tabs stay inside their parent tab and are
+ * handled by a later recursion rather than splitting at the wrong level.
+ */
+function splitByTabs(heading: string, bodyLines: string[]): Section[] | null {
+  let inFence = false;
+  const countByIndent = new Map<number, number>();
+  for (const line of bodyLines) {
+    if (isCodeFence(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const t = parseTabMarker(line);
+    if (t) countByIndent.set(t.indent, (countByIndent.get(t.indent) ?? 0) + 1);
+  }
+  let targetIndent = Infinity;
+  for (const [indent, n] of countByIndent) {
+    if (n >= 2 && indent < targetIndent) targetIndent = indent;
+  }
+  if (targetIndent === Infinity) return null;
+  return partitionOn(heading, bodyLines, (line) => {
+    const t = parseTabMarker(line);
+    return t && t.indent === targetIndent ? t.label : null;
+  });
+}
+
+/** Split on bold sub-labels (`**a. …**`). */
+function splitByBold(heading: string, bodyLines: string[]): Section[] | null {
+  return partitionOn(heading, bodyLines, parseBoldLabel);
+}
+
+/**
+ * Terminal fallback: pack lines into size-capped windows, flushing only at
+ * a blank line once over the cap and never inside a code fence (so code
+ * blocks are never cut). An un-cuttable fence larger than the cap is kept
+ * whole.
+ */
+function splitByWindow(heading: string, bodyLines: string[]): Section[] {
+  const windows: string[][] = [];
+  let cur: string[] = [];
+  let inFence = false;
+  for (const line of bodyLines) {
+    cur.push(line);
+    if (isCodeFence(line)) inFence = !inFence;
+    if (!inFence && line.trim() === '' && sectionLen(cur) >= MAX_CHUNK_CHARS) {
+      windows.push(cur);
+      cur = [];
+    }
+  }
+  if (sectionLen(cur) > 0) windows.push(cur);
+  if (windows.length <= 1) return [{ heading, bodyLines }];
+  return windows.map((w, i) => ({
+    heading: i === 0 ? heading : `${heading} (part ${i + 1})`,
+    bodyLines: w,
+  }));
+}
+
+/**
+ * Recursively sub-split a section that exceeds MAX_CHUNK_CHARS, preferring
+ * the most semantic boundary available: content tabs, then bold
+ * sub-labels, then a hard size-capped window. Each recursion strictly
+ * shrinks the input, so it always terminates; a part that can't be made
+ * smaller (e.g. a single oversized code fence) is kept whole.
+ */
+function subSplitSection(heading: string, bodyLines: string[]): Section[] {
+  if (sectionLen(bodyLines) <= MAX_CHUNK_CHARS) return [{ heading, bodyLines }];
+  const parts =
+    splitByTabs(heading, bodyLines) ??
+    splitByBold(heading, bodyLines) ??
+    splitByWindow(heading, bodyLines);
+  const out: Section[] = [];
+  for (const p of parts) {
+    if (sectionLen(p.bodyLines) > MAX_CHUNK_CHARS && p.bodyLines.length < bodyLines.length) {
+      out.push(...subSplitSection(p.heading, p.bodyLines));
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
 /**
  * Split a markdown body into H2/H3-bounded chunks, with a brief tail
  * overlap from the following section.
@@ -195,11 +369,24 @@ export function chunkMarkdown(body: string, topic: string): Chunk[] {
 
   if (filteredSections.length === 0) return [];
 
+  // Pass 1.5 — sub-split any oversized section on its internal structure
+  // (mkdocs content tabs, then bold sub-labels, then a hard size-capped
+  // window) so big multi-forwarder reference sections like the Receiver
+  // deploy page's "Step 3" become individually retrievable per forwarder
+  // instead of collapsing into one 40 KB chunk that search buries and the
+  // answer budget can only skim the top of.
+  const finalSections: Section[] = [];
+  for (const s of filteredSections) {
+    for (const sub of subSplitSection(s.heading, s.bodyLines)) {
+      if (sectionLen(sub.bodyLines) > 0) finalSections.push(sub);
+    }
+  }
+
   // Pass 2 — build chunks, attaching overlap tails.
   const chunks: Chunk[] = [];
-  for (let i = 0; i < filteredSections.length; i++) {
-    const cur = filteredSections[i]!;
-    const next = filteredSections[i + 1];
+  for (let i = 0; i < finalSections.length; i++) {
+    const cur = finalSections[i]!;
+    const next = finalSections[i + 1];
     let body = cur.bodyLines.join('\n').trim();
     if (next) {
       const tail = buildOverlapTail(next.bodyLines.join('\n'));
