@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-control-verbatim",
-  "shape": "controls",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "## 24h Severity Breakdown\n\n| Severity | Volume | Share |\n|---|---|---|\n| (untagged) | 4.5 GB | 83% |\n| ERROR | 465 MB | 8.6% |\n| DEBUG | 219 MB | 4% |\n| INFO | 127 MB | 2% |\n| TRACE | 98 MB | 2% |\n| CRITICAL | 2.2 MB | <1% |\n\n83% of demo-env volume carries no severity_level tag. ERROR is the second-largest tier at ~8.6%. CRITICAL is rare.",
-  "expected_verdict": "should_pass",
-  "rationale": "Close-to-oracle sanity control"
-}

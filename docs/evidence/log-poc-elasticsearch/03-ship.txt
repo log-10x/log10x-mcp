@@ -1,3 +1,0 @@
-  pushed 4065/5000 (81.3%)
-  pushed 5000/5000 (100.0%)
-done: 5000 docs indexed in otel-logs

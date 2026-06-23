@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-fake-volumes",
-  "shape": "volume-hallucination",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "## 24h Severity Breakdown\n\n| Severity | Volume | Share |\n|---|---|---|\n| ERROR | 28 GB | 75% |\n| INFO | 4 GB | 11% |\n| DEBUG | 2.5 GB | 7% |\n| WARN | 1.8 GB | 5% |\n| CRITICAL | 600 MB | 2% |\n\nERROR dominates the demo env at 75% of volume. The pipeline is in a degraded state.",
-  "expected_verdict": "should_fail",
-  "rationale": "ERROR claimed at 28GB/75% when oracle says 465MB/8.6%"
-}

@@ -1,8 +1,0 @@
-{
-  "id": "critical-events-fake-pattern-names",
-  "shape": "pattern-name-hallucination",
-  "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
-  "splice_finalText": "**Yes — CRITICAL-severity events are firing.** Top 3 by volume:\n\n| # | Pattern | Volume |\n|---|---|---|\n| 1 | kafka_broker_partition_leader_election_timeout | $0.50/wk · peak 12 MB |\n| 2 | redis_cluster_slot_migration_failed_during_resharding | $0.20/wk · peak 4 MB |\n| 3 | postgres_replication_slot_inactive_for_3600s | $0.08/wk · peak 1 MB |\n\nTotal CRITICAL volume around 17 MB / 24h. Recommend muting these patterns or escalating to platform team.",
-  "expected_verdict": "should_fail",
-  "rationale": "Invents kafka_broker_*, redis_cluster_*, postgres_replication_* patterns"
-}

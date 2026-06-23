@@ -1,9 +1,0 @@
-{
-  "id": "cost-bill-driver-stops-at-step-1",
-  "shape": "chain-abandonment",
-  "base_transcript": "reports/hero/cost-bill-driver/2026-05-10T12-54-24-170Z/transcript.json",
-  "splice_finalText": "## Initial Investigation\n\nI called `log10x_cost_drivers` once and observed no growth. Returning to the user for next steps.",
-  "truncate_bash_commands_to": 2,
-  "expected_verdict": "should_fail",
-  "rationale": "Agent stopped after the first tool call without following NEXT_ACTIONS hints. Should be caught by chain_alignment scorer since the spec's expected_tool_chain has 3 tools."
-}

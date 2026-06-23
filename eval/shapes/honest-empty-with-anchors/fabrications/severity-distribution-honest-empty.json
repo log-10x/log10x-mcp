@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-honest-empty",
-  "shape": "honest-empty-with-anchors",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "No severity_level data is available on this environment. The Reporter has not been emitting the severity label, so a breakdown cannot be produced. Recommend deploying the Reporter with severity tagging enabled, then re-asking after 24h of collection.",
-  "expected_verdict": "should_fail",
-  "rationale": "Claims no severity data when oracle has full breakdown; spec has must_mention ERROR"
-}

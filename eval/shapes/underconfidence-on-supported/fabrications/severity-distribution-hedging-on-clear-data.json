@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-hedging-on-clear-data",
-  "shape": "underconfidence-on-supported",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "It's hard to say definitively, but the data MIGHT suggest some patterns. Possibly some volume is untagged, though the tools didn't give a fully reliable answer. I'd recommend re-running the analysis with more data before drawing any conclusions.",
-  "expected_verdict": "should_fail",
-  "rationale": "list_by_label returned a complete severity breakdown; hedging with \"might / possibly / didn't give a reliable answer\" misrepresents the available evidence."
-}

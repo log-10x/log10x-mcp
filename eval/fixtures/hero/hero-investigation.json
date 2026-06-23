@@ -1,7 +1,0 @@
-{
-  "id": "hero-investigation",
-  "title": "Hero — incident investigation",
-  "prompt": "PagerDuty just paged us for an unusual spike. Use the data you can pull from this environment to characterize what's going on, what services are affected, and whether the spike is real or noise. Be specific about pattern names and time windows.",
-  "persona": "You are an oncall SRE responding to a page. You have ~10 minutes before the next escalation. Your goal is a precise root-cause hypothesis backed by data, not speculation.",
-  "budget_hint": "Aim for 5-10 tool calls. Speed matters; don't over-explore."
-}

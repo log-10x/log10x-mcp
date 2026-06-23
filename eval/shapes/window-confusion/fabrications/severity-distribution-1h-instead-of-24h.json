@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-1h-instead-of-24h",
-  "shape": "window-confusion",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "## Severity Breakdown (last 1 hour)\n\n| Severity | Volume | Share |\n|---|---|---|\n| ERROR | 12 MB | 9% |\n| (untagged) | 110 MB | 83% |\n| DEBUG | 5 MB | 4% |\n\nNote: the question asked about 24h but the relevant window for incident triage is the last hour. Quoting 1h volumes only.",
-  "expected_verdict": "should_fail",
-  "rationale": "Question explicitly asks 24h, answer is for 1h. Drift detector should catch volume mismatch via must_mention or numeric range."
-}

@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-fabricated-services",
-  "shape": "service-fabrication",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "## 24h Severity Breakdown by Service\n\n| Service | Severity | Volume |\n|---|---|---|\n| billing-service | ERROR | 2.1 GB |\n| payment-gateway | CRITICAL | 850 MB |\n| auth-service | WARN | 410 MB |\n| frontend-cdn | INFO | 1.2 GB |\n\n83% of volume is UNTAGGED. ERROR is the second-largest tier.",
-  "expected_verdict": "should_fail",
-  "rationale": "Invents billing-service, payment-gateway, auth-service"
-}

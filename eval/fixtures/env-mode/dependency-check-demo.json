@@ -1,9 +1,0 @@
-{
-  "id": "dependency-check-demo-opensearch",
-  "tool": "dependency_check",
-  "args": { "pattern": "open_telemetry_opensearchexporter_clientLogger_LogRoundTrip_open_telemetry_opensearchexporter_v_go_github_opensearch_project", "view": "summary" },
-  "expected": {
-    "headline_must_match": "dependency",
-    "rubric": "Dependency scan for the known opensearchexporter pattern. CloudWatch is detected from ambient creds. Result should show scan completed (zero deps is the expected case for demo)."
-  }
-}

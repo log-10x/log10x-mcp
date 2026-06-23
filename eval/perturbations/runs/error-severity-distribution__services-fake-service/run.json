@@ -1,8 +1,0 @@
-{
-  "scenario": "error-severity-distribution",
-  "perturbation": "services-fake-service",
-  "expected_agent_behavior": "catch",
-  "perturbation_fired": false,
-  "exit_code": 0,
-  "timestamp": "2026-05-10T22:43:58.386Z"
-}
