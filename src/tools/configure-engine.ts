@@ -96,6 +96,33 @@ const GB = 1_000_000_000; // decimal GB — matches CloudWatch/Datadog/Splunk bi
 const FEASIBILITY_TOLERANCE_PCT = 0.1; // ±10% of target counts as "hit"
 const MIN_REPORTER_DAYS = 7;
 
+/**
+ * Dual-axis feasibility: a plan hits its target if it sheds enough BYTES or
+ * saves enough DOLLARS. Rate-only actions (tier_down) have bytes_out ==
+ * bytes_in, so a byte-only test reports an all-tier_down plan (e.g. the
+ * CloudWatch standard-tier default) infeasible despite real spend savings.
+ * `saved_dollars` per row already captures tier_down's rate delta, so the
+ * caller passes the summed row savings as `achievedSavedUsd`.
+ */
+export function isPlanFeasible(p: {
+  targetShedBytes: number;
+  remainingBytesToShed: number;
+  currentMonthlyUsd: number;
+  targetPercent: number;
+  achievedSavedUsd: number;
+}): { feasible: boolean; bytesFeasible: boolean; dollarsFeasible: boolean } {
+  const achievedShedBytes = p.targetShedBytes - Math.max(0, p.remainingBytesToShed);
+  const bytesFeasible =
+    p.targetShedBytes === 0 ||
+    Math.abs(achievedShedBytes - p.targetShedBytes) / Math.max(1, p.targetShedBytes) <=
+      FEASIBILITY_TOLERANCE_PCT;
+  const targetShedUsd = p.currentMonthlyUsd * (p.targetPercent / 100);
+  const dollarsFeasible =
+    targetShedUsd <= 0 ||
+    p.achievedSavedUsd >= targetShedUsd * (1 - FEASIBILITY_TOLERANCE_PCT);
+  return { feasible: bytesFeasible || dollarsFeasible, bytesFeasible, dollarsFeasible };
+}
+
 // ── refresh-mode constants ──────────────────────────────────────────
 // Commitment target is stored in the cap-CSV as a `# target_percent=N`
 // comment-line preamble. The engine's lookup parser ignores lines that
@@ -1429,12 +1456,17 @@ export async function executeConfigureEngine(
     ? coveredBytes / totalObservedBytes
     : 0;
 
-  // Feasibility: did greedy hit the target within tolerance?
-  const achievedShedBytes = targetShedBytes - Math.max(0, remainingBytesToShed);
-  const feasible =
-    targetShedBytes === 0 ||
-    Math.abs(achievedShedBytes - targetShedBytes) / Math.max(1, targetShedBytes) <=
-      FEASIBILITY_TOLERANCE_PCT;
+  // Feasibility: did greedy hit the target on EITHER the byte or the dollar
+  // axis? tier_down sheds no bytes but cuts spend, so a byte-only test would
+  // wrongly report an all-tier_down plan infeasible (see isPlanFeasible).
+  const achievedSavedUsd = rows.reduce((s, r) => s + r.saved_dollars_monthly, 0);
+  const { feasible } = isPlanFeasible({
+    targetShedBytes,
+    remainingBytesToShed,
+    currentMonthlyUsd,
+    targetPercent,
+    achievedSavedUsd,
+  });
 
   let infeasibleReason: string | undefined;
   if (!feasible && remainingBytesToShed > 0) {
