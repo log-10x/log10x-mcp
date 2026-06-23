@@ -799,7 +799,11 @@ export function pearsonWithOffset(a: number[], b: number[], offset: number): num
 
 export function anchorPhaseGap(anchor: number[], candidate: number[]): number {
   const n = Math.min(anchor.length, candidate.length);
-  if (n < 6) return 1;
+  // Too few overlapping buckets to evaluate a phase relationship. Return 0
+  // (unevaluable) so the candidate is NOT flagged anchor_phase_aligned on
+  // zero evidence. Mirrors metrics_that_moved treating <6 buckets / <2 per
+  // phase as unevaluable; we do not claim a phase relationship we cannot see.
+  if (n < 6) return 0;
   const a = anchor.slice(-n);
   const c = candidate.slice(-n);
   const sorted = [...a].sort((x, y) => x - y);
@@ -808,7 +812,8 @@ export function anchorPhaseGap(anchor: number[], candidate: number[]): number {
   for (let i = 0; i < n; i++) {
     if (a[i] > median) { sumHigh += c[i]; nHigh++; } else { sumLow += c[i]; nLow++; }
   }
-  if (nHigh < 2 || nLow < 2) return 1;
+  // Need >=2 samples on each side of the anchor median to compare phases.
+  if (nHigh < 2 || nLow < 2) return 0;
   const meanHigh = sumHigh / nHigh;
   const meanLow = sumLow / nLow;
   const scale = Math.max(Math.abs(meanHigh), Math.abs(meanLow), 1e-9);

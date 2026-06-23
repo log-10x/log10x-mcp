@@ -143,11 +143,20 @@ test('anchorPhaseGap: candidate flat across anchor phases → gap≈0', () => {
   assert.ok(gap < 0.05, `flat candidate should give ~0 gap, got ${gap}`);
 });
 
-test('anchorPhaseGap: too short input returns 1 (defensive)', () => {
-  // < 6 overlap → 1 (treat as max gap to avoid false-negative filter).
+test('anchorPhaseGap: too short input returns 0 (unevaluable, not flagged aligned)', () => {
+  // < 6 overlap → 0: not enough buckets to evaluate a phase relationship,
+  // so do not claim one (avoids a false anchor_phase_aligned on no evidence).
   const a = [1, 2, 3];
   const c = [1, 2, 3];
-  assert.equal(anchorPhaseGap(a, c), 1);
+  assert.equal(anchorPhaseGap(a, c), 0);
+});
+
+test('anchorPhaseGap: fewer than 2 samples per phase returns 0 (unevaluable)', () => {
+  // 6 buckets but the anchor is nearly flat, so one side of the median has
+  // < 2 samples → unevaluable → 0.
+  const a = [5, 5, 5, 5, 5, 9];
+  const c = [1, 2, 3, 4, 5, 6];
+  assert.equal(anchorPhaseGap(a, c), 0);
 });
 
 test('anchorPhaseGap: anti-correlated candidate gives large gap (direction-blind)', () => {
