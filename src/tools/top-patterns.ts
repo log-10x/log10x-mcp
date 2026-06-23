@@ -26,6 +26,14 @@ import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
 import { fieldVariation } from '../lib/field-variation.js';
 import { type TopPatternRow } from '../lib/top-patterns-render.js';
+import {
+  getEnvDfContext,
+  buildDisplayName,
+  dedupeVisibleNames,
+  DEFAULT_NAME_WIDTH,
+  type DfContext,
+  type NameableRow,
+} from '../lib/pattern-df.js';
 import { detectIncidents, type IncidentInput } from '../lib/detectors/incident-cluster.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry } from '../lib/unified-envelope.js';
@@ -646,6 +654,37 @@ export async function executeTopPatterns(
     };
   });
 
+  // --- RENDER-ONLY pattern naming (Layers 1-2) ---
+  // Build the discriminator-first display_name from each row's symbolMessage
+  // (r.pattern) over the env-wide df-map. The df-map is fetched once and
+  // CACHED per env so pattern_detail's drill-in renders the SAME label for
+  // the same pattern. Identity fields (r.pattern, r.hash) are untouched.
+  // Degrades safely: a backend hiccup yields a zero-corpus df -> Layer 1.
+  // Uses the default fixed 24h window (NOT the tool's timeRange) so both
+  // surfaces build their df-map over the same pattern set and agree on labels.
+  const dfCtx: DfContext = await getEnvDfContext(env, metricsEnv);
+  for (const r of renderRows) {
+    const dn = buildDisplayName(r.pattern, {
+      df: dfCtx,
+      service: r.service,
+      severity: r.severity,
+      width: DEFAULT_NAME_WIDTH,
+    });
+    r.display_name = dn.display_name;
+    r.display_tokens = dn.display_tokens;
+  }
+  // Guard (d): guarantee distinct names across the visible page. Operate on
+  // a thin view that writes display_name back onto the rows.
+  const nameableView: NameableRow[] = renderRows.map((r) => ({
+    display_name: r.display_name ?? '',
+    display_tokens: r.display_tokens ?? [],
+    pattern_hash: r.hash ?? '',
+  }));
+  dedupeVisibleNames(nameableView, dfCtx);
+  nameableView.forEach((n, i) => {
+    renderRows[i].display_name = n.display_name;
+  });
+
   // Totals + analyzer detection
   const totalBytes = totalRes && totalRes.status === 'success' && totalRes.data.result.length > 0
     ? parsePrometheusValue(totalRes.data.result[0]) * volScale
@@ -925,7 +964,17 @@ export async function executeTopPatterns(
         );
         return { display, first_seen_age_source: ageSource };
       })(),
-      descriptor: r.pattern ?? r.hash ?? '',
+      // descriptor is now the readable, discriminator-first display_name
+      // (Layer 2) instead of the raw underscored symbolMessage — the burned
+      // "no raw symbol_message in headlines" rule. The raw form stays
+      // verbatim on `identity` + `symbol_message` for round-trip/identity.
+      descriptor: r.display_name && r.display_name.length > 0 ? r.display_name : (r.pattern ?? r.hash ?? ''),
+      // RENDER-ONLY output contract (consumed by the homepage chat widget).
+      // symbol_message + pattern_hash are unchanged identity; display_name +
+      // display_tokens are additive render fields.
+      symbol_message: r.pattern ?? '',
+      display_name: r.display_name ?? '',
+      display_tokens: r.display_tokens ?? [],
       trend_bytes_per_sec: r.trendBytesPerSec,
       // PL-12a additions.
       kept_bytes: keptBytes,

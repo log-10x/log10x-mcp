@@ -19,15 +19,22 @@
  *   - With hint only:          "<hint>"
  *   - Fallback:                "pattern"
  *
- * <hint> is the symbol_message with underscores replaced by spaces,
- * capped at maxHintChars (default 40) and suffixed with "..." when
- * truncated. When the symbol_message is empty, the hint is dropped
- * and we render just the service-led lead.
+ * <hint> is the symbol_message rendered for humans. When a per-env
+ * document-frequency context (`df`) is supplied it is the discriminator-
+ * first display_name (Layer 2, lib/pattern-df.ts); otherwise it is the
+ * '_'->space name codepoint-safe mid-ellipsis'd to maxHintChars (Layer 1,
+ * lib/text-crop.ts) — NOT the old front-slice + "..." which dropped the
+ * tail discriminator and could bisect a surrogate pair. When the
+ * symbol_message is empty, the hint is dropped and we render just the
+ * service-led lead.
  *
  * Callers should keep the raw underscored symbol_message + pattern_hash
  * in the payload (machine fields) for round-trip and downstream tool
  * chaining; this helper is for prose only.
  */
+
+import { midEllipsis } from './text-crop.js';
+import { buildDisplayName, type DfContext } from './pattern-df.js';
 
 export interface PatternLabelInput {
   /** Raw symbol_message (underscored tokens) or descriptor. May be null/undefined. */
@@ -40,6 +47,13 @@ export interface PatternLabelInput {
   maxHintChars?: number;
   /** Fallback string when no signal at all is available. */
   fallback?: string;
+  /**
+   * Optional shared per-env df-context. When present the hint is the
+   * discriminator-first display_name (boilerplate dropped, tail surfaced);
+   * when absent the hint degrades to a plain mid-ellipsis. Pass the SAME
+   * context used by top_patterns so a pattern reads identically on both.
+   */
+  df?: DfContext | null;
 }
 
 export function formatPatternLabel(input: PatternLabelInput): string {
@@ -53,10 +67,14 @@ export function formatPatternLabel(input: PatternLabelInput): string {
     : null;
 
   const raw = (input.symbol_message ?? '').trim();
-  const hint = raw.replace(/_/g, ' ');
   const maxHint = input.maxHintChars ?? 40;
-  const truncatedHint =
-    hint.length > maxHint ? hint.slice(0, Math.max(0, maxHint - 3)) + '...' : hint;
+  let truncatedHint = '';
+  if (raw) {
+    truncatedHint = input.df
+      ? buildDisplayName(raw, { df: input.df, service: svc, severity: sev, width: maxHint })
+          .display_name
+      : midEllipsis(raw.replace(/_/g, ' '), maxHint);
+  }
 
   if (lead && truncatedHint) return `${lead} (${truncatedHint})`;
   if (lead) return lead;
@@ -74,6 +92,7 @@ export function formatPatternLabelFromServices(input: {
   services?: Array<{ name?: string; service?: string; severity?: string }>;
   maxHintChars?: number;
   fallback?: string;
+  df?: DfContext | null;
 }): string {
   const top = input.services?.[0];
   return formatPatternLabel({
@@ -82,5 +101,6 @@ export function formatPatternLabelFromServices(input: {
     severity: top?.severity,
     maxHintChars: input.maxHintChars,
     fallback: input.fallback,
+    df: input.df,
   });
 }
