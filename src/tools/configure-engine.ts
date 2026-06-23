@@ -1453,6 +1453,7 @@ export async function executeConfigureEngine(
     args.current_csv,
     rows,
     effectiveStandardAction,
+    new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const)),
     args.reduction ?? 'hard',
     { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
@@ -2788,6 +2789,7 @@ export function renderCsvDiff(
   currentCsv: string | undefined,
   rows: PerPatternRow[],
   defaultAction: Action,
+  actionByContainer: ReadonlyMap<string, Action>,
   reduction: 'soft' | 'hard',
   commitment?: { targetPercent: number; baselineMonthlyBytes: number }
 ): string {
@@ -2812,15 +2814,33 @@ export function renderCsvDiff(
   // Cap semantics: offload/drop act on the WHOLE service (cap 0 = everything
   // overflows). compact/sample/tier_down/pass act on the slice past the
   // budget-derived cap.
-  const avgCap = rows.length > 0
-    ? Math.round(rows.reduce((s, r) => s + r.cap_bytes_per_window, 0) / rows.length)
-    : 0;
-  const capForAction = (defaultAction === 'offload' || defaultAction === 'drop') ? 0 : avgCap;
+  // Per-container cap = the SUM of that container's OWN per-pattern caps
+  // (each from computeCapBytesPerWindow under its pattern's action), NOT a
+  // mean across every container's patterns. Averaging produced a number that
+  // matched no real budget (a pass-heavy service got a near-full cap, an
+  // offload-heavy one ~0). Build the per-container sums once.
+  const capSumByContainer = new Map<string, number>();
+  for (const r of rows) {
+    if (!r.container) continue;
+    capSumByContainer.set(
+      r.container,
+      (capSumByContainer.get(r.container) ?? 0) + r.cap_bytes_per_window
+    );
+  }
   const reason = `MCP configure_engine (${reduction})`;
   for (const c of containers) {
+    // Each container gets ITS OWN resolved standard-tier action (the Phase-2
+    // per-service advisory), falling back to defaultAction only when a
+    // container has no decision. offload/drop keep cap 0 (the whole container
+    // overflows); every other action gets the container's own budget sum.
+    const action = actionByContainer.get(c) ?? defaultAction;
+    const cap =
+      action === 'offload' || action === 'drop'
+        ? 0
+        : Math.round(capSumByContainer.get(c) ?? 0);
     // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
     // never break the `<bytes>:<action>:<reason>` parse.
-    const value = `${capForAction}:${defaultAction}:${reason.replace(/[,:]/g, ';')}`;
+    const value = `${cap}:${action}:${reason.replace(/[,:]/g, ';')}`;
     merged.set(c, value);
   }
   // Preserve any existing preamble from the baseline (so refresh PRs

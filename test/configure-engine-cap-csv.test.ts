@@ -10,8 +10,9 @@
  *                                    k8s_container=pat:<hash>, so the
  *                                    engine never matches these rows)
  *
- * Per-pattern action assignment lives in data/action-intent.json, NOT
- * in caps.csv. The cap CSV is the per-container safety floor.
+ * The per-container action is folded into the single cap value
+ * (`<container>,<bytes>:<action>:<reason>`); there is no separate
+ * action-intent.json side-file. Per-PATTERN detail stays out of the CSV.
  *
  * This test locks in the fix:
  *   1. No `pat:` prefix rows in the emitted CSV.
@@ -85,6 +86,7 @@ test('renderCsvDiff: no pat:<hash> rows are ever emitted', () => {
     undefined,
     rows,
     'compact', // defaultAction
+    new Map(), // actionByContainer: empty -> all fall back to defaultAction
     'hard',
     { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
   );
@@ -114,6 +116,7 @@ test('renderCsvDiff: one container-keyed row per configured container', () => {
     undefined,
     rows,
     'compact',
+    new Map(),
     'hard',
     { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
   );
@@ -153,6 +156,7 @@ test('renderCsvDiff: service-name==container-name fallback (no snapshot)', () =>
     undefined,
     rows,
     'compact',
+    new Map(),
     'hard',
     { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
   );
@@ -192,7 +196,8 @@ test('renderCsvDiff: floor patterns do not leak into caps.csv', () => {
     ['svc-a'],
     undefined,
     rows,
-    'compact', // default — `override-hash` differs from this
+    'compact', // default; override-hash differs from this
+    new Map(),
     'hard',
     { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
   );
@@ -210,4 +215,64 @@ test('renderCsvDiff: floor patterns do not leak into caps.csv', () => {
     !diff.includes('override-hash'),
     'pattern hash leaked into CSV (any form)'
   );
+});
+
+test('renderCsvDiff: each container gets its own action + cap = sum of its row caps', () => {
+  // Phase-2 per-service advisory: cartservice compacts, frontend passes,
+  // noisy-svc offloads. Each container's caps.csv row must reflect ITS OWN
+  // action and a cap derived from ITS OWN rows, not a global average/action.
+  const rows: PerPatternRow[] = [
+    makeRow({ pattern_hash: 'a1', container: 'cartservice', cap_bytes_per_window: 100, action: 'compact' }),
+    makeRow({ pattern_hash: 'a2', container: 'cartservice', cap_bytes_per_window: 50, action: 'pass' }),
+    makeRow({ pattern_hash: 'b1', container: 'frontend', cap_bytes_per_window: 300, action: 'pass' }),
+    makeRow({ pattern_hash: 'c1', container: 'noisy-svc', cap_bytes_per_window: 0, action: 'offload' }),
+  ];
+  const actionByContainer = new Map<string, PerPatternRow['action']>([
+    ['cartservice', 'compact'],
+    ['frontend', 'pass'],
+    ['noisy-svc', 'offload'],
+  ]);
+
+  const diff = renderCsvDiff(
+    ['cartservice', 'frontend', 'noisy-svc'],
+    undefined,
+    rows,
+    'compact', // defaultAction (unused: every container has a decision)
+    actionByContainer,
+    'hard',
+    { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
+  );
+
+  const dataRows = additionsFromDiff(diff).filter(
+    (l) => l.length > 0 && !l.startsWith('#') && l !== 'container,cap'
+  );
+  const byKey: Record<string, string> = Object.fromEntries(
+    dataRows.map((l) => {
+      const i = l.indexOf(',');
+      return [l.slice(0, i), l.slice(i + 1)];
+    })
+  );
+
+  // cap = sum of that container's per-pattern caps (100+50 / 300); offload -> 0.
+  assert.equal(byKey['cartservice'], '150:compact:MCP configure_engine (hard)');
+  assert.equal(byKey['frontend'], '300:pass:MCP configure_engine (hard)');
+  assert.equal(byKey['noisy-svc'], '0:offload:MCP configure_engine (hard)');
+});
+
+test('renderCsvDiff: undecided container falls back to defaultAction with its own cap sum', () => {
+  const rows: PerPatternRow[] = [
+    makeRow({ pattern_hash: 'd1', container: 'svc-x', cap_bytes_per_window: 70, action: 'sample' }),
+    makeRow({ pattern_hash: 'd2', container: 'svc-x', cap_bytes_per_window: 30, action: 'sample' }),
+  ];
+  const diff = renderCsvDiff(
+    ['svc-x'],
+    undefined,
+    rows,
+    'sample', // defaultAction used because actionByContainer has no entry
+    new Map(),
+    'hard',
+    { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
+  );
+  const row = additionsFromDiff(diff).find((l) => l.startsWith('svc-x,'));
+  assert.equal(row, 'svc-x,100:sample:MCP configure_engine (hard)');
 });
