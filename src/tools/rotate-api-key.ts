@@ -154,6 +154,12 @@ async function executeRotateApiKeyInner(
       `\`${result.apiKey}\`\n\n` +
       'Update your MCP host config (`LOG10X_API_KEY`) and any scripts / CI secrets ' +
       'using the old value, then restart the host.';
+    // Pivot the live process to the new key so this session keeps working
+    // even though disk persistence failed. The new key is already in hand;
+    // LOG10X_API_KEY (Path 3) wins priority over the stale credentials file,
+    // so the reload validates and bakes the NEW key into the rebuilt backend.
+    process.env.LOG10X_API_KEY = result.apiKey;
+    try { await reloadEnvironmentsInPlace(envs); } catch { /* leave md telling user to restart host */ }
     return { ok: true, username: result.profile.username, new_api_key: result.apiKey, error: `local save failed: ${(e as Error).message}`, markdown: md };
   }
 

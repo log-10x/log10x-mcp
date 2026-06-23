@@ -629,7 +629,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           name: 'reporter_tier',
           status: 'warn',
           message:
-            'No Reporter tier detected — investigate / cost_drivers / pattern_trend tools will be unavailable in this env.',
+            'No Reporter tier detected, so investigate / whats_changing / pattern_trend tools will be unavailable in this env.',
           fix: 'Deploy Cloud Reporter (k8s CronJob) or Edge Reporter (forwarder pipeline) per https://doc.log10x.com/apps/reporter/.',
         });
       }
@@ -674,7 +674,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           checks.push({
             name: 'metric_freshness',
             status: 'fail',
-            message: `${detectedTier} reporter's most recent datapoint is ${Math.round(ageSec / 3600)} hours old. The Reporter has stopped emitting. Investigate / cost_drivers / pattern_trend will return stale data or empty results.`,
+            message: `${detectedTier} reporter's most recent datapoint is ${Math.round(ageSec / 3600)} hours old. The Reporter has stopped emitting. Investigate / whats_changing / pattern_trend will return stale data or empty results.`,
             fix: 'The Reporter has stopped emitting metrics. Check the Reporter pod / CronJob status, recent logs, and restart if needed. This is the most common silent failure mode.',
           });
         }
@@ -795,14 +795,14 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
             name: 'cardinality_concentration',
             status: 'warn',
             message: `A single pattern is ${Math.round(top1Ratio * 100)}% of your 30-day log spend. If it's a DEBUG/INFO pattern, you have a large filtering opportunity; if it's an ERROR, you have an ongoing incident to investigate.`,
-            fix: 'Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_exclusion_filter to cut cost safely.',
+            fix: 'Call log10x_top_patterns(limit=1) to see which pattern. Then log10x_investigate on it to check whether it is an incident or noise. If it is noise, log10x_dependency_check + log10x_pattern_mitigate to cut cost safely.',
           });
         } else if (top5Ratio > 0.7) {
           checks.push({
             name: 'cardinality_concentration',
             status: 'warn',
             message: `The top 5 patterns are ${Math.round(top5Ratio * 100)}% of your 30-day log spend. Your logging cost is concentrated; investigating or filtering the top few has outsized impact.`,
-            fix: 'Call log10x_top_patterns(limit=5) and log10x_cost_drivers to identify which of the top 5 are growing vs stable. Stable-and-high is a filter candidate; growing-and-high is an investigation candidate.',
+            fix: 'Call log10x_top_patterns(limit=5) and log10x_whats_changing to identify which of the top 5 are growing vs stable. Stable-and-high is a filter candidate; growing-and-high is an investigation candidate.',
           });
         } else {
           checks.push({
@@ -1541,7 +1541,7 @@ export function renderDoctorReport(report: DoctorReport): string {
     }
   } else {
     // Be specific about WHICH tool surfaces are blocked. A retriever
-    // probe failing only blocks retriever-* tools; cost_drivers /
+    // probe failing only blocks retriever-* tools; whats_changing /
     // top_patterns / investigate / etc. continue to work. The earlier
     // blanket "MCP cannot serve tool calls until the failed check is
     // resolved" message was overly broad and frightened readers off
@@ -1552,7 +1552,7 @@ export function renderDoctorReport(report: DoctorReport): string {
     const failList = failed.length > 0 ? failed.join(', ') : 'one or more checks';
     lines.push(
       `Some checks failed (${failList}). Tools that depend on the failing subsystem will return errors; ` +
-        'unrelated tools (cost_drivers, top_patterns, investigate, etc.) continue to work normally. ' +
+        'unrelated tools (whats_changing, top_patterns, investigate, etc.) continue to work normally. ' +
         'See the fix(es) above.'
     );
   }

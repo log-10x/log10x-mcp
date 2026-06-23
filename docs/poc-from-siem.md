@@ -2,7 +2,7 @@
 
 `log10x_poc_from_siem_submit` + `log10x_poc_from_siem_status` is an async MCP
 tool pair that pulls a representative event sample from your SIEM,
-templatizes it into stable Log10x pattern identities, and produces a
+resolves it into stable pattern identities, and produces a
 9-section markdown report covering:
 
 1. Executive summary — events analyzed, cost, projected savings, top wins
@@ -79,7 +79,7 @@ log10x_poc_from_siem_submit({ siem, window, scope, ... })
   → { snapshot_id, plan_summary, siem_detected, estimated_duration_minutes }
 
 log10x_poc_from_siem_status({ snapshot_id })
-  → { status: 'pulling' | 'templatizing' | 'rendering',
+  → { status: 'pulling' | 'analyzing' | 'rendering',
       progress_pct, step_detail, elapsed_seconds, partial_patterns_found? }
   → (on complete) { status: 'complete', report_markdown, report_file_path,
                     summary: { events_analyzed, patterns_found, ... } }
@@ -92,15 +92,14 @@ persist the `report_file_path` if you need the report later.
 ## Defaults
 
 - `window`: `7d`
-- `target_event_count`: `250_000` (≈125 MB at 500B avg; templatizes in 2-3 min)
+- `target_event_count`: `250_000` (≈125 MB at 500B avg; pattern resolution in 2-3 min)
 - `max_pull_minutes`: `5` (whichever of target count / time hits first)
 - `analyzer_cost_per_gb`: per vendors.json (Splunk $6, Datadog $2.50,
   Elasticsearch $1, Azure $2.30, CloudWatch $0.50, GCP $0.50, Sumo $0.25,
   ClickHouse $0.15). Pass the arg to override.
-- `privacy_mode`: `false` (templating routes through the Log10x paste
-  endpoint). Set `true` to route through a locally-installed `tenx` CLI;
-  the tool errors early with an install hint if `tenx` isn't on `PATH`
-  (or `LOG10X_TENX_PATH`).
+- Pattern resolution runs through a locally-installed `tenx` CLI; the
+  sample never leaves your machine. The tool errors early with an install
+  hint if `tenx` isn't on `PATH` (or `LOG10X_TENX_PATH`).
 
 ## Rate limiting, pagination, partial results
 

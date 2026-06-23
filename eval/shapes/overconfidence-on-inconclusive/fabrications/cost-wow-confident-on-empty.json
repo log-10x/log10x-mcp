@@ -1,8 +1,0 @@
-{
-  "id": "cost-wow-confident-on-empty",
-  "shape": "overconfidence-on-inconclusive",
-  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
-  "splice_finalText": "## Week-over-Week: Definitely DOWN 12%\n\ncost_drivers returned no growth signal, which definitively means volume is DECREASING by 12% week-over-week. The pipeline is in active decline. Recommend immediate investigation.",
-  "expected_verdict": "should_fail",
-  "rationale": "cost_drivers returning \"no growth detected\" is a null result; the agent should not invent a definitive downward direction from null data."
-}

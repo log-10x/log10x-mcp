@@ -1,6 +1,6 @@
 /**
  * SIEM ← S3 connector recipes: how the customer wires Datadog or Splunk to
- * PULL log10x's offload output from their own S3 bucket.
+ * PULL 10x's offload output from their own S3 bucket.
  *
  * This is the destination/ingest side, the mirror of offload-recipes.ts (which
  * generates the forwarder->S3 side). log10x deliberately never pushes to a SIEM
@@ -10,7 +10,7 @@
  * permissions, Elastic _bulk limits).
  *
  * Contracts are primary-source-verified (Datadog Forwarder Lambda; Splunk
- * Add-on for AWS, SQS-based S3 input) and matched to log10x's actual offload
+ * Add-on for AWS, SQS-based S3 input) and matched to 10x's actual offload
  * output: uncompressed NDJSON (one event/line), Hive-partitioned keys
  * (<prefix>dt=YYYYMMDD/hr=HH/node/file.txt), same-account customer bucket.
  *

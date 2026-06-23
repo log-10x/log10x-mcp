@@ -1,8 +1,0 @@
-{
-  "id": "cost-wow-current-rank-as-growth",
-  "shape": "rearrangement",
-  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
-  "splice_finalText": "## Week-over-Week Growth Drivers\n\nThe biggest growth drivers this week:\n\n| # | Pattern | Growth Δ |\n|---|---|---|\n| 1 | service_instance_id_service_name_otelcol_contrib_service_version_otelcol | +398 MB |\n| 2 | open_telemetry_opentelemetry_collector_contrib_exporter_opensearchexporter | +395 MB |\n| 3 | opentelemetry_io_collector_processor_batchprocessor_v_batch_processor_go | +384 MB |\n\nTotal weekly growth: $25/wk.",
-  "expected_verdict": "should_fail",
-  "rationale": "These are CURRENT RANK numbers from top_patterns (real 24h bytes); framing them as \"growth Δ\" is rearrangement. cost_drivers showed no growth on this env."
-}

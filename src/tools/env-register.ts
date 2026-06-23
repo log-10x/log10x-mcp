@@ -83,7 +83,7 @@ export const envRegisterSchema = {
     'Streamer endpoint — the in-cluster service that fronts the Receiver. `url` is required; `target_path` is the optional sub-path under a shared ingress.'
   ),
   retriever: retrieverConfigSchema.describe(
-    'Retriever endpoint + the four SQS queues (index/subquery/stream/query) it coordinates on. `input_bucket` is the archive the Retriever reads from.'
+    'Retriever endpoint + the four SQS queues (index/subquery/stream/query) it coordinates on. `input_bucket` is the customer-owned S3 offload bucket the Retriever fetches from.'
   ),
   offload_destinations: z
     .array(offloadDestinationSchema)

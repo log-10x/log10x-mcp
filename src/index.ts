@@ -232,7 +232,7 @@ function getEnvs(): Environments {
  * rewrites it, so ops can see the original text when hunting root causes.
  */
 /**
- * Tools that query the metrics backend (cost_drivers, top_patterns,
+ * Tools that query the metrics backend (top_patterns, whats_changing,
  * etc.). When the MCP is in pure-demo mode (no user configuration,
  * silently landed on the demo backend), these tools short-circuit
  * with a structured `not_configured` response instead of returning
@@ -1262,7 +1262,7 @@ registerLog10xTool('log10x_top_patterns', topPatternsSchema, (args) =>
 // Set diff of patterns across a time boundary. Compares pattern presence in
 // two windows and returns new / retired / persistent / re_emerged sets plus
 // co_emergence_clusters (deploy fingerprint via first_seen clustering).
-// Coherent only because log10x pattern_hash is stable across queries;
+// Coherent only because 10x's pattern_hash is stable across queries;
 // competitors that re-cluster per query can't answer this.
 
 registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
@@ -1275,9 +1275,9 @@ registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
 // ── Tool: log10x_whats_changing ──
 //
 // Patterns ranked by delta vs a baseline window (not current cost). Restores
-// the capability of the removed log10x_cost_drivers tool
+// the removed cost-drivers ranking
 // using the modern StructuredOutput envelope. Brand-new patterns (no
-// baseline) are excluded — they go to log10x_whats_new.
+// baseline) are excluded; they go to log10x_whats_new.
 
 registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
   wrap('log10x_whats_changing', async () => {
@@ -1909,7 +1909,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
   { name: 'log10x_pattern_diff', intent: 'Set diff of patterns across a time boundary — new/retired/persistent/re_emerged + co_emergence_clusters (deploy fingerprint). Coherent across boundaries because pattern_hash is stable across queries.' },
-  { name: 'log10x_whats_changing', intent: 'Patterns ranked by delta vs baseline (growth/shrinkage). Brand-new patterns excluded — see log10x_whats_new for those. Restores the deleted log10x_cost_drivers capability.' },
+  { name: 'log10x_whats_changing', intent: 'Patterns ranked by delta vs baseline (growth/shrinkage). Brand-new patterns excluded, see log10x_whats_new for those.' },
   { name: 'log10x_whats_new', intent: 'Patterns whose first_seen falls inside a recency window. Separate from delta-vs-baseline because new patterns have no baseline.' },
   { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
   { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
@@ -2005,7 +2005,7 @@ async function handleCliFlags(): Promise<boolean> {
         'Environment:',
         '  LOG10X_API_KEY            API key from console.log10x.com (or run `log10x_signin_start` then `log10x_signin_complete` to mint one via Auth0 Device Flow)',
         '  LOG10X_API_BASE           Override Prometheus gateway URL',
-        '  __SAVE_LOG10X_RETRIEVER_URL__       Retriever query endpoint (optional)',
+        '  LOG10X_RETRIEVER_URL      Retriever query endpoint (optional)',
         '  LOG10X_TENX_MODE          `local` or `docker` backend for the local engine and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local; compile requires the cloud flavor)',
         '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker (default: log10x/pipeline-10x:latest)',

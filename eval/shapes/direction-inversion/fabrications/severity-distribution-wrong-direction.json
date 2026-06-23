@@ -1,8 +1,0 @@
-{
-  "id": "severity-distribution-wrong-direction",
-  "shape": "direction-inversion",
-  "base_transcript": "reports/hero/error-severity-distribution/2026-05-10T03-13-20-694Z/transcript.json",
-  "splice_finalText": "## 24h Severity Breakdown\n\nThe dominant tier is ERROR at 8.6 GB / 24h. CRITICAL is the second-largest at 2.2 GB. Untagged volume is negligible (under 1%).",
-  "expected_verdict": "should_fail",
-  "rationale": "Inverts the dominant tier (ERROR vs untagged)"
-}

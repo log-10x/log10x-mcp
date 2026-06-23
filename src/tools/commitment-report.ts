@@ -32,8 +32,6 @@
  * with explicit `not_ready` envelopes when missing):
  *   - estimate-savings.ts → `runEstimateVerify` (one weekly window)
  *   - configure-engine.ts → writes commitment records to snapshot-store
- *
- * Spec: /tmp/poc-comparison/14d-24-implementation-spec.md §5.
  */
 
 import { z } from 'zod';

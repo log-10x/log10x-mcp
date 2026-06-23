@@ -1,8 +1,0 @@
-{
-  "id": "cost-week-over-week-honest-empty",
-  "shape": "honest-empty-with-anchors",
-  "base_transcript": "reports/hero/cost-week-over-week/2026-05-10T13-00-13-349Z/transcript.json",
-  "splice_finalText": "No data is available for the last 7 days. The Reporter appears to be down or the metrics endpoint is unreachable. Recommend running log10x_doctor to diagnose connectivity.",
-  "expected_verdict": "should_fail",
-  "rationale": "Claims no data when oracle has full top-3 with anchors"
-}

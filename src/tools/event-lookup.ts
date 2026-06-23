@@ -250,7 +250,7 @@ async function executeEventLookupInner(
   }
 
   // Reporter pattern labels are always snake_case. The agent may have picked
-  // up a display form (space-separated) from top_patterns / cost_drivers and
+  // up a display form (space-separated) from top_patterns / whats_changing and
   // passed it back in; normalize to the canonical form so the exact-match
   // selector lands.
   const rawInput = inputPattern;
@@ -306,13 +306,13 @@ async function executeEventLookupInner(
           {
             tool: 'log10x_resolve_batch',
             args: { source: 'events', events: [rawInput] },
-            reason: 'raw log line — templatize via resolve_batch to get a stable pattern identity',
+            reason: 'raw log line, resolve the raw line into a stable pattern identity via resolve_batch',
           },
         ];
         return [
           'No match found for raw log line via pattern matcher.',
           '',
-          'This input looks like a raw log line (contains spaces + punctuation). `log10x_event_lookup` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use `log10x_resolve_batch({ events: ["<line>"] })` which templatizes lines into pattern identities first.',
+          'This input looks like a raw log line (contains spaces + punctuation). `log10x_event_lookup` is for canonical pattern identities (snake_case, no punctuation). For raw-line triage, use `log10x_resolve_batch({ events: ["<line>"] })` which resolves raw lines into pattern identities first.',
           '',
           renderNextActions(rawHint),
         ]
@@ -633,7 +633,7 @@ async function formatResults(
     // So we do not assert the bytes are archived/fetchable; we offer the fetch
     // conditionally and flag that a zero result means it was hard-dropped.
     const tail = offloadStatus.recommend_action === 'use_retriever_query'
-      ? `If your receiver offloads this pattern to S3 (not hard-drop), fetch it via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\` — a zero result means it was hard-dropped, not archived.`
+      ? `If your receiver offloads this pattern to S3 (not hard-drop), fetch it via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`. A zero result means it was hard-dropped, not offloaded.`
       : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is reducing this pattern but no retriever surface is configured.`;
     lines.push('');
     if (offloadStatus.kept_timed_out || offloadStatus.dropped_share_pct_24h === null || offloadStatus.kept_share_pct_24h === null) {
@@ -692,7 +692,7 @@ async function formatResults(
       nextActions.push({
         tool: 'log10x_retriever_query',
         args: { pattern, from: 'now-24h' },
-        reason: 'this pattern is in the drop/offload cohort; if it is offloaded to S3 (not hard-dropped), fetch the slice back — a zero result means it was hard-dropped, not archived',
+        reason: 'this pattern is in the drop/offload cohort; if it is offloaded to S3 (not hard-dropped), fetch the slice back. A zero result means it was hard-dropped, not offloaded',
       });
     } else {
       nextActions.push({

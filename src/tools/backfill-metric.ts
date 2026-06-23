@@ -295,7 +295,7 @@ async function executeBackfillMetricInner(
   }
 
   // Reporter/Retriever pattern labels are snake_case. Normalize in case the
-  // agent re-fed a display form (spaces) from top_patterns / cost_drivers.
+  // agent re-fed a display form (spaces) from top_patterns / whats_changing.
   const pattern = normalizePattern(args.pattern);
 
   // ── 1. Query the offload bucket for the offloaded cohort ──

@@ -1,7 +1,0 @@
-{
-  "id": "hero-improvement",
-  "title": "Hero — top 3 improvement recommendations",
-  "prompt": "We just deployed Log10x's Receiver and want to actually save money. Look at our environment and recommend the 3 highest-impact changes we should make over the next month. Each recommendation needs (a) a specific pattern or label, (b) the projected savings, (c) the risk of breaking something.",
-  "persona": "You are a platform engineer presenting a cost-reduction proposal to a quarterly review. The audience expects you to know exactly what you're proposing and why.",
-  "budget_hint": "Aim for 6-10 tool calls. The 3 recommendations must each be backed by a specific tool result."
-}

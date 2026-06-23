@@ -9,7 +9,7 @@
  * protocol has NO standard way to separate the two.
  *
  * Without a convention, tools end up mixing:
- *   - "**Next actions**: call log10x_cost_drivers({…})"
+ *   - "**Next actions**: call log10x_top_patterns({…})"
  *   - "⚠ do not re-label as cost drivers"
  *   - "Do not speculate about event content"
  * …into the visible user output. Users see directives meant for the

@@ -2,9 +2,8 @@
  * log10x_overflow_contents — the contents view of the customer's S3
  * offload bucket.
  *
- * Parity with Datadog "Logs Without Limits" and CloudWatch Logs IA: the
- * cheap tier is the OVERFLOW QUEUE, not a search target. The customer
- * wants to REVIEW what's accumulating, not query it.
+ * The offload bucket is the OVERFLOW QUEUE, not a search target. The
+ * customer wants to REVIEW what's accumulating, not query it.
  *
  * What this tool does:
  *   - Queries `all_events_summaryBytes_total{routeState="drop"}` grouped
@@ -219,14 +218,22 @@ export async function executeOverflowContents(
   //   3. Bytes per (hash) over the first half of the window — used as
   //      the growth baseline against the full-window bytes for the
   //      growth_rate_pct calc.
-  const halfLabel = halfWindowLabel(tf.range);
+  // Half of the full window, in seconds, always strictly < the full range
+  // regardless of unit (m/h/d). PromQL accepts `s` durations. The old
+  // string-based halver left minute ranges and 1h unchanged, so the
+  // "first half" slice silently became the PRIOR full window.
+  const halfSeconds = Math.max(1, Math.floor((tf.days * 86400) / 2));
+  const halfLabel = `${halfSeconds}s`;
   const bytesByPatternQ = `sum by (${LABELS.hash}, ${LABELS.pattern}, ${LABELS.service}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector}}[${tf.range}]))`;
   const eventsByPatternQ = `sum by (${LABELS.hash}, ${LABELS.service}) (increase(${VOLUME_METRIC}{${baseSelector}}[${tf.range}]))`;
   const firstHalfBytesQ = `sum by (${LABELS.hash}) (increase(${BYTES_METRIC}{${baseSelector}}[${halfLabel}] offset ${halfLabel}))`;
-  // Time-window bookends use the timestamp() trick on the series' last
-  // sample. min/max over the series within the window.
-  const firstSeenQ = `min by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
-  const lastSeenQ = `max by (${LABELS.hash}) (timestamp(${BYTES_METRIC}{${baseSelector}}))`;
+  // Time-window bookends: evaluate timestamp(metric) at steps across
+  // [now-range, now] via a subquery and reduce with min/max_over_time, so
+  // we pick the earliest/latest step where each hash's series actually has
+  // a sample. This recovers true window bookends; a plain instant
+  // timestamp() would collapse to ~eval-time for every series.
+  const firstSeenQ = `min by (${LABELS.hash}) (min_over_time(timestamp(${BYTES_METRIC}{${baseSelector}})[${tf.range}:]))`;
+  const lastSeenQ = `max by (${LABELS.hash}) (max_over_time(timestamp(${BYTES_METRIC}{${baseSelector}})[${tf.range}:]))`;
 
   const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, taggedFetch] =
     await Promise.all([
@@ -612,17 +619,6 @@ function parseValue(r: { value?: [number, string] }): number {
  *   7d   → 84h  (≈ 3.5d expressed in hours; PromQL accepts h)
  *   1d   → 12h
  */
-function halfWindowLabel(range: string): string {
-  const m = range.match(/^(\d+)([dh])$/);
-  if (!m) return range;
-  const n = parseInt(m[1], 10);
-  const unit = m[2];
-  if (unit === 'd') {
-    return n >= 2 ? `${Math.floor(n / 2)}d` : `${Math.round((n * 24) / 2)}h`;
-  }
-  return `${Math.max(1, Math.round(n / 2))}h`;
-}
-
 /**
  * Minimum first-half byte floor below which the growth rate is unreliable.
  * Near-zero baselines produce huge percentage blowups from tiny absolute

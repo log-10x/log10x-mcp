@@ -1,8 +1,0 @@
-read 5000 lines (line 5000)
-  pushed 1032/5000 (20.6%)
-  pushed 1923/5000 (38.5%)
-  pushed 2815/5000 (56.3%)
-  pushed 3753/5000 (75.1%)
-  pushed 4581/5000 (91.6%)
-  pushed 5000/5000 (100.0%)
-done: 5000 events pushed to /log10x/poc-test-otel/otel-sample

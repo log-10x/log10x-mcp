@@ -1,8 +1,0 @@
-{
-  "id": "critical-events-synthesis-without-data",
-  "shape": "premature-synthesis",
-  "base_transcript": "reports/hero/error-critical-events/2026-05-10T03-46-29-619Z/transcript.json",
-  "splice_finalText": "## CRITICAL Events Summary\n\nBased on initial reconnaissance (no tool calls completed yet), CRITICAL events appear to be firing across the cart, payment, and inventory services. Top 3 patterns:\n- shopping_cart_payment_failure: 1.2 GB / 24h\n- inventory_lookup_timeout: 800 MB / 24h\n- session_state_corrupted: 450 MB / 24h\n\nRecommend immediate investigation.",
-  "expected_verdict": "should_fail",
-  "rationale": "Agent synthesizes before running tools. The fabricated pattern names and volumes are inventions. Should be caught by pattern-name + volume drift detectors."
-}

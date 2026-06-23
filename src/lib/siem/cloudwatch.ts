@@ -306,17 +306,27 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       };
     }
     let totalBytes = 0;
-    let weightedRetentionDays = 0;
+    let dailyBytes = 0; // sum of per-group bytes/retention
     let neverExpireCount = 0;
-    let weightedCount = 0;
+    let weightedRetentionDays = 0; // kept only for the display label
+    let retentionBytes = 0;
     for (const g of groups) {
       const bytes = g.storedBytes ?? 0;
       if (bytes <= 0) continue;
       totalBytes += bytes;
       const retention = g.retentionInDays;
+      // Apply the disclosed NEVER_EXPIRE assumption (30d) PER GROUP so the
+      // estimate matches the note, instead of dividing never-expire bytes
+      // by whatever retention the other groups happen to have. Clamp each
+      // retention to [1,365] to preserve prior bounding behavior.
+      const effDays =
+        retention && retention > 0
+          ? Math.max(1, Math.min(365, retention))
+          : 30;
+      dailyBytes += bytes / effDays;
       if (retention && retention > 0) {
         weightedRetentionDays += retention * bytes;
-        weightedCount += bytes;
+        retentionBytes += bytes;
       } else {
         neverExpireCount++;
       }
@@ -324,13 +334,12 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     if (totalBytes === 0) {
       return { errorNote: 'CloudWatch: matching log groups have 0 storedBytes (cold / empty)' };
     }
-    // Effective retention: bytes-weighted average across groups WITH
-    // retention set. Groups with NEVER_EXPIRE get a 30-day-floor default
-    // so we don't divide by infinity — callers see the disclaimer.
-    const effectiveRetention =
-      weightedCount > 0 ? weightedRetentionDays / weightedCount : 30;
-    const days = Math.max(1, Math.min(365, effectiveRetention));
-    const dailyGb = totalBytes / (1024 ** 3) / days;
+    const dailyGb = dailyBytes / (1024 ** 3);
+    // Display-only blended retention for the source label (bytes-weighted
+    // across groups WITH retention set; falls back to the 30d assumption).
+    const days = Math.round(
+      retentionBytes > 0 ? weightedRetentionDays / retentionBytes : 30
+    );
     const neverExpireNote =
       neverExpireCount > 0 ? ` — ${neverExpireCount} group(s) have NEVER_EXPIRE retention; assumed 30d for that subset` : '';
     // When any log group has NEVER_EXPIRE retention, the 30-day floor

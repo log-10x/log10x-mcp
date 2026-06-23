@@ -1,5 +1,5 @@
 /**
- * Shared renderer for pattern-list output (top_patterns, cost_drivers,
+ * Shared renderer for pattern-list output (top_patterns, whats_changing,
  * event_lookup, services). One stanza per pattern: a header line
  * (service · severity), the full untruncated pattern, a volume
  * share-bar, a metrics line (volume · cost · events), then the
@@ -29,14 +29,14 @@ export interface PatternStanzaRow {
   flags?: string[];
   /**
    * Growth mode: when set, the metrics line shows `$base -> $now`
-   * plus deltaLabel instead of a plain cost. Used by cost_drivers.
+   * plus deltaLabel instead of a plain cost. Used by whats_changing.
    */
   costBaseline?: number;
   /** Preformatted delta tag for growth mode, e.g. "+34%", "NEW". */
   deltaLabel?: string;
   /**
    * Value the share-bar is scaled against. Defaults to bytes. Tools
-   * whose magnitude is not volume (cost_drivers ranks by $ delta) set
+   * whose magnitude is not volume (whats_changing ranks by $ delta) set
    * this so the bar reflects the metric that actually ranks the list.
    */
   barValue?: number;
@@ -119,7 +119,7 @@ export interface StanzaRenderOpts {
   /**
    * Skip the title + Scope summary lines (the legend and stanzas still
    * render). For callers that print their own header block, e.g.
-   * cost_drivers with its baseline/comparison framing.
+   * whats_changing with its baseline/comparison framing.
    */
   suppressHeader?: boolean;
 }

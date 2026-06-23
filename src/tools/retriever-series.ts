@@ -59,7 +59,7 @@ export const retrieverSeriesSchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message). Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers. Mutually exclusive with `search`; `search` wins if both provided.'
+      'Reporter-named pattern (Symbol Message). Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / whats_changing. Mutually exclusive with `search`; `search` wins if both provided.'
     ),
   search: z
     .string()

@@ -190,7 +190,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     const lead = chain[0];
     lines.push(`1. Verify the root cause: run the commands above. If the ${rootService} commits or kube events line up with the inflection, the hypothesis is confirmed.`);
     lines.push(`2. Check blast-radius before any action: \`log10x_dependency_check({ pattern: '${lead.mover.pattern}' })\`.`);
-    lines.push(`3. For forensic retrieval of the actual root-cause events: \`log10x_retriever_query({ pattern: '${lead.mover.pattern}', from: 'now-2h' })\` (requires Retriever tier).`);
+    lines.push(`3. To fetch the actual root-cause events the Receiver offloaded to your S3: \`log10x_retriever_query({ pattern: '${lead.mover.pattern}', from: 'now-2h' })\` (requires Retriever tier).`);
   } else {
     lines.push('1. Widen the investigation window or switch to `depth: "deep"` to expand the pattern universe.');
     lines.push('2. If the symptom is a specific customer or request subset, re-run with a narrower anchor (paste the exact log line instead of a service name).');

@@ -63,8 +63,8 @@ export interface OffloadStatus {
    * True when the drop/offload cohort (`routeState="drop"`) has bytes in the
    * window. NOTE: today `routeState="drop"` does NOT distinguish
    * offload-to-S3 (fetchable via retriever_query) from hard-drop (gone,
-   * never archived). So `is_offloaded` means "in the engine's drop/offload
-   * cohort", NOT "confirmed archived/fetchable". Consumers must not promise
+   * never offloaded). So `is_offloaded` means "in the engine's drop/offload
+   * cohort", NOT "confirmed offloaded/fetchable". Consumers must not promise
    * fetchability from this alone — a true distinction needs the dedicated
    * `routeState="offload"` setter (D1b). Until then, gate fetch-back claims
    * on a found result / retriever-configured, not on this flag.

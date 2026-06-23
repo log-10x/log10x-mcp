@@ -436,7 +436,7 @@ async function executeTrendInner(
   const metricsEnv = await resolveMetricsEnv(env);
 
   // Reporter pattern labels are always snake_case. Normalize in case an
-  // agent re-fed a display form from top_patterns / cost_drivers.
+  // agent re-fed a display form from top_patterns / whats_changing.
   const pattern = normalizePattern(args.pattern);
 
   const now = Math.floor(Date.now() / 1000);

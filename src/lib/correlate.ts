@@ -272,16 +272,24 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
     for (const off of LAG_OFFSETS_SECONDS) pairs.push({ mover: m, offset: off });
   }
 
+  // PromQL `offset` is always evaluated relative to "now". To anchor each lag
+  // probe's window-end at (inflection - lagOffset) we add the now-to-inflection
+  // shift. Clamp negatives in case the inflection is at or after now.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const inflectionShift = Math.max(0, nowSec - opts.inflectionTimestamp);
+
   const lagTasks = pairs.map(({ mover, offset }) =>
     limiter(async () => {
       if (Date.now() > hardDeadline) {
         hardTimeoutHit = true;
         return;
       }
+      const probeOffset = inflectionShift + offset;
+      const baselineOffset = probeOffset + opts.thresholds.lagBaselineWidthSeconds;
       const q =
-        `(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(mover.pattern)}"}[${opts.window}] offset ${offset}s)) ` +
+        `(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(mover.pattern)}"}[${opts.window}] offset ${probeOffset}s)) ` +
         `/ ignoring(__name__) ` +
-        `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(mover.pattern)}"}[${opts.window}] offset ${offset + opts.thresholds.maxCoMoversForLag * 60}s))) - 1`;
+        `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(mover.pattern)}"}[${opts.window}] offset ${baselineOffset}s))) - 1`;
       try {
         const res = await queryInstant(opts.env, q);
         queriesExecuted += 1;
@@ -384,7 +392,9 @@ function chainCoherenceScore(index: number, total: number): number {
   // positives.
   if (total <= 3) return 0.9;
   if (total <= 5) return 0.8;
-  return Math.max(0.5, 1 - (index / total) * 0.4);
+  // 6+ chains: every link must be penalized below the small-chain band,
+  // and degrade further down the chain.
+  return Math.max(0.4, 0.7 - (index / total) * 0.4);
 }
 
 function escape(s: string): string {

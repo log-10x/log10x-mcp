@@ -15,7 +15,7 @@
  *      which env is current.
  */
 
-import { revalidateEnvironments, type Environments } from '../lib/environments.js';
+import { reloadEnvironmentsInPlace, type Environments } from '../lib/environments.js';
 import { activeNotices, getManifest } from '../lib/manifest.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
@@ -53,12 +53,15 @@ export async function executeLoginStatus(
   _args: Record<string, never>,
   envs: Environments
 ): Promise<string | StructuredOutput> {
-  // Revalidate credentials before reporting state. Without this, the
+  // Refresh credentials/env state before reporting. Without this, the
   // tool would render whatever was decided at MCP boot, even if the
   // credentials file has since become valid (e.g. a rotated key whose
-  // authorizer cache has now cleared) or vice versa.
+  // authorizer cache has now cleared) or vice versa. Use the non-clearing
+  // reload (NOT revalidateEnvironments) so a pure status query never
+  // deletes process.env.LOG10X_API_KEY and silently demotes an
+  // env-var-authenticated user to demo mode.
   try {
-    await revalidateEnvironments(envs);
+    await reloadEnvironmentsInPlace(envs);
   } catch {
     // Best-effort. Fall through and render whatever state we have.
   }
