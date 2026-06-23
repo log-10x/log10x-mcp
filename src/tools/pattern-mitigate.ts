@@ -22,9 +22,9 @@
  *      enforced.
  *
  * Discoverability surface:
- *   - top_patterns / cost_drivers / event_lookup already point users at
+ *   - top_patterns / whats_changing / event_lookup already point users at
  *     mitigation paths via their agent-only NEXT_ACTIONS. Those routes
- *     get updated to point at THIS tool, not directly at exclusion_filter.
+ *     point at THIS tool.
  *   - System-prompt rule (separately): when a cost-bearing tool surfaces
  *     a pattern and the user's framing is cost-related, the agent should
  *     proactively offer "want me to show you options for reducing this?"
@@ -54,7 +54,7 @@ export const patternMitigateSchema = {
   pattern: z
     .string()
     .min(1)
-    .describe('The pattern identity to mitigate. Pass the canonical name from a prior log10x_top_patterns / log10x_cost_drivers / log10x_event_lookup row.'),
+    .describe('The pattern identity to mitigate. Pass the canonical name from a prior log10x_top_patterns / log10x_event_lookup row.'),
   service: z
     .string()
     .optional()
@@ -775,11 +775,11 @@ async function executePatternMitigateInner(
     );
   } else if (analyzerName) {
     lines.push(
-      `**1. Drop it at ${analyzerName}.** Fastest. Apply an exclusion in ${analyzerName} and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName} — they just don't get indexed. Note: log10x_exclusion_filter doesn't yet generate native configs for ${analyzerName} (supports Datadog, Splunk, Elasticsearch, AWS CloudWatch); you'd apply this one manually in the ${analyzerName} UI for now.`
+      `**1. Drop it at ${analyzerName}.** Fastest. Apply an exclusion in ${analyzerName} and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName}, they just don't get indexed. Note: native exclusion configs are generated for Datadog, Splunk, Elasticsearch, and AWS CloudWatch; for ${analyzerName} you'd apply this one manually in the ${analyzerName} UI for now.`
     );
   } else {
     lines.push(
-      `**1. Drop it at your analyzer.** Fastest. Save a config in your log analyzer and the cost stops within minutes. Events still flow through your pipeline up to the analyzer — they just don't get indexed or stored. We could not auto-detect which analyzer you ship to — log10x_exclusion_filter can generate native configs for Datadog, Splunk, Elasticsearch, and AWS CloudWatch. For any other analyzer the agent should ask the user and either generate the config (when supported) or hand-instruct apply (when not).`
+      `**1. Drop it at your analyzer.** Fastest. Save a config in your log analyzer and the cost stops within minutes. Events still flow through your pipeline up to the analyzer, they just don't get indexed or stored. We could not auto-detect which analyzer you ship to. Native configs are generated for Datadog, Splunk, Elasticsearch, and AWS CloudWatch. For any other analyzer the agent should ask the user and either generate the config (when supported) or hand-instruct apply (when not).`
     );
   }
   lines.push('');
@@ -848,26 +848,7 @@ async function executePatternMitigateInner(
     {
       tool: 'log10x_dependency_check',
       args: { pattern },
-      reason: 'safety gate — verifies no dashboards/alerts/saved-searches depend on the pattern before any drop is applied',
-    },
-    {
-      tool: 'log10x_exclusion_filter',
-      args: {
-        pattern,
-        vendor: analyzerSupported ? caps.analyzerVendor! : 'datadog',
-      },
-      reason: analyzerSupported
-        ? `option 1 — analyzer-side exclusion (auto-detected analyzer: ${caps.analyzerVendor})`
-        : caps.analyzerVendor
-          ? `option 1 — analyzer-side exclusion (detected analyzer: ${caps.analyzerVendor}, but log10x_exclusion_filter doesn't generate native configs for it; agent should hand-instruct rather than call this entry blindly)`
-          : `option 1 — analyzer-side exclusion (vendor unknown; agent should confirm with user before generating config)`,
-    },
-    {
-      tool: 'log10x_exclusion_filter',
-      args: { pattern, vendor: knownForwarder ? caps.forwarderKind! : 'fluentbit' },
-      reason: knownForwarder
-        ? `option 2 — forwarder-side drop (auto-detected forwarder: ${caps.forwarderKind})`
-        : 'option 2 — forwarder-side drop (forwarder unknown; agent should confirm with user before generating config)',
+      reason: 'safety gate, verifies no dashboards/alerts/saved-searches depend on the pattern before any drop is applied',
     },
   ];
   if (caps.canMute) {
@@ -887,11 +868,11 @@ async function executePatternMitigateInner(
 
   lines.push('');
   lines.push(agentOnly(
-    `Routing constraint: do not call any drop/mute/compact sub-tool until the user picks an option. ` +
-    `When they do, route option 1 → log10x_exclusion_filter with their analyzer vendor; option 2 → same tool with their forwarder vendor; ` +
-    `option 3 → log10x_advise_install; option 4 → log10x_configure_engine. ` +
+    `Routing constraint: do not act on any drop/mute/compact option until the user picks one. ` +
+    `When they do, for options 1 and 2 hand-instruct the analyzer-side or forwarder-side drop config (there is no separate sub-tool to call); ` +
+    `option 3 routes to log10x_advise_install; option 4 routes to log10x_configure_engine. ` +
     `For options 1 and 3, call log10x_dependency_check first and present its findings before generating the drop config. ` +
-    `log10x_exclusion_filter emits an exact tenx_hash drop as the primary config (precise, collision-proof) for structured-field vendors when the env's pipeline carries tenx_hash, with the message-regex form as fallback; the raw-line forwarders rsyslog/syslog-ng/promtail have no structured field so they keep the regex form. For options 1/2 on structured vendors, frame it as a precise drop, not an approximate regex match.` +
+    `For structured-field vendors whose pipeline carries tenx_hash, emit an exact tenx_hash drop as the primary config (precise, collision-proof) with the message-regex form as fallback; the raw-line forwarders rsyslog/syslog-ng/promtail have no structured field so they keep the regex form. For options 1/2 on structured vendors, frame it as a precise drop, not an approximate regex match.` +
     (caps.gitopsRepo ? ` Resolved gitops_repo: ${caps.gitopsRepo} (source: ${caps.gitopsSource}).` : '')
   ));
   lines.push('');

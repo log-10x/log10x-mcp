@@ -80,7 +80,7 @@ export function anyTokenMatches(haystack: string, tokens: string[]): boolean {
 }
 
 /**
- * Strict token-AND match using the templater's tokenization rules.
+ * Strict token-AND match using the 10x engine's tokenization rules.
  *
  * The haystack is split on non-alphanumeric runs and lower-cased to
  * produce a token set. The match passes when every supplied pattern
@@ -101,7 +101,7 @@ export function anyTokenMatches(haystack: string, tokens: string[]): boolean {
  *
  * This is the matcher the dependency-check tool uses on saved-search
  * names, queries, alert messages, and dashboard descriptions. It mirrors
- * the templater's symbol tokenization (split on non-alphanumeric, ≥ 2
+ * the 10x engine's symbol tokenization (split on non-alphanumeric, ≥ 2
  * chars) so a pattern like `Payment_Gateway_Timeout` matches a saved
  * search whose body says `payment gateway timeout` or
  * `Payment.Gateway.Timeout` but not one that just mentions `payment`.

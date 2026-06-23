@@ -2,16 +2,16 @@
  * @catalog_tier      A
  * @guardrail         pattern_id_stability
  * @routes_to         log10x_pattern_trend, log10x_pattern_examples, log10x_whats_new
- * @_audit_rationale  Restored cost_drivers capability with multi-offset baseline averaging (1x/2x/3x timeRange) joined per (pattern_hash, service, severity) tuple, applies DEFAULT_GATES floors, and EXCLUDES brand-new patterns to log10x_whats_new for clean delta-vs-baseline semantics. Uses local pattern_hash derivation (groupRowsByPattern). Differentiated framing + identity-stability join.
  *
  * log10x_whats_changing — patterns ranked by delta vs a baseline window.
  *
  * Answers the "what grew (or shrank) the most since X" question. Distinct
- * from `log10x_top_volume`, which ranks by current cost — this tool ranks
+ * from `log10x_top_volume`, which ranks by current cost. This tool ranks
  * by delta and applies gates that drop noise-level changes.
  *
- * Restores the capability of the deleted `log10x_cost_drivers` tool using
- * the modern StructuredOutput envelope and the shared baseline machinery in
+ * Multi-offset baseline averaging (1x/2x/3x timeRange) joined per
+ * (pattern_hash, service, severity) tuple, applies DEFAULT_GATES floors,
+ * using the StructuredOutput envelope and the shared baseline machinery in
  * `top-volume-extras.ts` / gates in `lib/gates.ts`.
  *
  * Brand-new patterns (no baseline samples) are EXCLUDED from this tool's
@@ -70,7 +70,7 @@ export const whatsChangingSchema = {
     .optional()
     .describe(
       `Dollar floor for delta. Rows with delta < min_delta_usd are dropped. ` +
-      `Default ${DEFAULT_GATES.minDollarPerWeek} (the cost_drivers gate). Set to 0 to disable.`,
+      `Default $${DEFAULT_GATES.minDollarPerWeek}/wk scaled to the selected timeRange window. Set to 0 to disable.`,
     ),
   min_delta_contribution_pct: z
     .number()
@@ -221,7 +221,12 @@ export async function executeWhatsChanging(
     cwLabel = `${m[1]}d offset`;
   }
 
-  const minDeltaUsd = args.min_delta_usd ?? DEFAULT_GATES.minDollarPerWeek;
+  // DEFAULT_GATES.minDollarPerWeek is a per-WEEK floor; scale it to the
+  // chosen window so a 1d run isn't gated against a 7-day dollar figure
+  // (over-filter ~7x) and a 30d run isn't gated against it (under-filter
+  // ~4.3x). An explicitly supplied value keeps its stated window semantics.
+  const minDeltaUsd =
+    args.min_delta_usd ?? (DEFAULT_GATES.minDollarPerWeek * tf.days / 7);
   const minDeltaContribPct = args.min_delta_contribution_pct ?? DEFAULT_GATES.minContributionPct;
   const minDeltaUsdIsDefault = args.min_delta_usd === undefined;
   const minContribIsDefault = args.min_delta_contribution_pct === undefined;
@@ -240,7 +245,7 @@ export async function executeWhatsChanging(
     threshold_basis: gatesAtDefault ? ('default' as const) : ('customer_supplied' as const),
     threshold_audit: {
       value: minDeltaUsd,
-      basis: `min_delta_usd=${minDeltaUsd} (default=${DEFAULT_GATES.minDollarPerWeek}), min_delta_contribution_pct=${minDeltaContribPct} (default=${DEFAULT_GATES.minContributionPct})`,
+      basis: `min_delta_usd=${minDeltaUsd.toFixed(2)} over ${tf.label} (default $${DEFAULT_GATES.minDollarPerWeek}/wk scaled to window), min_delta_contribution_pct=${minDeltaContribPct} (default=${DEFAULT_GATES.minContributionPct})`,
     },
   };
   const sourceDisclosure = {

@@ -149,10 +149,18 @@ export async function executeSigninComplete(
 ): Promise<string | StructuredOutput> {
   requireWriteAccess('completes sign-in and writes ~/.log10x/credentials');
   const md = await executeSigninCompleteInner(args, envs);
-  const okMatch = /^## Signed in to Log10x/m.test(md);
+  // Credentials were persisted on either the clean success header OR the
+  // reload-failure header (the in-process env reload hiccuped, but the API
+  // key is on disk and the user IS signed in). Treat the latter as success
+  // with a warning, not a failure, so the agent does not retry the flow.
+  const reloadFailed = /^## Signed in\. Env reload failed/m.test(md);
+  const okMatch = /^## Signed in to Log10x/m.test(md) || reloadFailed;
   const usernameMatch = md.match(/signed in as \*\*(.+?)\*\*/) || md.match(/Account\*\*: (.+?)\n/);
   const pathMatch = md.match(/saved to `(.+?)`/) || md.match(/saved to ([^\s]+) successfully/);
   const errorMessage = okMatch ? undefined : md.split('\n').find((l) => l.trim().length > 0 && !l.startsWith('#'));
+  const reloadWarning = reloadFailed
+    ? 'In-process env reload failed; restart your MCP host to pick up the new credentials.'
+    : undefined;
   const pathUsed = args.api_key ? 'pasted_api_key' : 'browser_device_flow';
   const human_summary = okMatch
     ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''} via ${pathUsed.replace(/_/g, ' ')}; credentials persisted to ${pathMatch?.[1] ?? '~/.log10x/credentials'}.`
@@ -167,6 +175,7 @@ export async function executeSigninComplete(
       credentials_path: pathMatch?.[1],
       path_used: pathUsed,
       error_message: errorMessage,
+      ...(reloadWarning ? { reload_warning: reloadWarning } : {}),
       human_summary,
     },
     actions: okMatch ? [{ tool: 'log10x_login_status', args: {}, reason: 'verify env list and identity now that sign-in completed' }] : [],

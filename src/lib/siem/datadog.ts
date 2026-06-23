@@ -191,7 +191,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
  *   2. attributes.attributes.message — common custom-format aliasing.
  *   3. attributes.attributes.log / .body / .raw — vendor variants.
  *   4. JSON.stringify(attributes.attributes) — last resort, gives the
- *      pattern templater something to fingerprint instead of `undefined`.
+ *      the 10x engine something to fingerprint instead of `undefined`.
  *
  * Returns null when every path is empty, so the caller can skip the
  * event and surface the count in metadata. The prior `?.message`

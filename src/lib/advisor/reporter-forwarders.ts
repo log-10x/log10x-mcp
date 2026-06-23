@@ -88,8 +88,8 @@ export interface ForwarderSpec {
    * (`optimize`, `readOnly`) for the two opt-in modes:
    *   - default (neither flag): receive + filter events, emit them in
    *     their original form back through the forwarder.
-   *   - optimize=true: receive + filter + losslessly compact (~20-40x
-   *     volume reduction).
+   *   - optimize=true: receive + filter + losslessly compact (~50-80%
+   *     volume reduction, per destination).
    *   - readOnly=true: receive + emit TenXSummary metrics, do NOT write
    *     events back through the forwarder (passive observation).
    *
@@ -128,8 +128,8 @@ export interface ForwarderSpec {
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
     gitToken?: string;
     /**
-     * When true, emit events in compact encoded form (templateHash+vars,
-     * ~20-40x volume reduction). Mutually exclusive with `readOnly`.
+     * When true, emit events in compact encoded form (~50-80% volume
+     * reduction, per destination). Mutually exclusive with `readOnly`.
      */
     optimize?: boolean;
     /**
@@ -635,7 +635,7 @@ ${destOutput}
       if (optimize) {
         probes.push({
           name: 'tenx-encoded-events',
-          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          question: 'Are events emitted in compact encoded form?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c fluent-bit --tail=500 | grep -oE '"log":"~[^"]{5,20},[0-9]{10,}' | head -3`,
           ],
@@ -947,7 +947,7 @@ bash "%~dp0post-render.sh"
       if (optimize) {
         probes.push({
           name: 'tenx-encoded-events',
-          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          question: 'Are events emitted in compact encoded form?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c fluentd --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
           ],
@@ -1293,7 +1293,7 @@ ${indent(destOutput, 6)}
       if (optimize) {
         probes.push({
           name: 'tenx-encoded-events',
-          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          question: 'Are events emitted in compact encoded form?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c logstash --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
           ],
@@ -1431,7 +1431,7 @@ ${indent(destSink, 4)}
       if (optimize) {
         probes.push({
           name: 'tenx-encoded-events',
-          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          question: 'Are events emitted in compact encoded form?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c vector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
           ],
@@ -1556,7 +1556,7 @@ ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
       if (optimize) {
         probes.push({
           name: 'tenx-encoded-events',
-          question: 'Are events emitted in compact encoded form (templateHash+vars)?',
+          question: 'Are events emitted in compact encoded form?',
           commands: [
             `kubectl -n ${namespace} logs -l ${sel} -c opentelemetry-collector --tail=500 | grep -oE '~[A-Za-z0-9]{5,20},[0-9]{10,}' | head -3`,
           ],

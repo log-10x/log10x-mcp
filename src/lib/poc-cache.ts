@@ -48,8 +48,8 @@ export interface CacheEntry {
 
 /**
  * Stable 16-char hex key over the user-visible cache-contributing
- * args. Excludes auth-style fields (analyzer_cost_per_gb,
- * privacy_mode) that don't affect the events or templater output.
+ * args. Excludes auth-style fields (analyzer_cost_per_gb)
+ * that don't affect the events or engine output.
  */
 export function computeCacheKey(args: CacheKeyArgs): string {
   const canonical = {

@@ -5,8 +5,8 @@
  * field-set structure (which fields exist, in what positions, with
  * what types). Two events that look logically "the same" but differ
  * structurally (one has `tags: []`, the other has `tags: ["x","y"]`)
- * get different templateHashes. The Reporter-tier templater
- * normalizes some of this and they can share a `symbolMessage`.
+ * get different templateHashes. The 10x engine normalizes some of
+ * this at the Reporter tier and they can share a `symbolMessage`.
  *
  * Naive use of `computeConcentration()` from
  * `src/lib/variable-concentration.ts` groups by templateHash. For

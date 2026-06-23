@@ -313,18 +313,18 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
   }
 
   // Structured NEXT_ACTIONS for autonomous chain agents. After dependency
-  // check, the canonical next steps are: generate a mute config (if no
+  // check, the canonical next steps are: build a mitigation plan (if no
   // critical dependencies surfaced) or look at the events (to confirm
   // what's being muted). When the scan didn't run (paste-mode fallback),
-  // exclusion_filter is still suggested but with explicit acknowledgement
-  // that no scan was performed — caller's responsibility to verify.
+  // pattern_mitigate is still suggested but with explicit acknowledgement
+  // that no scan was performed; caller's responsibility to verify.
   const nextActions: NextAction[] = [
     {
-      tool: 'log10x_exclusion_filter',
-      args: { pattern, vendor: args.vendor },
+      tool: 'log10x_pattern_mitigate',
+      args: { pattern },
       reason: scanRan
-        ? 'generate the drop / mute config after dependency review'
-        : 'generate the drop / mute config (NOTE: dependency scan did NOT run, verify dashboards / alerts manually first)',
+        ? 'build the drop / mute mitigation plan after dependency review'
+        : 'build the drop / mute mitigation plan (NOTE: dependency scan did NOT run, verify dashboards / alerts manually first)',
     },
     {
       tool: 'log10x_pattern_trend',

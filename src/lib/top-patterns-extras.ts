@@ -3,9 +3,9 @@
  *
  *   - **Badge classification** — per-row trajectory label (NEW / ACUTE /
  *     GROWING / STABLE / SHRINKING) derived from current-vs-baseline
- *     bytes. Mirrors the semantics in `cost-drivers.ts` (3-window
- *     baseline at offsets 7d/14d/21d) so the badge maps 1:1 to what
- *     log10x_cost_drivers would say for the same hash.
+ *     bytes. Uses a 3-window baseline at offsets 7d/14d/21d so the
+ *     badge maps 1:1 to what log10x_whats_changing would say for the
+ *     same hash.
  *   - **Service breadth** — count of distinct services emitting each
  *     hash, used to gate the "show service breakdown" CTA to multi-
  *     service rows only.
@@ -370,7 +370,7 @@ export async function fetchDepsPerHash(
  * Lifted from `exclusion-filter.ts`'s `generateHashFilter('datadog',
  * 'config', ...)` — kept here as a small standalone helper so
  * top_patterns can fold it inline without importing the full
- * exclusion_filter tool's surface.
+ * pattern_mitigate tool's surface.
  */
 export function datadogAnalyzerQuery(hash: string, service: string, severity: string): string {
   const parts = [`@tenx_hash:"${hash}"`];

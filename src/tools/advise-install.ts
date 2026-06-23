@@ -1,5 +1,5 @@
 /**
- * log10x_advise_install — the wizard front door.
+ * log10x_advise_install: the wizard front door.
  *
  * Progressive Q-and-A driver for a k8s install of the Log10x Reporter or
  * Receiver. Each call merges the user's latest answer into a wizard

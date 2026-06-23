@@ -180,8 +180,8 @@ interface PatternExamplesSummary {
   multi_line_detected: boolean;
   // Catalog-identity-handoff: the raw SIEM events pulled by the probe,
   // re-emitted in full (no truncation) so chain steps that need
-  // the live lines — e.g. resolve_batch, paste-triage, secondary templater
-  // passes — don't re-issue the same SIEM round-trip. Upstream probe size
+  // the live lines, e.g. resolve_batch, paste-triage, a secondary
+  // 10x-engine pass, don't re-issue the same SIEM round-trip. Upstream probe size
   // is bounded by probeBatch + maxPullMinutes so there is no runaway-size
   // risk. Strings are stringified once at emit time (events arrive as
   // `unknown[]` from the connector layer).
@@ -631,7 +631,7 @@ async function executePatternExamplesInner(
   let inputTemplateHash: string | undefined;
 
   if (looksLikeRawLogLine) {
-    // Pasted-line input: templatize once via tenx to discover the input
+    // Pasted-line input: run once through the 10x engine to discover the input
     // event's templateHash. The hash is the verification key. The probe
     // tokens come from the SAMPLE EVENT's content (the original raw text),
     // not the template body — pattern-extraction.ts sometimes returns
@@ -822,7 +822,7 @@ async function executePatternExamplesInner(
   // ── 6b. Optional slot_filter ───────────────────────────────────────
   // Drill-down: when the caller passes slot_filter={ name, value }, keep
   // only buckets whose `variables[name]` contains `value` (string match,
-  // case-sensitive — slot values are taken verbatim from the templater).
+  // case-sensitive, slot values are taken verbatim from the 10x engine).
   // The slot name matches BOTH the raw slot key AND the collapsed base
   // (e.g. `slot_4_part2` collapses to `slot_4` in the rendered output);
   // we check both so a filter named for the collapsed form still hits.
@@ -1182,7 +1182,7 @@ function buildVendorQuery(
  * Strips JSON envelope keys via the same field-priority list coerceToLine
  * uses (`.log`, `.message`, `attributes.message`, `_raw`). When the body
  * is bare (no envelope), uses it directly. Tokenizes on non-alphanumeric
- * runs ≥ 2 chars, deduped — matches the templater's symbol tokenization.
+ * runs ≥ 2 chars, deduped, matches the 10x engine's symbol tokenization.
  */
 function contentTokens(templateBody: string): Set<string> {
   if (!templateBody) return new Set();

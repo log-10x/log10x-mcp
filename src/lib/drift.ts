@@ -172,7 +172,7 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
   const cohortQ =
     `topk(${opts.thresholds.maxCohortSize}, ` +
     `-abs(${perPatternFractionalSlope} - ${anchorSlopePerWeek})` +
-    ` and ${perPatternFractionalSlope} > ${driftFloor}` +
+    ` and abs(${perPatternFractionalSlope}) > ${driftFloor}` +
     `)`;
 
   let cohort: CoDrifter[] = [];

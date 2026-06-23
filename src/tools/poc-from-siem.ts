@@ -1247,7 +1247,10 @@ function computeDailyProjection(
   if (volumeSource !== 'none' && ri.totalDailyGb && ri.totalDailyGb > 0) {
     const sampleGb = totalBytes / 1024 ** 3;
     const dailyFactor = sampleGb > 0 ? ri.totalDailyGb / sampleGb : 0;
-    const expected = projectBilling(totalCostWindow * dailyFactor, ri.windowHours, 24);
+    // totalCostWindow * dailyFactor already equals one full day's cost
+    // (totalDailyGb * analyzerCost); the daily volume is authoritative, so do
+    // NOT re-scale by 24/windowHours.
+    const expected = totalCostWindow * dailyFactor;
     dollarExpected = expected;
     const m = ri.volumeRangeMultiplier;
     dollarLow = m ? expected * m.low : expected;

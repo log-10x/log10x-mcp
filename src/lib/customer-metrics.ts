@@ -143,7 +143,7 @@ export function customerMetricsNotConfiguredMessage(diagnostic?: string): string
     '',
     '**Continuing without cross-pillar**:',
     '',
-    'The agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, cost_drivers) and archive tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.',
+    'The agent can still investigate using log-tier tools (event_lookup, pattern_trend, top_patterns, whats_changing) and offload-fetch tools (retriever_query, retriever_series). Skip cross-pillar correlation in this chain and surface the missing-backend state in the synthesis.',
   ];
   if (diagnostic) {
     lines.push('');

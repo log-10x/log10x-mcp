@@ -548,10 +548,16 @@ async function computeBaseline(
   const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH);
   const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
 
-  // growth_pct is a tail-ratio of the daily series — factor-invariant under
+  // growth_pct is a tail-ratio of the daily series, factor-invariant under
   // uniform scaling, so compute it from the UNSCALED validDays explicitly.
+  // It spans the first-7d centroid to the last-7d centroid (~validDays-7
+  // days), NOT one month, so normalize it to a true monthly compound rate
+  // before cubing for the 90d projection. Cubing the raw window ratio
+  // double/triple-counts growth on a 90d horizon.
   const growthPct = computeGrowthPct(validDays);
-  const monthlyUsdIn90d = monthlyUsd * Math.pow(1 + growthPct, 3);
+  const spanDays = Math.max(1, validDays.length - 7);
+  const monthlyRate = Math.pow(1 + growthPct, DAYS_PER_MONTH / spanDays) - 1;
+  const monthlyUsdIn90d = monthlyUsd * Math.pow(1 + monthlyRate, 3);
 
   const top = await fetchTopContributors(
     env,
@@ -604,17 +610,16 @@ async function computeBaseline(
       monthly_usd_in_90d: monthlyUsdIn90d,
       monthly_usd_in_90d_at_list: monthlyUsdIn90d,
       monthly_usd_in_90d_disclosed: monthlyUsdIn90dDisclosed,
-      // growth_pct is the MONTHLY COMPOUND rate (e.g. 0.36 = 36%/mo), but
-      // the field name + parent object ("projection_no_action_90d") biased
-      // CFO readers toward interpreting it as the 90d total growth, a 46%
-      // under-read risk. Surface both values with unambiguous names; keep
-      // the legacy growth_pct alias so existing consumers don't break.
+      // growth_pct is the HORIZON-SPAN growth (first-7d centroid to
+      // last-7d centroid, ~horizon minus 7 days), NOT a monthly rate. Keep
+      // it as the legacy alias so existing consumers don't break, but the
+      // 90d projection is driven by the derived monthly compound rate below.
       growth_pct: growthPct,
-      monthly_compound_growth_pct: growthPct,
+      monthly_compound_growth_pct: monthlyRate,
       // Emit the percent-shaped sibling so consumers reading `_pct` at
       // face value (where share_pct=16.09 means 16.09% in the same
       // envelope) get the consistent reading.
-      monthly_compound_growth_percent: growthPct * 100,
+      monthly_compound_growth_percent: monthlyRate * 100,
       horizon_total_growth_pct:
         monthlyUsd > 0 && monthlyUsdIn90d != null
           ? monthlyUsdIn90d / monthlyUsd - 1
@@ -764,9 +769,11 @@ function percentile(sorted: number[], p: number): number {
 }
 
 /**
- * Organic growth: (last 7d mean / first 7d mean) - 1, computed over
- * the window. Returns 0 when either tail is empty/zero or the window
- * is shorter than 14 days (not enough signal to extrapolate).
+ * Organic growth over the whole window: (last 7d mean / first 7d mean) - 1.
+ * This is the HORIZON-SPAN growth (across ~window minus 7 days), NOT a
+ * monthly rate; callers must normalize it to a monthly compound rate before
+ * extrapolating. Returns 0 when either tail is empty/zero or the window is
+ * shorter than 14 days (not enough signal to extrapolate).
  */
 function computeGrowthPct(days: number[]): number {
   const valid = days.filter((d) => Number.isFinite(d) && d >= 0);

@@ -24,6 +24,8 @@ export interface InvestigateThresholds {
     default: number;
   };
   maxCoMoversForLag: number;
+  /** Sliding-window width (seconds) for the Phase C lag-profile baseline. */
+  lagBaselineWidthSeconds: number;
   maxParallelPromqlQueries: number;
   lagSoftTimeoutMs: number;
   lagHardTimeoutMs: number;
@@ -44,6 +46,7 @@ const SPEC_DEFAULTS: InvestigateThresholds = {
     default: 0.03,
   },
   maxCoMoversForLag: 8,
+  lagBaselineWidthSeconds: 480,
   maxParallelPromqlQueries: 30,
   lagSoftTimeoutMs: 15_000,
   lagHardTimeoutMs: 30_000,

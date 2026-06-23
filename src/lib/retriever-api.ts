@@ -49,11 +49,11 @@ export class RetrieverNotConfiguredError extends Error {
   constructor() {
     super(
       'Retriever endpoint not configured for this MCP install. ' +
-        'log10x_retriever_query and log10x_backfill_metric cannot reach the S3 archive in this session.\n\n' +
+        'log10x_retriever_query and log10x_backfill_metric cannot reach your S3 offload bucket in this session.\n\n' +
         'Two possible causes:\n' +
         '  1. Retriever IS deployed but MCP env vars are unset. Fix: set __SAVE_LOG10X_RETRIEVER_URL__ ' +
         'to the retriever query handler URL (e.g., the NLB) and __SAVE_LOG10X_RETRIEVER_BUCKET__ to the ' +
-        'archive bucket, then restart the MCP client.\n' +
+        'offload bucket, then restart the MCP client.\n' +
         '  2. Retriever is NOT deployed for this customer. Fix: deploy per ' +
         'https://doc.log10x.com/apps/cloud/retriever/\n\n' +
         'Workaround for the current request: if the events you need are inside SIEM hot retention ' +
@@ -1479,6 +1479,7 @@ export async function runRetrieverQuery(
   // reachable server that is rejecting the request.
   let transport: 'http' | 'sqs' = 'http';
   let httpErr: unknown;
+  let sqsStarted: number | undefined;
   try {
     await submitQuery(env, body);
   } catch (err: unknown) {
@@ -1501,6 +1502,7 @@ export async function runRetrieverQuery(
     // HTTP transport failed at the network layer. Attempt SQS fallback.
     const sqsTimeoutMs = parseInt(process.env.LOG10X_RETRIEVER_SQS_TIMEOUT_MS || '60000', 10);
     try {
+      sqsStarted = Date.now();
       await submitViaSqs(body, sqsTimeoutMs);
       transport = 'sqs';
     } catch (sqsErr: unknown) {
@@ -1753,7 +1755,9 @@ export async function runRetrieverQuery(
     buckets,
     countSummary,
     transport,
-    ...(transport === 'sqs' ? { sqsLatencyMs: wallTimeMs } : {}),
+    ...(transport === 'sqs' && sqsStarted !== undefined
+      ? { sqsLatencyMs: Date.now() - sqsStarted }
+      : {}),
   };
 
   // Attach CloudWatch-sourced execution diagnostics. Best-effort — polling

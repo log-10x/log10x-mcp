@@ -526,8 +526,8 @@ export async function executeTopPatterns(
     ),
     // Baseline bytes at 7d/14d/21d offsets — drives the trajectory
     // badge (NEW / ACUTE / GROWING / STABLE / SHRINKING). Mirrors
-    // cost_drivers' 3-window baseline so the badge tells the same
-    // story log10x_cost_drivers would for the same hash.
+    // whats_changing's 3-window baseline so the badge tells the same
+    // story log10x_whats_changing would for the same hash.
     fetchBaselineBytes(env, filters, metricsEnv, tf.range),
     // Distinct services emitting each hash — single grouped query,
     // post-processed locally. Gates the "service breakdown" CTA.
@@ -711,7 +711,7 @@ export async function executeTopPatterns(
   // context can EXECUTE the differentiated follow-ups instead of having
   // to compose the right call. Every arg is verified against the target
   // tool's schema (investigate=starting_point, correlate=anchor+
-  // anchor_type, savings/cost_drivers=timeRange; tf.range is the PromQL
+  // anchor_type, savings=timeRange; tf.range is the PromQL
   // form, e.g. "1h"). Ordered by differentiated value.
   const nextActions: NextAction[] = [];
   const topActive = renderRows.find(r => r.hash);

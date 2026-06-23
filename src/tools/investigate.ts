@@ -851,15 +851,15 @@ async function executeInvestigateInner(
   const resolution = await resolveAnchor(args.starting_point, env, metricsEnv, args.window, effectiveBaselineOffset);
 
   if (resolution.mode === 'environment') {
-    // For windows longer than 16 days, route to cost_drivers. Two reasons:
+    // For windows longer than 16 days, route to whats_changing. Two reasons:
     //   1. Prometheus instant-query 32-day span limit makes it IMPOSSIBLE to
     //      compare "last 30d" to "30d ago" (60d total span) in one query.
     //   2. Even with a shorter offset like 1d, the ratio is meaningless: 29
     //      of 30 days overlap, so any real inflection returns ≈0% change.
     //      Example: a real regression 6 days ago reports as "-0%" because
     //      the comparison is 30d vs 30d-minus-1d (29 of 30 days overlap).
-    // The correct tool for multi-week drift is cost_drivers (chunked range
-    // query path). Route explicitly rather than produce a silently-broken
+    // The correct tool for multi-week drift is whats_changing (week-over-week
+    // drift path). Route explicitly rather than produce a silently-broken
     // audit.
     const windowExceedsAuditCapability = windowSecs > 16 * 86400;
     if (exceedsPromRangeLimit || windowExceedsAuditCapability) {
@@ -873,13 +873,13 @@ async function executeInvestigateInner(
         `## Investigation: ${userVisibleStartingPoint(args.starting_point)}, last ${args.window}`,
         '',
         `**Investigation id**: ${investigationId}`,
-        `**Result**: Routed to \`log10x_cost_drivers\`.`,
+        `**Result**: Routed to \`log10x_whats_changing\`.`,
         '',
-        `This question routes better through \`log10x_cost_drivers\`: ${reason}. \`cost_drivers\` uses a chunked range-query path that handles long-window drift correctly and produces per-service week-over-week deltas.`,
+        `This question routes better through \`log10x_whats_changing\`: ${reason}. \`whats_changing\` handles long-window drift correctly and produces per-service week-over-week deltas.`,
         '',
         '**Try instead**:',
-        `- \`log10x_cost_drivers({ timeRange: '7d' })\` for global drift ranking (week-over-week)`,
-        `- \`log10x_cost_drivers({ timeRange: '30d' })\` for monthly drift`,
+        `- \`log10x_whats_changing({ timeRange: '7d' })\` for global drift ranking (week-over-week)`,
+        `- \`log10x_whats_changing({ timeRange: '30d' })\` for monthly drift`,
         `- \`log10x_investigate({ starting_point: 'environment', window: '7d' })\` if you want the audit layout with a backend-safe window`,
         `- \`log10x_pattern_trend({ pattern: '<specific>', timeRange: '30d', step: '1h' })\` for a single-pattern 30-day time series`,
       ].join('\n');
@@ -955,14 +955,14 @@ async function executeInvestigateInner(
           `**Result**: Could not resolve "${args.starting_point}" to a known pattern or service.`,
           '',
           '**Supported inputs**:',
-          '- A raw log line (will be templatized and matched by structural identity)',
+          '- A raw log line (will be resolved to a pattern and matched by structural identity)',
           '- A pattern identity (symbolMessage / pattern_hash — 11-char base64url)',
           '- A service name',
           '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
           '',
           '**Try next**:',
           `- \`log10x_event_lookup({ pattern: '${args.starting_point}' })\` to search by substring`,
-          `- \`log10x_list_by_label({ label: 'tenx_user_service' })\` to list known services`,
+          `- \`log10x_discover_labels({ label: 'tenx_user_service' })\` to list known services`,
         );
       }
     }

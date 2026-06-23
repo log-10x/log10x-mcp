@@ -262,7 +262,12 @@ async function executeSavingsInner(
   // concurrent requests quadruples wall time with zero improvement in coverage).
   // The root cause is server-side and cannot be fixed from the client. The
   // coverage annotation surfaces the partial-data honestly to the caller.
-  const chunkOffsets = Array.from({ length: tf.days }, (_, i) => i);
+  // Sub-day windows (15m/1h/6h) make tf.days fractional; Array.from with a
+  // fractional length floors to 0, which would silently zero the retriever
+  // leg. For sub-day windows query a single shot over tf.range instead of
+  // per-day [1d] chunks. Math.ceil guards any future non-integer day value.
+  const subDay = tf.days < 1;
+  const chunkOffsets = subDay ? [0] : Array.from({ length: Math.ceil(tf.days) }, (_, i) => i);
   const chunkSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
     const results = await Promise.all(
       chunkOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
@@ -301,8 +306,20 @@ async function executeSavingsInner(
          edgeIn7dRes, edgeOut7dRes, indexed7dResult, streamed7dResult] = await Promise.all([
     queryInstant(env, pql.edgeInputBytes(tf.range)).catch(() => null),
     queryInstant(env, pql.edgeEmittedBytes(tf.range)).catch(() => null),
-    chunkSum(pql.retrieverIndexedBytesChunk),
-    chunkSum(pql.retrieverStreamedBytesChunk),
+    subDay
+      ? (async () => {
+          const r = await queryInstant(env, pql.retrieverIndexedBytes(tf.range)).catch(() => null);
+          const v = r?.data?.result?.[0] ? parsePrometheusValue(r.data.result[0]) : 0;
+          return { sum: r ? v : 0, succeeded: r ? 1 : 0, total: 1 };
+        })()
+      : chunkSum(pql.retrieverIndexedBytesChunk),
+    subDay
+      ? (async () => {
+          const r = await queryInstant(env, pql.retrieverStreamedBytes(tf.range)).catch(() => null);
+          const v = r?.data?.result?.[0] ? parsePrometheusValue(r.data.result[0]) : 0;
+          return { sum: r ? v : 0, succeeded: r ? 1 : 0, total: 1 };
+        })()
+      : chunkSum(pql.retrieverStreamedBytesChunk),
     queryInstant(env, pql.pipelineUp()).catch(() => null),
     queryInstant(env, pql.distinctServices(tf.range)).catch(() => null),
     fetch7d ? queryInstant(env, pql.edgeInputBytes('7d')).catch(() => null) : Promise.resolve(null),

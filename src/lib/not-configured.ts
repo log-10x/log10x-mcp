@@ -245,7 +245,7 @@ export function defaultActionsForKind(kind: NotConfiguredKind): Action[] {
         {
           tool: 'log10x_advise_retriever',
           args: {},
-          reason: 'stand up the Retriever S3 archive + index, then re-run',
+          reason: 'stand up the Retriever offload bucket + index, then re-run',
           role: 'required-next',
         },
       ];

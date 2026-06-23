@@ -7,7 +7,7 @@
  *
  * The same builder serves both apps. The current chart format unifies
  * around a single Receiver workload with two opt-in feature flags:
- *   - `optimize` — losslessly compact events (~20-40x volume reduction).
+ *   - `optimize`: losslessly compact events (~50-80% reduction; per-destination, lossless only on Splunk / self-hosted ES / ClickHouse).
  *   - `readOnly` — emit metrics, do NOT write events back through the
  *     forwarder (passive observation).
  * The flags are mutually exclusive at the chart level. AdvisorApp keeps
@@ -81,8 +81,8 @@ export interface ReporterAdviseArgs {
   /** Splunk HEC token if destination=splunk. */
   splunkHecToken?: string;
   /**
-   * Enable encoded event output (compact templateHash+vars form,
-   * ~20-40x volume reduction). Only meaningful when app='receiver';
+   * Enable encoded event output (compact encoded form,
+   * ~50-80% reduction per-destination). Only meaningful when app='receiver';
    * blocks when app='reporter' (Reporter has no write-back path to
    * encode events on). Maps to `tenx.optimize: true` in every
    * supported chart's values.yaml.
@@ -422,7 +422,7 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, ~20-40x smaller) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`) — the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, typically 50-80% smaller where the destination is compaction-capable) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',

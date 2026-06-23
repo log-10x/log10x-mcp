@@ -25,13 +25,6 @@
  * LEGACY ONE-SHOT PRESERVED: when all infra args are supplied explicitly on
  * the first call (no wizard state), the tool still emits a plan immediately
  * (backward-compat with callers that supply everything at once).
- *
- * ARCHIVED ORIGINAL (109 lines, one-shot flat emitter):
- *   The original executeAdviseRetriever called buildRetrieverPlan() + buildAdvisePlanEnvelope()
- *   directly with no question loop. It is preserved in git history
- *   (commit before this file was replaced). The buildRetrieverPlan() and
- *   buildAdvisePlanEnvelope() call-sites below are unchanged — the wizard
- *   is a session-accumulation shell around the existing plan builder.
  */
 
 import { z } from 'zod';

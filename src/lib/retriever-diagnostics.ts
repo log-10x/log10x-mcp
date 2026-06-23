@@ -411,7 +411,7 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
     if (diag.scanStats.matched === 0) {
       return `The Bloom filter scanned ${diag.scanStats.scanned} index objects and none matched. ` +
         `${diag.scanStats.skippedSearch} skipped by search filter, ${diag.scanStats.skippedTemplate} by template filter. ` +
-        'The search tokens do not exist in the archive for this time range.';
+        'The search tokens do not exist in the offload bucket for this time range.';
     }
     // Bloom matched but no result events. Distinguish, in order:
     //  (a) workers still running when polled (incomplete),

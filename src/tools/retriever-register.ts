@@ -5,7 +5,7 @@
  * The env document is the single source of truth for everything tools
  * need to act on a given Log10x environment: cluster identity, SIEM
  * destination, offload destinations, streamer endpoint, and (this
- * tool's responsibility) the Retriever block — query URL, archive
+ * tool's responsibility) the Retriever block: query URL, offload
  * bucket, and the four SQS queues the Retriever coordinates on.
  *
  * Precondition: the environment must already exist in the env-config
@@ -56,7 +56,7 @@ export const retrieverRegisterSchema = {
     .string()
     .min(1)
     .describe(
-      'S3 bucket holding the Retriever archive (encoded events + byte-range index). Example: `acme-prod-retriever-archive`.'
+      'S3 bucket holding the offloaded events + byte-range index. Example: `acme-prod-retriever-offload`.'
     ),
   input_prefix: z
     .string()

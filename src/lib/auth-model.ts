@@ -25,7 +25,7 @@
  * | Acquired via   | `POST /api/v1/auth/token` (exchanges Auth0 token)|
  *
  * Used for: every gateway call the MCP makes on the user's behalf —
- * queries (cost_drivers, top_patterns, retriever_query, etc.), env
+ * queries (top_patterns, whats_changing, retriever_query, etc.), env
  * management (create / update / delete env), profile + settings,
  * billing, marketplace link.
  *

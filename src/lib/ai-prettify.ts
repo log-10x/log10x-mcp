@@ -13,17 +13,16 @@
  * `createMessage` call throws), fail-soft back to raw identities plus a
  * one-line appendix note. The report still renders — just less pretty.
  *
- * Design note: we send templated pattern identities (variable values
- * already stripped by the templater) along with severity + service.
- * No raw log content. Far lower sensitivity than the paste Lambda,
- * which sent raw log lines.
+ * Design note: we send pattern identities (variable values already
+ * stripped by the 10x engine) along with severity + service.
+ * No raw log content.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 const PROMPT_HEADER = [
   'You are generating short human-readable names for log event patterns.',
-  'Each row below is one templatized pattern — variable values have been replaced with underscores.',
+  'Each row below is one log pattern, variable values have been replaced with underscores.',
   'Your job: produce a 3-5-word title-case name for each pattern.',
   '',
   'Rules:',

@@ -61,7 +61,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / cost_drivers and wants the offloaded events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / whats_changing and wants the offloaded events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
     ),
   pattern_hash: z
     .string()
@@ -777,12 +777,14 @@ async function executeRetrieverQueryInner(
               break;
             }
           }
-          if (!patternHashForNudge) {
+          if (!patternHashForNudge && hashes.size === 1) {
             // Pattern name didn't ride on the event payload (older
-            // archive shape). Fall back to "any single hash is
-            // offloaded" — we already scoped the search to one pattern,
-            // so a single hash in the result set is overwhelmingly the
-            // same pattern.
+            // offload shape), but the scan really did bring back a single
+            // distinct pattern (one tenx_hash). Only then is it safe to
+            // attribute the single offloaded hash to args.pattern. If the
+            // result set has multiple distinct patterns we suppress the
+            // per-pattern nudge and fall back to the generic offload
+            // NEXT_ACTION below.
             const offloadedHashes = Object.entries(offloadByHash).filter(([, s]) => s.is_offloaded);
             if (offloadedHashes.length === 1) patternHashForNudge = offloadedHashes[0][0];
           }

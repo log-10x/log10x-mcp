@@ -1,7 +1,7 @@
 /**
  * MetricsBackend — interface + factory for the log10x engine's metrics store.
  *
- * The MCP queries this for every metric tool (top_patterns, cost_drivers,
+ * The MCP queries this for every metric tool (top_patterns, whats_changing,
  * pattern_trend, event_lookup, etc.). Today's hardcoded path to
  * `prometheus.log10x.com` is replaced by a per-env discriminated union:
  * log10x hosted, customer's self-hosted Prometheus / Mimir / Cortex,
@@ -13,7 +13,7 @@
  *
  * Parallel to but distinct from `CustomerMetricsBackend` in
  * `customer-metrics.ts` (which targets the customer's cross-pillar APM
- * metrics, not log10x's own engine output). Both use Prometheus-shaped
+ * metrics, not 10x's own engine output). Both use Prometheus-shaped
  * reads; we keep the interfaces separate to reflect the different
  * schemas while sharing transport idioms.
  *

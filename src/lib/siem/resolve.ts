@@ -2,7 +2,7 @@
  * Shared SIEM-vendor resolution.
  *
  * Every vendor-taking tool (poc_from_siem_submit, dependency_check,
- * exclusion_filter, advise_*) used to roll its own "is the user explicit
+ * pattern_mitigate, advise_*) used to roll its own "is the user explicit
  * or should we sniff env vars?" logic. This module centralizes that, so
  * the same priority + ambiguity rules apply everywhere:
  *
@@ -16,8 +16,8 @@
  *      or use a default.
  *
  * Tools that only support a subset of SIEMs (dep-check covers 4 of 8;
- * exclusion_filter SIEM subset covers the same 4) pass `restrictTo` to
- * scope discovery — both ambiguity and none-found resolve against the
+ * pattern_mitigate SIEM subset covers the same 4) pass `restrictTo` to
+ * scope discovery. Both ambiguity and none-found resolve against the
  * narrower set.
  */
 

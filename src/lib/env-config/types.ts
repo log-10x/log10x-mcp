@@ -84,7 +84,7 @@ export const streamerConfigSchema = z.object({
 
 /**
  * Retriever endpoint and the queues it owns. The retriever reads from
- * `input_bucket` (the archive), serves queries via `url`, and uses the four
+ * `input_bucket` (the customer-owned overflow bucket), serves queries via `url`, and uses the four
  * SQS queues for index/subquery/stream/query coordination. `query_log_group`
  * is the CloudWatch group we tail when investigating retriever failures.
  */
