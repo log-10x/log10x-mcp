@@ -25,6 +25,13 @@
  * Width is data-driven (one column per bucket up to `widthCap`).
  */
 
+/**
+ * Span at/above which both axes roll up to days: the x-axis labels in days
+ * and the y-axis renders volume per-day. 48h keeps day-scale windows (24h,
+ * 36h) legible in hours while rolling 7d/30d into days.
+ */
+const DAY_AXIS_THRESHOLD_SEC = 48 * 3600;
+
 export interface LineChartOpts {
   /** Max chart columns. Data wider than this is max-pooled into widthCap buckets. */
   widthCap?: number;
@@ -39,14 +46,19 @@ export interface LineChartOpts {
 
 /**
  * Render a line chart. Input `vals` are byte-rates (bytes/second from
- * a PromQL `rate(...)` query). The y-axis renders **volume per hour**
- * (MB/h, with KB/h fallback for low-volume patterns) — chosen over
- * $/h because:
- *   1. the row header already names the cost; the chart's job is the
- *      *trend shape*, not a second cost readout
- *   2. cost = volume × $/GB is a linear scaling, so the shape is
- *      identical either way — volume just parses faster (no mental
- *      $-conversion)
+ * a PromQL `rate(...)` query). The y-axis renders **volume per period**,
+ * where the period matches the x-axis span: per-hour for sub-2-day
+ * windows, per-day once the window is multi-day. This keeps the chart's
+ * unit aligned with the per-day prose the tools narrate at week/month
+ * scale (e.g. "73.7 GB/day") instead of forcing the reader to reconcile a
+ * "3069 MB/h" peak against it. The KB/MB/GB scale is then chosen from the
+ * peak so low-volume noise isn't a row of "0.0" labels. Volume (not $/h)
+ * because the row header already names the cost and cost = volume × $/GB
+ * is a linear scale, so the trend shape is identical either way.
+ *
+ * The x-axis likewise picks ONE time unit for the whole axis from the
+ * total span — minutes / hours / days — so a 30-day window reads
+ * "-30d / -15d / now" rather than an unreadable "-720h / -360h".
  *
  * Returns `null` if there is nothing to render (all zero / empty input);
  * callers fall back to a textual note.
@@ -124,26 +136,28 @@ export function lineChart(vals: number[], opts: LineChartOpts = {}): string | nu
     }
   }
 
-  // Format y-axis values as volume per hour. `vals` are bytes/sec.
-  // Adaptive unit: MB/h for typical patterns, KB/h when peak < 1 MB/h
-  // so low-volume noise doesn't render as a row of "0.0 MB/h" labels.
-  const peakMbPerHr = (maxV * 3600) / 1e6;
-  const useKb = peakMbPerHr < 1;
+  // Format y-axis values as volume per PERIOD. `vals` are bytes/sec. The
+  // period matches the x-axis span — per-day once multi-day, else per-hour —
+  // so the unit agrees with the per-day prose the tools narrate at week/month
+  // scale. The KB/MB/GB scale is chosen from the peak in that period so
+  // low-volume noise isn't a row of "0.0" labels and month-scale floods don't
+  // overflow into five-digit MB.
+  const spanSec = opts.spanSeconds ?? 0;
+  const periodSec = spanSec >= DAY_AXIS_THRESHOLD_SEC ? 86400 : 3600;
+  const periodSuffix = periodSec === 86400 ? '/day' : '/h';
+  const peakPerPeriod = maxV * periodSec;
+  const [scaleDiv, scaleUnit]: readonly [number, string] =
+    peakPerPeriod >= 1e9 ? [1e9, 'GB']
+      : peakPerPeriod >= 1e6 ? [1e6, 'MB']
+        : [1e3, 'KB'];
   const fmtY = (bytesPerSec: number): string => {
-    if (useKb) {
-      const kbPerHr = (bytesPerSec * 3600) / 1e3;
-      if (kbPerHr >= 100) return `${kbPerHr.toFixed(0)} KB/h`;
-      if (kbPerHr >= 10) return `${kbPerHr.toFixed(1)} KB/h`;
-      return `${kbPerHr.toFixed(2)} KB/h`;
-    }
-    const mbPerHr = (bytesPerSec * 3600) / 1e6;
-    if (mbPerHr >= 100) return `${mbPerHr.toFixed(0)} MB/h`;
-    if (mbPerHr >= 10) return `${mbPerHr.toFixed(1)} MB/h`;
-    return `${mbPerHr.toFixed(1)} MB/h`;
+    const v = (bytesPerSec * periodSec) / scaleDiv;
+    const digits = v >= 100 ? 0 : 1;
+    return `${v.toFixed(digits)} ${scaleUnit}${periodSuffix}`;
   };
 
   const peakLbl = zoomed ? `peak  ${fmtY(maxV)}` : fmtY(maxV);
-  const floorLbl = zoomed ? `floor ${fmtY(floorV)}` : (useKb ? '0 KB/h' : '0 MB/h');
+  const floorLbl = zoomed ? `floor ${fmtY(floorV)}` : `0 ${scaleUnit}${periodSuffix}`;
   const labelW = Math.max(peakLbl.length, floorLbl.length) + 1;
 
   const lines: string[] = [];
@@ -156,18 +170,21 @@ export function lineChart(vals: number[], opts: LineChartOpts = {}): string | nu
 
   // X-axis labels. If caller gave us span_seconds, use it. Otherwise we
   // can't honestly label the axis (length-of-array tells us nothing
-  // about the underlying step).
-  const spanMin = opts.spanSeconds ? Math.floor(opts.spanSeconds / 60) : 0;
-  if (spanMin > 0) {
-    let left: string;
-    let mid: string;
-    if (spanMin >= 60) {
-      left = `-${Math.floor(spanMin / 60)}h`;
-      mid = `-${Math.floor(spanMin / 120)}h`;
-    } else {
-      left = `-${spanMin}m`;
-      mid = `-${Math.floor(spanMin / 2)}m`;
-    }
+  // about the underlying step). Pick ONE unit for the whole axis from the
+  // total span — minutes (<1h), hours (<48h), days (>=48h) — so both ticks
+  // read in the same unit ("-30d / -15d", never "-30d / -360h").
+  if (spanSec > 0) {
+    const [unitSec, unitSuffix]: readonly [number, string] =
+      spanSec >= DAY_AXIS_THRESHOLD_SEC ? [86400, 'd']
+        : spanSec >= 3600 ? [3600, 'h']
+          : [60, 'm'];
+    // One decimal, trailing-zero trimmed: 30 -> "30", 3.5 -> "3.5".
+    const trim = (n: number): string => {
+      const r = Math.round(n * 10) / 10;
+      return Number.isInteger(r) ? String(r) : r.toFixed(1);
+    };
+    const left = `-${trim(spanSec / unitSec)}${unitSuffix}`;
+    const mid = `-${trim(spanSec / unitSec / 2)}${unitSuffix}`;
     const right = 'now';
     const dataChars = new Array(width).fill(' ');
     // left aligned at col 0
