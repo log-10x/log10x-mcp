@@ -2918,7 +2918,7 @@ function renderUnifiedDiff(before: string, after: string): string {
 }
 
 // ─── PR command rendering ─────────────────────────────────────────────
-function renderPrCommand(
+export function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
   csvDiff: string
@@ -2931,6 +2931,13 @@ function renderPrCommand(
 
   // Reconstruct post-merge CSV from the diff additions.
   const newCsv = reconstructAfterCsv(csvDiff, args.current_csv);
+  // Stamp the policy generation alongside caps.csv (mirrors the kubectl
+  // ConfigMap path): the engine advertises it as tenx_config_version, and the
+  // config-generation closed loop needs it to verify a gitops-deployed policy.
+  // Without it, engines deployed via gitops never stamp the version and
+  // verifyConfigGeneration stays perpetually "stale".
+  const genCsv = renderGenerationCsv(computeGeneration(newCsv));
+  const genPath = lookupPath.replace(/[^/]*$/, 'config-generation.csv');
 
   const out: string[] = [];
   out.push('```bash');
@@ -2938,6 +2945,7 @@ function renderPrCommand(
   out.push(`REPO=${shellQuote(repo)}`);
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
+  out.push(`GEN_PATH=${shellQuote(genPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -2945,6 +2953,11 @@ function renderPrCommand(
   out.push("cat > \"$TMPFILE\" <<'CSV_EOF'");
   out.push(newCsv.trimEnd());
   out.push('CSV_EOF');
+  out.push('');
+  out.push('GENFILE=$(mktemp)');
+  out.push("cat > \"$GENFILE\" <<'GEN_EOF'");
+  out.push(genCsv.trimEnd());
+  out.push('GEN_EOF');
   out.push('');
 
   out.push('# Resolve current file SHA (empty if the file does not exist yet).');
@@ -2969,6 +2982,17 @@ function renderPrCommand(
   out.push('  -f content="$CONTENT_B64" )');
   out.push('[ -n "$CUR_SHA" ] && PUT_ARGS+=( -f sha="$CUR_SHA" )');
   out.push('gh api "${PUT_ARGS[@]}"');
+  out.push('');
+  out.push('# Commit config-generation.csv (sibling of caps.csv) so the engine');
+  out.push('# stamps tenx_config_version and the closed loop can verify this policy.');
+  out.push('GEN_CUR_SHA=$(gh api "/repos/$REPO/contents/$GEN_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
+  out.push('GEN_CONTENT_B64=$(base64 < "$GENFILE" | tr -d "\\n")');
+  out.push('GEN_PUT_ARGS=( -X PUT "/repos/$REPO/contents/$GEN_PATH"');
+  out.push('  -f branch="$BRANCH"');
+  out.push('  -f message="$PR_TITLE (config-generation)"');
+  out.push('  -f content="$GEN_CONTENT_B64" )');
+  out.push('[ -n "$GEN_CUR_SHA" ] && GEN_PUT_ARGS+=( -f sha="$GEN_CUR_SHA" )');
+  out.push('gh api "${GEN_PUT_ARGS[@]}"');
   out.push('');
   out.push('# Open PR.');
   out.push('gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \\');
