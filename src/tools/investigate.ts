@@ -52,6 +52,19 @@ import { PATTERN_HASH_REGEX } from '../lib/pattern-reference-resolver.js';
 import type { Action, StructuredOutput } from '../lib/output-types.js';
 
 /**
+ * Interactive deadline for investigate's retriever escalation (stage 1). The
+ * Lambda-mode retriever has a ~100s cold-start floor, so the original 150s
+ * budget waited that out for CLI/batch — but it exceeds interactive MCP-client
+ * timeouts (the dev bridge caps one tool call at 120s) and hangs outright on an
+ * unreachable retriever. Default to a short interactive budget that degrades to
+ * retrieverFallback='unavailable' (the metrics-based analysis still returns);
+ * set LOG10X_INVESTIGATE_RETRIEVER_TIMEOUT_MS=150000 for CLI/batch that wants
+ * the deep historical pass on a cold retriever.
+ */
+const RETRIEVER_ESCALATION_TIMEOUT_MS =
+  parseInt(process.env.LOG10X_INVESTIGATE_RETRIEVER_TIMEOUT_MS || '15000', 10) || 15000;
+
+/**
  * pattern_hash never appears in user-facing prose. When the
  * starting_point looks like a raw 11-char hash, render it as a generic
  * "this pattern" descriptor instead of echoing the hash. The actual hash
@@ -1206,11 +1219,13 @@ async function executeInvestigateInner(
           bucketSize: '1d',
           limit: 10_000,
         },
-        // Measured cold floor on a Lambda-mode retriever is ~100s (worker
-        // cold-start dominates; window size barely matters). 30s guaranteed
-        // a silent catch -> retrieverFallback='unavailable' on every cold
-        // call — stage 1 was a production no-op. 150s covers cold + headroom.
-        { timeoutMs: 150_000 }
+        // Interactive deadline (RETRIEVER_ESCALATION_TIMEOUT_MS, default 15s):
+        // on a warm retriever stage 1 returns fast; on a cold (~100s floor) or
+        // unreachable retriever it degrades to retrieverFallback='unavailable'
+        // instead of hanging past the MCP client timeout. The metrics-based
+        // analysis still returns. Override the env var for CLI/batch that wants
+        // to wait out a cold start.
+        { timeoutMs: RETRIEVER_ESCALATION_TIMEOUT_MS }
       );
       retrieverFallback = 'stage_1_only';
       // When Stage 1 reveals enough buckets with sustained movement, Stage 2
