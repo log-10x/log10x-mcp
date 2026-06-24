@@ -30,7 +30,8 @@ import { z } from 'zod';
 import { writeFile } from 'node:fs/promises';
 import type { EnvConfig } from '../lib/environments.js';
 import { loadEnvironments } from '../lib/environments.js';
-import { queryInstant, queryRange } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import { LABELS } from '../lib/promql.js';
 import * as pql from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
@@ -269,15 +270,19 @@ async function fetchFromTsdb(
   );
 
   const [topRes, totalRes, distinctRes] = await Promise.all([
-    queryInstant(env, topQ),
-    queryInstant(
+    // increase[30d] surfacing per-pattern EXACT bytes → heavy budget.
+    iQueryInstant(env, topQ, QUERY_BUDGET.heavy),
+    // increase[30d] surfacing the EXACT full-service byte total → heavy budget.
+    iQueryInstant(
       env,
       `sum(increase(all_events_summaryBytes_total{${scopeFilter}}[${timeRange}]))`,
-    ).catch(() => null),
-    queryInstant(env, distinctQ).catch(() => null),
+      QUERY_BUDGET.heavy,
+    ),
+    // count() of distinct patterns → cheap budget.
+    iQueryInstant(env, distinctQ, QUERY_BUDGET.cheap),
   ]);
 
-  if (topRes.status !== 'success' || topRes.data.result.length === 0) {
+  if (!topRes || topRes.status !== 'success' || topRes.data.result.length === 0) {
     return {
       rows: [],
       patternCountTotal: null,
@@ -338,38 +343,49 @@ async function fetchFromTsdb(
 
   const hashes = rawRows.map((r) => r.hash).filter(Boolean);
 
-  const [firstSeenByHash, ...primaryTrendResults] = await Promise.all([
-    fetchFirstSeenBatch(env, hashes),
-    ...rawRows.map((r) =>
-      r.hash
-        ? queryRange(
-            env,
-            `sum by (${LABELS.hash}) (rate(emitted_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
-            trendStart,
-            now,
-            trendStep,
-          ).catch(() => null)
-        : Promise.resolve(null),
-    ),
-  ]);
+  // fetchFirstSeenBatch is already internally bounded (boundedFanout +
+  // iQueryRange); keep it as a standalone batch await rather than racing it
+  // inside the per-row trend fan-out.
+  const firstSeenByHash = await fetchFirstSeenBatch(env, hashes);
+
+  // Primary trend wave: one rate([5m]) range query per row, bounded so a slow
+  // backend cannot stall the whole list. Values feed the sparkline only (not an
+  // exact-bytes headline) → cheap per-leg budget, heavy soft deadline.
+  const primaryTrendResults = await boundedFanout(
+    rawRows,
+    async (r) => {
+      if (!r.hash) return null;
+      return iQueryRange(
+        env,
+        `sum by (${LABELS.hash}) (rate(emitted_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
+        trendStart,
+        now,
+        trendStep,
+        QUERY_BUDGET.cheap,
+      );
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy },
+  );
 
   // Fallback: for rows with no primary data, query all_events_summaryBytes_total.
   const fallbackNeeded = rawRows.map((r, idx) => {
     const res = primaryTrendResults[idx];
     return r.hash && (res === null || res.status !== 'success' || !res.data.result[0]?.values?.length);
   });
-  const fallbackResults = await Promise.all(
-    rawRows.map((r, idx) =>
-      fallbackNeeded[idx]
-        ? queryRange(
-            env,
-            `sum by (${LABELS.hash}) (rate(all_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
-            trendStart,
-            now,
-            trendStep,
-          ).catch(() => null)
-        : Promise.resolve(null),
-    ),
+  const fallbackResults = await boundedFanout(
+    rawRows,
+    async (r, idx) => {
+      if (!fallbackNeeded[idx]) return null;
+      return iQueryRange(
+        env,
+        `sum by (${LABELS.hash}) (rate(all_events_summaryBytes_total{${LABELS.hash}="${r.hash}"}[5m]))`,
+        trendStart,
+        now,
+        trendStep,
+        QUERY_BUDGET.cheap,
+      );
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy },
   );
 
   // Merge: prefer primary; use fallback when primary has no data.

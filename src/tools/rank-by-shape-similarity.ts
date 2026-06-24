@@ -16,7 +16,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryRange } from '../lib/api.js';
+import { iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout, withTimeout } from '../lib/concurrency.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -254,13 +255,17 @@ export async function executeRankByShapeSimilarity(
   let anchorSeries: number[];
   try {
     if (args.anchor_type === 'log10x_pattern') {
-      const metricsEnv = await resolveMetricsEnv(env);
+      const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
       anchorExpression = buildPatternAnchorRateQuery(
         args.anchor,
         metricsEnv,
         Math.max(stepSeconds * 3, 180),
       );
-      const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
+      // Bounded so a wedged backend can't stall the tool on the anchor leg.
+      // null (timeout/error) → extractValues([]) → the existing <3-bucket
+      // anchor_not_found fallback below. heavy budget: a single substantive
+      // range fetch the whole ranking hinges on, not a fanned-out leg.
+      const res = await timedQuery(() => iQueryRange(env, anchorExpression, fromSec, nowSec, stepSeconds, QUERY_BUDGET.heavy));
       anchorSeries = extractValues(res);
     } else {
       anchorExpression = args.anchor;
@@ -278,7 +283,10 @@ export async function executeRankByShapeSimilarity(
           remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backendInfo.trace)),
         });
       }
-      const res = await timedQuery(() => backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
+      // Customer backend method has no env/timeoutMs param, so bound it with
+      // a client-side race instead of iQueryRange. null on timeout →
+      // extractValues([]) → the same <3-bucket anchor_not_found fallback.
+      const res = await timedQuery(() => withTimeout(backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds), QUERY_BUDGET.heavy));
       anchorSeries = extractValues(res);
     }
   } catch (e) {
@@ -393,58 +401,95 @@ export async function executeRankByShapeSimilarity(
 
   const ranked: RankedCandidate[] = [];
   const failed: string[] = [];
-  // ── Candidate existence pre-pass ───────────────────────────────────
-  // Bug fix: the tool used to accept any string as a candidate and run
-  // the shape pipeline against whatever queryRange returned (often an
-  // empty / placeholder zero-series), producing meaningless ranks. We
-  // now ask the backend whether each candidate resolves to a real
-  // metric series via `count(<candidate>)`. Candidates that don't
-  // resolve are tagged `candidate_unknown` and skipped before any
-  // shape math runs. If NONE survive we short-circuit to `no_signal`
-  // with `no_signal_reason: 'all_candidates_unknown'`.
+  // ── Candidate existence + shape fan-out ────────────────────────────
+  // Collapses what were two serial loops (validate-exists via count(),
+  // then per-survivor queryRange) into ONE bounded parallel fan-out. The
+  // serial form was, at the 100-candidate cap, two passes of up to 100
+  // sequential queries each — a multi-minute stall on a slow backend.
+  //
+  // Each leg first asks the backend whether the candidate resolves to a
+  // real metric series via `count(<candidate>)` (cheap existence probe;
+  // a candidate that doesn't resolve is `candidate_unknown` and skipped
+  // before any shape math, so we never compare the anchor against a
+  // fabricated zero-series). Surviving candidates are fetched and ranked
+  // in the same leg. The leg catches its own errors and returns a
+  // verdict, so a `null` from boundedFanout means only the outer per-leg
+  // race fired (a true timeout). null is counted as a survivor that then
+  // failed → it lands in evaluation_failed, NOT candidate_unknown (a
+  // timeout is "couldn't evaluate", not "doesn't exist"), which keeps the
+  // survivors = ranked ∪ failed invariant the downstream counts rely on.
   const unknown: Array<{ candidate: string; reason: 'candidate_unknown'; detail: string }> = [];
-  const survivors: string[] = [];
-  for (const cand of args.candidates) {
-    const verdict = await validateCandidateExists(
-      cand,
-      customer.backend!,
-      timedQuery,
-    );
-    if (verdict.ok) {
-      survivors.push(cand);
-    } else {
-      if (verdict.throttled) throttledHit = true;
-      unknown.push({ candidate: cand, reason: 'candidate_unknown', detail: verdict.detail });
-    }
-  }
+  let survivorCount = 0;
+  let timedOutLegs = 0;
 
-  for (const cand of survivors) {
-    try {
-      const res = await timedQuery(() => customer.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
-      const candSeries = extractValues(res);
-      if (candSeries.length < 3) {
-        failed.push(cand);
-        continue;
+  type Leg =
+    | { kind: 'unknown'; detail: string; throttled: boolean }
+    | { kind: 'failed'; throttled: boolean }
+    | { kind: 'ranked'; row: RankedCandidate; throttled: boolean };
+
+  const legResults = await boundedFanout(
+    args.candidates,
+    async (cand): Promise<Leg> => {
+      const verdict = await validateCandidateExists(cand, customer.backend!, timedQuery);
+      if (!verdict.ok) {
+        return { kind: 'unknown', detail: verdict.detail, throttled: verdict.throttled };
       }
-      const corr = computeTemporalCorrelation(anchorSeries, candSeries, stepSeconds, offsetsForScan);
-      const gap = anchorPhaseGap(anchorSeries, candSeries);
-      ranked.push({
-        candidate: cand,
-        metric_ref: canonicalMetricRef(cand),
-        pearson_magnitude: Math.abs(corr.r),
-        pearson_signed: corr.r,
-        lag_seconds: corr.lagSeconds,
-        lag_at_bound: Math.abs(corr.lagSeconds) >= effectiveMaxAbs && effectiveMaxAbs > 0,
-        lag_tightness: corr.lagTightness,
-        anchor_phase_gap: gap,
-        anchor_phase_aligned: gap >= phaseAlignedFloor,
-        n_buckets: candSeries.length,
-      });
-    } catch (e) {
-      if (e instanceof Error && /HTTP 429/.test(e.message)) throttledHit = true;
-      failed.push(cand);
+      try {
+        const res = await timedQuery(() => customer.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
+        const candSeries = extractValues(res);
+        if (candSeries.length < 3) return { kind: 'failed', throttled: false };
+        const corr = computeTemporalCorrelation(anchorSeries, candSeries, stepSeconds, offsetsForScan);
+        const gap = anchorPhaseGap(anchorSeries, candSeries);
+        return {
+          kind: 'ranked',
+          throttled: false,
+          row: {
+            candidate: cand,
+            metric_ref: canonicalMetricRef(cand),
+            pearson_magnitude: Math.abs(corr.r),
+            pearson_signed: corr.r,
+            lag_seconds: corr.lagSeconds,
+            lag_at_bound: Math.abs(corr.lagSeconds) >= effectiveMaxAbs && effectiveMaxAbs > 0,
+            lag_tightness: corr.lagTightness,
+            anchor_phase_gap: gap,
+            anchor_phase_aligned: gap >= phaseAlignedFloor,
+            n_buckets: candSeries.length,
+          },
+        };
+      } catch (e) {
+        const throttled = e instanceof Error && /HTTP 429/.test(e.message);
+        return { kind: 'failed', throttled };
+      }
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy },
+  );
+
+  for (let i = 0; i < args.candidates.length; i++) {
+    const leg = legResults[i];
+    if (!leg) {
+      // Outer-race timeout: couldn't validate or fetch in time. Treat as an
+      // evaluated-then-failed survivor (same bucket a fetch error used), so
+      // survivors = ranked ∪ failed stays consistent and we don't claim the
+      // metric "doesn't exist".
+      timedOutLegs += 1;
+      survivorCount += 1;
+      failed.push(args.candidates[i]);
+      continue;
+    }
+    if (leg.throttled) throttledHit = true;
+    if (leg.kind === 'unknown') {
+      unknown.push({ candidate: args.candidates[i], reason: 'candidate_unknown', detail: leg.detail });
+    } else if (leg.kind === 'failed') {
+      survivorCount += 1;
+      failed.push(args.candidates[i]);
+    } else {
+      survivorCount += 1;
+      ranked.push(leg.row);
     }
   }
+  // Preserve the original `survivors.length` shape (count of candidates that
+  // passed existence validation, plus timed-out legs counted as survivors).
+  const survivors = { length: survivorCount } as { length: number };
   ranked.sort((a, b) => b.pearson_magnitude - a.pearson_magnitude);
 
   const nUsable = ranked.length;
@@ -501,6 +546,17 @@ export async function executeRankByShapeSimilarity(
   const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));
   const nAtBound = ranked.filter((r) => r.lag_at_bound).length;
 
+  // Backend-pressure hint, with a timeout flip: when a large share of the
+  // fan-out legs hit the per-leg deadline (a wedged/slow backend), surface
+  // 'slow' so the agent paces itself — unless we already saw an explicit 429
+  // (the stronger 'throttled' signal wins). 'slow' is an existing value;
+  // the envelope shape and strings are unchanged.
+  const baseHint = rankPressureHint(queryCount, totalLatencyMs, throttledHit);
+  const backendPressureHint: 'ok' | 'slow' | 'throttled' | null =
+    baseHint !== 'throttled' && timedOutLegs > 0 && timedOutLegs >= Math.ceil(args.candidates.length / 2)
+      ? 'slow'
+      : baseHint;
+
   const data: RankByShapeSummary = {
     status,
     threshold_used: phaseAlignedFloor,
@@ -516,7 +572,7 @@ export async function executeRankByShapeSimilarity(
     low_candidate_count: lowCandidateCount,
     query_count: queryCount,
     total_latency_ms: totalLatencyMs,
-    backend_pressure_hint: rankPressureHint(queryCount, totalLatencyMs, throttledHit),
+    backend_pressure_hint: backendPressureHint,
     human_summary,
     ranked,
     evaluation_failed: failed,
@@ -730,7 +786,7 @@ function parseStep(step: string): number {
 }
 
 function extractValues(
-  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | undefined,
+  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | undefined | null,
 ): number[] {
   if (!res || res.status !== 'success') return [];
   const first = res.data?.result?.[0]?.values;

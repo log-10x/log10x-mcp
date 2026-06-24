@@ -20,7 +20,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
@@ -37,7 +38,6 @@ import {
   type RawPatternServiceRow,
 } from '../lib/pattern-descriptor.js';
 import { validateStrictArgs } from '../lib/strict-args.js';
-import { wrapBackendError } from '../lib/primitive-errors.js';
 import {
   buildChassisEnvelope,
   buildChassisErrorEnvelope,
@@ -238,7 +238,7 @@ export async function executeWhatsChanging(
 
   const metricsEnv = Object.keys(filters).length > 0
     ? await resolveMetricsEnvFiltered(env, filters)
-    : await resolveMetricsEnv(env);
+    : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   const decisions = {
     threshold_used: minDeltaUsd,
@@ -256,29 +256,18 @@ export async function executeWhatsChanging(
     window_basis: 'explicit' as const,
   };
 
-  // Query 1: current window. Treat backend errors as a hard failure (we
-  // can't compute deltas without the after-side); empty result as no_signal.
-  let currentRes: Awaited<ReturnType<typeof queryInstant>>;
-  try {
-    currentRes = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range));
-    recordQuery(telemetry);
-  } catch (e) {
-    recordQuery(telemetry);
-    const err = wrapBackendError(e);
-    return buildChassisErrorEnvelope({
-      tool: 'log10x_whats_changing',
-      err,
-      telemetry,
-      scope: scopeBase,
-      source_disclosure: sourceDisclosure,
-      contextPayload: {
-        time_range: tf.label,
-        comparison_window: cwLabel,
-        stage: 'current_window',
-      },
-    });
-  }
-  if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
+  // Query 1: current window. Bounded with the heavy budget (it surfaces the
+  // exact bytes that become the per-pattern dollar deltas). A timeout/error
+  // resolves to null and degrades to the SAME no_signal output as an empty
+  // result — without the after-side we can't compute deltas, so "no data" is
+  // the honest answer; we never stall the agent on a wedged backend.
+  const currentRes = await iQueryInstant(
+    env,
+    pql.bytesPerPattern(filters, metricsEnv, tf.range),
+    QUERY_BUDGET.heavy,
+  );
+  recordQuery(telemetry);
+  if (!currentRes || currentRes.status !== 'success' || currentRes.data.result.length === 0) {
     return buildChassisEnvelope({
       tool: 'log10x_whats_changing',
       view: 'summary',
@@ -332,29 +321,35 @@ export async function executeWhatsChanging(
 
   // Queries 2..N: baseline windows (one per offset). Join by the full
   // (symbol_message, service, severity) tuple. A per-offset failure isn't
-  // fatal — the remaining offsets still produce a usable baseline — but we
-  // surface it as a structured backend_errors[] entry instead of a silent
-  // .catch(() => null).
+  // fatal — the remaining offsets still produce a usable baseline — and we
+  // surface it as a structured backend_errors[] entry. Bounded fan-out caps
+  // the width and gives each leg the heavy budget (these surface the exact
+  // baseline bytes that feed the dollar deltas); a timed-out/failed leg
+  // resolves to null and is recorded as a partial backend error.
   const backendErrors: Array<{ stage: string; offset_days?: number; error_type: string; hint: string }> = [];
-  const baselineResults = await Promise.all(
-    baselineOffsets.map(async (offsetDays) => {
-      try {
-        const res = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range, offsetDays));
-        recordQuery(telemetry);
-        return res;
-      } catch (e) {
-        recordQuery(telemetry);
-        const err = wrapBackendError(e);
-        backendErrors.push({
-          stage: 'baseline_window',
-          offset_days: offsetDays,
-          error_type: err.error_type,
-          hint: err.hint,
-        });
-        return null;
-      }
-    }),
+  const baselineResults = await boundedFanout(
+    baselineOffsets,
+    async (offsetDays) => {
+      const res = await iQueryInstant(
+        env,
+        pql.bytesPerPattern(filters, metricsEnv, tf.range, offsetDays),
+        QUERY_BUDGET.heavy,
+      );
+      recordQuery(telemetry);
+      return res && res.status === 'success' ? res : null;
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.heavy, softDeadlineMs: QUERY_BUDGET.heavy },
   );
+  baselineResults.forEach((baseRes, idx) => {
+    if (!baseRes) {
+      backendErrors.push({
+        stage: 'baseline_window',
+        offset_days: baselineOffsets[idx],
+        error_type: 'backend_timeout',
+        hint: 'baseline window query timed out or failed; the remaining offsets still produced a usable baseline.',
+      });
+    }
+  });
   for (const baseRes of baselineResults) {
     if (!baseRes || baseRes.status !== 'success') continue;
     for (const r of baseRes.data.result) {
@@ -372,15 +367,18 @@ export async function executeWhatsChanging(
   // rows. eventsPerPattern aggregates across service/severity, so a join
   // on the full triple would miss every row. Like the baseline call, a
   // failure here is non-fatal; the bytes-side answer is still useful.
-  let eventsRes: Awaited<ReturnType<typeof queryInstant>> | null = null;
-  try {
-    eventsRes = await queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range));
-    recordQuery(telemetry);
-  } catch (e) {
-    recordQuery(telemetry);
-    const err = wrapBackendError(e);
-    backendErrors.push({ stage: 'events_by_pattern_full', error_type: err.error_type, hint: err.hint });
-    eventsRes = null;
+  const eventsRes = await iQueryInstant(
+    env,
+    pql.eventsByPatternFull(filters, metricsEnv, tf.range),
+    QUERY_BUDGET.heavy,
+  );
+  recordQuery(telemetry);
+  if (!eventsRes || eventsRes.status !== 'success') {
+    backendErrors.push({
+      stage: 'events_by_pattern_full',
+      error_type: 'backend_timeout',
+      hint: 'events-by-pattern enrichment timed out or failed; the bytes-side answer is still useful.',
+    });
   }
   if (eventsRes && eventsRes.status === 'success') {
     for (const r of eventsRes.data.result) {

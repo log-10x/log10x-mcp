@@ -32,7 +32,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue } from '../lib/cost.js';
@@ -208,36 +208,24 @@ export async function executePatternDiff(
   const metricsEnv =
     Object.keys(filters).length > 0
       ? await resolveMetricsEnvFiltered(env, filters)
-      : await resolveMetricsEnv(env);
+      : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // Two PromQL queries: bytes-per-pattern at "now" and at "now - 1 window"
-  // (the previous full window).
-  let afterRes: Awaited<ReturnType<typeof queryInstant>>;
-  let beforeRes: Awaited<ReturnType<typeof queryInstant>>;
-  try {
-    [afterRes, beforeRes] = await Promise.all([
-      queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range)),
-      queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range, tf.days)),
-    ]);
-    recordQuery(telemetry);
-    recordQuery(telemetry);
-  } catch (e) {
-    recordQuery(telemetry);
-    const err = wrapBackendError(e);
-    return buildChassisErrorEnvelope({
-      tool: 'log10x_pattern_diff',
-      err,
-      telemetry,
-      scope: scopeBase,
-      source_disclosure: sourceDisclosure,
-      contextPayload: {
-        time_range: tf.label,
-        comparison: 'after_vs_before',
-      },
-    });
-  }
+  // (the previous full window). Both surface the EXACT bytes that become the
+  // cost_now / cost_before dollar columns, so each leg gets the heavy budget
+  // and the increase[range] shape is preserved. A timed-out/failed leg
+  // resolves to null; if BOTH are unavailable we degrade to the SAME no_signal
+  // "No pattern data" envelope the tool already gives, never a hard stall.
+  const [afterRes, beforeRes] = await Promise.all([
+    iQueryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range), QUERY_BUDGET.heavy),
+    iQueryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range, tf.days), QUERY_BUDGET.heavy),
+  ]);
+  recordQuery(telemetry);
+  recordQuery(telemetry);
 
-  if (afterRes.status !== 'success' && beforeRes.status !== 'success') {
+  const afterOk = !!afterRes && afterRes.status === 'success';
+  const beforeOk = !!beforeRes && beforeRes.status === 'success';
+  if (!afterOk && !beforeOk) {
     return buildChassisEnvelope({
       tool: 'log10x_pattern_diff',
       view: 'summary',
@@ -283,7 +271,7 @@ export async function executePatternDiff(
     }
     return row;
   };
-  if (afterRes.status === 'success') {
+  if (afterOk && afterRes) {
     for (const r of afterRes.data.result) {
       const sm = r.metric[LABELS.pattern];
       if (!sm) continue;
@@ -291,7 +279,7 @@ export async function executePatternDiff(
         parsePrometheusValue(r);
     }
   }
-  if (beforeRes.status === 'success') {
+  if (beforeOk && beforeRes) {
     for (const r of beforeRes.data.result) {
       const sm = r.metric[LABELS.pattern];
       if (!sm) continue;

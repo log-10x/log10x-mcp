@@ -76,6 +76,7 @@ import {
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { DEFAULT_LABELS } from '../lib/promql.js';
 import { patternDescriptor } from '../lib/pattern-descriptor.js';
+import { boundedFanout } from '../lib/concurrency.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -1926,23 +1927,49 @@ export async function executeCommitmentReport(
     });
   }
 
+  // Bound the per-week verify fan-out (up to ~52 weeks for ytd). The serial
+  // `for ... await` stalled the whole report on a slow backend; cap the width
+  // at 4. No per-leg client timeout: runEstimateVerify owns its own [30d]
+  // exact-bytes query budgets, and a client-side race here could truncate a
+  // legitimately-heavy weekly verify and silently drop a real result. Each
+  // leg catches internally so the week's error string is preserved in
+  // verifyErrors exactly as the prior loop did; boundedFanout's own null
+  // (soft-deadline skip) maps to a skipped-week error so every week is
+  // still accounted for.
+  const runner = runEstimateVerifyImpl;
+  const weekOutcomes = await boundedFanout(
+    weeks,
+    async (
+      w
+    ): Promise<{ ok: true; value: WeeklyVerifyResult } | { ok: false; err: string }> => {
+      try {
+        const r = await runner({
+          backend,
+          commitment,
+          week_start: w.week_start,
+          week_end: w.week_end,
+        });
+        return { ok: true, value: r };
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          err: `${w.week_start}: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+    },
+    { concurrency: 4 }
+  );
   const weeklyResults: WeeklyVerifyResult[] = [];
   const verifyErrors: string[] = [];
-  for (const w of weeks) {
-    try {
-      const r = await runEstimateVerifyImpl({
-        backend,
-        commitment,
-        week_start: w.week_start,
-        week_end: w.week_end,
-      });
-      weeklyResults.push(r);
-    } catch (e: unknown) {
-      verifyErrors.push(
-        `${w.week_start}: ${e instanceof Error ? e.message : String(e)}`
-      );
+  weekOutcomes.forEach((outcome, idx) => {
+    if (outcome === null) {
+      verifyErrors.push(`${weeks[idx]!.week_start}: verify skipped (fan-out deadline)`);
+    } else if (outcome.ok) {
+      weeklyResults.push(outcome.value);
+    } else {
+      verifyErrors.push(outcome.err);
     }
-  }
+  });
 
   // 5. Aggregate + attribution.
   const agg = aggregateWeekly(weeklyResults);

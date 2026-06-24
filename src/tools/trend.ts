@@ -6,7 +6,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryRange, queryInstant } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { formatPatternLabel } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
@@ -169,23 +169,24 @@ export async function executeTrend(
   // summary can echo it on both the name-input and hash-input paths.
   let patternName: string | undefined = args.pattern;
   let resolvedHash: string | undefined = args.pattern_hash;
+  // Resolve the metrics env ONCE up front (cheap budget) so the reverse-lookup
+  // here and executeTrendInner share a single resolution instead of two.
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap).catch(() => null);
   if (!patternName && args.pattern_hash) {
     // Reverse-lookup: find the most-emitting pattern label for this hash.
-    const metricsEnv = await resolveMetricsEnv(env).catch(() => null);
     if (metricsEnv) {
-      try {
-        const q =
-          `topk(1, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
-          `${LABELS.hash}="${args.pattern_hash.replace(/"/g, '\\"')}",` +
-          `${LABELS.env}="${metricsEnv}"}[7d])))`;
-        const res = await queryInstant(env, q);
-        recordQuery(chassisTelemetry);
-        if (res.status === 'success' && res.data.result.length > 0) {
-          patternName = res.data.result[0].metric[LABELS.pattern];
-        }
-      } catch {
-        // fall through — pattern stays undefined, inner fn will return no data
+      // Only the topk LABEL (pattern name) is read here — the numeric value is
+      // discarded — so a [1h] window is enough and the budget is cheap.
+      const q =
+        `topk(1, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
+        `${LABELS.hash}="${args.pattern_hash.replace(/"/g, '\\"')}",` +
+        `${LABELS.env}="${metricsEnv}"}[1h])))`;
+      const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
+      recordQuery(chassisTelemetry);
+      if (res && res.status === 'success' && res.data.result.length > 0) {
+        patternName = res.data.result[0].metric[LABELS.pattern];
       }
+      // null/empty → pattern stays undefined, inner fn returns no data.
     }
   } else if (patternName && !resolvedHash) {
     // Name-input path: forward-lookup the stable hash so the summary can
@@ -203,7 +204,7 @@ export async function executeTrend(
   const effectiveWindow = normalizedTimeRange ?? args.timeRange ?? '7d';
 
   const sumOut: { data?: PatternTrendSummary } = {};
-  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange, pattern_hash: resolvedHash }, env, sumOut);
+  await executeTrendInner({ ...args, pattern: patternName ?? '', timeRange: normalizedTimeRange, pattern_hash: resolvedHash }, env, sumOut, metricsEnv ?? undefined);
   recordQuery(chassisTelemetry);
 
   if (!sumOut.data) {
@@ -408,7 +409,8 @@ export async function executeTrend(
 async function executeTrendInner(
   args: { pattern: string; pattern_hash?: string; timeRange?: string; step?: string; analyzerCost?: number; include?: 'kept' | 'dropped' | 'both'; monthly_volume_gb?: number },
   env: EnvConfig,
-  sumOut?: { data?: PatternTrendSummary }
+  sumOut?: { data?: PatternTrendSummary },
+  metricsEnvArg?: string
 ): Promise<string> {
   // Defensive defaults — match trendSchema.
   // Normalise '1d' legacy alias → '24h'.
@@ -433,7 +435,9 @@ async function executeTrendInner(
   const costPerGb: number | null =
     rateSource === 'customer_supplied' ? (args.analyzerCost as number) : null;
   const period = costPeriodLabel(tf.days);
-  const metricsEnv = await resolveMetricsEnv(env);
+  // Reuse the env resolved once in executeTrend when threaded in; fall back to
+  // a cheap-budget resolve for any direct caller that doesn't pass it.
+  const metricsEnv = metricsEnvArg ?? (await resolveMetricsEnv(env, QUERY_BUDGET.cheap));
 
   // Reporter pattern labels are always snake_case. Normalize in case an
   // agent re-fed a display form from top_patterns / whats_changing.
@@ -474,14 +478,18 @@ async function executeTrendInner(
     'drop',
   );
   const [res, droppedRes, envTotalRes] = await Promise.all([
-    queryRange(env, primaryQuery, start, now, stepSeconds),
+    // Primary + dropped legs surface exact bytes/series to the user → heavy
+    // budget (these are increase[range] magnitude legs). iQuery* resolve to
+    // null on timeout/error; null maps to the same no-data path below.
+    iQueryRange(env, primaryQuery, start, now, stepSeconds, QUERY_BUDGET.heavy),
     droppedQuery
-      ? queryRange(env, droppedQuery, start, now, stepSeconds).catch(() => null)
+      ? iQueryRange(env, droppedQuery, start, now, stepSeconds, QUERY_BUDGET.heavy)
       : Promise.resolve(null),
     // env-total is ONLY the volume-lens basis; skip the query entirely when no
-    // projection was requested (its result is unused at factor 1).
+    // projection was requested (its result is unused at factor 1). It feeds the
+    // projected-bytes magnitude shown to the user, so heavy budget too.
     args.monthly_volume_gb
-      ? queryInstant(env, envTotalQuery).catch(() => null)
+      ? iQueryInstant(env, envTotalQuery, QUERY_BUDGET.heavy)
       : Promise.resolve(null),
   ]);
   // Resolve the volume projection lens ONCE. envMonthlyBytes normalizes the
@@ -495,7 +503,7 @@ async function executeTrendInner(
   const volumeLens = resolveVolumeLens(args.monthly_volume_gb, envMonthlyBytes);
   const factor = volumeLens.factor;
 
-  if (res.status !== 'success' || res.data.result.length === 0) {
+  if (!res || res.status !== 'success' || res.data.result.length === 0) {
     return `No trend data for pattern "${pattern}" in the ${tf.label}.`;
   }
 

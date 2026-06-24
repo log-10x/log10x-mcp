@@ -37,7 +37,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant, type PrometheusResponse } from '../lib/api.js';
+import { type PrometheusResponse } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtBytes } from '../lib/format.js';
@@ -200,7 +201,7 @@ export async function executeOverflowContents(
   // Normalise '1d' legacy alias → '24h'.
   const timeRange = normalizeTimeRange(args.timeRange ?? '30d');
   const tf = parseTimeframe(timeRange);
-  const metricsEnv = await resolveMetricsEnv(env);
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
   const limit = args.limit ?? 50;
   const serviceFilter = args.service?.trim() || null;
 
@@ -235,13 +236,22 @@ export async function executeOverflowContents(
   const firstSeenQ = `min by (${LABELS.hash}) (min_over_time(timestamp(${BYTES_METRIC}{${baseSelector}})[${tf.range}:]))`;
   const lastSeenQ = `max by (${LABELS.hash}) (max_over_time(timestamp(${BYTES_METRIC}{${baseSelector}})[${tf.range}:]))`;
 
+  // Each query gets its OWN interactive deadline via iQueryInstant and runs
+  // concurrently, so the expensive [tf.range] timestamp subqueries (firstSeen/
+  // lastSeen) no longer eat the shared budget and starve the bytes legs. All
+  // five are increase()/over-time legs over [tf.range] whose values reach the
+  // user (bytes, events, growth baseline, window bookends) → heavy budget.
+  // iQuery* swallow timeout/error to null; the existing `&& res.status===...`
+  // guards below already map null to the same no-data degradation, so the
+  // per-leg .catch wrappers are removed. The cap-CSV fetch is NOT a metrics
+  // query — it keeps its own fallback .catch unchanged.
   const [bytesRes, eventsRes, firstHalfRes, firstSeenRes, lastSeenRes, taggedFetch] =
     await Promise.all([
-      queryInstant(env, bytesByPatternQ).catch(() => null),
-      queryInstant(env, eventsByPatternQ).catch(() => null),
-      queryInstant(env, firstHalfBytesQ).catch(() => null),
-      queryInstant(env, firstSeenQ).catch(() => null),
-      queryInstant(env, lastSeenQ).catch(() => null),
+      iQueryInstant(env, bytesByPatternQ, QUERY_BUDGET.heavy),
+      iQueryInstant(env, eventsByPatternQ, QUERY_BUDGET.heavy),
+      iQueryInstant(env, firstHalfBytesQ, QUERY_BUDGET.heavy),
+      iQueryInstant(env, firstSeenQ, QUERY_BUDGET.heavy),
+      iQueryInstant(env, lastSeenQ, QUERY_BUDGET.heavy),
       fetchCapCsvTagged(env).catch(() => ({
         csvContent: undefined,
         actionIntent: undefined,

@@ -255,17 +255,10 @@ const KNOWN_VIOLATIONS: Record<string, { reason: string; ticket: string }> = {
     reason: 'investigate emits query_count=0 on the chassis performance block despite ~24 real backend calls (under-report)',
     ticket: 'TODO(real_telemetry): surface investigate query count on performance.query_count',
   },
-  // services' PRIMARY ranking query has no .catch — a backend-down throw
-  // propagates as a raw rejection instead of a structured error envelope.
-  'log10x_services:structured_error': {
-    reason: 'services lets a primary-query backend failure throw (no try/catch around the lead query) instead of returning a structured error envelope',
-    ticket: 'TODO(structured_error): wrap services backend fan-out and emit buildChassisErrorEnvelope on failure',
-  },
-  // top_patterns' primary topk query is un-caught — backend-down throws.
-  'log10x_top_patterns:structured_error': {
-    reason: 'top_patterns primary topk query is un-caught; backend-down rejects the promise instead of returning a structured error',
-    ticket: 'TODO(structured_error): catch the lead topPatternsFull query and emit a structured error envelope',
-  },
+  // (RESOLVED in Phase B: services + top_patterns now bound their lead query via
+  // iQueryInstant, which returns null instead of throwing on backend-down, and
+  // emit a structured error envelope. The former structured_error allowlist
+  // entries were removed once their §2 tests went green.)
 
   // ── DEAD-END findings: emitter ↔ target-schema mismatches ────────────
   // These are exactly the cross-chain class the harness is built to catch.

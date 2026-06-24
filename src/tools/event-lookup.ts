@@ -7,7 +7,9 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant, queryAi } from '../lib/api.js';
+import { queryAi } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
@@ -221,7 +223,7 @@ async function executeEventLookupInner(
   const rateSource: 'list_price' | 'customer_supplied' | 'unset' = rateResolved.source;
   const costPerGb: number | null = rateResolved.rate_per_gb;
   const period = costPeriodLabel(tf.days);
-  const metricsEnv = await resolveMetricsEnv(env);
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // Reverse cross-pillar lookup: a tenx_hash (e.g. seen on an event in
   // the customer's SIEM / CloudWatch Logs) → the named pattern, then the
@@ -232,7 +234,7 @@ async function executeEventLookupInner(
   if (args.tenxHash) {
     const h = args.tenxHash.trim();
     const q = `count by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${LABELS.hash}="${h.replace(/"/g, '\\"')}",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
-    const r = await queryInstant(env, q).catch(() => null);
+    const r = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
     const top = r && r.status === 'success'
       ? r.data.result
           .map((x) => ({ p: x.metric[LABELS.pattern] || '', v: parsePrometheusValue(x) }))
@@ -278,9 +280,9 @@ async function executeEventLookupInner(
   };
 
   // Current window: bytes per service for this pattern
-  const currentRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range));
+  const currentRes = await iQueryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range), QUERY_BUDGET.heavy);
 
-  if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
+  if (!currentRes || currentRes.status !== 'success' || currentRes.data.result.length === 0) {
     // Try fuzzy match with regex. Escape regex special characters AND PromQL
     // string delimiters before building the query — raw log lines commonly
     // contain quotes, colons, braces, and URL schemes that blow up the
@@ -294,7 +296,7 @@ async function executeEventLookupInner(
       .replace(/"/g, '.')                       // drop literal quotes (can't embed in PromQL string)
       .slice(0, 200);                           // cap length to keep query size sane
     const fuzzyQuery = `sum by (${LABELS.service}, ${LABELS.severity}) (increase(all_events_summaryBytes_total{${LABELS.pattern}=~".*${regexSafe}.*",${LABELS.env}="${metricsEnv}"}[${tf.range}]))`;
-    const fuzzyRes = await queryInstant(env, fuzzyQuery).catch(() => null);
+    const fuzzyRes = await iQueryInstant(env, fuzzyQuery, QUERY_BUDGET.heavy);
 
     if (!fuzzyRes || fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
       if (looksLikeRawLogLine) {
@@ -366,24 +368,36 @@ async function formatResults(
     }
   }
 
-  // Baseline per service
+  // Baseline per service. The 3 prior-window baseline legs surface exact
+  // $ figures, so each leg keeps the increase[range] shape and gets the
+  // heavy budget (a cheap timeout would drop a legitimately-slow baseline
+  // on a cold backend). Fan out with bounded concurrency instead of a
+  // serial await loop; a timed-out leg degrades to null and simply
+  // contributes one fewer sample to the per-service average (the same
+  // outcome the old `if (status==='success')` guard produced on failure).
   const baselineByService = new Map<string, number[]>();
-  for (const offsetDays of tf.baselineOffsets) {
-    const baseRes = await queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range, offsetDays));
-    if (baseRes.status === 'success') {
-      for (const r of baseRes.data.result) {
-        const svc = r.metric[LABELS.service] || '';
-        const arr = baselineByService.get(svc) || [];
-        arr.push(parsePrometheusValue(r));
-        baselineByService.set(svc, arr);
-      }
+  const baselineResults = await boundedFanout(
+    tf.baselineOffsets,
+    async (offsetDays) => {
+      const r = await iQueryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, tf.range, offsetDays), QUERY_BUDGET.heavy);
+      return r && r.status === 'success' ? r.data.result : null;
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.heavy, softDeadlineMs: QUERY_BUDGET.heavy }
+  );
+  for (const result of baselineResults) {
+    if (!result) continue;
+    for (const r of result) {
+      const svc = r.metric[LABELS.service] || '';
+      const arr = baselineByService.get(svc) || [];
+      arr.push(parsePrometheusValue(r));
+      baselineByService.set(svc, arr);
     }
   }
 
   // Event counts per service
-  const eventsRes = await queryInstant(env, pql.eventsPerServiceForPattern(pattern, metricsEnv, tf.range));
+  const eventsRes = await iQueryInstant(env, pql.eventsPerServiceForPattern(pattern, metricsEnv, tf.range), QUERY_BUDGET.heavy);
   const eventsBySvc = new Map<string, number>();
-  if (eventsRes.status === 'success') {
+  if (eventsRes && eventsRes.status === 'success') {
     for (const r of eventsRes.data.result) {
       const svc = r.metric[LABELS.service] || '';
       eventsBySvc.set(svc, parsePrometheusValue(r));
@@ -475,7 +489,7 @@ async function formatResults(
     let hashToQuery: string | undefined = resolvedFromHash;
     if (!hashToQuery) {
       const hq = `topk(1, sum by (${LABELS.hash}) (increase(all_events_summaryBytes_total{${LABELS.pattern}="${pattern.replace(/"/g, '\\"')}",${LABELS.env}="${metricsEnv}"}[24h])))`;
-      const hr = await queryInstant(env, hq).catch(() => null);
+      const hr = await iQueryInstant(env, hq, QUERY_BUDGET.cheap);
       if (hr && hr.status === 'success' && hr.data.result.length > 0) {
         const h = hr.data.result[0].metric[LABELS.hash];
         if (typeof h === 'string' && h.length > 0) hashToQuery = h;
@@ -722,10 +736,10 @@ async function formatResults(
     let longNow = 0, longBase = 0, longOk = false;
     try {
       const [ln, lb] = await Promise.all([
-        queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d')),
-        queryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d', 7)),
+        iQueryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d'), QUERY_BUDGET.heavy),
+        iQueryInstant(env, pql.patternAcrossServices(pattern, metricsEnv, '7d', 7), QUERY_BUDGET.heavy),
       ]);
-      if (ln.status === 'success' && lb.status === 'success') {
+      if (ln && lb && ln.status === 'success' && lb.status === 'success') {
         longNow = ln.data.result.reduce((s, r) => s + parsePrometheusValue(r), 0);
         longBase = lb.data.result.reduce((s, r) => s + parsePrometheusValue(r), 0);
         longOk = true;

@@ -24,6 +24,7 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
@@ -440,10 +441,16 @@ export async function executeInvestigate(
   // a stale Zod default.
   const innerArgs = { ...args, window: effectiveWindow };
 
+  // Resolve the edge/cloud metrics env ONCE up front (cheap probe) and
+  // thread it into both executeInvestigateInner and the offload-status
+  // block below — previously each resolved it independently (one extra
+  // round-trip per call on a slow backend).
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
+
   // ── Structural failure path ────────────────────────────────────────
   let md: string;
   try {
-    md = await executeInvestigateInner(innerArgs, env);
+    md = await executeInvestigateInner(innerArgs, env, metricsEnv);
   } catch (e) {
     const err = wrapBackendError(e);
     return buildChassisEnvelope({
@@ -487,7 +494,6 @@ export async function executeInvestigate(
       (async (): Promise<TopOffloadedPattern[] | undefined> => {
         const candidates = collectCandidatePatterns(md, parsed);
         if (candidates.length === 0) return undefined;
-        const metricsEnv = await resolveMetricsEnv(env);
         const resolved = await resolveHashesForPatterns(env, candidates, metricsEnv);
         if (resolved.size === 0) return undefined;
         const hashes = [...new Set([...resolved.values()].map((v) => v.hash))];
@@ -754,7 +760,8 @@ async function executeInvestigateInner(
     environment?: string;
     use_bytes: boolean;
   },
-  env: EnvConfig
+  env: EnvConfig,
+  metricsEnv: string
 ): Promise<string> {
   const investigationId = randomUUID();
   const thresholds = DEFAULT_THRESHOLDS;
@@ -823,7 +830,7 @@ async function executeInvestigateInner(
   const exceedsPromRangeLimit = combinedSpanSecs > 32 * 86400;
 
   // ── Phase 0 — Environment resolution + metric primitive probe ──
-  const metricsEnv = await resolveMetricsEnv(env);
+  // metricsEnv is resolved once by executeInvestigate and threaded in.
   const reporterTier = metricsEnv === 'edge' ? 'edge' : metricsEnv === 'cloud' ? 'cloud' : 'unknown';
 
   // Probe for the event-count metric. If it's not emitted by this Reporter,
@@ -833,11 +840,12 @@ async function executeInvestigateInner(
   let metricWarning: string | undefined;
   if (!useBytesMetric) {
     try {
-      const probe = await queryInstant(
+      const probe = await iQueryInstant(
         env,
-        `count(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}) > 0`
+        `count(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}"}) > 0`,
+        QUERY_BUDGET.cheap
       );
-      if (probe.status !== 'success' || probe.data.result.length === 0) {
+      if (!probe || probe.status !== 'success' || probe.data.result.length === 0) {
         useBytesMetric = true;
         metricWarning = 'event-count metric unavailable — falling back to bytes. Rate curves may be skewed by single large events (a stack-trace burst looks like a volume spike). Deploy the Reporter counter emission to upgrade.';
       }
@@ -999,9 +1007,9 @@ async function executeInvestigateInner(
     try {
       const freshnessMetric = metricName || 'all_events_summaryVolume_total';
       const recencyQ = `sum(rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(resolution.anchor)}"}[5m]))`;
-      const res = await queryInstant(env, recencyQ);
+      const res = await iQueryInstant(env, recencyQ, QUERY_BUDGET.cheap);
       let recentRate = 0;
-      if (res.status === 'success' && res.data.result[0]) {
+      if (res && res.status === 'success' && res.data.result[0]) {
         recentRate = parsePrometheusValue(res.data.result[0]);
       }
       if (recentRate < thresholds.acuteNoiseFloor) {
@@ -1018,8 +1026,8 @@ async function executeInvestigateInner(
           // failure.
           const activeErrorsQ =
             `topk(3, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(resolution.service)}"}[5m])) > ${thresholds.acuteNoiseFloor}) unless on (${LABELS.pattern}) (sum by (${LABELS.pattern}) (rate(${freshnessMetric}{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(resolution.anchor)}"}[5m])))`;
-          const activeRes = await queryInstant(env, activeErrorsQ);
-          if (activeRes.status === 'success' && activeRes.data.result.length > 0) {
+          const activeRes = await iQueryInstant(env, activeErrorsQ, QUERY_BUDGET.cheap);
+          if (activeRes && activeRes.status === 'success' && activeRes.data.result.length > 0) {
             const activeNames = activeRes.data.result
               .map((r) => {
                 const p = r.metric[LABELS.pattern];
@@ -1402,8 +1410,8 @@ async function resolveAnchor(
         `(increase(all_events_summaryBytes_total{` +
         `${LABELS.hash}="${escape(sp)}",` +
         `${LABELS.env}="${metricsEnv}"}[7d])))`;
-      const res = await queryInstant(env, hashQ);
-      if (res.status === 'success' && res.data.result.length > 0) {
+      const res = await iQueryInstant(env, hashQ, QUERY_BUDGET.cheap);
+      if (res && res.status === 'success' && res.data.result.length > 0) {
         const row = res.data.result[0];
         const resolvedName = row.metric[LABELS.pattern];
         if (resolvedName) {
@@ -1447,11 +1455,12 @@ async function resolveAnchor(
     // error pattern emitted by `log10x_cost_drivers({ timeRange: "7d" })` at
     // ~2430 events/s over the 7d window was unresolvable because it was
     // silent in the last 5m/1h. Resolution window must align with scope.
-    const byPattern = await queryInstant(
+    const byPattern = await iQueryInstant(
       env,
-      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[${window}])) > 0`
+      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[${window}])) > 0`,
+      QUERY_BUDGET.cheap
     );
-    if (byPattern.status === 'success' && byPattern.data.result.length > 0) {
+    if (byPattern && byPattern.status === 'success' && byPattern.data.result.length > 0) {
       // Try to pull the severity + service for the anchor.
       const meta = await lookupPatternMeta(env, metricsEnv, sp, window);
       return {
@@ -1482,14 +1491,14 @@ async function resolveAnchor(
       `sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}] offset ${baselineOffset}) > ${meaningfulBaselineFloor})` +
       `) - 1`;
     const [growRes, declineRes] = await Promise.all([
-      queryInstant(env, `topk(1, ${signedChange})`),
-      queryInstant(env, `bottomk(1, ${signedChange})`),
+      iQueryInstant(env, `topk(1, ${signedChange})`, QUERY_BUDGET.cheap),
+      iQueryInstant(env, `bottomk(1, ${signedChange})`, QUERY_BUDGET.cheap),
     ]);
     // Merge, pick the row with the largest |rate change|
     type Row = { pattern: string; severity: string; rc: number };
     const rows: Row[] = [];
     for (const res of [growRes, declineRes]) {
-      if (res.status === 'success') {
+      if (res && res.status === 'success') {
         for (const r of res.data.result) {
           const rc = parsePrometheusValue(r);
           if (Number.isFinite(rc)) {
@@ -1517,11 +1526,12 @@ async function resolveAnchor(
     // Fallback: if no patterns crossed the meaningful baseline floor, fall
     // back to the loudest pattern so the investigate flow still has something
     // to classify (will likely hit "flat", which is the honest result).
-    const svcPat = await queryInstant(
+    const svcPat = await iQueryInstant(
       env,
-      `topk(1, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}])))`
+      `topk(1, sum by (${LABELS.pattern}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.service}="${escape(sp)}"}[${window}])))`,
+      QUERY_BUDGET.cheap
     );
-    if (svcPat.status === 'success' && svcPat.data.result.length > 0) {
+    if (svcPat && svcPat.status === 'success' && svcPat.data.result.length > 0) {
       const row = svcPat.data.result[0];
       return {
         mode: 'service',
@@ -1536,12 +1546,13 @@ async function resolveAnchor(
     // in the requested window, check whether it's active at 30d. If so, tag
     // the resolution with a hint so the error message can suggest widening
     // the window instead of bouncing the user to event_lookup.
-    const widePatternProbe = await queryInstant(
+    const widePatternProbe = await iQueryInstant(
       env,
-      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[30d])) > 0`
+      `sum(rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(sp)}"}[30d])) > 0`,
+      QUERY_BUDGET.cheap
     );
     const existsAtWider =
-      widePatternProbe.status === 'success' && widePatternProbe.data.result.length > 0;
+      !!widePatternProbe && widePatternProbe.status === 'success' && widePatternProbe.data.result.length > 0;
     return {
       mode: 'pattern',
       inputType: 'pattern_identity',
@@ -1557,8 +1568,8 @@ async function resolveAnchor(
     .slice(0, 60);
   const fuzzyQ = `topk(1, sum by (${LABELS.pattern}, ${LABELS.service}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}=~".*${fuzzy}.*"}[5m])))`;
   try {
-    const res = await queryInstant(env, fuzzyQ);
-    if (res.status === 'success' && res.data.result.length > 0) {
+    const res = await iQueryInstant(env, fuzzyQ, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result.length > 0) {
       const row = res.data.result[0];
       return {
         mode: 'raw_line',
@@ -1583,8 +1594,8 @@ async function lookupPatternMeta(
 ): Promise<{ service?: string; severity?: string }> {
   try {
     const q = `sum by (${LABELS.service}, ${LABELS.severity}) (rate(all_events_summaryVolume_total{${LABELS.env}="${metricsEnv}",${LABELS.pattern}="${escape(pattern)}"}[${window}]))`;
-    const res = await queryInstant(env, q);
-    if (res.status === 'success' && res.data.result[0]) {
+    const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result[0]) {
       return {
         service: res.data.result[0].metric[LABELS.service],
         severity: res.data.result[0].metric[LABELS.severity],
@@ -1636,14 +1647,14 @@ async function renderEnvironmentAudit(
   let topPatternForChain: string | undefined;
   try {
     const [growRes, declineRes] = await Promise.all([
-      queryInstant(env, `topk(5, ${signedChangeExpr})`),
-      queryInstant(env, `bottomk(5, ${signedChangeExpr})`),
+      iQueryInstant(env, `topk(5, ${signedChangeExpr})`, QUERY_BUDGET.cheap),
+      iQueryInstant(env, `bottomk(5, ${signedChangeExpr})`, QUERY_BUDGET.cheap),
     ]);
 
     type Row = { pattern: string; service: string; rc: number };
     const rows: Row[] = [];
     for (const r of [growRes, declineRes]) {
-      if (r.status !== 'success') continue;
+      if (!r || r.status !== 'success') continue;
       for (const row of r.data.result) {
         const rc = parsePrometheusValue(row);
         if (!Number.isFinite(rc)) continue;

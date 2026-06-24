@@ -31,7 +31,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant, queryRange } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -198,12 +198,21 @@ export async function executeMetricOverlay(
   // The fallback only fires for `log10x_pattern` anchors — `customer_metric`
   // anchors have no log10x-side service attribution to query, so we
   // surface the input_invalid envelope unchanged.
+  //
+  // Resolve the metrics env ONCE for the log10x_pattern path (cheap budget)
+  // and thread it into both the auto-source helper AND the anchor fetch below,
+  // instead of resolving it twice on the auto-source path.
+  let metricsEnvForLog10x: string | null = null;
+  if (argsInput.anchor_type === 'log10x_pattern') {
+    metricsEnvForLog10x = await resolveMetricsEnv(env, QUERY_BUDGET.cheap).catch(() => null);
+  }
   if (!candidateNormalized && argsInput.anchor_type === 'log10x_pattern') {
     try {
       const sourced = await sourceTopServiceCandidateForPatternAnchor(
         argsInput.anchor,
         env,
         Math.max(stepSeconds * 3, 180),
+        metricsEnvForLog10x ?? undefined,
       );
       if (sourced) {
         candidateNormalized = sourced.candidatePromql;
@@ -246,10 +255,34 @@ export async function executeMetricOverlay(
   let anchorExpression: string;
   try {
     if (args.anchor_type === 'log10x_pattern') {
-      const metricsEnv = await resolveMetricsEnv(env);
+      // Reuse the env resolved once above; only re-resolve if that resolution
+      // failed (preserves the original throw-into-catch error behavior).
+      const metricsEnv = metricsEnvForLog10x ?? (await resolveMetricsEnv(env, QUERY_BUDGET.cheap));
       const escaped = args.anchor.replace(/"/g, '\\"');
       anchorExpression = `sum(rate(all_events_summaryBytes_total{${LABELS.pattern}="${escaped}",${LABELS.env}="${metricsEnv}"}[${Math.max(stepSeconds * 3, 180)}s]))`;
-      const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
+      // Bounded anchor fetch (cheap: a rate-curve, not an exact-bytes leg).
+      // null = the anchor backend timed out — route to the backend_timeout
+      // error envelope (NOT no_signal): a stalled anchor is a hard failure.
+      const res = await timedQuery(() => iQueryRange(env, anchorExpression, fromSec, nowSec, stepSeconds, QUERY_BUDGET.cheap));
+      if (res === null) {
+        return overlayErrorEnvelope({
+          anchor_type: args.anchor_type,
+          anchor_expression: args.anchor,
+          candidate: args.candidate,
+          window,
+          stepSeconds,
+          thresholdBasis,
+          queryCount,
+          totalLatencyMs,
+          throttledHit,
+          err: {
+            error_type: 'backend_timeout',
+            retryable: true,
+            suggested_backoff_ms: 1500,
+            hint: `Anchor query exceeded the ${QUERY_BUDGET.cheap}ms interactive budget against the metrics backend. Retry after backoff or narrow the window.`,
+          },
+        });
+      }
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
@@ -313,7 +346,10 @@ export async function executeMetricOverlay(
   let candSeries: Array<[number, number]>;
   try {
     if (candidateAutoSource) {
-      const candRes = await timedQuery(() => queryRange(env, args.candidate, fromSec, nowSec, stepSeconds));
+      // Bounded candidate fetch (cheap: a rate-curve). null on timeout flows
+      // through extractFirstSeries → [] → status 'no_signal', exactly the
+      // degradation a missing/empty candidate already produces.
+      const candRes = await timedQuery(() => iQueryRange(env, args.candidate, fromSec, nowSec, stepSeconds, QUERY_BUDGET.cheap));
       candSeries = extractFirstSeries(candRes);
     } else {
       const backend = await resolveBackend({
@@ -487,19 +523,24 @@ async function sourceTopServiceCandidateForPatternAnchor(
   anchor: string,
   env: EnvConfig,
   rateRangeSec: number,
+  metricsEnvArg?: string,
 ): Promise<{ candidatePromql: string; serviceLabel: string } | null> {
   try {
-    const metricsEnv = await resolveMetricsEnv(env);
+    // Reuse the env resolved once by the caller when threaded in; fall back to
+    // a cheap-budget resolve otherwise. Dedupes the double resolveMetricsEnv on
+    // the auto-source + log10x_pattern-anchor path.
+    const metricsEnv = metricsEnvArg ?? (await resolveMetricsEnv(env, QUERY_BUDGET.cheap));
     const selectorLabel = looksLikePatternHash(anchor) ? LABELS.hash : LABELS.pattern;
     const escapedAnchor = anchor.replace(/"/g, '\\"');
     const escapedEnv = metricsEnv.replace(/"/g, '\\"');
     // Instant top-1 ranking by 1h bytes attributed to this pattern across
-    // services. Cheap on every Prom-compatible backend.
+    // services. Only the topk LABEL (service name) is read; the numeric value
+    // is discarded → cheap budget. null on timeout falls through to null.
     const rankQ =
       `topk(1, sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{` +
       `${selectorLabel}="${escapedAnchor}",${LABELS.env}="${escapedEnv}"}[1h])))`;
-    const res = await queryInstant(env, rankQ);
-    if (res.status !== 'success' || !res.data?.result?.length) return null;
+    const res = await iQueryInstant(env, rankQ, QUERY_BUDGET.cheap);
+    if (!res || res.status !== 'success' || !res.data?.result?.length) return null;
     const topService = res.data.result[0]?.metric?.[LABELS.service];
     if (!topService) return null;
     const escapedService = topService.replace(/"/g, '\\"');
@@ -688,7 +729,7 @@ function parseStep(step: string): number {
 }
 
 function extractFirstSeries(
-  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | undefined,
+  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | null | undefined,
 ): Array<[number, number]> {
   if (!res || res.status !== 'success') return [];
   const first = res.data?.result?.[0]?.values;

@@ -24,7 +24,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryRange } from '../lib/api.js';
+import { iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout, withTimeout } from '../lib/concurrency.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -368,13 +369,18 @@ export async function executeMetricsThatMoved(
   let anchorSeries: Array<[number, number]>;
   try {
     if (args.anchor_type === 'log10x_pattern') {
-      const metricsEnv = await resolveMetricsEnv(env);
+      const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
       anchorExpression = buildPatternAnchorRateQuery(
         args.anchor,
         metricsEnv,
         Math.max(stepSeconds * 3, 180),
       );
-      const res = await timedQuery(() => queryRange(env, anchorExpression, fromSec, nowSec, stepSeconds));
+      // Bounded so a wedged backend can't stall the whole tool on the anchor
+      // leg. null (timeout/error) → extractFirstSeries([]) → the existing
+      // <6-bucket anchor_not_found fallback below. heavy budget: a single
+      // substantive range fetch the whole analysis hinges on (failing it
+      // aborts the call), not a fanned-out leg.
+      const res = await timedQuery(() => iQueryRange(env, anchorExpression, fromSec, nowSec, stepSeconds, QUERY_BUDGET.heavy));
       anchorSeries = extractFirstSeries(res);
     } else {
       anchorExpression = args.anchor;
@@ -394,7 +400,10 @@ export async function executeMetricsThatMoved(
           remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backendInfo.trace)),
         });
       }
-      const res = await timedQuery(() => backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
+      // Customer backend method has no env/timeoutMs param, so bound it with
+      // a client-side race instead of iQueryRange. null on timeout →
+      // extractFirstSeries([]) → the same <6-bucket anchor_not_found fallback.
+      const res = await timedQuery(() => withTimeout(backendInfo.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds), QUERY_BUDGET.heavy));
       anchorSeries = extractFirstSeries(res);
     }
   } catch (e) {
@@ -526,31 +535,48 @@ export async function executeMetricsThatMoved(
   const notMoved: MovedCandidate[] = [];
   const failed: string[] = [];
 
-  for (const cand of filteredCandidates) {
-    try {
-      const res = await timedQuery(() => customerBackend.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
-      const candSeries = extractFirstSeries(res);
-      const signal = computeMovedSignal(anchorPartition, candSeries, stepSeconds);
-      if (signal.kind === 'failed') {
-        failed.push(cand);
-        continue;
+  // Bounded parallel fan-out over candidates. Replaces a serial for-loop
+  // that, at the 100-candidate cap, was a multi-minute stall on a slow
+  // backend even with a per-query timeout. concurrency caps the width;
+  // the per-leg cheap race + heavy soft-deadline caps each leg's wait.
+  // A leg returns null on timeout / throw / insufficient-data; null maps
+  // to the SAME evaluation_failed bucket the serial loop used.
+  const legResults = await boundedFanout(
+    filteredCandidates,
+    async (cand): Promise<{ row: MovedCandidate } | null> => {
+      try {
+        const res = await timedQuery(() => customerBackend.backend!.queryRange(cand, fromSec, nowSec, stepSeconds));
+        const candSeries = extractFirstSeries(res);
+        const signal = computeMovedSignal(anchorPartition, candSeries, stepSeconds);
+        if (signal.kind === 'failed') return null;
+        return {
+          row: {
+            candidate: cand,
+            metric_ref: canonicalMetricRef(cand),
+            mean_anchor_high: signal.meanHigh,
+            mean_anchor_low: signal.meanLow,
+            phase_gap: signal.phaseGap,
+            direction: signal.direction,
+            n_high: signal.nHigh,
+            n_low: signal.nLow,
+          },
+        };
+      } catch (e) {
+        if (e instanceof Error && /HTTP 429/.test(e.message)) throttledHit = true;
+        return null;
       }
-      const row: MovedCandidate = {
-        candidate: cand,
-        metric_ref: canonicalMetricRef(cand),
-        mean_anchor_high: signal.meanHigh,
-        mean_anchor_low: signal.meanLow,
-        phase_gap: signal.phaseGap,
-        direction: signal.direction,
-        n_high: signal.nHigh,
-        n_low: signal.nLow,
-      };
-      if (signal.phaseGap >= floor) moved.push(row);
-      else notMoved.push(row);
-    } catch (e) {
-      if (e instanceof Error && /HTTP 429/.test(e.message)) throttledHit = true;
-      failed.push(cand);
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy },
+  );
+  for (let i = 0; i < filteredCandidates.length; i++) {
+    const leg = legResults[i];
+    if (!leg) {
+      // null = timed out / threw / insufficient data → same bucket as before.
+      failed.push(filteredCandidates[i]);
+      continue;
     }
+    if (leg.row.phase_gap >= floor) moved.push(leg.row);
+    else notMoved.push(leg.row);
   }
 
   moved.sort((a, b) => b.phase_gap - a.phase_gap);
@@ -884,7 +910,7 @@ function parseStep(step: string): number {
 }
 
 function extractFirstSeries(
-  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | undefined,
+  res: { status?: string; data?: { result?: Array<{ values?: Array<[number, string]> }> } } | undefined | null,
 ): Array<[number, number]> {
   if (!res || res.status !== 'success') return [];
   const first = res.data?.result?.[0]?.values;

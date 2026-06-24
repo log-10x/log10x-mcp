@@ -37,7 +37,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant, queryRange } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
 import {
   bytesToGb,
   parsePrometheusValue,
@@ -373,7 +373,7 @@ async function computeBaseline(
   horizon: BaselineHorizon
 ): Promise<BaselineEnvelopeData> {
   const horizonDays = horizon === '90d' ? 90 : 30;
-  const metricsEnv = await resolveMetricsEnv(env);
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // ── Gate 0: destination. ────────────────────────────────────────
   // Without a destination there is no $/GB to project against.
@@ -681,7 +681,13 @@ async function fetchReporterAgeDays(
   // bit so the caller can still tell the gate is passed).
   const q = `min(min_over_time(timestamp(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${env.labels.env}="${metricsEnv}"})[30d:1d]))`;
   try {
-    const res = await queryInstant(env, q);
+    // 30d-range subquery whose value (reporter age) is surfaced and gates the
+    // whole tool → heavy budget so a cold backend gets the time to answer.
+    // iQueryInstant resolves to null on timeout/error; res?.data?.result?.[0]
+    // then yields undefined → the existing `return null` sentinel (treated as
+    // "Reporter not deployed" → not_ready/reporter_too_new), identical to the
+    // prior catch path.
+    const res = await iQueryInstant(env, q, QUERY_BUDGET.heavy);
     const point = res?.data?.result?.[0];
     if (!point) return null;
     const oldestUnix = parsePrometheusValue(point);
@@ -709,7 +715,12 @@ async function fetchDailyBytes(
   const step = 86400; // 1 day
   const q = `sum(increase(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${env.labels.env}="${metricsEnv}"}[1d]))`;
   try {
-    const res = await queryRange(env, q, start, now, step);
+    // increase[1d] daily buckets surfacing EXACT bytes/$ + percentiles to the
+    // user → heavy budget. iQueryRange resolves to null on timeout/error;
+    // res?.data?.result?.[0] then yields undefined → the existing NaN-filled
+    // sentinel (validDays empties → not_ready/no_data), identical to the prior
+    // catch path.
+    const res = await iQueryRange(env, q, start, now, step, QUERY_BUDGET.heavy);
     const series = res?.data?.result?.[0];
     if (!series || !series.values) return Array(days).fill(NaN);
     const out: number[] = [];
@@ -810,9 +821,13 @@ async function fetchTopContributors(
   let bytesRes;
   let eventsRes;
   try {
+    // Both legs are topk/sum increase[Nd] over the horizon surfacing EXACT
+    // per-contributor bytes/$ + event counts to the user → heavy budget.
+    // iQueryInstant resolves to null on timeout/error; the `?? []` reads below
+    // map a null leg to the SAME empty-contributors result the prior catch gave.
     [bytesRes, eventsRes] = await Promise.all([
-      queryInstant(env, bytesQ),
-      queryInstant(env, eventsQ),
+      iQueryInstant(env, bytesQ, QUERY_BUDGET.heavy),
+      iQueryInstant(env, eventsQ, QUERY_BUDGET.heavy),
     ]);
   } catch {
     return [];

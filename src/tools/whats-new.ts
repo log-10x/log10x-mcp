@@ -23,7 +23,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { formatPatternLabelFromServices } from '../lib/pattern-label.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
@@ -39,10 +39,8 @@ import {
   type RawPatternServiceRow,
 } from '../lib/pattern-descriptor.js';
 import { validateStrictArgs } from '../lib/strict-args.js';
-import { wrapBackendError } from '../lib/primitive-errors.js';
 import {
   buildChassisEnvelope,
-  buildChassisErrorEnvelope,
   newChassisTelemetry,
   recordQuery,
 } from '../lib/chassis-envelope.js';
@@ -199,31 +197,22 @@ export async function executeWhatsNew(
 
   const metricsEnv = Object.keys(filters).length > 0
     ? await resolveMetricsEnvFiltered(env, filters)
-    : await resolveMetricsEnv(env);
+    : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // Current window: hashes that are actively emitting bytes RIGHT NOW.
   // Patterns that existed historically but aren't emitting in the current
   // window aren't surfaced — "new" here means "new AND still active."
-  let currentRes: Awaited<ReturnType<typeof queryInstant>>;
-  try {
-    currentRes = await queryInstant(env, pql.bytesPerPattern(filters, metricsEnv, tf.range));
-    recordQuery(telemetry);
-  } catch (e) {
-    recordQuery(telemetry);
-    const err = wrapBackendError(e);
-    return buildChassisErrorEnvelope({
-      tool: 'log10x_whats_new',
-      err,
-      telemetry,
-      scope,
-      source_disclosure: sourceDisclosure,
-      contextPayload: {
-        time_range: tf.label,
-        first_seen_within: firstSeenWithin,
-      },
-    });
-  }
-  if (currentRes.status !== 'success' || currentRes.data.result.length === 0) {
+  // Bounded with the heavy budget (it surfaces the exact bytes that become the
+  // per-pattern cost). A timeout/error resolves to null and degrades to the
+  // SAME no_signal output as an empty result, so a wedged backend never stalls
+  // the agent — it just reports "no pattern data".
+  const currentRes = await iQueryInstant(
+    env,
+    pql.bytesPerPattern(filters, metricsEnv, tf.range),
+    QUERY_BUDGET.heavy,
+  );
+  recordQuery(telemetry);
+  if (!currentRes || currentRes.status !== 'success' || currentRes.data.result.length === 0) {
     const headline = `No pattern data over ${tf.label}.`;
     const humanSummary = `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection.`;
     return buildChassisEnvelope({
@@ -273,22 +262,24 @@ export async function executeWhatsNew(
   // adding a heavier range query. Failure of the prior-window probe is
   // non-fatal too — we degrade trajectory to 'steady' (the safe default)
   // and keep going.
+  // Each leg is bounded with the heavy budget (the event counts feed the
+  // trajectory classification and the surfaced events_now). A timed-out/failed
+  // leg resolves to null and is handled by the per-result guards below —
+  // current-window events degrade to 0 (non-fatal partial), prior-window to the
+  // safe 'steady' trajectory default — instead of throwing.
   const backendErrors: Array<{ stage: string; error_type: string; hint: string }> = [];
-  let eventsRes: Awaited<ReturnType<typeof queryInstant>> | null = null;
-  let eventsPriorRes: Awaited<ReturnType<typeof queryInstant>> | null = null;
-  try {
-    [eventsRes, eventsPriorRes] = await Promise.all([
-      queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)),
-      queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range, tf.days)),
-    ]);
-    recordQuery(telemetry);
-    recordQuery(telemetry);
-  } catch (e) {
-    recordQuery(telemetry);
-    const err = wrapBackendError(e);
-    backendErrors.push({ stage: 'events_by_pattern_full', error_type: err.error_type, hint: err.hint });
-    eventsRes = null;
-    eventsPriorRes = null;
+  const [eventsRes, eventsPriorRes] = await Promise.all([
+    iQueryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range), QUERY_BUDGET.heavy),
+    iQueryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range, tf.days), QUERY_BUDGET.heavy),
+  ]);
+  recordQuery(telemetry);
+  recordQuery(telemetry);
+  if ((!eventsRes || eventsRes.status !== 'success') || (!eventsPriorRes || eventsPriorRes.status !== 'success')) {
+    backendErrors.push({
+      stage: 'events_by_pattern_full',
+      error_type: 'backend_timeout',
+      hint: 'events count enrichment timed out or failed; pattern bytes/cost are still trustworthy.',
+    });
   }
   const eventsKey = (sm: string, svc: string, sev: string) => `${sm}\x00${svc}\x00${sev}`;
   const eventsByKey = new Map<string, number>();

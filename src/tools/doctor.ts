@@ -16,7 +16,8 @@
  */
 
 import { z } from 'zod';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import {
   resolveRetriever,
   formatRetrieverTrace,
@@ -261,9 +262,31 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
       })()
     : envs.all;
 
-  for (const env of targets) {
-    perEnvChecks[env.nickname] = await runPerEnvChecks(env);
-  }
+  // Fan the per-env probes out with bounded width so a slow/wedged env does
+  // not serialize the whole multi-env run. Each env's checks are independent;
+  // a wholly-stalled env degrades to null and is recorded as a single warn
+  // rather than hanging the report. The soft deadline matches the heavy
+  // budget so a backend that swallows every leg still releases the slot.
+  const perEnvResults = await boundedFanout(
+    targets,
+    async (env) => ({ nickname: env.nickname, checks: await runPerEnvChecks(env) }),
+    { concurrency: 4, softDeadlineMs: QUERY_BUDGET.heavy }
+  );
+  perEnvResults.forEach((r, i) => {
+    if (r) {
+      perEnvChecks[r.nickname] = r.checks;
+    } else {
+      // The env's whole probe set timed out / threw. Surface a single
+      // advisory so the env is not silently dropped from the report.
+      const nickname = targets[i].nickname;
+      perEnvChecks[nickname] = [{
+        name: 'metrics_backend_reachable',
+        status: 'warn',
+        message: `Per-environment checks for ${nickname} did not complete in time — the metrics backend may be slow or unreachable. Other environments were unaffected.`,
+        fix: `Re-run \`log10x_doctor\` scoped to this env (environment: "${nickname}") once the backend is responsive, or verify connectivity to ${nickname}'s metrics endpoint.`,
+      }];
+    }
+  });
 
   return finalize(globalChecks, perEnvChecks);
 }
@@ -571,28 +594,30 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
 
   // Gateway reachable + auth works.
-  try {
-    const res = await queryInstant(env, `count(up{${LABELS.env}=~"edge|cloud"}) or vector(0)`);
-    if (res.status === 'success') {
-      checks.push({
-        name: 'metrics_backend_reachable',
-        status: 'pass',
-        message: `Backend \`${env.metricsBackend.kind}\` at ${env.metricsBackend.endpoint} reachable, auth OK for env ${env.nickname}.`,
-      });
-    } else {
-      checks.push({
-        name: 'prometheus_gateway',
-        status: 'warn',
-        message: `Gateway responded but query status was "${res.status}".`,
-        fix: 'Check that the API key and env ID match and have read access.',
-      });
-      return checks; // no point running freshness checks if gateway is broken
-    }
-  } catch (e) {
+  const gatewayRes = await iQueryInstant(env, `count(up{${LABELS.env}=~"edge|cloud"}) or vector(0)`, QUERY_BUDGET.cheap);
+  if (gatewayRes && gatewayRes.status === 'success') {
+    checks.push({
+      name: 'metrics_backend_reachable',
+      status: 'pass',
+      message: `Backend \`${env.metricsBackend.kind}\` at ${env.metricsBackend.endpoint} reachable, auth OK for env ${env.nickname}.`,
+    });
+  } else if (gatewayRes) {
+    // Responded, but the query status was not 'success'.
+    checks.push({
+      name: 'prometheus_gateway',
+      status: 'warn',
+      message: `Gateway responded but query status was "${gatewayRes.status}".`,
+      fix: 'Check that the API key and env ID match and have read access.',
+    });
+    return checks; // no point running freshness checks if gateway is broken
+  } else {
+    // Timed out or errored (iQueryInstant swallowed to null) — the gateway is
+    // unreachable from here. Same terminal "gateway is broken" fallback the
+    // throw path used: fail and stop before the freshness probes.
     checks.push({
       name: 'prometheus_gateway',
       status: 'fail',
-      message: `Gateway query failed: ${(e as Error).message}`,
+      message: `Gateway query failed or timed out (no response within ${Math.round(QUERY_BUDGET.cheap / 1000)}s).`,
       fix: `Verify the credentials for env ${env.nickname}: re-check the key at https://console.log10x.com → Profile → API Settings, or run \`log10x_signin_start\` to mint a fresh one via the Auth0 Device Flow with GitHub or Google (the model chains to \`log10x_signin_complete\` automatically). To paste an existing key directly, call \`log10x_signin_complete\` with \`{ api_key: "<key>" }\`. If the network is locked down, allowlist prometheus.log10x.com.`,
     });
     return checks;
@@ -600,12 +625,17 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
 
   // Reporter tier detection.
   let detectedTier: 'edge' | 'cloud' | undefined;
-  try {
-    const res = await queryInstant(
+  {
+    // count()>0 existence probes — numeric value is discarded, only the
+    // presence of a result row matters → cheap budget. A null (timeout/error)
+    // falls through to the same "no tier detected" warn the empty-result path
+    // already produces.
+    const res = await iQueryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="edge"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="edge"}) > 0`,
+      QUERY_BUDGET.cheap
     );
-    if (res.status === 'success' && res.data.result.length > 0) {
+    if (res && res.status === 'success' && res.data.result.length > 0) {
       detectedTier = 'edge';
       checks.push({
         name: 'reporter_tier',
@@ -613,11 +643,12 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         message: 'Edge Reporter detected — full-fidelity metrics with dropped-event coverage.',
       });
     } else {
-      const cloudRes = await queryInstant(
+      const cloudRes = await iQueryInstant(
         env,
-        `count(all_events_summaryBytes_total{${LABELS.env}="cloud"}) > 0`
+        `count(all_events_summaryBytes_total{${LABELS.env}="cloud"}) > 0`,
+        QUERY_BUDGET.cheap
       );
-      if (cloudRes.status === 'success' && cloudRes.data.result.length > 0) {
+      if (cloudRes && cloudRes.status === 'success' && cloudRes.data.result.length > 0) {
         detectedTier = 'cloud';
         checks.push({
           name: 'reporter_tier',
@@ -634,12 +665,6 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         });
       }
     }
-  } catch (e) {
-    checks.push({
-      name: 'reporter_tier',
-      status: 'warn',
-      message: `Reporter probe failed: ${(e as Error).message}`,
-    });
   }
 
   // Metric freshness — catches the "Reporter deployed but stopped emitting 6h ago" case.
@@ -647,9 +672,12 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     try {
       // Query the age in seconds of the most recent non-stale datapoint.
       // time() - timestamp(last emission) = seconds since last scrape.
+      // A freshness probe (time()-timestamp), not an increase[Nd] magnitude
+      // leg → cheap budget. Null (timeout/error) falls through to the same
+      // "returned no result" warn the empty-result path already produces.
       const q = `time() - max(timestamp(all_events_summaryBytes_total{${LABELS.env}="${detectedTier}"}))`;
-      const res = await queryInstant(env, q);
-      if (res.status === 'success' && res.data.result[0]?.value) {
+      const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
+      if (res && res.status === 'success' && res.data.result[0]?.value) {
         const ageSec = parseFloat(res.data.result[0].value[1]);
         if (!Number.isFinite(ageSec)) {
           checks.push({
@@ -722,9 +750,12 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     // emitting error-level logs at all (instrumentation gap). The tool
     // surfaces the question for the user to classify.
     try {
+      // increase[30d] severity shares are surfaced to the user as percentages
+      // → heavy budget (exact magnitude leg). Null (timeout/error) is the same
+      // no-op as the existing non-success / empty path (block does nothing).
       const q = `sum by (${LABELS.severity}) (increase(all_events_summaryBytes_total{${tierSelector}}[30d]))`;
-      const res = await queryInstant(env, q);
-      if (res.status === 'success' && res.data.result.length > 0) {
+      const res = await iQueryInstant(env, q, QUERY_BUDGET.heavy);
+      if (res && res.status === 'success' && res.data.result.length > 0) {
         let total = 0;
         let infoBytes = 0;
         let errorLikeBytes = 0; // error + warn + crit + fatal
@@ -774,15 +805,20 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     // filtering. This turns "drop candidate discovery" from an agent task
     // into an automatic doctor recommendation.
     try {
+      // increase[30d] magnitudes surfaced to the user as concentration shares
+      // (top1/top5 %) → heavy budget on both legs. Fixed 2-query Promise.all
+      // (not an unbounded fan-out), so the shape stays; only the budget +
+      // null-handling change. Null degrades to the same 0 / [] the non-success
+      // path already used (block then produces no check — the no-data fallback).
       const totalQ = `sum(increase(all_events_summaryBytes_total{${tierSelector}}[30d]))`;
       const topQ = `topk(5, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${tierSelector}}[30d])))`;
       const [totalRes, topRes] = await Promise.all([
-        queryInstant(env, totalQ),
-        queryInstant(env, topQ),
+        iQueryInstant(env, totalQ, QUERY_BUDGET.heavy),
+        iQueryInstant(env, topQ, QUERY_BUDGET.heavy),
       ]);
-      const total = totalRes.status === 'success' && totalRes.data.result[0]?.value
+      const total = totalRes && totalRes.status === 'success' && totalRes.data.result[0]?.value
         ? parseFloat(totalRes.data.result[0].value[1]) : 0;
-      const topRows = topRes.status === 'success' ? topRes.data.result : [];
+      const topRows = topRes && topRes.status === 'success' ? topRes.data.result : [];
       if (total > 0 && topRows.length > 0) {
         const topBytes = topRows
           .map((r) => r.value ? parseFloat(r.value[1]) : NaN)
@@ -824,9 +860,13 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     // question for the user. Uses percentile-ratio rather than a boilerplate
     // regex so it works on any service naming convention.
     try {
+      // increase[30d] per-service bytes are surfaced to the user (each quiet
+      // service is named with its formatted byte volume) → heavy budget. Null
+      // (timeout/error) is the same no-op as the existing non-success / <5-row
+      // path (block produces no check).
       const perSvcQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector},${LABELS.service}!=""}[30d]))`;
-      const res = await queryInstant(env, perSvcQ);
-      if (res.status === 'success' && res.data.result.length >= 5) {
+      const res = await iQueryInstant(env, perSvcQ, QUERY_BUDGET.heavy);
+      if (res && res.status === 'success' && res.data.result.length >= 5) {
         const rows = res.data.result
           .map((r) => ({
             service: r.metric[LABELS.service] || '',
@@ -888,18 +928,24 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // Log10x pattern metrics. Never fails — always degrades gracefully.
   if (backendResolution.backend) {
     const required = ['tenx_user_service', 'k8s_namespace', 'k8s_pod', 'k8s_container'];
-    const missing: string[] = [];
-    for (const label of required) {
-      try {
+    // Bounded fan-out over the 4 label probes (was a serial await loop). Each
+    // is a count()>0 existence probe — numeric value discarded → cheap budget.
+    // The fn returns '' when the label is confirmed present, and the label
+    // name when it is absent. A null leg (timeout/error) maps to the SAME
+    // "missing" verdict the old per-label catch produced.
+    const presence = await boundedFanout(
+      required,
+      async (label) => {
         const q = `count(all_events_summaryBytes_total{${label}!=""}) > 0`;
-        const res = await queryInstant(env, q);
-        if (res.status !== 'success' || res.data.result.length === 0) {
-          missing.push(label);
-        }
-      } catch {
-        missing.push(label);
-      }
-    }
+        const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
+        if (res && res.status === 'success' && res.data.result.length > 0) return '';
+        return label; // present-but-empty result → missing
+      },
+      { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
+    );
+    const missing: string[] = presence
+      .map((r, i) => (r === null ? required[i] : r)) // null (timeout/error) → missing
+      .filter((label): label is string => label.length > 0);
     if (missing.length === 0) {
       checks.push({
         name: 'cross_pillar_enrichment_floor',
@@ -941,11 +987,15 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       const longWindowQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector}}[24h])) > ${MEANINGFUL_24H_FLOOR_BYTES}`;
       // Services with zero volume in the last 15m
       const recentWindowQ = `sum by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector}}[15m]))`;
+      // Both legs feed a presence / zero comparison only (the byte value is
+      // discarded — message lists service names, no magnitude) → cheap budget.
+      // Fixed 2-query Promise.all kept as-is; increase[24h]/[15m] shape kept.
+      // Null degrades to the same no-op as the existing non-success path.
       const [longRes, recentRes] = await Promise.all([
-        queryInstant(env, longWindowQ),
-        queryInstant(env, recentWindowQ),
+        iQueryInstant(env, longWindowQ, QUERY_BUDGET.cheap),
+        iQueryInstant(env, recentWindowQ, QUERY_BUDGET.cheap),
       ]);
-      if (longRes.status === 'success' && recentRes.status === 'success') {
+      if (longRes && longRes.status === 'success' && recentRes && recentRes.status === 'success') {
         const longSvcVolume = new Map<string, number>();
         for (const r of longRes.data.result) {
           const svc = r.metric[LABELS.service];
@@ -1099,18 +1149,20 @@ async function addConfigLiveCheck(
 
   const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;
   const readRunningGenerations = async (): Promise<string[]> => {
-    try {
-      const resp = await queryInstant(
-        env,
-        `count by (tenx_config_version) (increase(all_events_summaryBytes_total{${envSel}}[1h]))`,
-      );
-      if (resp.status !== 'success') return [];
-      return (resp.data?.result ?? [])
-        .map((r) => (r.metric as Record<string, string>)?.tenx_config_version)
-        .filter((v): v is string => typeof v === 'string' && v.length > 0);
-    } catch {
-      return [];
-    }
+    // Only the tenx_config_version LABEL is read (the count value is
+    // discarded) → cheap budget. Null (timeout/error) returns the same []
+    // the non-success path already returns, so verifyConfigGeneration sees
+    // "no running generation" and degrades to its not_configured/unverified
+    // verdict rather than this leg hanging the doctor run.
+    const resp = await iQueryInstant(
+      env,
+      `count by (tenx_config_version) (increase(all_events_summaryBytes_total{${envSel}}[1h]))`,
+      QUERY_BUDGET.cheap,
+    );
+    if (!resp || resp.status !== 'success') return [];
+    return (resp.data?.result ?? [])
+      .map((r) => (r.metric as Record<string, string>)?.tenx_config_version)
+      .filter((v): v is string => typeof v === 'string' && v.length > 0);
   };
 
   const result = await verifyConfigGeneration({ readCapsCsv, readRunningGenerations });
@@ -1185,15 +1237,17 @@ async function addOffloadDeliveryCheck(
   const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;
   const stampedQ = `sum(increase(all_events_summaryBytes_total{${envSel},routeState="offload"}[1h]))`;
   const stampedFn = async (): Promise<number | null> => {
-    try {
-      const resp = await queryInstant(env, stampedQ);
-      if (resp.status !== 'success') return null;
-      const v = resp.data?.result?.[0]?.value?.[1];
-      const n = v !== undefined ? Number(v) : NaN;
-      return Number.isFinite(n) ? n : 0;
-    } catch {
-      return null;
-    }
+    // Stamped offload bytes feed the leak / silent-loss verdict (compared
+    // against the actual sink) — a magnitude leg whose value surfaces, so it
+    // gets the heavy budget. Null (timeout/error) is the SAME signal the
+    // non-success path already returns: the verifier then degrades to
+    // liveness + purity and never raises a false silent_loss on an
+    // unavailable metric.
+    const resp = await iQueryInstant(env, stampedQ, QUERY_BUDGET.heavy);
+    if (!resp || resp.status !== 'success') return null;
+    const v = resp.data?.result?.[0]?.value?.[1];
+    const n = v !== undefined ? Number(v) : NaN;
+    return Number.isFinite(n) ? n : 0;
   };
 
   const result = await verifyOffloadDelivery(
@@ -1248,11 +1302,17 @@ async function addScaleAndCapabilityCheck(
     // so the counts agree with what `log10x_services` / `log10x_top_patterns`
     // would return. An instant-vector count would only see series emitting
     // right now, which under-counts against the 7d volume framing above.
+    // increase[7d] magnitudes all surface to the user (volume bytes, service /
+    // pattern counts, compression ratio) → heavy budget. Fixed 4-query
+    // Promise.all kept as-is (not an unbounded fan-out); only budget + null
+    // handling change. A null leg flows through scaleFirstNumber → NaN, so the
+    // corresponding line is simply omitted (same no-data fallback the
+    // non-success path already gives).
     const [bytesRes, patternsRes, servicesRes, eventsRes] = await Promise.all([
-      queryInstant(env, `sum(increase(all_events_summaryBytes_total{${tierSelector}}[7d]))`),
-      queryInstant(env, `count(group by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${tierSelector}}[7d])))`),
-      queryInstant(env, `count(group by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector},${LABELS.service}!=""}[7d])))`),
-      queryInstant(env, `sum(increase(all_events_summaryVolume_total{${tierSelector}}[7d]))`),
+      iQueryInstant(env, `sum(increase(all_events_summaryBytes_total{${tierSelector}}[7d]))`, QUERY_BUDGET.heavy),
+      iQueryInstant(env, `count(group by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{${tierSelector}}[7d])))`, QUERY_BUDGET.heavy),
+      iQueryInstant(env, `count(group by (${LABELS.service}) (increase(all_events_summaryBytes_total{${tierSelector},${LABELS.service}!=""}[7d])))`, QUERY_BUDGET.heavy),
+      iQueryInstant(env, `sum(increase(all_events_summaryVolume_total{${tierSelector}}[7d]))`, QUERY_BUDGET.heavy),
     ]);
     const bytes7d = scaleFirstNumber(bytesRes);
     const patternCount = scaleFirstNumber(patternsRes);
@@ -1301,8 +1361,10 @@ async function addScaleAndCapabilityCheck(
   }
 }
 
-function scaleFirstNumber(res: { status: string; data: { result: { value?: [number, string] }[] } }): number {
-  if (res.status !== 'success' || res.data.result.length === 0) return NaN;
+function scaleFirstNumber(res: { status: string; data: { result: { value?: [number, string] }[] } } | null): number {
+  // A null arg means the leg timed out / errored (iQueryInstant swallowed it);
+  // treat it the same as a non-success response → NaN, so the caller omits the line.
+  if (!res || res.status !== 'success' || res.data.result.length === 0) return NaN;
   const v = res.data.result[0].value?.[1];
   return v ? parseFloat(v) : NaN;
 }

@@ -23,7 +23,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import * as pql from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
 import { resolveRate, destinationFromEnvAnalyzer } from '../lib/rate-resolution.js';
@@ -269,8 +270,16 @@ async function executeSavingsInner(
   const subDay = tf.days < 1;
   const chunkOffsets = subDay ? [0] : Array.from({ length: Math.ceil(tf.days) }, (_, i) => i);
   const chunkSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
-    const results = await Promise.all(
-      chunkOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
+    // Bound the per-day fan-out: each [1d] chunk is deliberately small (the
+    // whole point of chunking is to keep each leg under the server budget), so
+    // a cheap per-leg timeout fits; the heavy soft deadline caps the overall
+    // wall time so an uncapped 30-day fan-out can't hang the tool. A timed-out
+    // chunk comes back null → counted as a coverage miss, exactly as the prior
+    // .catch(()=>null) handled it. The coverage annotation surfaces the gap.
+    const results = await boundedFanout(
+      chunkOffsets,
+      (off) => iQueryInstant(env, builder(off), QUERY_BUDGET.cheap),
+      { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
     );
     let sum = 0;
     let succeeded = 0;
@@ -287,8 +296,13 @@ async function executeSavingsInner(
   const fetch7d = tf.days > 7;
   const sevenDayOffsets = Array.from({ length: 7 }, (_, i) => i);
   const chunk7dSum = async (builder: (off: number) => string): Promise<{ sum: number; succeeded: number; total: number }> => {
-    const results = await Promise.all(
-      sevenDayOffsets.map((off) => queryInstant(env, builder(off)).catch(() => null))
+    // Same bounded per-day fan-out as chunkSum (7 fixed offsets for the ramp
+    // check). null legs degrade to coverage misses, surfaced by the run-rate
+    // coverage note.
+    const results = await boundedFanout(
+      sevenDayOffsets,
+      (off) => iQueryInstant(env, builder(off), QUERY_BUDGET.cheap),
+      { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
     );
     let sum = 0;
     let succeeded = 0;
@@ -302,28 +316,35 @@ async function executeSavingsInner(
   };
 
   // Query all savings metrics in parallel.
+  // Budget split: edge in/out and the retriever single-shot legs are
+  // increase[range] magnitudes that surface exact bytes/$ to the user → heavy.
+  // pipelineUp (up probe) and distinctServices (count) discard the magnitude →
+  // cheap. The chunkSum/chunk7dSum legs are already bounded internally. Every
+  // leg degrades to null/zero independently — the downstream `=== null`
+  // coverage checks and `?.data?.result?.[0] ? … : 0` reads map a timed-out
+  // leg to the same empty-data path the prior .catch(()=>null) produced.
   const [edgeInRes, edgeOutRes, indexedResult, streamedResult, pipeRes, svcRes,
          edgeIn7dRes, edgeOut7dRes, indexed7dResult, streamed7dResult] = await Promise.all([
-    queryInstant(env, pql.edgeInputBytes(tf.range)).catch(() => null),
-    queryInstant(env, pql.edgeEmittedBytes(tf.range)).catch(() => null),
+    iQueryInstant(env, pql.edgeInputBytes(tf.range), QUERY_BUDGET.heavy),
+    iQueryInstant(env, pql.edgeEmittedBytes(tf.range), QUERY_BUDGET.heavy),
     subDay
       ? (async () => {
-          const r = await queryInstant(env, pql.retrieverIndexedBytes(tf.range)).catch(() => null);
+          const r = await iQueryInstant(env, pql.retrieverIndexedBytes(tf.range), QUERY_BUDGET.heavy);
           const v = r?.data?.result?.[0] ? parsePrometheusValue(r.data.result[0]) : 0;
           return { sum: r ? v : 0, succeeded: r ? 1 : 0, total: 1 };
         })()
       : chunkSum(pql.retrieverIndexedBytesChunk),
     subDay
       ? (async () => {
-          const r = await queryInstant(env, pql.retrieverStreamedBytes(tf.range)).catch(() => null);
+          const r = await iQueryInstant(env, pql.retrieverStreamedBytes(tf.range), QUERY_BUDGET.heavy);
           const v = r?.data?.result?.[0] ? parsePrometheusValue(r.data.result[0]) : 0;
           return { sum: r ? v : 0, succeeded: r ? 1 : 0, total: 1 };
         })()
       : chunkSum(pql.retrieverStreamedBytesChunk),
-    queryInstant(env, pql.pipelineUp()).catch(() => null),
-    queryInstant(env, pql.distinctServices(tf.range)).catch(() => null),
-    fetch7d ? queryInstant(env, pql.edgeInputBytes('7d')).catch(() => null) : Promise.resolve(null),
-    fetch7d ? queryInstant(env, pql.edgeEmittedBytes('7d')).catch(() => null) : Promise.resolve(null),
+    iQueryInstant(env, pql.pipelineUp(), QUERY_BUDGET.cheap),
+    iQueryInstant(env, pql.distinctServices(tf.range), QUERY_BUDGET.cheap),
+    fetch7d ? iQueryInstant(env, pql.edgeInputBytes('7d'), QUERY_BUDGET.heavy) : Promise.resolve(null),
+    fetch7d ? iQueryInstant(env, pql.edgeEmittedBytes('7d'), QUERY_BUDGET.heavy) : Promise.resolve(null),
     fetch7d ? chunk7dSum(pql.retrieverIndexedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
     fetch7d ? chunk7dSum(pql.retrieverStreamedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
   ]);

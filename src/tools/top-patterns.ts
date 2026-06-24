@@ -11,7 +11,8 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant, queryRange } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { boundedFanout } from '../lib/concurrency.js';
 import * as pql from '../lib/promql.js';
 import { LABELS, includeToSelector, type FilterValue } from '../lib/promql.js';
 import { bytesToCost, parsePrometheusValue, buildDisclosedDollarValue, type DisclosedDollarValue } from '../lib/cost.js';
@@ -236,9 +237,12 @@ export async function executeTopPatterns(
   for (const [k, v] of Object.entries(filters)) {
     if (typeof v === 'string') probeFilters[k] = v;
   }
+  // resolveMetricsEnv takes an optional timeout — bound the edge/cloud probe at
+  // the cheap budget. resolveMetricsEnvFiltered has no timeout param (shared
+  // lib, owned elsewhere); its inner probe stays unbounded — see lib_followups.
   const metricsEnv = Object.keys(probeFilters).length > 0
     ? await resolveMetricsEnvFiltered(env, probeFilters)
-    : await resolveMetricsEnv(env);
+    : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // PL-12a — `include='both'` needs a parallel pass with
   // `routeState="drop"` to recover the dropped slice per (pattern,
@@ -250,26 +254,35 @@ export async function executeTopPatterns(
 
   // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct,
   //              cost-by-service rollup ---
+  // Each leg keeps its existing increase[tf.range] SHAPE; only the per-call
+  // timeout/budget changes. iQueryInstant resolves to null on timeout/error —
+  // the bytes/$/events-surfacing legs use heavy, the pure count() leg uses
+  // cheap, and every null is routed to the SAME fallback the prior
+  // `.catch(()=>null)` (or empty-result guard) already used. The redundant
+  // per-leg `.catch(()=>null)` is removed (iQuery* already swallow to null).
   const [res, eventsRes, totalRes, countRes, serviceRollupRes, droppedSliceRes, droppedTotalRes] = await Promise.all([
-    queryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit)),
-    queryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range)).catch(() => null),
-    queryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range)).catch(() => null),
-    queryInstant(env, pql.distinctPatternCount(filters, metricsEnv, tf.range)).catch(() => null),
+    iQueryInstant(env, pql.topPatternsFull(filters, metricsEnv, tf.range, args.limit), QUERY_BUDGET.heavy),
+    iQueryInstant(env, pql.eventsByPatternFull(filters, metricsEnv, tf.range), QUERY_BUDGET.heavy),
+    iQueryInstant(env, pql.totalBytesInScope(filters, metricsEnv, tf.range), QUERY_BUDGET.heavy),
+    // distinctPatternCount is a count(count by(...)) — numeric value is a
+    // pattern COUNT, not bytes/$ → cheap budget.
+    iQueryInstant(env, pql.distinctPatternCount(filters, metricsEnv, tf.range), QUERY_BUDGET.cheap),
     // Cost-by-service rollup — the "where is the money" headline. One
     // grouped query; answers the question a vanilla-SIEM SRE has to
     // hand-roll (stats by container_name) and which the per-pattern
-    // list buries under fragmentation.
-    queryInstant(env, pql.bytesPerServiceScoped(filters, metricsEnv, tf.range)).catch(() => null),
+    // list buries under fragmentation. Surfaces exact per-service bytes → heavy.
+    iQueryInstant(env, pql.bytesPerServiceScoped(filters, metricsEnv, tf.range), QUERY_BUDGET.heavy),
     // PL-12a `both` dual-query: per-(pattern, service, severity) bytes
     // for the dropped cohort, so we can carry kept/dropped/share_pct
-    // on every row. Skipped when include != 'both'.
+    // on every row. Skipped when include != 'both'. Surfaces exact bytes → heavy.
     runBoth
-      ? queryInstant(env, pql.bytesPerPattern(droppedSliceFilters, metricsEnv, tf.range)).catch(() => null)
+      ? iQueryInstant(env, pql.bytesPerPattern(droppedSliceFilters, metricsEnv, tf.range), QUERY_BUDGET.heavy)
       : Promise.resolve(null),
     // PL-12a `both` totals: env-wide dropped bytes so the totals block
     // and headline can report `dropped_share_pct` against the union.
+    // Surfaces exact dropped total bytes/$ → heavy.
     runBoth
-      ? queryInstant(env, pql.totalBytesInScope(droppedSliceFilters, metricsEnv, tf.range)).catch(() => null)
+      ? iQueryInstant(env, pql.totalBytesInScope(droppedSliceFilters, metricsEnv, tf.range), QUERY_BUDGET.heavy)
       : Promise.resolve(null),
   ]);
 
@@ -290,7 +303,9 @@ export async function executeTopPatterns(
   );
   const volScale = volRes.factor;
 
-  if (res.status !== 'success' || res.data.result.length === 0) {
+  if (!res || res.status !== 'success' || res.data.result.length === 0) {
+    // A timed-out / errored ranking query (res === null) degrades to the SAME
+    // empty-result path an empty success already takes — no new error surface.
     // When include='dropped', the empty-result cause is ambiguous:
     //   A. enrichment_not_wired — receiver does not emit the routeState label at all.
     //   B. enrichment_wired_window_empty — label is wired but no dropped events in this window/scope.
@@ -306,9 +321,13 @@ export async function executeTopPatterns(
       // zero the label is not being stamped by the receiver at all (state A).
       let distinctDroppedPatternCount = 0;
       try {
+        // count() meta probe — numeric value is a distinct-pattern COUNT (not
+        // bytes/$) → cheap budget. iQueryInstant resolves to null on
+        // timeout/error; the `metaRes &&` guard then leaves the count at 0,
+        // the SAME non-fatal fall-through the prior catch produced.
         const metaProbeQuery = `count(count by (message_pattern) (all_events_summaryBytes_total{tenx_env="${metricsEnv}",routeState="drop"}[24h]))`;
-        const metaRes = await queryInstant(env, metaProbeQuery);
-        if (metaRes.status === 'success' && metaRes.data.result.length > 0) {
+        const metaRes = await iQueryInstant(env, metaProbeQuery, QUERY_BUDGET.cheap);
+        if (metaRes && metaRes.status === 'success' && metaRes.data.result.length > 0) {
           distinctDroppedPatternCount = Number(metaRes.data.result[0].value?.[1] ?? 0) || 0;
         }
       } catch {
@@ -519,48 +538,64 @@ export async function executeTopPatterns(
 
   // (analyzer + lens + label resolved up-front, before the rate — see top.)
 
+  // 24h trend per hash, sum'd across all series with that hash. Previously one
+  // unbounded queryRange per hash spread into the Promise.all below (an N+1 fan
+  // that, on a slow backend, multiplied one slow leg by the row count). Now
+  // bounded: boundedFanout caps width at 6 and each leg at the cheap budget,
+  // with the heavy budget as the soft deadline for the whole fan. trendResults
+  // stays index-aligned with rawRows (null for empty-hash rows / slow legs).
+  // The query SHAPE is unchanged (rate(...[5m]) sparkline, not an exact-bytes
+  // increase leg). Runs in parallel with the lib fetches below.
+  const trendResultsP = boundedFanout(
+    rawRows,
+    async (r) => {
+      if (!r.hash) return null;
+      const tr = await iQueryRange(
+        env,
+        `sum by (${LABELS.hash}) (rate(${trendMetric}{${LABELS.hash}="${r.hash}"${routeStateSelector}}[5m]))`,
+        trendStart,
+        now,
+        trendStepSec,
+        QUERY_BUDGET.cheap
+      );
+      return tr && tr.status === 'success' ? tr : null;
+    },
+    { concurrency: 6, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
+  );
+
   const [
-    firstSeenByHash,
-    eventsByHash,
-    baselineByKey,
-    serviceBreadthByHash,
-    depsByHash,
-    ...trendResults
+    [
+      firstSeenByHash,
+      eventsByHash,
+      baselineByKey,
+      serviceBreadthByHash,
+      depsByHash,
+    ],
+    trendResults,
   ] = await Promise.all([
-    fetchFirstSeenBatch(env, hashes),
-    fetchEventsByHashes(
-      rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity })),
-      { scope: args.siemScope, perHash: 250, window: args.timeRange }
-    ),
-    // Baseline bytes at 7d/14d/21d offsets — drives the trajectory
-    // badge (NEW / ACUTE / GROWING / STABLE / SHRINKING). Mirrors
-    // whats_changing's 3-window baseline so the badge tells the same
-    // story log10x_whats_changing would for the same hash.
-    fetchBaselineBytes(env, filters, metricsEnv, tf.range),
-    // Distinct services emitting each hash — single grouped query,
-    // post-processed locally. Gates the "service breakdown" CTA.
-    fetchServiceBreadth(env, metricsEnv, tf.range, hashes),
-    // Per-hash dependency check — token-AND match against the
-    // detected analyzer's saved searches / alerts / dashboards.
-    // Returns null when no supported analyzer is detected.
-    fetchDepsPerHash(
-      analyzer,
-      rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity }))
-    ).catch(() => null),
-    // 24h trend per hash, sum'd across all series with that hash. One query
-    // per hash, parallel; cheap to spawn. trendResults[i] aligns with
-    // hashes[i] (skipping empties).
-    ...rawRows.map(r =>
-      r.hash
-        ? queryRange(
-            env,
-            `sum by (${LABELS.hash}) (rate(${trendMetric}{${LABELS.hash}="${r.hash}"${routeStateSelector}}[5m]))`,
-            trendStart,
-            now,
-            trendStepSec
-          ).catch(() => null)
-        : Promise.resolve(null)
-    ),
+    Promise.all([
+      fetchFirstSeenBatch(env, hashes),
+      fetchEventsByHashes(
+        rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity })),
+        { scope: args.siemScope, perHash: 250, window: args.timeRange }
+      ),
+      // Baseline bytes at 7d/14d/21d offsets — drives the trajectory
+      // badge (NEW / ACUTE / GROWING / STABLE / SHRINKING). Mirrors
+      // whats_changing's 3-window baseline so the badge tells the same
+      // story log10x_whats_changing would for the same hash.
+      fetchBaselineBytes(env, filters, metricsEnv, tf.range),
+      // Distinct services emitting each hash — single grouped query,
+      // post-processed locally. Gates the "service breakdown" CTA.
+      fetchServiceBreadth(env, metricsEnv, tf.range, hashes),
+      // Per-hash dependency check — token-AND match against the
+      // detected analyzer's saved searches / alerts / dashboards.
+      // Returns null when no supported analyzer is detected.
+      fetchDepsPerHash(
+        analyzer,
+        rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity }))
+      ).catch(() => null),
+    ]),
+    trendResultsP,
   ]);
 
   // --- Phase 3: Assemble TopPatternRow[] ---

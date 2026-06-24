@@ -35,7 +35,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import * as pql from '../lib/promql.js';
 import { LABELS } from '../lib/promql.js';
 import { bytesToCost, bytesToGb, parsePrometheusValue } from '../lib/cost.js';
@@ -304,16 +304,19 @@ async function executeServicesInner(
   );
   const costPerGb: number | null = rate.rate_per_gb;
   const period = costPeriodLabel(tf.days);
-  const metricsEnv = await resolveMetricsEnv(env);
+  const metricsEnv = await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
   const exceptionServices = (args.exception_services ?? []).filter(
     (s): s is string => typeof s === 'string' && s.length > 0,
   );
   const exceptionSet = new Set(exceptionServices.map((s) => s.toLowerCase()));
 
   // ── Bytes per service (the existing query) ──
-  const res = await queryInstant(env, pql.bytesPerService(metricsEnv, tf.range));
+  // increase[tf.range] surfacing EXACT per-service bytes/$ to the user → heavy
+  // budget. iQueryInstant resolves to null on timeout/error; null routes to the
+  // SAME "no service data" fallback an empty/failed query already used.
+  const res = await iQueryInstant(env, pql.bytesPerService(metricsEnv, tf.range), QUERY_BUDGET.heavy);
 
-  if (res.status !== 'success' || res.data.result.length === 0) {
+  if (!res || res.status !== 'success' || res.data.result.length === 0) {
     return 'No service data available. Data appears after the first 24h of collection.';
   }
 
@@ -337,7 +340,13 @@ async function executeServicesInner(
   // feeds the byte attribution — routeState is the authoritative source.
   const envForGitops = envWithResolvedGitops(env);
   const [actionAxisRes, capCsvContent, actionIntent] = await Promise.all([
-    queryInstant(env, actionAxisQ).catch(() => null),
+    // group-by(service,routeState) increase[tf.range] — surfaces EXACT
+    // offload/compact/drop bytes to the user → heavy budget. iQueryInstant
+    // already swallows timeout/error to null (the .catch is no longer needed);
+    // the downstream `if (actionAxisRes && status==='success')` guard maps null
+    // to the SAME "no action split" path a failed query already gave (all bytes
+    // reconcile into bytes_passed).
+    iQueryInstant(env, actionAxisQ, QUERY_BUDGET.heavy),
     fetchCapCsvForEnv(envForGitops).catch(() => undefined),
     fetchActionIntentForEnv(envForGitops).catch(() => undefined),
   ]);

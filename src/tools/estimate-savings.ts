@@ -50,7 +50,7 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryInstant } from '../lib/api.js';
+import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import {
   projectActionRange,
   getDestinationCostModel,
@@ -512,7 +512,7 @@ function parsePromResult(
         value?: [number, string];
       }>;
     };
-  },
+  } | null,
   keyLabel: string
 ): Record<string, number> {
   const out: Record<string, number> = {};
@@ -528,7 +528,7 @@ function parsePromResult(
 
 function parseScalarSum(res: {
   data?: { result?: Array<{ value?: [number, string] }> };
-}): number {
+} | null): number {
   const rows = res?.data?.result ?? [];
   let sum = 0;
   for (const row of rows) {
@@ -819,7 +819,7 @@ export async function runEstimateForecast(
   if (args.service) probeFilters[env.labels.service] = args.service;
   const metricsEnv = Object.keys(probeFilters).length > 0
     ? await resolveMetricsEnvFiltered(env, probeFilters)
-    : await resolveMetricsEnv(env);
+    : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // Build the scope selector using the same buildSelector path as top_patterns:
   // routeState!="drop" (absence-tolerant kept cohort) + optional service filter.
@@ -863,13 +863,18 @@ export async function runEstimateForecast(
   const hashServiceQuery =
     `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{routeState!="drop",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
 
+  // increase[observation_window] legs surface exact bytes/$ to the user → heavy
+  // budget. distinctCount is a count-of-counts disclosure value → cheap. Each
+  // leg degrades to null independently (iQueryInstant swallows timeout/error)
+  // so one slow leg cannot sink the batch; the parsers below tolerate null
+  // (parsePromResult → {}, parseScalarSum → 0, the same "no data" fallback).
   const parallelQueries: Array<Promise<unknown>> = [
-    queryInstant(env, bytesQuery),
-    queryInstant(env, eventsQuery),
-    queryInstant(env, totalQuery),
-    queryInstant(env, distinctCountQuery).catch(() => null),
+    iQueryInstant(env, bytesQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, eventsQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, totalQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, distinctCountQuery, QUERY_BUDGET.cheap),
   ];
-  parallelQueries.push(queryInstant(env, hashServiceQuery));
+  parallelQueries.push(iQueryInstant(env, hashServiceQuery, QUERY_BUDGET.heavy));
 
   const queryResults = await Promise.all(parallelQueries);
   const [bytesRes, eventsRes, totalRes, distinctCountRes] = queryResults as [
@@ -879,6 +884,16 @@ export async function runEstimateForecast(
     Parameters<typeof parseScalarSum>[0] | null,
   ];
   const hashServiceRes = queryResults[4] as Parameters<typeof parsePromResult>[0];
+
+  // Backend-down detection: iQueryInstant returns null on a FAILED fetch, vs an
+  // empty-but-successful response when the backend is up with no data in window.
+  // If every measurement leg failed, the backend is unreachable — throw so the
+  // top-level handler emits the structured backend_error envelope (restores the
+  // pre-bounding throw→catch behavior). A misleading zero-savings "success" must
+  // never ship when we simply could not measure.
+  if (!bytesRes && !eventsRes && !totalRes && !hashServiceRes) {
+    throw new Error('metrics backend unreachable: all estimate_savings forecast queries failed');
+  }
 
   // Extract distinct pattern count from the count-of-counts query.
   let patternUniverseCount: number | null = null;
@@ -1492,13 +1507,17 @@ export async function runEstimateVerify(
     postPassedByHashRes,
     postDroppedByHashRes,
   ] = await Promise.all([
-    queryInstant(env, baselinePassedQuery),
-    queryInstant(env, baselineByHashQuery),
-    queryInstant(env, postTotalQuery),
-    queryInstant(env, postPassedQuery),
-    queryInstant(env, postDroppedQuery),
-    queryInstant(env, postPassedByHashQuery),
-    queryInstant(env, postDroppedByHashQuery),
+    // All seven are increase[baseline/post_window] legs that surface exact
+    // bytes/$/delivered_pct to the user → heavy budget. Any leg that times out
+    // resolves to null; the parsers below (parseScalarSum → 0, parsePromResult
+    // → {}) map null to the same empty-data fallback the tool already gives.
+    iQueryInstant(env, baselinePassedQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, baselineByHashQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, postTotalQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, postPassedQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, postDroppedQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, postPassedByHashQuery, QUERY_BUDGET.heavy),
+    iQueryInstant(env, postDroppedByHashQuery, QUERY_BUDGET.heavy),
   ]);
 
   const baselineBytes = parseScalarSum(baselineTotalRes);
@@ -1512,7 +1531,7 @@ export async function runEstimateVerify(
   // breakdown rows carry them so downstream renderers (commitment_report's
   // CFO tables) lead with the name, never the hash.
   const hashToPattern = new Map<string, string>();
-  if (postDroppedByHashRes.status === 'success') {
+  if (postDroppedByHashRes && postDroppedByHashRes.status === 'success') {
     for (const r of postDroppedByHashRes.data.result) {
       const h = r.metric[hashLabel];
       const p = r.metric[patternLabel];
@@ -1530,18 +1549,18 @@ export async function runEstimateVerify(
   let patternToContainer = new Map<string, string>();
   if (hasActionSource && postDroppedBytes > 0) {
     const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
-    try {
-      const pairRes = await queryInstant(env, dropByPairQuery);
-      patternToContainer = extractHashContainerMap(
-        pairRes,
-        hashLabel,
-        containerLabel
-      );
-    } catch {
-      // Best-effort: leave the map empty. The action-split path will
-      // emit `unattributed` rows for every dropped hash, which the
-      // caller surfaces as a caveat.
-    }
+    // Best-effort container attribution: the per-pair value only ranks which
+    // container owns a hash (no exact byte/$ reaches the user), so the cheap
+    // budget is right. On timeout/error iQueryInstant resolves null and
+    // extractHashContainerMap (res?.data?.result ?? []) yields an empty map —
+    // the action-split path then emits `unattributed` rows, the same fallback
+    // the prior try/catch produced.
+    const pairRes = await iQueryInstant(env, dropByPairQuery, QUERY_BUDGET.cheap);
+    patternToContainer = extractHashContainerMap(
+      pairRes ?? {},
+      hashLabel,
+      containerLabel
+    );
   }
 
   // Parse action-intent.json (canonical action source) when supplied.
