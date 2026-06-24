@@ -9,10 +9,14 @@
  */
 
 import type { EnvConfig } from './environments.js';
-import { queryInstant } from './api.js';
+import { iQueryInstant, QUERY_BUDGET } from './interactive-query.js';
+import { boundedFanout } from './concurrency.js';
 import { LABELS } from './promql.js';
 import { parsePrometheusValue } from './cost.js';
 import type { InvestigateThresholds } from './thresholds.js';
+
+/** Max concurrent per-pattern slope queries when ranking co-drifters. */
+const DRIFT_COHORT_CONCURRENCY = 6;
 
 export interface DriftResult {
   anchor: string;
@@ -93,16 +97,16 @@ export async function classifyTrajectory(
   let rateChangeRatio = 1;
   let slopePerWeek = 0;
   try {
-    const res = await queryInstant(env, currentVsBaseline);
-    if (res.status === 'success' && res.data.result[0]) {
+    const res = await iQueryInstant(env, currentVsBaseline, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result[0]) {
       rateChangeRatio = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
     // non-fatal
   }
   try {
-    const res = await queryInstant(env, slopeQuery);
-    if (res.status === 'success' && res.data.result[0]) {
+    const res = await iQueryInstant(env, slopeQuery, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result[0]) {
       slopePerWeek = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
@@ -154,8 +158,8 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
   let anchorSlopePerWeek = 0;
   let queriesExecuted = 1;
   try {
-    const res = await queryInstant(opts.env, anchorSlopeQ);
-    if (res.status === 'success' && res.data.result[0]) {
+    const res = await iQueryInstant(opts.env, anchorSlopeQ, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result[0]) {
       anchorSlopePerWeek = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
@@ -177,9 +181,9 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
 
   let cohort: CoDrifter[] = [];
   try {
-    const res = await queryInstant(opts.env, cohortQ);
+    const res = await iQueryInstant(opts.env, cohortQ, QUERY_BUDGET.cheap);
     queriesExecuted += 1;
-    if (res.status === 'success') {
+    if (res && res.status === 'success') {
       // topk with negative abs returns patterns sorted by closeness to anchor slope.
       // Their per-pattern slopes must be fetched separately or extracted from a second pass;
       // for the MVP, we re-derive slope via a per-pattern call if the pattern isn't the anchor.
@@ -193,30 +197,35 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
           sev: row.metric[LABELS.severity] || '',
         });
       }
-      // Pull actual fractional slopes per pattern. Same normalization as
-      // anchorSlopeQ so values are comparable.
-      for (const pat of patterns) {
-        const slopeQ =
-          `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h]))[${opts.window}:1h]) * 604800) ` +
-          `/ ` +
-          `clamp_min(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h])), 1)`;
-        try {
-          const r = await queryInstant(opts.env, slopeQ);
-          queriesExecuted += 1;
-          if (r.status === 'success' && r.data.result[0]) {
+      // Pull actual fractional slopes per pattern with bounded concurrency + a
+      // per-leg deadline. This was a serial N+1 that, on a wide cohort against a
+      // slow backend, serialized into a multi-minute hang. A timed-out/failed
+      // leg is dropped; the whole pass is soft-capped so it can't run away.
+      const slopeResults = await boundedFanout(
+        patterns,
+        async (pat): Promise<CoDrifter | null> => {
+          const slopeQ =
+            `(deriv(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h]))[${opts.window}:1h]) * 604800) ` +
+            `/ ` +
+            `clamp_min(sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(pat.p)}"}[1h])), 1)`;
+          const r = await iQueryInstant(opts.env, slopeQ, QUERY_BUDGET.cheap);
+          if (r && r.status === 'success' && r.data.result[0]) {
             const slope = parsePrometheusValue(r.data.result[0]);
-            const similarity = slopeSimilarity(anchorSlopePerWeek, slope);
-            cohort.push({
+            return {
               pattern: pat.p,
               service: pat.s,
               severity: pat.sev,
               slopePerWeek: slope,
-              slopeSimilarity: similarity,
-            });
+              slopeSimilarity: slopeSimilarity(anchorSlopePerWeek, slope),
+            };
           }
-        } catch {
-          // skip
-        }
+          return null;
+        },
+        { concurrency: DRIFT_COHORT_CONCURRENCY, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
+      );
+      queriesExecuted += patterns.length;
+      for (const c of slopeResults) {
+        if (c) cohort.push(c);
       }
     }
   } catch (e) {

@@ -17,8 +17,12 @@
  */
 
 import type { EnvConfig } from './environments.js';
-import { queryRange } from './api.js';
+import { iQueryRange, QUERY_BUDGET } from './interactive-query.js';
+import { boundedFanout } from './concurrency.js';
 import { LABELS } from './promql.js';
+
+/** Max concurrent first-seen range queries in a batch (caps the N+1 fan-out). */
+const FIRST_SEEN_CONCURRENCY = 8;
 
 export interface FirstSeenResult {
   /** Seconds since the earliest non-zero timestamp. `null` if no data found. */
@@ -59,8 +63,8 @@ export async function fetchFirstSeen(
 
   try {
     const q = `${metric}{${LABELS.hash}="${hash}"}`;
-    const res = await queryRange(env, q, start, now, step);
-    if (res.status !== 'success' || !Array.isArray(res.data.result)) {
+    const res = await iQueryRange(env, q, start, now, step, QUERY_BUDGET.cheap);
+    if (!res || res.status !== 'success' || !Array.isArray(res.data.result)) {
       return { ageSeconds: null, firstSeenUnix: null };
     }
     let earliest: number | null = null;
@@ -97,11 +101,16 @@ export async function fetchFirstSeenBatch(
 ): Promise<Map<string, FirstSeenResult>> {
   const out = new Map<string, FirstSeenResult>();
   if (hashes.length === 0) return out;
-  const results = await Promise.all(
-    hashes.map(h => fetchFirstSeen(env, h, metric, lookbackSeconds).then(r => [h, r] as const))
+  // Bounded-concurrency fan-out with a per-leg deadline and a whole-batch soft
+  // deadline: a wide top-N against a slow backend degrades to "(unknown)"
+  // first-seen for the un-fetched tail instead of firing N unbounded queries.
+  const results = await boundedFanout(
+    hashes,
+    (h) => fetchFirstSeen(env, h, metric, lookbackSeconds),
+    { concurrency: FIRST_SEEN_CONCURRENCY, timeoutMs: QUERY_BUDGET.cheap, softDeadlineMs: QUERY_BUDGET.heavy }
   );
-  for (const [h, r] of results) {
-    if (r.ageSeconds !== null) out.set(h, r);
-  }
+  results.forEach((r, i) => {
+    if (r && r.ageSeconds !== null) out.set(hashes[i], r);
+  });
   return out;
 }
