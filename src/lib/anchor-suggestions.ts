@@ -18,7 +18,7 @@
  * those terms stay in field names for the agent.
  */
 import type { EnvConfig } from './environments.js';
-import { queryRange } from './api.js';
+import { iQueryRange, QUERY_BUDGET } from './interactive-query.js';
 import { LABELS } from './promql.js';
 import { resolveMetricsEnv } from './resolve-env.js';
 import { computeAnchorDispersion } from './anchor-dispersion.js';
@@ -72,8 +72,8 @@ export async function suggestHigherVariationAnchors(
       `(rate(all_events_summaryBytes_total{${LABELS.env}="${metricsEnv}"}[${rateRange}s])))`;
     const nowSec = Math.floor(Date.now() / 1000);
     const fromSec = nowSec - windowSeconds;
-    const res = await queryRange(env, promql, fromSec, nowSec, stepSeconds);
-    if (res.status !== 'success') return [];
+    const res = await iQueryRange(env, promql, fromSec, nowSec, stepSeconds, QUERY_BUDGET.cheap);
+    if (!res || res.status !== 'success') return [];
 
     const candidates: AnchorSuggestion[] = [];
     for (const r of res.data.result) {

@@ -14,7 +14,7 @@
  */
 
 import type { EnvConfig } from './environments.js';
-import { queryInstant } from './api.js';
+import { iQueryInstant, QUERY_BUDGET } from './interactive-query.js';
 import { LABELS } from './promql.js';
 import { parsePrometheusValue } from './cost.js';
 import { resolveMetricsEnv } from './resolve-env.js';
@@ -44,7 +44,7 @@ export async function resolvePatternHashFromMetrics(
     const exactQ =
       `count by (${LABELS.hash}) (increase(all_events_summaryBytes_total{` +
       `${LABELS.pattern}="${p}",${LABELS.env}="${metricsEnv}"}[24h]))`;
-    const exact = await queryInstant(env, exactQ).catch(() => null);
+    const exact = await iQueryInstant(env, exactQ, QUERY_BUDGET.cheap);
     const exactRows = exact?.data?.result ?? [];
     const exactHit = pickBest(exactRows);
     if (exactHit) return exactHit;
@@ -65,7 +65,7 @@ export async function resolvePatternHashFromMetrics(
     const prefixQ =
       `count by (${LABELS.hash}) (increase(all_events_summaryBytes_total{` +
       `${LABELS.pattern}=~"${prefix}.*",${LABELS.env}="${metricsEnv}"}[24h]))`;
-    const prefixR = await queryInstant(env, prefixQ).catch(() => null);
+    const prefixR = await iQueryInstant(env, prefixQ, QUERY_BUDGET.cheap);
     return pickBest(prefixR?.data?.result ?? []);
   } catch {
     return undefined;
@@ -130,7 +130,7 @@ export async function resolvePatternRefInMetrics(
       const q =
         `count by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
         `${LABELS.hash}="${escaped}",${LABELS.env}="${metricsEnv}"}[24h]))`;
-      const res = await queryInstant(env, q).catch(() => null);
+      const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
       const rows = res?.data?.result ?? [];
       if (rows.length === 0) {
         // Probe ran cleanly, no rows → confirmed absent in this window.
