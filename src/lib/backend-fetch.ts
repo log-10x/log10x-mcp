@@ -8,7 +8,13 @@
  *   - Default 3 attempts (`LOG10X_RETRY_ATTEMPTS` override).
  *   - 250ms base backoff, exponential with jitter (`LOG10X_RETRY_BASE_MS`).
  *   - 30s per-attempt timeout via AbortController (`LOG10X_REQUEST_TIMEOUT_MS`).
- *   - Retry classes: network exception, AbortError (→ timeout), HTTP 5xx, HTTP 429.
+ *   - Retry classes: network exception, HTTP 5xx, HTTP 429.
+ *   - Timeout (AbortError) is NOT retried by default: re-issuing an identical
+ *     query with an identical budget almost always times out again, so a single
+ *     slow read used to cost up to attempts×timeout (~90s) of wall-clock before
+ *     failing. Set `LOG10X_RETRY_TIMEOUTS=true` (or opts.retryTimeouts) to
+ *     restore the legacy retry-on-timeout — an escape hatch for cold-warmup
+ *     self-hosted stores (e.g. Mimir/Cortex store-gateway lazy load).
  *   - Non-retryable: any other 4xx — surfaced immediately with kind-labelled body.
  *   - AMP path: `reSignPerAttempt` callback rebuilds the signed init each
  *     attempt so SigV4 timestamps stay fresh.
@@ -36,6 +42,12 @@ export interface BackendFetchOpts {
   attempts?: number;
   /** Exponential backoff base. Defaults to LOG10X_RETRY_BASE_MS or 250. */
   baseMs?: number;
+  /**
+   * Retry on timeout (AbortError). Defaults to false (fail fast on the first
+   * timeout). Falls back to the LOG10X_RETRY_TIMEOUTS env flag when unset.
+   * Network / 5xx / 429 retries are unaffected by this.
+   */
+  retryTimeouts?: boolean;
   /**
    * AMP-style: rebuild a freshly-signed init each attempt. When provided,
    * the caller-supplied `init` is ignored and replaced per attempt with
@@ -69,6 +81,8 @@ export async function backendFetch(
   const baseMs = opts.baseMs ?? DEFAULT_BASE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const kindLabel = opts.kindLabel;
+  const retryTimeouts =
+    opts.retryTimeouts ?? (process.env.LOG10X_RETRY_TIMEOUTS || '').toLowerCase() === 'true';
 
   let lastErr: Error | undefined;
 
@@ -102,6 +116,11 @@ export async function backendFetch(
         lastErr = err;
         reason = 'network';
       }
+      // Fail fast on timeout: a query that blew its budget will almost
+      // certainly blow it again on an identical retry, so retrying only
+      // multiplies the wall-clock (up to attempts×timeout) before failing.
+      // Opt back in via opts.retryTimeouts / LOG10X_RETRY_TIMEOUTS.
+      if (reason === 'timeout' && !retryTimeouts) break;
       if (attempt < attempts - 1) {
         const delayMs = baseMs * Math.pow(2, attempt) + Math.floor(Math.random() * 100);
         console.warn(

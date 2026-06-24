@@ -99,8 +99,12 @@ function sleep(ms: number): Promise<void> {
  * (unchanged behavior); for other kinds it hits the customer's own
  * Prom-compatible store with the appropriate auth.
  */
-export async function queryInstant(env: EnvConfig, promql: string): Promise<PrometheusResponse> {
-  return env.metricsBackend.queryInstant(promql);
+export async function queryInstant(
+  env: EnvConfig,
+  promql: string,
+  timeoutMs?: number
+): Promise<PrometheusResponse> {
+  return env.metricsBackend.queryInstant(promql, timeoutMs);
 }
 
 /** Prometheus range query. Delegates to the env's MetricsBackend. */
@@ -109,9 +113,10 @@ export async function queryRange(
   promql: string,
   start: number,
   end: number,
-  step: number
+  step: number,
+  timeoutMs?: number
 ): Promise<PrometheusResponse> {
-  return env.metricsBackend.queryRange(promql, start, end, step);
+  return env.metricsBackend.queryRange(promql, start, end, step, timeoutMs);
 }
 
 /** AI analysis query. Returns the AI text response. */

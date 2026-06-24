@@ -81,3 +81,51 @@ export function createLimiter(concurrency: number, softDeadlineMs?: number): Lim
 
   return limiter as Limiter;
 }
+
+/**
+ * Race a promise against a deadline. Resolves to `null` if `ms` elapses before
+ * `p` settles. Promoted from the offload-status partial-result pattern so every
+ * interactive caller can bound a slow leg uniformly. Note: a client-side race
+ * does not cancel `p` — pair it with a backend-level timeout (the threaded
+ * `timeoutMs` on queryInstant/queryRange) when you also need the in-flight
+ * request aborted.
+ */
+export async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Fan out `fn` over `items` with bounded concurrency and a per-leg deadline,
+ * degrading any slow / failed / soft-expired leg to `null` instead of sinking
+ * the whole batch. The fix for the N+1 / serial-loop query patterns (first-seen,
+ * drift, rank-by-shape, metrics-that-moved, commitment per-week, preview-filter):
+ * a bare `for (const x of xs) await query(x)` over 100 items is a multi-minute
+ * hang even with a per-leg timeout; this caps both the width and each leg.
+ *
+ * Result order matches `items`. `null` means that leg did not produce a value
+ * (timed out, threw, or was skipped after the soft deadline) — callers map it
+ * to their existing unknown/skip handling.
+ */
+export async function boundedFanout<I, O>(
+  items: I[],
+  fn: (item: I, index: number) => Promise<O>,
+  opts: { concurrency: number; timeoutMs?: number; softDeadlineMs?: number }
+): Promise<Array<O | null>> {
+  const limit = createLimiter(opts.concurrency, opts.softDeadlineMs);
+  const tasks = items.map((item, i) =>
+    limit(() => (opts.timeoutMs ? withTimeout(fn(item, i), opts.timeoutMs) : fn(item, i)))
+      .then((r) => (r === undefined ? null : r))
+      .catch(() => null)
+  );
+  return (await Promise.all(tasks)) as Array<O | null>;
+}

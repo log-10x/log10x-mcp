@@ -32,7 +32,8 @@ import {
 } from '../lib/pattern-df.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { queryInstant, queryRange } from '../lib/api.js';
+import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { withTimeout } from '../lib/concurrency.js';
 import { LABELS } from '../lib/promql.js';
 import { parsePrometheusValue } from '../lib/cost.js';
 import { lineChart } from '../lib/line-chart.js';
@@ -182,15 +183,18 @@ function renderAsciiBarChart(
 async function resolvePatternName(
   env: EnvConfig,
   hash: string,
+  metricsEnv: string,
 ): Promise<string | null> {
   try {
-    const metricsEnv = await resolveMetricsEnv(env);
+    // Only the dominant pattern LABEL is read; the magnitude is discarded, so a
+    // short [1h] rate window is numerically safe (preserves the topk argmax) and
+    // scans far less TSDB than the old [7d] increase.
     const q =
-      `topk(1, sum by (${LABELS.pattern}) (increase(all_events_summaryBytes_total{` +
+      `topk(1, sum by (${LABELS.pattern}) (rate(all_events_summaryBytes_total{` +
       `${LABELS.hash}="${hash.replace(/"/g, '\\"')}",` +
-      `${LABELS.env}="${metricsEnv}"}[7d])))`;
-    const res = await queryInstant(env, q);
-    if (res.status === 'success' && res.data.result.length > 0) {
+      `${LABELS.env}="${metricsEnv}"}[1h])))`;
+    const res = await iQueryInstant(env, q, QUERY_BUDGET.cheap);
+    if (res && res.status === 'success' && res.data.result.length > 0) {
       return res.data.result[0].metric[LABELS.pattern] ?? null;
     }
     return null;
@@ -203,16 +207,18 @@ async function resolvePatternName(
 async function fetchServiceBreakdown(
   env: EnvConfig,
   hash: string,
+  metricsEnv: string,
 ): Promise<Array<{ service: string; severity: string; bytes: number; bytes_display: string; share_pct: number; share_pct_display: string }>> {
   try {
-    const metricsEnv = await resolveMetricsEnv(env);
+    // Surfaces EXACT bytes/shares — keep the [30d] increase shape (rate*W would
+    // drift the reported numbers); bound it with the heavy interactive budget.
     const q =
       `sum by (${LABELS.service}, ${LABELS.severity}) ` +
       `(increase(all_events_summaryBytes_total{` +
       `${LABELS.hash}="${hash.replace(/"/g, '\\"')}",` +
       `${LABELS.env}="${metricsEnv}"}[30d]))`;
-    const res = await queryInstant(env, q);
-    if (res.status !== 'success' || res.data.result.length === 0) return [];
+    const res = await iQueryInstant(env, q, QUERY_BUDGET.heavy);
+    if (!res || res.status !== 'success' || res.data.result.length === 0) return [];
     const rows = res.data.result.map((r) => ({
       service: r.metric[LABELS.service] || '(unattributed)',
       severity: r.metric[LABELS.severity] || '',
@@ -242,8 +248,9 @@ async function fetchEnvMonthlyBytes(env: EnvConfig, metricsEnv: string): Promise
     const q =
       `sum(increase(all_events_summaryBytes_total{` +
       `${LABELS.env}="${metricsEnv}"}[30d]))`;
-    const res = await queryInstant(env, q);
-    if (res.status !== 'success' || res.data.result.length === 0) return 0;
+    // Env-wide exact bytes (volume-lens basis) — keep increase[30d]; heavy budget.
+    const res = await iQueryInstant(env, q, QUERY_BUDGET.heavy);
+    if (!res || res.status !== 'success' || res.data.result.length === 0) return 0;
     const v = parsePrometheusValue(res.data.result[0]);
     return Number.isFinite(v) && v > 0 ? v : 0;
   } catch {
@@ -286,8 +293,8 @@ async function fetchTrend(
       `sum by (${LABELS.hash}) ` +
       `(rate(all_events_summaryBytes_total{` +
       `${LABELS.hash}="${hash.replace(/"/g, '\\"')}"}[5m]))`;
-    const res = await queryRange(env, q, start, now, step);
-    if (res.status !== 'success' || res.data.result.length === 0) return [];
+    const res = await iQueryRange(env, q, start, now, step, QUERY_BUDGET.cheap);
+    if (!res || res.status !== 'success' || res.data.result.length === 0) return [];
     return (res.data.result[0].values as [number, string][]).map(([ts, v]) => ({
       ts,
       bytes_per_sec: Number.isFinite(Number(v)) ? Number(v) : 0,
@@ -601,23 +608,51 @@ export async function executePatternDetail(args: {
     resolvedHash = fromMetrics;
   }
 
-  // The env-wide total is ONLY the volume-lens basis. Resolving the metrics
-  // env (an edge/cloud probe query) AND fetching the total are BOTH wasted
-  // work when no projection was requested, so gate the whole chain on
-  // monthly_volume_gb. When lensed it runs concurrently with the main batch;
-  // when off it costs zero queries, keeping the hot path identical to today.
+  // Resolve the edge/cloud metrics env ONCE per drill and thread it everywhere.
+  // This used to be three separate live, un-memoized edgeProbe round trips
+  // (inside resolvePatternName, fetchServiceBreakdown, and the df-context
+  // resolve below); bounded so a wedged probe can't stall the drill.
+  // Bound the env probe too: it uses a direct queryInstant, and withTimeout is
+  // the GUARANTEE that covers anything the threaded budget can't reach (a
+  // backend that ignores timeoutMs, the listLabelValues path below, the SIEM
+  // pull). The threaded budget is the optimization (it aborts the in-flight
+  // prom request). On timeout we fall back to 'cloud' (the same default the
+  // probe itself returns when it finds no edge series).
+  const metricsEnv =
+    (await withTimeout(resolveMetricsEnv(env, QUERY_BUDGET.cheap), QUERY_BUDGET.cheap + 500)) ?? 'cloud';
+
+  // The env-wide total is ONLY the volume-lens basis — gate it on
+  // monthly_volume_gb so an un-lensed drill costs zero extra queries.
   const basisPromise: Promise<number> = args.monthly_volume_gb
-    ? resolveMetricsEnv(env).then((metricsEnv) => fetchEnvMonthlyBytes(env, metricsEnv))
+    ? fetchEnvMonthlyBytes(env, metricsEnv)
     : Promise.resolve(0);
 
-  // Fetch all data in parallel.
-  const [patternName, services, firstSeenAgeSeconds, trendSeries, envMonthlyBytes] = await Promise.all([
-    resolvePatternName(env, resolvedHash),
-    fetchServiceBreakdown(env, resolvedHash),
-    fetchFirstSeen(env, resolvedHash),
-    fetchTrend(env, resolvedHash, timeRange),
-    basisPromise,
-  ]);
+  // SIEM sample pull (best-effort enrichment) renders from the hash (ignores
+  // patternName), so it can run inside the batch. Bound it: include_samples is
+  // the DEFAULT, and the pull can be slow / re-probe, so it must not stall the
+  // drill — on timeout we degrade to "no samples", same as an unresolved SIEM.
+  const samplesPromise: Promise<{ events: string[]; siemKind: 'resolved' | 'unresolved' }> =
+    includeSamples
+      ? withTimeout(fetchSampleEvents(resolvedHash, null, timeRange), QUERY_BUDGET.heavy).then(
+          (r) => r ?? { events: [] as string[], siemKind: 'unresolved' as const }
+        )
+      : Promise.resolve({ events: [] as string[], siemKind: 'unresolved' as const });
+
+  // Fetch everything concurrently, every leg bounded. The df-context
+  // (render-only naming) and the SIEM sample pull used to run SERIALLY after
+  // this batch; folded in so they overlap the metric legs (wall-clock = slowest
+  // leg, not the sum). getEnvDfContext uses listLabelValues (not threaded), so
+  // it gets the client-side race; on timeout dfCtx is null => Layer-1 naming.
+  const [patternName, services, firstSeenAgeSeconds, trendSeries, envMonthlyBytes, dfCtx, sampleResult] =
+    await Promise.all([
+      resolvePatternName(env, resolvedHash, metricsEnv),
+      fetchServiceBreakdown(env, resolvedHash, metricsEnv),
+      withTimeout(fetchFirstSeen(env, resolvedHash), QUERY_BUDGET.cheap),
+      fetchTrend(env, resolvedHash, timeRange),
+      basisPromise,
+      withTimeout(getEnvDfContext(env, metricsEnv), QUERY_BUDGET.cheap),
+      samplesPromise,
+    ]);
   recordQuery(telemetry);
 
   // ── Volume projection lens. ─────────────────────────────────────
@@ -637,21 +672,16 @@ export async function executePatternDetail(args: {
     for (const p of trendSeries) p.bytes_per_sec *= volumeLens.factor;
   }
 
-  const { events: sampleEvents, siemKind } = includeSamples
-    ? await fetchSampleEvents(resolvedHash, patternName, timeRange)
-    : { events: [] as string[], siemKind: 'unresolved' as const };
-
+  const { events: sampleEvents, siemKind } = sampleResult;
   if (includeSamples && siemKind === 'resolved') {
     recordQuery(telemetry);
   }
 
   const totalBytes = services.reduce((s, r) => s + r.bytes, 0);
 
-  // RENDER-ONLY pattern naming (Layer 2) — the SAME shared env df-map
-  // top_patterns uses, so the drill-in header matches the list row. Degrades
-  // to Layer 1 on any backend hiccup (zero-corpus df).
-  const metricsEnvForDf = await resolveMetricsEnv(env);
-  const dfCtx: DfContext = await getEnvDfContext(env, metricsEnvForDf);
+  // RENDER-ONLY pattern naming (Layer 2) — dfCtx was resolved in the batch above
+  // (shared env df-map, same as top_patterns; degrades to Layer 1 on a backend
+  // hiccup / zero-corpus df).
   const topSvc = services[0];
   const built = patternName
     ? buildDisplayName(patternName, {
@@ -815,4 +845,8 @@ export async function executePatternDetail(args: {
 /** Exported for unit tests only. */
 export const __testables = {
   renderAsciiBarChart,
+  resolvePatternName,
+  fetchServiceBreakdown,
+  fetchEnvMonthlyBytes,
+  fetchTrend,
 };

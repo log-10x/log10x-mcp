@@ -197,3 +197,61 @@ test('backendFetch times out via AbortSignal and surfaces timeout error', async 
     );
   }
 });
+
+/**
+ * Hanging server that COUNTS how many requests reached it (= attempt count),
+ * so we can assert the fail-fast-on-timeout contract: a timeout is not retried
+ * by default even when attempts > 1.
+ */
+async function startHanging(): Promise<{ url: string; attempts(): number; close(): Promise<void> }> {
+  let n = 0;
+  const server: Server = createServer(() => {
+    n += 1;
+    // never respond — let the per-attempt AbortController fire
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('hanging stub failed to bind');
+  return {
+    url: `http://127.0.0.1:${addr.port}`,
+    attempts: () => n,
+    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+  };
+}
+
+test('backendFetch fails fast on timeout: exactly 1 attempt despite attempts=3', async () => {
+  const stub = await startHanging();
+  try {
+    await assert.rejects(
+      () =>
+        backendFetch(
+          `${stub.url}/api/v1/query?query=up`,
+          { method: 'GET' },
+          { kindLabel: 'test', timeoutMs: 50, attempts: 3 }
+        ),
+      /timed out after 50ms/
+    );
+    // The old behavior would have made 3 attempts (~150ms+); fail-fast makes 1.
+    assert.equal(stub.attempts(), 1);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('retryTimeouts escape hatch restores timeout retries (attempts=3 -> 3 requests)', async () => {
+  const stub = await startHanging();
+  try {
+    await assert.rejects(
+      () =>
+        backendFetch(
+          `${stub.url}/api/v1/query?query=up`,
+          { method: 'GET' },
+          { kindLabel: 'test', timeoutMs: 50, attempts: 3, retryTimeouts: true }
+        ),
+      /timed out after 50ms/
+    );
+    assert.equal(stub.attempts(), 3);
+  } finally {
+    await stub.close();
+  }
+});

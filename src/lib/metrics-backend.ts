@@ -129,8 +129,14 @@ export interface MetricsBackend {
   /** Human-readable endpoint URL for logging / doctor output — never includes secrets. */
   readonly endpoint: string;
 
-  queryInstant(promql: string): Promise<PrometheusResponse>;
-  queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse>;
+  queryInstant(promql: string, timeoutMs?: number): Promise<PrometheusResponse>;
+  queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number,
+    timeoutMs?: number
+  ): Promise<PrometheusResponse>;
   listLabels(): Promise<string[]>;
   listLabelValues(label: string, opts?: { windowSeconds?: number }): Promise<string[]>;
 }
@@ -375,10 +381,14 @@ async function promJsonFetch<T>(
   kindLabel: string,
   url: URL,
   extraHeaders: Record<string, string>,
-  authHeaders: Record<string, string>
+  authHeaders: Record<string, string>,
+  timeoutMs?: number
 ): Promise<T> {
   const headers = { ...extraHeaders, ...authHeaders };
-  return backendJsonFetch<T>(url.toString(), { headers }, { kindLabel });
+  // timeoutMs undefined => backendFetch falls back to DEFAULT_TIMEOUT_MS, so
+  // every existing caller keeps the 30s default; only callers that pass a
+  // budget (interactive tools) get the tighter deadline.
+  return backendJsonFetch<T>(url.toString(), { headers }, { kindLabel, timeoutMs });
 }
 
 function promAuthHeaders(auth: PromAuth): Record<string, string> {
@@ -410,19 +420,25 @@ class Log10xBackend implements MetricsBackend {
     this.auth = `${config.apiKey}/${config.envId}`;
   }
 
-  async queryInstant(promql: string): Promise<PrometheusResponse> {
+  async queryInstant(promql: string, timeoutMs?: number): Promise<PrometheusResponse> {
     const url = new URL('/api/v1/query', this.endpoint);
     url.searchParams.set('query', promql);
-    return promJsonFetch('log10x', url, {}, { 'X-10X-Auth': this.auth });
+    return promJsonFetch('log10x', url, {}, { 'X-10X-Auth': this.auth }, timeoutMs);
   }
 
-  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
+  async queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number,
+    timeoutMs?: number
+  ): Promise<PrometheusResponse> {
     const url = new URL('/api/v1/query_range', this.endpoint);
     url.searchParams.set('query', promql);
     url.searchParams.set('start', String(startSec));
     url.searchParams.set('end', String(endSec));
     url.searchParams.set('step', String(stepSec));
-    return promJsonFetch('log10x', url, {}, { 'X-10X-Auth': this.auth });
+    return promJsonFetch('log10x', url, {}, { 'X-10X-Auth': this.auth }, timeoutMs);
   }
 
   async listLabels(): Promise<string[]> {
@@ -468,13 +484,19 @@ class Log10xDemoBackend implements MetricsBackend {
     this.authHeaders = { Authorization: `Bearer ${config.licenseJwt}` };
   }
 
-  async queryInstant(promql: string): Promise<PrometheusResponse> {
+  async queryInstant(promql: string, timeoutMs?: number): Promise<PrometheusResponse> {
     const url = new URL('/api/v1/demo/query', this.endpoint);
     url.searchParams.set('query', promql);
-    return this.demoFetch(url);
+    return this.demoFetch(url, timeoutMs);
   }
 
-  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
+  async queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number,
+    timeoutMs?: number
+  ): Promise<PrometheusResponse> {
     const nowS = Math.floor(Date.now() / 1000);
     const minStart = nowS - DEMO_WINDOW_SEC;
     const end = Math.min(endSec, nowS);
@@ -513,9 +535,9 @@ class Log10xDemoBackend implements MetricsBackend {
   // Wraps the shared fetch to give demo callers actionable messages on the two
   // demo-specific failures. The gateway's 400 body already explains the 3h
   // window, so it passes through unchanged.
-  private async demoFetch<T = PrometheusResponse>(url: URL): Promise<T> {
+  private async demoFetch<T = PrometheusResponse>(url: URL, timeoutMs?: number): Promise<T> {
     try {
-      return await promJsonFetch<T>('log10x_demo', url, {}, this.authHeaders);
+      return await promJsonFetch<T>('log10x_demo', url, {}, this.authHeaders, timeoutMs);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('HTTP 401') || msg.includes('HTTP 403')) {
@@ -550,19 +572,25 @@ class PrometheusBackend implements MetricsBackend {
     return promAuthHeaders(this.auth);
   }
 
-  async queryInstant(promql: string): Promise<PrometheusResponse> {
+  async queryInstant(promql: string, timeoutMs?: number): Promise<PrometheusResponse> {
     const url = new URL(`${this.endpoint}/api/v1/query`);
     url.searchParams.set('query', promql);
-    return promJsonFetch(this.kind, url, this.extraHeaders, this.authHeaders);
+    return promJsonFetch(this.kind, url, this.extraHeaders, this.authHeaders, timeoutMs);
   }
 
-  async queryRange(promql: string, startSec: number, endSec: number, stepSec: number): Promise<PrometheusResponse> {
+  async queryRange(
+    promql: string,
+    startSec: number,
+    endSec: number,
+    stepSec: number,
+    timeoutMs?: number
+  ): Promise<PrometheusResponse> {
     const url = new URL(`${this.endpoint}/api/v1/query_range`);
     url.searchParams.set('query', promql);
     url.searchParams.set('start', String(startSec));
     url.searchParams.set('end', String(endSec));
     url.searchParams.set('step', String(stepSec));
-    return promJsonFetch(this.kind, url, this.extraHeaders, this.authHeaders);
+    return promJsonFetch(this.kind, url, this.extraHeaders, this.authHeaders, timeoutMs);
   }
 
   async listLabels(): Promise<string[]> {

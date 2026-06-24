@@ -9,9 +9,9 @@ import { queryInstant } from './api.js';
 import * as pql from './promql.js';
 
 /** Resolve whether to use edge or cloud metrics (global). */
-export async function resolveMetricsEnv(env: EnvConfig): Promise<'edge' | 'cloud'> {
+export async function resolveMetricsEnv(env: EnvConfig, timeoutMs?: number): Promise<'edge' | 'cloud'> {
   try {
-    const res = await queryInstant(env, pql.edgeProbe());
+    const res = await queryInstant(env, pql.edgeProbe(), timeoutMs);
     if (res.status === 'success' && res.data.result.length > 0) {
       return 'edge';
     }
