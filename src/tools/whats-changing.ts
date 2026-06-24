@@ -395,8 +395,32 @@ export async function executeWhatsChanging(
   // breakdowns.
   const rawRows = Array.from(rawByKey.values());
   const groups = groupRowsByPattern(rawRows, new Map());
-  const hashes = groups.map((g) => g.pattern_hash);
-  const firstSeenByHash = await fetchFirstSeenBatch(env, hashes);
+
+  // Bound the first_seen fan-out to the highest-current-cost candidates.
+  // fetchFirstSeenBatch fires one 30-day range query per DISTINCT pattern
+  // hash; over an env's full cardinality (bytesPerPattern has no topk) that is
+  // an unbounded burst that trips AMP's per-workspace query-rate limit (HTTP
+  // 429), self-throttling the whole tool to 20-70s even though every single
+  // query is fast (<4s). The result is ultimately sliced to `limit`, and
+  // top_patterns already bounds the identical batch via topk(limit) — so
+  // resolve first_seen only for the rows that can plausibly survive gating and
+  // the |delta| sort. Patterns outside this set keep ageSeconds=null, which the
+  // routing below treats as pre-existing/silent (included, never mis-excluded
+  // as new) — the same fallback an absent/slow backend already produces.
+  const groupBytesNow = (g: (typeof groups)[number]): number => {
+    let sum = 0;
+    for (const [, raw] of g.rows_by_service) sum += raw.bytes_now;
+    return sum;
+  };
+  const FIRST_SEEN_CANDIDATES = Math.max(limit * 4, 50);
+  const firstSeenHashes =
+    groups.length <= FIRST_SEEN_CANDIDATES
+      ? groups.map((g) => g.pattern_hash)
+      : [...groups]
+          .sort((a, b) => groupBytesNow(b) - groupBytesNow(a))
+          .slice(0, FIRST_SEEN_CANDIDATES)
+          .map((g) => g.pattern_hash);
+  const firstSeenByHash = await fetchFirstSeenBatch(env, firstSeenHashes);
 
   // Build deltas. Patterns with NO baseline samples across ANY service are
   // EXCLUDED — they belong in whats_new. A pattern with baseline in service
