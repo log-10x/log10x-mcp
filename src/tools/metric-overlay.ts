@@ -32,6 +32,7 @@
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
+import { withTimeout } from '../lib/concurrency.js';
 import { resolveBackend, customerMetricsNotConfiguredMessage, formatDetectionTrace } from '../lib/customer-metrics.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
@@ -299,7 +300,15 @@ export async function executeMetricOverlay(
           remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
         });
       }
-      const res = await timedQuery(() => backend.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds));
+      // Customer-metrics backend (cross-pillar) has no per-call timeout param,
+      // so bound the wait with a client-side deadline. The anchor is essential:
+      // on timeout, throw so the catch below emits the structured error envelope
+      // (a missing anchor cannot be overlaid). The underlying request still
+      // self-terminates at backend-fetch's 30s.
+      const res = await timedQuery(() =>
+        withTimeout(backend.backend!.queryRange(args.anchor, fromSec, nowSec, stepSeconds), QUERY_BUDGET.heavy),
+      );
+      if (res === null) throw new Error('anchor customer-metrics query exceeded the interactive budget');
       anchorSeries = extractFirstSeries(res);
     }
   } catch (e) {
@@ -364,7 +373,12 @@ export async function executeMetricOverlay(
           remediation: customerMetricsNotConfiguredMessage(formatDetectionTrace(backend.trace)),
         });
       }
-      const candRes = await timedQuery(() => backend.backend!.queryRange(args.candidate, fromSec, nowSec, stepSeconds));
+      // Candidate is degradable: on timeout, null → extractFirstSeries → [] →
+      // no_signal (the same degradation a missing/empty candidate produces). A
+      // backend error still throws into the catch below.
+      const candRes = await timedQuery(() =>
+        withTimeout(backend.backend!.queryRange(args.candidate, fromSec, nowSec, stepSeconds), QUERY_BUDGET.heavy),
+      );
       candSeries = extractFirstSeries(candRes);
     }
   } catch (e) {

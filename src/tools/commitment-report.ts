@@ -76,7 +76,8 @@ import {
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { DEFAULT_LABELS } from '../lib/promql.js';
 import { patternDescriptor } from '../lib/pattern-descriptor.js';
-import { boundedFanout } from '../lib/concurrency.js';
+import { boundedFanout, withTimeout } from '../lib/concurrency.js';
+import { QUERY_BUDGET } from '../lib/interactive-query.js';
 
 // ─── input schema ────────────────────────────────────────────────────
 
@@ -1298,9 +1299,11 @@ export async function fetchHashDescriptors(
   const query =
     `sum by (${L.hash},${L.service},${L.pattern}) ` +
     `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;
-  let res: Awaited<ReturnType<CustomerMetricsBackend['queryInstant']>>;
+  let res: Awaited<ReturnType<CustomerMetricsBackend['queryInstant']>> | null;
   try {
-    res = await backend.queryInstant(query);
+    // Customer-metrics backend has no per-call timeout; bound the wait. Timeout
+    // → null → no descriptors (best-effort enrichment degrades, same as empty).
+    res = await withTimeout(backend.queryInstant(query), QUERY_BUDGET.heavy);
   } catch {
     return out;
   }
@@ -2292,13 +2295,17 @@ export async function executeCommitmentReport(
           // Scope to the reporter tiers (edge|cloud), matching doctor — an
           // unscoped query would sum offload bytes across every series in a
           // multi-env backend and inflate the stamped figure.
-          const resp = await backend.queryInstant(
-            `sum(increase(all_events_summaryBytes_total{${LABELS.env}=~"edge|cloud",routeState="offload"}[1h]))`
+          const resp = await withTimeout(
+            backend.queryInstant(
+              `sum(increase(all_events_summaryBytes_total{${LABELS.env}=~"edge|cloud",routeState="offload"}[1h]))`,
+            ),
+            QUERY_BUDGET.heavy,
           );
-          // A non-success Prometheus status is "unavailable", NOT zero — return
-          // null so the verifier degrades to liveness+purity instead of falsely
-          // reading zero stamped bytes (which would mask a silent loss).
-          if (resp.status !== 'success') return null;
+          // A non-success Prometheus status (or a null timeout) is "unavailable",
+          // NOT zero — return null so the verifier degrades to liveness+purity
+          // instead of falsely reading zero stamped bytes (which would mask a
+          // silent loss).
+          if (!resp || resp.status !== 'success') return null;
           const results = resp.data?.result ?? [];
           if (results.length === 0) return 0;
           const v = results[0]?.value?.[1];

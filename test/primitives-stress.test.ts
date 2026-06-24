@@ -164,9 +164,10 @@ test('stress: rank_by_shape with 100 candidates + injected latency stays within 
       stub.setFixture(name, { values: buildSeries(variant, 30, endTs) });
     }
 
-    // 5ms per query. 201 requests at 5ms each = ~1s minimum. Tests
-    // that the synchronous candidate loop doesn't multiplicatively
-    // blow up under per-query delay.
+    // 5ms per query. Phase B replaced the synchronous candidate loop with a
+    // bounded-concurrency fan-out, so this now tests that the fan-out processes
+    // every candidate without a runaway (parallelism bug / unbounded retry)
+    // under per-query delay — not that it runs strictly serially.
     stub.setLatencyMs(5);
 
     const startMs = Date.now();
@@ -188,11 +189,12 @@ test('stress: rank_by_shape with 100 candidates + injected latency stays within 
     const data = (out.data as { payload: { ranked: unknown[]; evaluation_failed: string[] } }).payload;
     assert.equal(data.ranked.length + data.evaluation_failed.length, 100);
 
-    // Lower bound: 101 queries (1 anchor + 100 candidates) × 5ms ≈ 500ms.
-    assert.ok(elapsedMs >= 500, `expected serialised query budget ≥500ms, got ${elapsedMs}ms`);
-    // Upper bound: 30s — pure-sequential at 5ms/q should be ~1-2s on
-    // CI. 30s = "the loop has a hidden parallelism bug or unbounded retry."
-    assert.ok(elapsedMs < 30_000, `wall time blew budget: ${elapsedMs}ms`);
+    // No lower bound: the bounded-concurrency fan-out is intentionally faster
+    // than the old serial loop, and the assertion above already proves all 100
+    // candidates were processed. The upper bound is a runaway backstop (a real
+    // parallelism/retry bug would hang for minutes); kept generous so it does
+    // not flake under full-suite CPU contention.
+    assert.ok(elapsedMs < 60_000, `wall time blew budget (runaway?): ${elapsedMs}ms`);
   } finally {
     await stub.close();
     restoreEnv(before);
