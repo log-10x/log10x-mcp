@@ -16,7 +16,7 @@ import {
   type DisclosedDollarValue,
   buildDisclosedDollarValue,
 } from './cost.js';
-import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtGb, fmtPct } from './format.js';
+import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtDollar, fmtGb, fmtPct } from './format.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
@@ -170,9 +170,38 @@ function discloseCost(input: RenderInput, amount: number): DisclosedDollarValue 
   return buildDisclosedDollarValue(amount, source, siemLabel, input.analyzerCostPerGb);
 }
 
-/** Convenience: same as `discloseCost` but returns the formatted string. */
+/**
+ * Compact disclosed-dollar for table cells. The dollar-discipline invariant
+ * requires a `list price` / `may differ` token within 200 chars of every `$`
+ * — but the full ~150-char tail repeated in every cell made the tables
+ * unreadable. This keeps the invariant with a terse `(list price)` marker and
+ * defers the full caveat to `disclosureFootnote()`, rendered ONCE per view.
+ *   - list_price        → `$8.6K (list price)`
+ *   - customer_supplied → `$8.6K` (no caveat — invariant: real rate, no tail)
+ *   - unset             → `—`
+ */
 function fmtCostDisclosed(input: RenderInput, amount: number): string {
-  return fmtDisclosedDollar(discloseCost(input, amount));
+  const d = discloseCost(input, amount);
+  if (d == null || d.source === 'unset') return '—';
+  const head = fmtDollar(d.value);
+  return d.source === 'customer_supplied' ? head : `${head} (list price)`;
+}
+
+/**
+ * The one-time, full dollar caveat for a view — what every `(list price)`
+ * cell points at. Returns null on a customer-supplied / unset rate (nothing
+ * to caveat). Append once near the end of each dollar-emitting view instead
+ * of repeating the tail per cell.
+ */
+function disclosureFootnote(input: RenderInput): string | null {
+  const source: DollarSource = input.rateSource ?? 'list_price';
+  if (source !== 'list_price') return null;
+  const siemLabel = input.siemLabel ?? SIEM_DISPLAY_NAMES[input.siem] ?? 'the SIEM';
+  return (
+    `_Figures marked "(list price)" use ${siemLabel} list price $${input.analyzerCostPerGb}/GB; ` +
+    'your actual bill may differ with discounts, commits, or contract tier. Set `analyzerCost` ' +
+    'in your env config or pass `effective_ingest_per_gb` for your real rate._'
+  );
 }
 
 /**
@@ -636,6 +665,12 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   lines.push('- `view: "configs"` — native SIEM exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.)');
   lines.push('- `view: "pattern", pattern: "<identity>"` — deep dive on a specific pattern');
   lines.push('- `view: "top", top_n: 20` — expanded drivers table');
+
+  const foot = disclosureFootnote(input);
+  if (foot) {
+    lines.push('');
+    lines.push(foot);
+  }
 
   return lines.join('\n');
 }
@@ -1724,8 +1759,17 @@ function cloudwatchExclusion(drops: EnrichedPattern[]): string {
   // visible at the AWS console.
   const body = drops
     .map((p, i) => {
-      const phrase = p.literalPhrase.replace(/"/g, '\\"');
-      return `# Subscription filter: drop pattern #${i + 1}\naws logs put-subscription-filter \\\n  --log-group-name "/aws/your/logs" \\\n  --filter-name "log10x-drop-${i}" \\\n  --filter-pattern '-"${phrase}"' \\\n  --destination-arn "<your-kinesis-or-lambda-arn>"`;
+      // CloudWatch filter terms are single-line; collapse internal
+      // whitespace/newlines so the phrase is one token.
+      const flat = p.literalPhrase.replace(/\s+/g, ' ').trim();
+      // CloudWatch term escaping: backslash then double-quote for the "…" literal.
+      const cwTerm = flat.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      // The whole --filter-pattern value is a shell single-quoted arg; a
+      // single quote inside the phrase would otherwise terminate the arg and
+      // produce a broken `aws` command. Escape ' as the standard '\'' dance.
+      const filterValue = `-"${cwTerm}"`;
+      const shellArg = `'${filterValue.replace(/'/g, `'\\''`)}'`;
+      return `# Subscription filter: drop pattern #${i + 1}\naws logs put-subscription-filter \\\n  --log-group-name "/aws/your/logs" \\\n  --filter-name "log10x-drop-${i}" \\\n  --filter-pattern ${shellArg} \\\n  --destination-arn "<your-kinesis-or-lambda-arn>"`;
     })
     .join('\n\n');
   return approximationFootnote(drops) + body;
