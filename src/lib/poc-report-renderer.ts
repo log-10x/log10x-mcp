@@ -17,6 +17,7 @@ import {
   buildDisclosedDollarValue,
 } from './cost.js';
 import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtDollar, fmtGb, fmtPct } from './format.js';
+import { buildDfContext, buildDisplayName } from './pattern-df.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
@@ -292,61 +293,46 @@ function displayNameCompact(
  * is identical for every row. The discriminator is buried in the tail
  * (requestURI path, verb, level), which the label drops.
  *
- * Algorithm:
- *   1. Tokenize every row's symbolMessage on `_`.
- *   2. A token is "common" if it appears in ≥60% of rows. (60% rather
- *      than 100% so a single outlier — e.g., an `Unauthorized` row —
- *      doesn't keep `kind` in the discriminator set for 46 K8s rows.)
- *   3. For each row, take its tokens MINUS the common set, in original
- *      order, deduped against consecutive repeats, with short noise
- *      tokens (length ≤ 2 like `v`, `ks`, `io`) dropped.
- *   4. Take the LAST `maxWords` discriminators. The suffix usually
- *      carries the unique info (`…kube_system_leases`,
- *      `…customresourcedefinitions_networking`).
- *   5. Title-case + join. Empty result → caller falls back to original.
+ * Algorithm: delegates to the shared discriminator-first naming
+ * (lib/pattern-df.ts `buildDisplayName`). Boilerplate is learned from
+ * cross-pattern token frequency (absolute df ≥ ceil(N/2)), the rarest
+ * tokens are surfaced in the name's ORIGINAL order, and camelCase is
+ * preserved (never Title-cased). This is the SAME naming top_patterns /
+ * pattern_detail use, so a pattern reads consistently across surfaces.
  *
- * Returns identity → label map. Identities without a symbolMessage,
- * and identities whose discriminator set is empty, are omitted.
+ * No cross-page uniqueness pass here (unlike top_patterns): the PoC renders
+ * the raw identity alongside every name, so near-identical patterns (e.g. a
+ * crash-loop logged 13× as one incident) are still distinguishable — and
+ * forcing distinct labels on them produced long token-stuffed names. They
+ * SHOULD read alike; the report already clusters them as one incident.
+ *
+ * (Replaces the prior hand-rolled set-difference: a fractional 60% common
+ * threshold that leaked the boilerplate run at small N, and a Title-case
+ * join that mangled camelCase — ValkeyCartStore → Valkeycartstore. It also
+ * omitted sparse rows, which is what surfaced raw hashes / "Unnamed pattern"
+ * downstream; buildDisplayName never blanks, so those rows now get a name.)
+ *
+ * Returns identity → label map. Identities without a symbolMessage are
+ * omitted (the caller falls back to the template heuristic).
  */
 function setDifferenceLabels(
-  rows: Array<{ identity: string; symbolMessage?: string }>,
-  maxWords = 4,
-  commonThreshold = 0.6,
+  rows: Array<{ identity: string; symbolMessage?: string; service?: string; severity?: string }>,
 ): Map<string, string> {
   const out = new Map<string, string>();
-  const tokenized = rows
-    .map((r) => ({
-      identity: r.identity,
-      tokens: r.symbolMessage ? r.symbolMessage.split('_').filter((t) => t.length > 0) : [],
-    }))
-    .filter((r) => r.tokens.length > 0);
-  if (tokenized.length < 2) return out;
-
-  const N = tokenized.length;
-  const minCount = Math.max(2, Math.ceil(N * commonThreshold));
-  const tokenRowCount = new Map<string, number>();
-  for (const { tokens } of tokenized) {
-    const seen = new Set<string>();
-    for (const t of tokens) seen.add(t);
-    for (const t of seen) tokenRowCount.set(t, (tokenRowCount.get(t) || 0) + 1);
-  }
-  const common = new Set<string>();
-  for (const [t, c] of tokenRowCount) {
-    if (c >= minCount) common.add(t);
-  }
-
-  for (const { identity, tokens } of tokenized) {
-    const diff: string[] = [];
-    for (const t of tokens) {
-      if (common.has(t)) continue;
-      if (t.length <= 2) continue;
-      if (diff.length > 0 && diff[diff.length - 1].toLowerCase() === t.toLowerCase()) continue;
-      diff.push(t);
-    }
-    if (diff.length === 0) continue;
-    const picked = diff.slice(-maxWords);
-    const label = picked.map((t) => t[0].toUpperCase() + t.slice(1).toLowerCase()).join(' ');
-    out.set(identity, label);
+  const withSym = rows.filter((r) => r.symbolMessage && r.symbolMessage.length > 0);
+  if (withSym.length === 0) return out;
+  // One df-map over the visible pattern set — same basis as top_patterns.
+  const df = buildDfContext(withSym.map((r) => r.symbolMessage as string));
+  for (const r of withSym) {
+    // Wider budget than the console (56 vs 44) — the markdown report has room,
+    // and it avoids mid-cropping a discriminator token ("transport" -> "tra…rt").
+    const { display_name } = buildDisplayName(r.symbolMessage as string, {
+      df,
+      service: r.service,
+      severity: r.severity,
+      width: 56,
+    });
+    if (display_name) out.set(r.identity, display_name);
   }
   return out;
 }
