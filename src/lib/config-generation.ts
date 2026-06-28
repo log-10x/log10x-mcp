@@ -5,10 +5,20 @@
  *
  * The MCP writes `caps.csv` into the cap ConfigMap. This module derives a short
  * deterministic GENERATION id from that policy and writes it as a sibling
- * `config-generation.csv` key. The engine's custom initializer reads it and
- * stamps every event with `tenx_config_version=<generation>`, which rides the
- * summary metrics as a Prometheus label (proven live on the demo). So the
- * running engine advertises which policy generation it loaded.
+ * `config-generation.csv` key.
+ *
+ * ENGINE-SIDE CONTRACT. The rate receiver reads that file via its
+ * `rateReceiverConfigGenerationFile` option — set by pointing
+ * `configGeneration.file` (or the `CONFIG_GENERATION_FILE` env) at the file,
+ * which the receiver's config-generation object then loads and stamps on every
+ * event as `tenx_config_version=<generation>`, riding the summary metrics as a
+ * Prometheus label (proven live on the demo). So the running engine advertises
+ * which policy generation it loaded. The option is OPT-IN and decoupled from
+ * caps: a receiver pointed at no file (e.g. GitOps-managed caps without this
+ * MCP) emits no label and never depends on the file existing. See
+ * `pipelines/run/receive/rate/config-generation-object.js` (the loader) and
+ * `modules/.../receive/rate/{module.yaml,settings.yaml}` (the option + the
+ * `tenx_config_version` enrichmentField) in the config repo.
  *
  * Verification is STATELESS: the generation is a hash of the policy, so the
  * verifier recomputes the expected generation from the CURRENT cap ConfigMap and
@@ -31,9 +41,9 @@ export function computeGeneration(capsCsv: string): string {
 }
 
 /**
- * The `config-generation.csv` body the engine's custom initializer reads
- * (`TenXLookup.get("config-generation", "generation", "key", "value")`). Two
- * columns with a header, mirroring caps.csv's shape.
+ * The `config-generation.csv` body the receiver's config-generation object reads
+ * (`TenXLookup.get("rateReceiverConfigGenerationFile", "generation", "key", "value")`).
+ * Two columns with a header, mirroring caps.csv's shape.
  */
 export function renderGenerationCsv(generation: string): string {
   return `key,value\ngeneration,${generation}\n`;
