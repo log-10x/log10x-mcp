@@ -259,6 +259,14 @@ async function probeTenxSeriesCount(
  * "POC" tools (`log10x_poc_*`) register in POC mode only.
  */
 export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc' | 'always')[]> = {
+  // The orientation/welcome tool MUST be registered in every mode, including
+  // `poc`. It is read-only and safe on any boot state, and it is the
+  // fresh-session entry point the homepage prompt ("where do I start with 10x?")
+  // routes to. Without an explicit entry it fell through to the unlisted-tool
+  // fallback, which only registers in analysis modes — so a `poc`-mode boot
+  // (LOG10X_DEMO_FALLBACK=off or an unresolvable demo backend) silently dropped
+  // the welcome tool and the prompt had nothing to call.
+  log10x_start: ['always'],
   // ── Always (auth, discovery, doctor) ──
   log10x_login_status: ['always'],
   log10x_signin_start: ['always'],
