@@ -249,7 +249,12 @@ function displayName(
       : symbolMessage
         ? formatEngineLabel(symbolMessage)
         : heuristicName(template, identity);
-  return `**${name}** (\`${identity}\`)`;
+  // User-facing rendering leads with the readable name + service; the raw
+  // identity (symbolMessage / pattern_hash) is carried in the structured
+  // envelope, the receiver-config YAML, and the dependency-check commands,
+  // not in the display name. Keeping it out of the name keeps the report
+  // scannable and screenshot-clean.
+  return `**${name}**`;
 }
 
 /** Compact variant for table cells: pretty name with truncated identity suffix. */
@@ -280,9 +285,10 @@ function displayNameCompact(
       : symbolMessage
         ? formatEngineLabel(symbolMessage)
         : heuristicName(template, identity);
-  const short = displayOverride
-    ?? (identity.length > 40 ? identity.slice(0, 38) + '…' : identity);
-  return `**${name}**<br>\`${short}\``;
+  // Identity intentionally omitted from the rendered table cell (see
+  // displayName): the report leads with the readable name + service.
+  void displayOverride;
+  return `**${name}**`;
 }
 
 /**
