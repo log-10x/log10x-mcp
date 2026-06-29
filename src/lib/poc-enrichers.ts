@@ -42,7 +42,13 @@ export interface EnrichableForPoc {
    * is the sample size (capped at 20), not the distinct count.
    */
   slotDistinctCounts?: Record<string, number>;
-  recommendedAction: 'mute' | 'sample' | 'keep';
+  /**
+   * The renderer's lossless lever for this pattern. We never emit
+   * mute/drop/sample as an auto-recommendation. `'mute'`/`'sample'` remain
+   * in the union only for back-compat with older callers + the envelope
+   * fixtures; the PoC renderer produces only compact/offload/tier_down/keep.
+   */
+  recommendedAction: 'compact' | 'offload' | 'tier_down' | 'keep' | 'mute' | 'sample';
   sampleRate: number;
   reasoning: string;
   /** Per-event timestamps from the SIEM pull, used for first-seen + growth signals. */
@@ -102,11 +108,13 @@ export interface PocEnrichment {
   /** Pattern's first-seen age in seconds when engine history is available. */
   firstSeenAgeSeconds: number | null;
   /**
-   * Action category after dependency-check fold-in. Same possible values
-   * as the existing recommendedAction with the addition of `fix` —
-   * ERROR-severity patterns are not noise, the right action is upstream.
+   * Action category after dependency-check fold-in. Carries the renderer's
+   * lossless lever (compact / offload / tier_down / keep) plus two
+   * refinements: `fix` (ERROR-severity patterns are not noise, the right
+   * action is upstream) and `blocked` (dep-check found refs, do not
+   * auto-act). `mute`/`sample` remain for back-compat with older callers.
    */
-  refinedAction: 'fix' | 'mute' | 'sample' | 'keep' | 'blocked';
+  refinedAction: 'fix' | 'compact' | 'offload' | 'tier_down' | 'keep' | 'blocked' | 'mute' | 'sample';
   /** Number of dependencies (monitors/dashboards/saved-searches) found, when checked. */
   dependencyCount: number | null;
   /** Source of the dep-check result (or `null` when not run for this pattern). */
@@ -314,7 +322,16 @@ export function refineAction(
       desc,
     );
   if (isDependencyFailure) return 'fix';
-  if (dependencyCount !== null && dependencyCount > 0 && p.recommendedAction === 'mute') {
+  // Any pattern that gets a reducing lever (lossless compact/offload/tier_down
+  // OR the legacy mute) is gated when a dependency reference exists, so the
+  // host agent confirms before changing it. `keep` patterns are never blocked.
+  const isReducing =
+    p.recommendedAction === 'compact' ||
+    p.recommendedAction === 'offload' ||
+    p.recommendedAction === 'tier_down' ||
+    p.recommendedAction === 'mute' ||
+    p.recommendedAction === 'sample';
+  if (dependencyCount !== null && dependencyCount > 0 && isReducing) {
     return 'blocked';
   }
   return p.recommendedAction;

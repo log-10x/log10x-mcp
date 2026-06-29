@@ -121,22 +121,28 @@ test('refineAction returns FIX for ERROR with timeout descriptor', () => {
   assert.equal(refineAction(p, null), 'fix');
 });
 
-test('refineAction promotes mute → blocked when dep_count > 0', () => {
-  const p = mkPattern({ severity: 'INFO', recommendedAction: 'mute' });
-  assert.equal(refineAction(p, 3), 'blocked');
+test('refineAction promotes a reducing lever to blocked when dep_count > 0', () => {
+  // Any lossless reducing lever (compact / offload / tier_down) is gated
+  // when a dependency reference exists, so the host agent confirms first.
+  for (const lever of ['compact', 'offload', 'tier_down', 'mute'] as const) {
+    const p = mkPattern({ severity: 'INFO', recommendedAction: lever });
+    assert.equal(refineAction(p, 3), 'blocked', `${lever} should block on deps>0`);
+  }
 });
 
-test('refineAction passes through mute when no dependencies', () => {
-  const p = mkPattern({ severity: 'INFO', recommendedAction: 'mute' });
-  assert.equal(refineAction(p, 0), 'mute');
-  assert.equal(refineAction(p, null), 'mute');
+test('refineAction passes through a reducing lever when no dependencies', () => {
+  for (const lever of ['compact', 'offload', 'tier_down', 'mute'] as const) {
+    const p = mkPattern({ severity: 'INFO', recommendedAction: lever });
+    assert.equal(refineAction(p, 0), lever, `${lever} passes through at deps=0`);
+    assert.equal(refineAction(p, null), lever, `${lever} passes through when unchecked`);
+  }
 });
 
-test('refineAction does not promote sample or keep to blocked', () => {
-  const p1 = mkPattern({ severity: 'INFO', recommendedAction: 'sample' });
-  assert.equal(refineAction(p1, 5), 'sample');
-  const p2 = mkPattern({ severity: 'INFO', recommendedAction: 'keep' });
-  assert.equal(refineAction(p2, 5), 'keep');
+test('refineAction never promotes keep to blocked', () => {
+  // `keep` patterns are kept verbatim; a dependency reference does not
+  // change that (there is no lossy action to gate).
+  const p = mkPattern({ severity: 'INFO', recommendedAction: 'keep' });
+  assert.equal(refineAction(p, 5), 'keep');
 });
 
 test('enrichForPoc end-to-end on a 5-pattern fixture', () => {

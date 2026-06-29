@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { renderPocReport } from '../../src/lib/poc-report-renderer.js';
+import { renderPocReport, renderPocConfigs } from '../../src/lib/poc-report-renderer.js';
 import type { ExtractedPatterns } from '../../src/lib/pattern-extraction.js';
 
 function fixture(): ExtractedPatterns {
@@ -106,8 +106,16 @@ test('renderPocReport omits compaction section for non-compacting SIEMs', () => 
     mcpVersion: '1.4.0',
   });
   assert.ok(!out.markdown.includes('## 6. Compact-byte Ratio (Measured)'));
-  // Native config block should render Datadog-specific exclusion JSON.
-  assert.ok(out.markdown.includes('### Datadog'));
+  // Section 5 is demoted to a lossless note (no native drop configs in the
+  // default report); the lossy exclusion configs live behind the `configs`
+  // view now. The default plan keeps every line.
+  assert.ok(out.markdown.includes('## 5. Native SIEM Exclusion Configs'));
+  assert.ok(/keeps every line/.test(out.markdown));
+  assert.ok(out.markdown.includes('`configs` view'));
+  // Datadog cannot compact, so the lossless lever is tier_down (its cheaper
+  // in-platform tier), fully retained.
+  assert.ok(/tier_down/.test(out.markdown), 'datadog should use tier_down lever');
+  assert.ok(!/mute \(drop all events\)/.test(out.markdown), 'no lossy mute in default report');
 });
 
 test('renderPocReport flags low-confidence when <10k events pulled', () => {
@@ -169,7 +177,7 @@ test('renderPocReport emits time-exhaustion banner when reason=time_exhausted', 
   assert.ok(out.markdown.includes('time budget reached'));
 });
 
-test('renderPocReport classifies actions: mute for hot INFO, keep for ERROR, sample for warn-hotloop', () => {
+test('renderPocReport classifies actions losslessly: tier_down for hot reducibles on Datadog, keep for ERROR', () => {
   const out = renderPocReport({
     siem: 'datadog',
     window: '7d',
@@ -186,17 +194,23 @@ test('renderPocReport classifies actions: mute for hot INFO, keep for ERROR, sam
     finishedAt: '2026-04-19T00:00:05Z',
     mcpVersion: '1.4.0',
   });
-  // INFO heartbeat (hot, 80% of volume) → mute
-  assert.ok(/mute \(drop all events\)/.test(out.markdown));
-  // ERROR pattern → keep
-  assert.ok(/severity=ERROR/i.test(out.markdown));
-  // WARN pattern (slow query, 19.5% of volume → hotloop) → sample
-  assert.ok(/sample 1\/(10|20)/.test(out.markdown));
+  // Datadog cannot compact, so reducible patterns (INFO heartbeat at 80%,
+  // WARN slow-query at ~19.5%) route to its cheaper in-platform tier,
+  // fully retained. ERROR is kept verbatim.
+  assert.ok(/tier_down/.test(out.markdown), 'hot reducibles -> tier_down on Datadog');
+  assert.ok(/severity=ERROR/i.test(out.markdown), 'ERROR pattern kept');
+  // Never auto-recommend a lossy lever.
+  assert.ok(!/mute \(drop all events\)/.test(out.markdown), 'no mute');
+  assert.ok(!/sample 1\//.test(out.markdown), 'no sample');
+  assert.ok(!/action: drop/.test(out.markdown), 'no action: drop');
 });
 
-test('renderPocReport native exclusion configs include the chosen SIEM', () => {
+test('native exclusion configs (configs view, lossy escape hatch) include the chosen SIEM', () => {
+  // Section 5 of the default report no longer emits drop configs; the native
+  // exclusion configs live behind the explicit `configs` view, prefaced with
+  // a "lossy, not recommended" warning.
   for (const siem of ['datadog', 'splunk', 'elasticsearch', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'clickhouse'] as const) {
-    const out = renderPocReport({
+    const out = renderPocConfigs({
       siem,
       window: '7d',
       extraction: fixture(),
@@ -212,11 +226,14 @@ test('renderPocReport native exclusion configs include the chosen SIEM', () => {
       finishedAt: '2026-04-19T00:00:05Z',
       mcpVersion: '1.4.0',
     });
-    assert.ok(out.markdown.includes('Fluent Bit (universal forwarder)'), `${siem}: missing fluent-bit block`);
+    assert.ok(out.includes('Fluent Bit (universal forwarder)'), `${siem}: missing fluent-bit block`);
+    assert.ok(/Lossy, not recommended/.test(out), `${siem}: missing lossy warning`);
   }
 });
 
-test('renderPocReport receiver YAML has an untilEpochSec', () => {
+test('renderPocReport receiver config is lossless (no untilEpochSec / no action: drop)', () => {
+  // Lossless levers (compact/offload/tier_down) are permanent policy, not a
+  // temporary mute, so they carry no auto-expiry and never emit action: drop.
   const out = renderPocReport({
     siem: 'datadog',
     window: '7d',
@@ -233,7 +250,10 @@ test('renderPocReport receiver YAML has an untilEpochSec', () => {
     finishedAt: '2026-04-19T00:00:05Z',
     mcpVersion: '1.4.0',
   });
-  assert.ok(/untilEpochSec: \d+/.test(out.markdown));
+  assert.ok(!/untilEpochSec/.test(out.markdown), 'no auto-expiry on a lossless lever');
+  assert.ok(!/action: drop/.test(out.markdown), 'no lossy drop action');
+  // A reducing lever IS present (Datadog -> tier_down).
+  assert.ok(/tier_down/.test(out.markdown));
 });
 
 test('renderPocReport handles zero patterns gracefully', () => {
