@@ -919,7 +919,7 @@ function buildCommitmentArtifact(
   perServiceConsequences: PerServiceConsequence[],
 ): CommitmentArtifact {
   const lines: string[] = [];
-  lines.push(`## Projected commitment — ${input.siem} (${input.window} sample)`);
+  lines.push(`## Projected commitment for ${input.siem} (${input.window} sample)`);
   lines.push('');
 
   // FIRST: per-service consequence table (the body).
@@ -961,7 +961,7 @@ function buildCommitmentArtifact(
   lines.push('### Next step');
   lines.push('');
   if (f.feasible) {
-    lines.push(`Commit with \`log10x_configure_engine(from_poc_id="${input.snapshotId}")\` — writes the cap CSV that delivers this plan.`);
+    lines.push(`Commit with \`log10x_configure_engine(from_poc_id="${input.snapshotId}")\`, which writes the cap CSV that delivers this plan.`);
   } else {
     lines.push('Either lower `target_percent_reduction`, trim `exception_services`, or pin specific services via `pin_services` then resubmit.');
   }
@@ -970,7 +970,7 @@ function buildCommitmentArtifact(
   // Appendix: per-pattern detail behind a collapsed disclosure. Keeps
   // the consequence-led principle that patterns are NOT the decision
   // surface — the renderer only points at where to fetch them.
-  lines.push('<details><summary>By pattern (advanced — open only if you want the per-pattern view)</summary>');
+  lines.push('<details><summary>By pattern (advanced, open only if you want the per-pattern view)</summary>');
   lines.push('');
   lines.push(`Per-pattern actions, consequences, and savings ship in \`output.patterns[].actions\` of this envelope. Re-render with \`view='top'\` for a markdown table, or call \`log10x_overflow_contents\` for the routing detail.`);
   lines.push('');
@@ -1257,9 +1257,22 @@ function buildActions(
       sampleN = Math.max(2, Math.round(p.sampleRate ?? 10));
       reason = `moderate-volume ${sev || 'info-class'} pattern — keep 1/${sampleN} to retain signal at lower cost.`;
     }
+  } else if (
+    refined === 'compact' ||
+    refined === 'offload' ||
+    refined === 'tier_down' ||
+    refined === 'drop'
+  ) {
+    // The renderer already resolved the concrete lossless lever for this
+    // pattern (compact / offload / tier_down); honor it directly instead of
+    // collapsing it to pass.
+    action = refined;
+    reason = isHotLoop
+      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume), ${action} on ${siem}.`
+      : `${sev || 'info-class'} pattern, ${action} on ${siem}.`;
   } else {
     action = 'pass';
-    reason = 'no qualifying reduction signal — pass.';
+    reason = 'no qualifying reduction signal, pass.';
   }
 
   // 2) Project savings from the action coefficient (matches feasibility).

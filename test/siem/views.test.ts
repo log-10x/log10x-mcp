@@ -114,13 +114,16 @@ test('summary flags WARN/ERROR patterns in top-N with risk banner', () => {
   assert.ok(out.includes('log10x_dependency_check'), 'should reference the dependency check tool');
 });
 
-test('yaml view returns valid YAML fence with receiver entries', () => {
+test('yaml view returns a valid lossless receiver-config fence', () => {
   const out = renderPocYaml(input(), 3);
   assert.ok(out.startsWith('```yaml'), 'yaml view should start with fenced block');
   assert.ok(out.includes('- pattern:'), 'should include pattern key');
-  assert.ok(out.includes('action:'), 'should include action key');
-  assert.ok(out.includes('untilEpochSec:'), 'should include expiry');
-  assert.ok(out.includes('receiver mute file'), 'should have receiver comment');
+  // Lossless levers, never a lossy action: drop / sample, never an expiry.
+  assert.ok(/compact:|offload:|tier_down:/.test(out), 'should include a lossless lever key');
+  assert.ok(!out.includes('action: drop'), 'must not emit lossy drop action');
+  assert.ok(!out.includes('untilEpochSec'), 'lossless levers do not auto-expire');
+  assert.ok(out.includes('receiver config'), 'should have receiver-config comment');
+  assert.ok(/Nothing dropped/.test(out), 'should state nothing is dropped');
 });
 
 test('yaml view cap respects top_n', () => {

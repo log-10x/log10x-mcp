@@ -31,7 +31,11 @@ function fakePattern(overrides: Partial<_EnrichedPattern>): _EnrichedPattern {
     costPerWindow: 10,
     pctOfTotal: 0.05,
     costPerWeek: 70,
-    recommendedAction: 'mute',
+    // Lossless default lever. (These tests exercise the native exclusion
+    // generators directly via an explicit drop list, so the per-pattern
+    // lever value itself is not asserted; it just has to type-check.)
+    recommendedAction: 'offload',
+    leverFraction: 0.95,
     sampleRate: 1,
     projectedSavings: 70,
     reasoning: 'noise',
@@ -45,7 +49,7 @@ function fakePattern(overrides: Partial<_EnrichedPattern>): _EnrichedPattern {
       topSlot: null,
       redundantWith: [],
       firstSeenAgeSeconds: null,
-      refinedAction: 'mute',
+      refinedAction: 'offload',
       dependencyCount: null,
       dependencyChecked: false,
       emergence: null,

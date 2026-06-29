@@ -11,6 +11,7 @@ import type { SiemId } from './siem/pricing.js';
 import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
 import {
   getDefaultActionForDestination,
+  getAllowedActionsForDestination,
   type Action as CostAction,
   type DollarSource,
   type DisclosedDollarValue,
@@ -51,7 +52,7 @@ export interface RenderInput {
   reasonStopped: 'target_reached' | 'time_exhausted' | 'source_exhausted' | 'error';
   /** Raw SIEM query string used. */
   queryUsed: string;
-  /** Windows in the 'window' string, parsed to hours — used to project $/wk. */
+  /** Windows in the 'window' string, parsed to hours, used to project $/wk. */
   windowHours: number;
   /** Analyzer cost per GB for the detected SIEM. */
   analyzerCostPerGb: number;
@@ -183,7 +184,7 @@ function discloseCost(input: RenderInput, amount: number): DisclosedDollarValue 
  */
 function fmtCostDisclosed(input: RenderInput, amount: number): string {
   const d = discloseCost(input, amount);
-  if (d == null || d.source === 'unset') return '—';
+  if (d == null || d.source === 'unset') return '-';
   const head = fmtDollar(d.value);
   return d.source === 'customer_supplied' ? head : `${head} (list price)`;
 }
@@ -248,10 +249,15 @@ function displayName(
       : symbolMessage
         ? formatEngineLabel(symbolMessage)
         : heuristicName(template, identity);
-  return `**${name}** (\`${identity}\`)`;
+  // User-facing rendering leads with the readable name + service; the raw
+  // identity (symbolMessage / pattern_hash) is carried in the structured
+  // envelope, the receiver-config YAML, and the dependency-check commands,
+  // not in the display name. Keeping it out of the name keeps the report
+  // scannable and screenshot-clean.
+  return `**${name}**`;
 }
 
-/** Compact variant for table cells — pretty name with truncated identity suffix. */
+/** Compact variant for table cells: pretty name with truncated identity suffix. */
 function displayNameCompact(
   identity: string,
   template: string,
@@ -279,9 +285,10 @@ function displayNameCompact(
       : symbolMessage
         ? formatEngineLabel(symbolMessage)
         : heuristicName(template, identity);
-  const short = displayOverride
-    ?? (identity.length > 40 ? identity.slice(0, 38) + '…' : identity);
-  return `**${name}**<br>\`${short}\``;
+  // Identity intentionally omitted from the rendered table cell (see
+  // displayName): the report leads with the readable name + service.
+  void displayOverride;
+  return `**${name}**`;
 }
 
 /**
@@ -459,12 +466,32 @@ interface EnrichedPattern extends ExtractedPattern {
   costPerWindow: number;
   pctOfTotal: number;
   costPerWeek: number;
-  recommendedAction: 'mute' | 'sample' | 'keep';
+  /**
+   * The lossless cost-cutting lever picked for this pattern. We NEVER
+   * auto-recommend `mute`/`drop`/`sample` (that contradicts the "save
+   * money WITHOUT losing data" pitch). Every reducible pattern gets a
+   * lossless lever; everything else is kept verbatim.
+   *   - `compact`   — re-encode in place, stays searchable in the SIEM.
+   *   - `offload`   — route to the customer's own S3, recoverable any time.
+   *   - `tier_down` — move to the SIEM's cheaper in-platform tier, retained.
+   *   - `keep`      — errors/warnings + low-volume patterns pass through.
+   */
+  recommendedAction: 'compact' | 'offload' | 'tier_down' | 'keep';
+  /**
+   * The MEASURED (compact) or modeled (offload/tier_down) fraction of
+   * this pattern's bytes the lever removes from the SIEM bill. Drives
+   * projectedSavings. `keep` → 0.
+   */
+  leverFraction: number;
+  /**
+   * Retained for type-compat with the envelope/enricher param shapes.
+   * Always 1 now (we do not sample).
+   */
   sampleRate: number;
   projectedSavings: number;
   reasoning: string;
   confidence: Confidence;
-  /** Snake-case identity — for ready-to-paste receiver configs. */
+  /** Snake-case identity, for ready-to-paste receiver configs. */
   identity: string;
   /** POC enrichment fields (incident cluster id, top slot, redundancy, dep-check, first-seen). */
   poc: PocEnrichment;
@@ -485,10 +512,9 @@ interface EnrichedPattern extends ExtractedPattern {
   literalLeading: boolean;
   /**
    * The destination's preferred level-1 action (`tier_down`, `offload`,
-   * `compact`, …) per `DEFAULT_ACTION_BY_DESTINATION`. Surfaced in the
-   * reasoning string for high-volume info-class patterns so the reader
-   * sees the SIEM-appropriate lever (Datadog → tier_down, Splunk → offload,
-   * ClickHouse → compact, …) rather than a one-size `mute`/`sample` verdict.
+   * `compact`, ...) per `DEFAULT_ACTION_BY_DESTINATION`. Informs which
+   * lossless lever the decision falls to when compact is unavailable
+   * (Datadog: tier_down, Splunk: offload, ClickHouse: compact, ...).
    */
   destinationLevel1Action: CostAction;
 }
@@ -519,7 +545,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   const lines: string[] = [];
 
   // Title + one-line verdict.
-  lines.push(`## POC — done. ${SIEM_DISPLAY_NAMES[input.siem]}, ${input.window} window.`);
+  lines.push(`## POC done. ${SIEM_DISPLAY_NAMES[input.siem]}, ${input.window} window.`);
   lines.push('');
 
   // Scale-brag line + emergence categorization. The agent reading the
@@ -553,7 +579,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     const oneHundred = scaleCostToDaily(totalCost, input.extraction.totalBytes, 100, input.windowHours);
     const oneHundredSavings = scaleCostToDaily(projectedSavings, input.extraction.totalBytes, 100, input.windowHours);
     lines.push(
-      `No volume specified. At 100 GB/day the top-pattern muting would save **${fmtCostDisclosed(input, oneHundredSavings)}/yr** out of **${fmtCostDisclosed(input, oneHundred)}/yr** total cost. For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
+      `No volume specified. At 100 GB/day the lossless plan would save **${fmtCostDisclosed(input, oneHundredSavings)}/yr** out of **${fmtCostDisclosed(input, oneHundred)}/yr** total cost, with every line kept (compacted in place or recoverable from your S3). For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
     );
   }
   lines.push('');
@@ -565,7 +591,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('### Same incident, multiple patterns');
     lines.push('');
     lines.push(
-      `${clusters.length} incident${clusters.length === 1 ? '' : 's'} detected — co-occurring patterns that share a service and overlap on descriptor tokens.`,
+      `${clusters.length} incident${clusters.length === 1 ? '' : 's'} detected: co-occurring patterns that share a service and overlap on descriptor tokens.`,
     );
     lines.push('');
     lines.push('| Incident | Service | Patterns | Combined $/mo | Signal |');
@@ -580,7 +606,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     }
     lines.push('');
     lines.push(
-      '_When two patterns cluster as one incident, the right next step is usually a single upstream fix (broken dependency, missing config) rather than muting each pattern separately._',
+      '_When two patterns cluster as one incident, the right next step is usually a single upstream fix (broken dependency, missing config) rather than reducing each pattern separately._',
     );
     lines.push('');
   }
@@ -592,7 +618,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('### Redundant pairs');
     lines.push('');
     lines.push(
-      `${redundancyPairs.length} pair${redundancyPairs.length === 1 ? '' : 's'} of patterns fire ~1:1 in the sample — likely the same event logged at two stages. Keep one, drop the other.`,
+      `${redundancyPairs.length} pair${redundancyPairs.length === 1 ? '' : 's'} of patterns fire ~1:1 in the sample, likely the same event logged at two stages. Consolidate to one stage upstream if you can.`,
     );
     lines.push('');
     lines.push('| Pattern A | Pattern B | Count ratio | Min count |');
@@ -624,12 +650,12 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
       const slot = renderSlotCell(p);
       const age = renderEmergenceCell(p);
       lines.push(
-        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtCostDisclosed(input, annualSavings)} |`,
+        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtCostDisclosed(input, annualSavings)} |`,
       );
     }
     lines.push('');
     if (clusters.length > 0) {
-      lines.push('_🔗N — row belongs to incident #N above._');
+      lines.push('_🔗N marks a row that belongs to incident #N above._');
       lines.push('');
     }
   }
@@ -639,18 +665,18 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   if (flagged.length > 0) {
     lines.push(
       `⚠ ${flagged.length} pattern${flagged.length === 1 ? '' : 's'} flagged (WARN/ERROR severity or low sample confidence). ` +
-        `Run \`log10x_dependency_check\` before muting — they may feed live alerts or dashboards.`
+        `Run \`log10x_dependency_check\` before changing them; they may feed live alerts or dashboards.`
     );
     lines.push('');
   }
 
   // Views CTA.
-  lines.push('**Available views** — call `log10x_poc_from_siem_status` again with:');
-  lines.push('- `view: "full"` — complete 9-section report');
-  lines.push('- `view: "yaml"` — receiver mute YAML for top patterns, paste-ready');
-  lines.push('- `view: "configs"` — native SIEM exclusion configs (Datadog exclusion filter, Splunk props.conf, etc.)');
-  lines.push('- `view: "pattern", pattern: "<identity>"` — deep dive on a specific pattern');
-  lines.push('- `view: "top", top_n: 20` — expanded drivers table');
+  lines.push('**Available views**, call `log10x_poc_from_siem_status` again with:');
+  lines.push('- `view: "full"`: complete 9-section report');
+  lines.push('- `view: "yaml"`: receiver config for top patterns (compact / offload), paste-ready');
+  lines.push('- `view: "configs"`: native SIEM hard-drop configs (lossy escape hatch, not recommended)');
+  lines.push('- `view: "pattern", pattern: "<identity>"`: deep dive on a specific pattern');
+  lines.push('- `view: "top", top_n: 20`: expanded drivers table');
 
   const foot = disclosureFootnote(input);
   if (foot) {
@@ -673,12 +699,13 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
     .slice(0, topN);
   const lines: string[] = [];
   lines.push('```yaml');
-  lines.push('# receiver mute file — paste into your GitOps ConfigMap');
+  lines.push('# receiver config, paste into your GitOps ConfigMap');
   lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
-  lines.push('# Auto-expires 30d from commit. Run log10x_dependency_check on each identity before merging.');
+  lines.push('# Lossless: every entry is compacted, offloaded (recoverable), or tier-dropped. Nothing dropped.');
+  lines.push('# Run log10x_dependency_check on each identity before committing.');
   lines.push('');
   if (patterns.length === 0) {
-    lines.push('# No high-confidence mute/sample candidates in this window.');
+    lines.push('# Nothing reducible in this window. 10x keeps everything; no config entries needed.');
   } else {
     for (const p of patterns) {
       const name = input.aiPrettyNames?.[p.identity];
@@ -696,16 +723,25 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
  * receiver, just give me the raw SIEM config" path.
  */
 export function renderPocConfigs(input: RenderInput, topN = 5): string {
+  // The default plan is lossless (compact / offload / tier_down) and drops
+  // nothing. This view is the explicit escape hatch for a user who wants to
+  // HARD-DROP a pattern at the SIEM/forwarder (lossy, not recommended). The
+  // candidates are the reducible patterns; the user opted in by asking for
+  // native exclusion configs.
   const drops = enrichPatterns(input)
-    .filter((p) => p.recommendedAction === 'mute')
+    .filter((p) => p.recommendedAction !== 'keep')
     .slice(0, topN);
   const lines: string[] = [];
   lines.push(`## Native ${SIEM_DISPLAY_NAMES[input.siem]} exclusion configs`);
   lines.push('');
   if (drops.length === 0) {
-    lines.push('_No high-confidence mute candidates in this window._');
+    lines.push('_Nothing reducible in this window. 10x keeps everything, so there is nothing to exclude._');
     return lines.join('\n');
   }
+  lines.push(
+    `> **Lossy, not recommended.** These configs hard-drop the lines at ${SIEM_DISPLAY_NAMES[input.siem]} / the forwarder, so the data is gone. 10x's default plan keeps every line (compact in place or offload to your S3, recoverable). Use these only if you specifically want to discard a pattern.`,
+  );
+  lines.push('');
   lines.push('Apply these in your SIEM admin console OR via the vendor API. Run `log10x_dependency_check` first.');
   lines.push('');
   lines.push(`### ${SIEM_DISPLAY_NAMES[input.siem]}`);
@@ -747,7 +783,7 @@ export function renderPocTop(input: RenderInput, topN = 20): string {
     const annual = projectBilling(p.costPerWindow, input.windowHours, 24 * 365);
     const flag = needsReview(p) ? ' ⚠' : '';
     lines.push(
-      `| ${i + 1} | ${name}${flag} | ${p.service || '—'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, weekly)} | ${fmtCostDisclosed(input, annual)} |`
+      `| ${i + 1} | ${name}${flag} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, weekly)} | ${fmtCostDisclosed(input, annual)} |`
     );
   }
   return lines.join('\n');
@@ -778,10 +814,10 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   lines.push('');
   lines.push(`**Identity**: \`${p.identity}\``);
   lines.push(
-    `**Stats**: ${p.severity || '—'} severity · ${fmtCount(p.count)} events · ${fmtPct(p.pctOfTotal * 100)} of sample volume · ${p.service || 'unknown service'}`
+    `**Stats**: ${p.severity || '-'} severity · ${fmtCount(p.count)} events · ${fmtPct(p.pctOfTotal * 100)} of sample volume · ${p.service || 'unknown service'}`
   );
   if ((p.costPerWindow > 0 || annualSavings > 0) && (input.rateSource ?? 'list_price') !== 'unset') {
-    lines.push(`**Projected cost**: ${fmtCostDisclosed(input, p.costPerWindow)}/window · **Savings if muted**: ${fmtCostDisclosed(input, annualSavings)}/year`);
+    lines.push(`**Projected cost**: ${fmtCostDisclosed(input, p.costPerWindow)}/window · **Lossless savings**: ${fmtCostDisclosed(input, annualSavings)}/year`);
   }
   lines.push(`**Confidence**: ${p.confidence}`);
   lines.push('');
@@ -811,11 +847,11 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
     }
     lines.push('');
   }
-  lines.push(`### Recommendation — ${actionLabel(p)}`);
+  lines.push(`### Recommendation: ${actionLabel(p, SIEM_DISPLAY_NAMES[input.siem])}`);
   lines.push(p.reasoning);
   lines.push('');
   if (p.recommendedAction !== 'keep') {
-    lines.push('**Receiver YAML** (paste into GitOps ConfigMap):');
+    lines.push('**Receiver config** (paste into GitOps ConfigMap):');
     lines.push('```yaml');
     lines.push(receiverYaml(p));
     lines.push('```');
@@ -824,22 +860,22 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   if (needsReview(p)) {
     // User-facing fact: this pattern has a profile that warrants review.
     lines.push(
-      `> **Review before muting**: this pattern\'s ${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards.`
+      `> **Review before changing**: this pattern\'s ${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards. The lever is lossless (nothing is dropped), but confirm the dependency surface first.`
     );
-    // Agent-only: the specific tool to call before any mute action.
-    lines.push(agentOnly(`Constraint: before generating an exclusion config for '${p.identity}', call log10x_dependency_check({ pattern: '${p.identity}' }) and surface its findings to the user.`));
+    // Agent-only: the specific tool to call before any change.
+    lines.push(agentOnly(`Constraint: before generating a receiver config for '${p.identity}', call log10x_dependency_check({ pattern: '${p.identity}' }) and surface its findings to the user.`));
   }
 
   // Structured NEXT_ACTIONS for autonomous chains. The pattern view is a
   // natural handoff into deeper investigation: dependency_check before any
-  // mute, retriever_query for archive history (with a worked filter on the
+  // change, retriever_query for archive history (with a worked filter on the
   // strongest low-cardinality slot when one exists), pattern_trend for
   // volume series.
   const nextActions: NextAction[] = [
     {
       tool: 'log10x_dependency_check',
       args: { pattern: p.identity },
-      reason: 'check dashboards / alerts before any mute action',
+      reason: 'check dashboards / alerts before changing this pattern',
     },
     {
       tool: 'log10x_pattern_trend',
@@ -917,7 +953,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       lines.push(
         `> **${fmtCount(droppedEvents)} input lines (${pctLabel}) were not accounted for by the engine.** ` +
           `Per-pattern event counts sum to ${fmtCount(accountedEvents)}, less than the sample line count (${fmtCount(lineCount)}). ` +
-          `Known engine-side bug (GAPS G11) — the engine silently drops lines under certain conditions ` +
+          `Known engine-side bug (GAPS G11): the engine silently drops lines under certain conditions ` +
           `(multi-line stack traces, event-boundary crossings, high-cardinality variant overfitting). ` +
           `The dropped lines may contain the highest-volume patterns, so the savings projection below should be treated as a lower bound.`
       );
@@ -942,7 +978,8 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
   }
 
-  lines.push(`# Log10x POC Report — ${SIEM_DISPLAY_NAMES[input.siem]}`);
+  const siemName = SIEM_DISPLAY_NAMES[input.siem];
+  lines.push(`# Log10x POC Report: ${siemName}`);
   lines.push('');
   lines.push(
     `_${input.window} window · scope=\`${input.scope || '(none)'}\`${input.query ? ` · query=\`${input.query}\`` : ''} · snapshot_id=\`${input.snapshotId}\`_`
@@ -953,10 +990,23 @@ export function renderPocReport(input: RenderInput): RenderResult {
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
   const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
   const top3 = patterns.slice(0, 3);
+  // Lossless headline: lead with the % cut and "without losing data". The
+  // levers behind it are compact (stays searchable) + offload (recoverable);
+  // we never sample or drop. Volume framing first, dollars trail in the body.
+  const savingsPctVal = totalCost > 0 ? (projectedSavings / totalCost) * 100 : 0;
+  if (savingsPctVal > 0) {
+    lines.push(`## Result: about ${fmtPct(savingsPctVal)} less ${siemName} spend, without losing data`);
+    lines.push('');
+    lines.push(
+      `10x groups your logs by message type, then cuts the cost of the heavy ones without deleting them. ` +
+        `Every line stays queryable in ${siemName} (compacted in place) or recoverable from your own S3 (offloaded). No sampling, no dropping.`,
+    );
+    lines.push('');
+  }
   lines.push('## 1. Executive Summary');
   lines.push('');
   lines.push(
-    `Analyzed **${fmtCount(input.extraction.totalEvents)} events** (${fmtBytes(input.extraction.totalBytes)}) from ${SIEM_DISPLAY_NAMES[input.siem]} across the last ${input.window}.`
+    `Analyzed **${fmtCount(input.extraction.totalEvents)} events** (${fmtBytes(input.extraction.totalBytes)}) from ${siemName} across the last ${input.window}.`
   );
   lines.push('');
   if (input.totalDailyGb && input.totalDailyGb > 0) {
@@ -968,7 +1018,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push(`> ${bannerTitle}`);
     lines.push('>');
     lines.push(
-      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings + receiver YAML + native exclusion configs are the same regardless of volume; only dollar figures scale.`
+      `> Cost figures below extrapolate from the pulled sample (${fmtBytes(input.extraction.totalBytes)}) to the full daily volume by per-pattern %. Pattern rankings and the receiver config are the same regardless of volume; only the dollar figures scale.`
     );
     lines.push('');
     const dailyCost = projectBilling(totalCost, input.windowHours, 24);
@@ -977,12 +1027,14 @@ export function renderPocReport(input: RenderInput): RenderResult {
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
     const annualSavings = projectBilling(projectedSavings, input.windowHours, 24 * 365);
     const m = input.volumeRangeMultiplier;
+    const savingsPctAnnual = fmtPct((annualSavings / Math.max(1, annualCost)) * 100);
+    lines.push(`- **Lossless reduction**: about ${savingsPctAnnual} of volume, with every line kept (compacted in place or recoverable from your S3).`);
     lines.push(`- **Projected daily cost**: ${formatCostRange(input, dailyCost, m)}`);
     lines.push(`- **Projected monthly cost**: ${formatCostRange(input, monthlyCost, m)}`);
     lines.push(`- **Projected annual cost**: ${formatCostRange(input, annualCost, m)}`);
     void weeklyCost;
     lines.push(
-      `- **Potential annual savings**: **${formatCostRange(input, annualSavings, m)}** — ${fmtPct((annualSavings / Math.max(1, annualCost)) * 100)} of annual cost`
+      `- **Potential annual savings**: **${formatCostRange(input, annualSavings, m)}**, ${savingsPctAnnual} of annual cost`
     );
     if (m) {
       lines.push('');
@@ -999,7 +1051,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       : `**No volume specified**: showing scenario brackets. Pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` for a precise projection.`;
     lines.push(`> ${detectHeader}`);
     lines.push('');
-    lines.push('**Projected annual savings by ingest volume** (what the top-pattern muting would save):');
+    lines.push('**Projected annual savings by ingest volume** (lossless: compact in place + offload to your S3, nothing dropped):');
     lines.push('');
     lines.push('| Daily ingest | Monthly ingest | Projected annual cost | Projected annual savings |');
     lines.push('|---|---|---|---|');
@@ -1027,7 +1079,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('_Sample-only costs (for reference)_:');
     lines.push(`- **Observed sample cost (window)**: ${fmtCostDisclosed(input, totalCost)}`);
     lines.push(
-      `- **Sample potential savings (window)**: ${fmtCostDisclosed(input, projectedSavings)} — ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
+      `- **Sample lossless savings (window)**: ${fmtCostDisclosed(input, projectedSavings)}, ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
     );
   }
   // The analyzer rate is now structurally attached to every $ line above via
@@ -1038,16 +1090,10 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('');
   if (top3.length > 0) {
-    lines.push('**Top 3 wins**:');
+    lines.push('**Top 3 wins** (lossless):');
     for (const p of top3) {
       const dn = displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity));
-      const label = p.recommendedAction === 'mute'
-        ? `Mute ${dn}`
-        : p.recommendedAction === 'sample'
-        ? `Sample ${dn} at 1/${p.sampleRate}`
-        : `Keep ${dn}`;
-      const save = p.recommendedAction === 'keep' ? '' : ` → save ${fmtCostDisclosed(input, p.projectedSavings)}`;
-      lines.push(`- ${label}${save}`);
+      lines.push(`- ${top3WinLabel(p, dn, fmtCostDisclosed(input, p.projectedSavings))}`);
     }
     lines.push('');
   }
@@ -1057,7 +1103,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('');
   const topN = Math.min(patterns.length, 20);
   if (topN === 0) {
-    lines.push('_No patterns resolved from the pulled events — the engine returned zero. This is usually a sign the events are pre-aggregated JSON blobs rather than raw log lines. Try a narrower `query`, and make sure a local tenx CLI is installed._');
+    lines.push('_No patterns resolved from the pulled events; the engine returned zero. This is usually a sign the events are pre-aggregated JSON blobs rather than raw log lines. Try a narrower `query`, and make sure a local tenx CLI is installed._');
     lines.push('');
   } else {
     lines.push(
@@ -1072,7 +1118,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '—'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -1097,7 +1143,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('| service | events | $/window | severity mix |');
     lines.push('|---|---|---|---|');
     for (const r of svcRows.slice(0, 15)) {
-      lines.push(`| ${r.svc} | ${fmtCount(r.events)} | ${fmtCostDisclosed(input, r.cost)} | ${r.severityMix || '—'} |`);
+      lines.push(`| ${r.svc} | ${fmtCount(r.events)} | ${fmtCostDisclosed(input, r.cost)} | ${r.severityMix || '-'} |`);
     }
     lines.push('');
     // Anomaly flag: any service with >50% of total cost?
@@ -1114,19 +1160,19 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('## 4. Receiver Recommendations');
   lines.push('');
   lines.push(
-    'Per-pattern recommendations with reasoning, projected savings, and ready-to-paste log10x receiver mute-file YAML. Mutes auto-expire at `untilEpochSec`; sampling retains a statistical slice for debug.'
+    `Per-pattern lossless lever with reasoning, projected savings, and a ready-to-paste log10x receiver config. Each entry compacts the line in place (stays searchable in ${siemName}), offloads it to your own S3 (recoverable any time), or moves it to a cheaper retained tier. Nothing is sampled or dropped.`
   );
   lines.push('');
   const receiverTopN = Math.min(patterns.length, 10);
   for (let i = 0; i < receiverTopN; i++) {
     const p = patterns[i];
-    lines.push(`### #${i + 1} — ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))}  _(${p.confidence} confidence)_`);
+    lines.push(`### #${i + 1}: ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))}  _(${p.confidence} confidence)_`);
     lines.push('');
-    lines.push(`- **Action**: ${actionLabel(p)}`);
+    lines.push(`- **Lever**: ${actionLabel(p, siemName)}`);
     lines.push(`- **Reasoning**: ${p.reasoning}`);
     lines.push(`- **Projected savings (window)**: ${fmtCostDisclosed(input, p.projectedSavings)}`);
     lines.push(
-      `- **Dependency warning**: ${p.recommendedAction === 'keep' ? '—' : `run \`log10x_dependency_check(pattern: "${p.identity}")\` first to surface alerts/dashboards/saved searches referencing this pattern`}`
+      `- **Dependency warning**: ${p.recommendedAction === 'keep' ? 'none (kept verbatim)' : `run \`log10x_dependency_check(pattern: "${p.identity}")\` first to surface alerts/dashboards/saved searches referencing this pattern`}`
     );
     lines.push('');
     if (p.recommendedAction !== 'keep') {
@@ -1137,31 +1183,16 @@ export function renderPocReport(input: RenderInput): RenderResult {
     }
   }
 
-  // Section 5: Native SIEM exclusion configs
+  // Section 5: Native SIEM exclusion configs (demoted).
+  // The default plan is lossless and drops nothing, so this section does
+  // NOT emit null-queue / Exclude configs. It points to the explicit
+  // `configs` view for users who specifically want to hard-drop (lossy).
   lines.push('## 5. Native SIEM Exclusion Configs');
   lines.push('');
   lines.push(
-    `Ready-to-paste configs for ${SIEM_DISPLAY_NAMES[input.siem]} and fluent-bit. Drop these into your pipeline **only** after running \`log10x_dependency_check\` on each pattern.`
+    `10x keeps every line (compact or offload), so this plan has no drop candidates. If you specifically want to hard-drop a pattern (lossy, not recommended), native ${siemName} and Fluent Bit exclusion configs are available via the \`configs\` view (\`log10x_poc_from_siem_status\` with \`view: "configs"\`).`,
   );
   lines.push('');
-  const dropCandidates = patterns.filter((p) => p.recommendedAction === 'mute').slice(0, 5);
-  if (dropCandidates.length === 0) {
-    lines.push('_No high-confidence drop candidates in this window._');
-    lines.push('');
-  } else {
-    lines.push(`### ${SIEM_DISPLAY_NAMES[input.siem]}`);
-    lines.push('');
-    lines.push('```');
-    lines.push(nativeConfig(input.siem, dropCandidates).trim());
-    lines.push('```');
-    lines.push('');
-    lines.push('### Fluent Bit (universal forwarder)');
-    lines.push('');
-    lines.push('```');
-    lines.push(fluentBitConfig(dropCandidates).trim());
-    lines.push('```');
-    lines.push('');
-  }
 
   // Section 6: Compact-byte ratio (measured, only where the engine
   // emitted encoded lines and only for SIEMs that ingest forwarder-
@@ -1181,12 +1212,23 @@ export function renderPocReport(input: RenderInput): RenderResult {
         `Numbers below are summed from the engine's actual \`encoded.log\` lines for these events. Not estimated. Each row's "compact bytes" is the total bytes the 10x forwarder would ship downstream for this pattern. Install: https://doc.log10x.com/apps/receiver/`
       );
       lines.push('');
+      lines.push(
+        'The compacted line carries the full template plus every captured variable, so the original line reconstructs exactly. This is lossless: nothing is summarized away or dropped.',
+      );
+      lines.push('');
       lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');
       lines.push('|---|---|---|---|---|');
+      // Daily-scale the saved-dollars column with the SAME factor enrichPatterns
+      // uses, so these match the rest of the report instead of showing the raw
+      // sub-cent sample figure.
+      const sampleGbForScale = input.extraction.totalBytes / (1024 ** 3);
+      const scaleFactor =
+        input.totalDailyGb && sampleGbForScale > 0 ? input.totalDailyGb / sampleGbForScale : 1;
       for (const p of measured) {
         const encBytes = p.encodedBytes ?? 0;
         const ratio = p.bytes > 0 ? p.bytes / Math.max(1, encBytes) : 1;
-        const saveCost = costFromBytes(p.bytes - encBytes, input.analyzerCostPerGb);
+        const savedBytes = Math.max(0, p.bytes - encBytes) * scaleFactor;
+        const saveCost = costFromBytes(savedBytes, input.analyzerCostPerGb);
         lines.push(
           `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, undefined, setDiff.get(p.identity))} | ${fmtBytes(p.bytes)} | ${fmtBytes(encBytes)} | ${ratio.toFixed(1)}× | ${fmtCostDisclosed(input, saveCost)} |`
         );
@@ -1198,57 +1240,56 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 7: Risk / dependency check
   lines.push('## 7. Risk / Dependency Check');
   lines.push('');
-  const riskyDrops = patterns.slice(0, 10).filter((p) => p.recommendedAction !== 'keep').filter((p) => {
+  const riskyChanges = patterns.slice(0, 10).filter((p) => p.recommendedAction !== 'keep').filter((p) => {
     const errorSev = p.severity && /ERROR|CRIT|FATAL|WARN/i.test(p.severity);
     const smallCount = p.count < 10;
     return errorSev || smallCount;
   });
-  if (riskyDrops.length === 0) {
-    lines.push('_All top drop candidates are high-volume, non-error patterns. Standard dependency check recommended but risk is low._');
+  if (riskyChanges.length === 0) {
+    lines.push('_All patterns with a lever are high-volume, non-error patterns, and the lever is lossless (nothing dropped). Standard dependency check recommended but risk is low._');
     lines.push('');
   } else {
-    lines.push('**These drop candidates need careful review**:');
+    lines.push('**These patterns need careful review before changing**:');
     lines.push('');
-    for (const p of riskyDrops) {
+    for (const p of riskyChanges) {
       const why: string[] = [];
       if (p.severity && /ERROR|CRIT|FATAL|WARN/i.test(p.severity)) {
-        why.push(`severity=${p.severity} — may feed alerts`);
+        why.push(`severity=${p.severity}, may feed alerts`);
       }
       if (p.count < 10) {
-        why.push(`only ${p.count} events in window — low confidence on statistical behavior`);
+        why.push(`only ${p.count} events in window, low confidence on statistical behavior`);
       }
-      lines.push(`- ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))} — ${why.join('; ')}`);
+      lines.push(`- ${displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity))}: ${why.join('; ')}`);
     }
     lines.push('');
   }
   lines.push(
-    'Before applying any drop, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. Dropping a pattern that feeds a live alert silently breaks the alert.'
+    'Before changing any pattern, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. The lever is lossless, but compacting or offloading a pattern that feeds a search-time field extraction is worth confirming first.'
   );
   lines.push('');
 
   // Section 8: Deployment paths
   lines.push('## 8. Deployment Paths');
   lines.push('');
-  lines.push('### Automated — log10x receiver (recommended)');
+  lines.push('### Automated: log10x receiver (recommended)');
   lines.push('');
   lines.push(
-    '1. Install the Log10x Receiver in your forwarder pipeline — https://doc.log10x.com/apps/receiver/'
+    '1. Install the Log10x Receiver in your forwarder pipeline: https://doc.log10x.com/apps/receiver/'
   );
   lines.push(
-    '2. Commit the generated receiver YAML above into your GitOps repo (the receiver watches a ConfigMap)'
+    '2. Commit the compact/offload config above into your GitOps repo (the receiver watches a ConfigMap).'
   );
   lines.push(
-    '3. Mutes auto-expire at `untilEpochSec`, so stale rules self-clean. The receiver publishes exact pattern-match metrics, so you can verify the intended traffic is being dropped before committing permanently.'
+    '3. Verify before you trust it: the receiver publishes exact before/after bytes per pattern, so you watch the reduction land in your own metrics before you commit. Nothing is dropped, so there is nothing to expire or roll back.'
   );
   lines.push('');
-  lines.push('### Manual — native SIEM config (no log10x runtime)');
+  lines.push('### Manual: native SIEM config (no log10x runtime)');
   lines.push('');
   lines.push(
-    `1. Paste the ${SIEM_DISPLAY_NAMES[input.siem]} config from Section 5 into your SIEM admin console`
+    'Without the receiver runtime there is no in-place compaction or offload (those need the engine). The native path can only hard-drop a pattern, which is lossy and not the recommended plan.',
   );
-  lines.push('2. Monitor ingestion volume for 24-48h to confirm the drop');
   lines.push(
-    '3. Trade-offs vs receiver: no auto-expiry, no per-pattern verification metric, no GitOps-reviewable identity (regex will drift)'
+    `If you specifically want to discard a pattern at ${SIEM_DISPLAY_NAMES[input.siem]} or the forwarder, the exclusion configs are in the \`configs\` view. Run \`log10x_dependency_check\` on each pattern first, then monitor ingestion volume for 24-48h to confirm the change.`,
   );
   lines.push('');
 
@@ -1266,7 +1307,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     const croppedAppendix = buildCroppedDisplays(appendixSlice.map((p) => p.identity));
     for (const p of appendixSlice) {
       lines.push(
-        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, croppedAppendix.get(p.identity), setDiff.get(p.identity))} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '—'} | ${p.service || '—'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
+        `| ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, croppedAppendix.get(p.identity), setDiff.get(p.identity))} | ${fmtCount(p.count)} | ${fmtBytes(p.bytes)} | ${p.severity || '-'} | ${p.service || '-'} | \`${truncate(p.sampleEvent, 80).replace(/\|/g, '\\|')}\` |`
       );
     }
     if (patterns.length > 50) {
@@ -1290,7 +1331,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     '- **Cost model**: `bytes × analyzer_cost_per_gb` over the pulled window. Window cost is projected to weekly cost via `$/window × (168h / window_hours)`.'
   );
   lines.push(
-    '- **Recommendation rules**: mute when pattern is DEBUG/INFO or below a minimum-value bar AND ≥1% of total volume; sample when MAX 10/s; keep when ERROR or WARN.'
+    '- **Recommendation rules** (all lossless): for a reducible pattern (DEBUG/INFO/TRACE/WARN or no severity AND ≥1% of total volume), compact in place when the SIEM supports it and the line is compressible (measured ≥40% smaller), else tier_down to a cheaper retained tier (Datadog/CloudWatch), else offload to your own S3 (recoverable). ERROR/CRIT/FATAL and low-volume patterns are kept verbatim. Nothing is sampled or dropped.'
   );
   lines.push(
     '- **Confidence** is `high` for patterns with ≥100 events in the window (stable rate), `medium` for 10-99, `low` for <10.'
@@ -1320,7 +1361,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       `- **naming**: ${Object.keys(input.aiPrettyNames).length} pattern(s) AI-prettified via MCP sampling; remainder use template-based heuristic`
     );
   } else if (input.aiPrettifyErrorNote) {
-    lines.push(`- **naming**: template-based heuristic (AI prettify skipped — ${input.aiPrettifyErrorNote})`);
+    lines.push(`- **naming**: template-based heuristic (AI prettify skipped: ${input.aiPrettifyErrorNote})`);
   } else {
     lines.push(`- **naming**: template-based heuristic`);
   }
@@ -1340,11 +1381,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       projectedSavings,
       top3Actions: top3.map((p) => {
         const name = resolveName(p.identity, p.template, input.aiPrettyNames);
-        return p.recommendedAction === 'mute'
-          ? `Mute ${name} → save ${fmtCostDisclosed(input, p.projectedSavings)}`
-          : p.recommendedAction === 'sample'
-          ? `Sample ${name} at 1/${p.sampleRate} → save ${fmtCostDisclosed(input, p.projectedSavings)}`
-          : `Keep ${name}`;
+        return top3WinLabel(p, name, fmtCostDisclosed(input, p.projectedSavings));
       }),
     },
   };
@@ -1362,6 +1399,13 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   // Threaded into reasoning for high-volume info-class patterns so the
   // recommendation matches the SIEM's cheapest cost-cutting path.
   const destinationAction: CostAction = getDefaultActionForDestination(input.siem, 1);
+  // Does this SIEM support in-place compaction (10x envelope / plugin)?
+  // Splunk, self-hosted ES/OS, and ClickHouse do; Datadog/CloudWatch/managed
+  // offerings do not. When it does, compact is the lead lever for a
+  // compressible pattern (keeps every line searchable in the SIEM at a
+  // fraction of the bytes). When it doesn't, we fall to tier_down (cheaper
+  // in-platform tier) or offload (customer-owned S3) — both lossless.
+  const compactSupported = getAllowedActionsForDestination(input.siem).includes('compact');
 
   // When the caller provides the customer's real daily volume, scale each
   // pattern's bytes from "sample-observed" to "projected-daily" by
@@ -1407,57 +1451,63 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     const lit = extractLiteralPhrase(p.template, identity);
     const severity = (p.severity || '').toUpperCase();
 
-    let action: 'mute' | 'sample' | 'keep' = 'keep';
-    let sampleRate = 1;
+    // Lossless decision: every reducible pattern gets a lossless lever
+    // (compact / offload / tier_down); everything else is kept verbatim.
+    // We NEVER auto-recommend mute / drop / sample.
+    let action: 'compact' | 'offload' | 'tier_down' | 'keep' = 'keep';
+    const sampleRate = 1; // we do not sample; retained for type-compat only.
+    let leverFraction = 0;
     let reasoning = '';
 
+    const siemName = SIEM_DISPLAY_NAMES[input.siem];
     const isErrorClass = /ERROR|CRIT|FATAL/.test(severity);
-    const isWarn = /WARN/.test(severity);
-    const isDebugInfo = /DEBUG|INFO|TRACE/.test(severity) || !severity;
+    // Reducible severities: DEBUG / INFO / TRACE / WARN / no-severity.
+    const isReducibleSev = /DEBUG|INFO|TRACE|WARN/.test(severity) || !severity;
     const isFrequent = pctOfTotal >= 0.01;
-    const isHotLoop = pctOfTotal >= 0.02;
+
+    // Measured compaction fraction from the engine's encoded output.
+    // encRatio = encodedBytes/bytes; compactFraction = 1 - encRatio, the
+    // share of bytes the in-place re-encode removes. Clamped to [0, 0.85].
+    const encRatio = p.encodedBytes && p.encodedBytes > 0 ? p.encodedBytes / Math.max(1, p.bytes) : 1;
+    const compactFraction = Math.min(0.85, Math.max(0, 1 - encRatio));
+    const isCompressible = compactFraction >= 0.4;
 
     if (isErrorClass) {
       action = 'keep';
-      reasoning = `severity=${severity || 'error-class'} — keep for incident diagnosis.`;
-    } else if (isWarn) {
-      if (isHotLoop) {
-        action = 'sample';
-        sampleRate = 10;
-        reasoning = `WARN pattern is ${fmtPct(pctOfTotal * 100)} of volume — sample 1/10 to keep signal without paying full cost.`;
+      reasoning = `severity=${severity || 'error-class'}, kept verbatim in ${siemName} for incident diagnosis.`;
+    } else if (isReducibleSev && isFrequent) {
+      const sevLabel = severity || 'info-class';
+      const pctLabel = fmtPct(pctOfTotal * 100);
+      if (compactSupported && isCompressible) {
+        action = 'compact';
+        leverFraction = compactFraction; // MEASURED.
+        reasoning =
+          `High-volume ${sevLabel} pattern (${pctLabel} of volume). ` +
+          `Compact in place: ${fmtPct(compactFraction * 100)} smaller, stays searchable in ${siemName}, ` +
+          `every line reconstructs exactly.`;
+      } else if (destinationAction === 'tier_down') {
+        action = 'tier_down';
+        leverFraction = 0.6;
+        reasoning =
+          `High-volume ${sevLabel} pattern (${pctLabel} of volume). ` +
+          `Route to ${siemName}'s cheaper in-platform tier, fully retained and queryable.`;
       } else {
-        action = 'keep';
-        reasoning = 'WARN pattern below volume threshold — keep.';
+        action = 'offload';
+        leverFraction = 0.95;
+        reasoning =
+          `High-volume ${sevLabel} pattern (${pctLabel} of volume). ` +
+          `Offload to your own S3 before ${siemName} bills it, recoverable any time via log10x_retriever_query.`;
       }
-    } else if (isDebugInfo && isFrequent) {
-      action = isHotLoop ? 'mute' : 'sample';
-      sampleRate = action === 'sample' ? 20 : 1;
-      // Surface the destination's preferred level-1 lever in the reasoning
-      // so the reader sees the SIEM-appropriate verb (Datadog → tier_down to
-      // Flex, Splunk → offload to customer-owned S3, ClickHouse → compact via
-      // CH UDF, …) on top of the muting verdict.
-      const destinationLever =
-        destinationAction === 'tier_down'
-          ? ' — preferred lever on this destination: `tier_down` (cheaper in-platform tier).'
-          : destinationAction === 'offload'
-          ? ' — preferred lever on this destination: `offload` (route to customer-owned S3 before the SIEM bills it).'
-          : destinationAction === 'compact'
-          ? ' — preferred lever on this destination: `compact` (10x compaction on the destination).'
-          : '';
-      reasoning = isHotLoop
-        ? `High-volume ${severity || 'info-class'} pattern (${fmtPct(pctOfTotal * 100)} of analyzed volume) — candidate for mute after dependency check.${destinationLever}`
-        : `Moderate-volume ${severity || 'info-class'} pattern — sample 1/20 to retain a trickle for debug.${destinationLever}`;
     } else {
       action = 'keep';
-      reasoning = 'Low volume or non-actionable signal — keep.';
+      reasoning = `Low-volume or non-actionable pattern (${fmtPct(pctOfTotal * 100)} of volume), kept verbatim in ${siemName}.`;
     }
 
-    const projectedSavings =
-      action === 'mute'
-        ? costPerWindow
-        : action === 'sample'
-        ? costPerWindow * (1 - 1 / sampleRate)
-        : 0;
+    // Savings = this pattern's window cost times the lever's removed
+    // fraction. Because costPerWindow is already daily-scaled when
+    // totalDailyGb is set, compact savings now scale exactly like the
+    // old mute savings did (fixes the sample-only scaling bug). keep → 0.
+    const projectedSavings = costPerWindow * leverFraction;
 
     let confidence: Confidence = 'medium';
     if (p.count >= 100) confidence = 'high';
@@ -1469,6 +1519,7 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
       pctOfTotal,
       costPerWeek,
       recommendedAction: action,
+      leverFraction,
       sampleRate,
       projectedSavings,
       reasoning,
@@ -1569,7 +1620,7 @@ function groupBy<T, K>(arr: T[], key: (x: T) => K): Map<K, T[]> {
 function severityMix(ps: EnrichedPattern[]): string {
   const mix = new Map<string, number>();
   for (const p of ps) {
-    const sev = p.severity || '—';
+    const sev = p.severity || '-';
     mix.set(sev, (mix.get(sev) || 0) + p.count);
   }
   const total = ps.reduce((s, p) => s + p.count, 0) || 1;
@@ -1580,10 +1631,32 @@ function severityMix(ps: EnrichedPattern[]): string {
     .join(', ');
 }
 
-function actionLabel(p: EnrichedPattern): string {
-  if (p.recommendedAction === 'mute') return 'mute (drop all events)';
-  if (p.recommendedAction === 'sample') return `sample 1/${p.sampleRate}`;
+function actionLabel(p: EnrichedPattern, siemName: string): string {
+  if (p.recommendedAction === 'compact') {
+    return `compact (stays in ${siemName}, ${fmtPct(p.leverFraction * 100)} smaller)`;
+  }
+  if (p.recommendedAction === 'offload') return 'offload (to your S3, recoverable)';
+  if (p.recommendedAction === 'tier_down') return 'tier_down (cheaper tier)';
   return 'keep';
+}
+
+/**
+ * One-line "win" label for the executive summary + the JSON summary's
+ * `top3Actions`. Leads with the lossless lever verb and the parenthetical
+ * that says WHY it's lossless (stays searchable / recoverable). `keep`
+ * carries no savings.
+ */
+function top3WinLabel(p: EnrichedPattern, displayLabel: string, savings: string): string {
+  if (p.recommendedAction === 'compact') {
+    return `Compact ${displayLabel} -> save ${savings} (stays searchable)`;
+  }
+  if (p.recommendedAction === 'offload') {
+    return `Offload ${displayLabel} -> save ${savings} (recoverable from your S3)`;
+  }
+  if (p.recommendedAction === 'tier_down') {
+    return `Tier down ${displayLabel} -> save ${savings} (cheaper tier, retained)`;
+  }
+  return `Keep ${displayLabel} (kept verbatim)`;
 }
 
 /**
@@ -1599,13 +1672,14 @@ function yamlQuote(s: string): string {
 }
 
 function receiverYaml(p: EnrichedPattern): string {
-  const expirySec = Math.floor(Date.now() / 1000) + 30 * 86_400; // 30-day expiry
-  const action = p.recommendedAction === 'mute' ? 'drop' : 'sample';
-  const extra = action === 'sample' ? `    sampleRate: ${p.sampleRate}` : '';
+  // Lossless lever map. We never emit `action: drop` / `sample`. The
+  // receiver re-encodes (compact), routes to customer S3 (offload), or
+  // tags for the SIEM's cheaper tier (tier_down). No auto-expiry: this
+  // is permanent policy, not a temporary mute.
   // The install gate sits inside the fenced block (not as a section
   // banner) so the prospect sees it at the exact moment they think
-  // about acting on the YAML — banners get skimmed past.
-  const installGate = '# Install 10x first (see https://doc.log10x.com/apps/receiver/) and then save this entry to the receiver mute file.';
+  // about acting on the config, banners get skimmed past.
+  const installGate = '# Install 10x first (see https://doc.log10x.com/apps/receiver/) and then add this entry to the receiver config.';
   // Which engine field is this `pattern:` value? The receiver matches
   // against it via `compactReceiverFieldNames`. We tell the user which
   // field to configure so the rule actually fires in production.
@@ -1616,20 +1690,27 @@ function receiverYaml(p: EnrichedPattern): string {
     matchKeyNote = '# Identity below is `tenx_hash` (patternHash). Configure: `compactReceiverFieldNames: [tenx_hash]` on the receiver.';
   } else {
     // p.identity fell back to templateHash. The receiver does NOT
-    // match against templateHash, so this rule is unmuteable as-is.
-    // Refuse to advertise it as a working mute entry — the comment
-    // tells the user this row needs an engine with the anchored
-    // encoded layout before mute YAML is producible.
+    // match against templateHash, so this rule is inert as-is. The
+    // comment tells the user this row needs an engine with the anchored
+    // encoded layout before a config entry is producible.
     matchKeyNote = '# WARNING: no engine `symbolMessage` or `tenx_hash` available for this template. The value below is the engine\'s internal `templateHash` and is NOT a valid receiver match key. Re-run with an engine that emits the anchored encoded layout (`pattern=`/`patternHash=` in apps/mcp/stdout).';
   }
+  // `keep` patterns carry no config entry.
+  if (p.recommendedAction === 'keep') {
+    return [installGate, '# (pattern kept verbatim, no receiver entry needed)'].join('\n');
+  }
+  const action = p.recommendedAction; // 'compact' | 'offload' | 'tier_down'
+  const extra =
+    action === 'offload'
+      ? ['  bucket: "s3://your-bucket/log10x/"   # your own bucket, recoverable via log10x_retriever_query']
+      : [];
   return [
     installGate,
     matchKeyNote,
-    `- pattern: ${yamlQuote(p.identity)}`,
-    `  action: ${action}`,
-    ...(extra ? [extra] : []),
-    `  untilEpochSec: ${expirySec}   # auto-expires in 30d`,
-    `  reason: ${yamlQuote(p.reasoning)}`,
+    `${action}:`,
+    `  - pattern: ${yamlQuote(p.identity)}`,
+    ...extra,
+    `    reason: ${yamlQuote(p.reasoning)}`,
   ].join('\n');
 }
 
@@ -1788,7 +1869,7 @@ function sumoExclusion(drops: EnrichedPattern[]): string {
   const body = drops
     .map((p, i) => {
       const phrase = p.literalPhrase.replace(/"/g, '\\"');
-      return `# Drop rule #${i + 1} — Field Extraction Rules → Drop\nmatches "*${phrase}*"`;
+      return `# Drop rule #${i + 1}: Field Extraction Rules → Drop\nmatches "*${phrase}*"`;
     })
     .join('\n\n');
   return approximationFootnote(drops) + body;
@@ -1800,7 +1881,7 @@ function clickhouseExclusion(drops: EnrichedPattern[]): string {
     .join('\n        AND ');
   return (
     approximationFootnote(drops) +
-    `-- Option A: ingestion-layer drop via MATERIALIZED VIEW\nCREATE MATERIALIZED VIEW logs_filtered\nTO logs_final AS\n  SELECT *\n  FROM logs_raw\n  WHERE ${conds};\n\n-- Option B: drop at the forwarder (preferred — no extra storage writes)`
+    `-- Option A: ingestion-layer drop via MATERIALIZED VIEW\nCREATE MATERIALIZED VIEW logs_filtered\nTO logs_final AS\n  SELECT *\n  FROM logs_raw\n  WHERE ${conds};\n\n-- Option B: drop at the forwarder (preferred, no extra storage writes)`
   );
 }
 
@@ -1941,7 +2022,7 @@ function renderEmergenceSummary(t: EmergenceTally): string {
   const parts: string[] = [];
   if (t.newCount > 0) parts.push(`**${t.newCount} new** (last 24h, incident signal)`);
   if (t.growingCount > 0) parts.push(`**${t.growingCount} growing** (≥2x window average, regression candidates)`);
-  if (t.stableCount > 0) parts.push(`${t.stableCount} stable (head-of-tail noise, sample/mute candidates)`);
+  if (t.stableCount > 0) parts.push(`${t.stableCount} stable (steady high-volume noise, compact/offload candidates)`);
   if (t.burstCount > 0) parts.push(`${t.burstCount} bursty (transient, check correlation)`);
   if (parts.length === 0) return '';
   return `Of those patterns: ${parts.join('; ')}.`;
@@ -1971,19 +2052,22 @@ function renderEmergenceCell(p: EnrichedPattern): string {
 /**
  * Render the Action cell. Reads the refined action (post dep-check
  * fold-in) and renders one of:
- *   - **FIX** — ERROR-class with a dependency-failure descriptor
- *   - **MUTE** / SAMPLE 1/N — cost-driven recommendation
- *   - **BLOCKED** — dep-check found refs, do not auto-act
- *   - KEEP — default for non-actionable rows
+ *   - **FIX**     — ERROR-class with a dependency-failure descriptor
+ *   - COMPACT     — lossless re-encode, stays searchable in the SIEM
+ *   - OFFLOAD     — lossless route to customer S3, recoverable
+ *   - TIER DOWN   — lossless move to the SIEM's cheaper tier
+ *   - **BLOCKED** — dep-check found refs, confirm before changing
+ *   - KEEP        — default for non-actionable rows
  *
- * Bolds destructive recommendations so a CLI reader scans them.
+ * Every lever here is lossless, so none are bolded as destructive.
  */
 function renderActionCell(p: EnrichedPattern): string {
   const refined = p.poc.refinedAction;
   if (refined === 'fix') return '**FIX**';
   if (refined === 'blocked') return '**BLOCKED**';
-  if (refined === 'mute') return '**MUTE**';
-  if (refined === 'sample') return `SAMPLE 1/${p.sampleRate}`;
+  if (refined === 'compact') return 'COMPACT';
+  if (refined === 'offload') return 'OFFLOAD';
+  if (refined === 'tier_down') return 'TIER DOWN';
   return 'KEEP';
 }
 
@@ -1994,7 +2078,7 @@ function renderActionCell(p: EnrichedPattern): string {
  */
 function renderSlotCell(p: EnrichedPattern): string {
   const s = p.poc.topSlot;
-  if (!s) return '—';
+  if (!s) return '-';
   const unbounded = s.distinctOverCount >= 0.9 ? ' 🔥' : '';
   return `${s.slot}: ${fmtCount(s.distinctCount)}${unbounded}`;
 }
