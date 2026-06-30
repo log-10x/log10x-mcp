@@ -22,14 +22,16 @@ test('all 8 SIEMs have pricing defined', () => {
 });
 
 test('pricing matches vendors.json values for the primary SIEMs', () => {
-  // From /Users/talweiss/git/l1x-co/backend/terraform/console/ui/src/vendors.json
+  // Source of truth: config/comsite/PRICING.md (per CLAUDE.md) + dotcom/comsite
+  // vendors.json — both put Sumo Logic at $2.50. (A prior version of this test and
+  // pricing.ts both carried a stale 0.25 with a comment that misquoted vendors.json.)
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB.splunk, 6);
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB.datadog, 2.5);
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, 1);
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB.cloudwatch, 0.5);
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB['azure-monitor'], 2.3);
   assert.equal(DEFAULT_ANALYZER_COST_PER_GB['gcp-logging'], 0.5);
-  assert.equal(DEFAULT_ANALYZER_COST_PER_GB.sumo, 0.25);
+  assert.equal(DEFAULT_ANALYZER_COST_PER_GB.sumo, 2.5);
 });
 
 test('every SIEM has a human-readable display name', () => {
