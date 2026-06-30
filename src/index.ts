@@ -80,6 +80,7 @@ import {
 import { discoverJoinSchema, executeDiscoverJoin } from './tools/discover-join.js';
 import { metricOverlaySchema, executeMetricOverlay } from './tools/metric-overlay.js';
 import { metricsThatMovedSchema, executeMetricsThatMoved } from './tools/metrics-that-moved.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, type SiemId } from './lib/siem/pricing.js';
 import {
   rankByShapeSimilaritySchema,
   executeRankByShapeSimilarity,
@@ -649,6 +650,28 @@ const BUILD_INFO = {
   commit: process.env.LOG10X_MCP_BUILD_SHA ?? 'unknown',
   builtAt: process.env.LOG10X_MCP_BUILD_TIME ?? 'unknown',
 };
+// Rate card surfaced in the agent instructions. Generated from the single
+// canonical source (DEFAULT_ANALYZER_COST_PER_GB, synced from vendors.json) so
+// the prose can never drift from what the cost tools actually charge. Short
+// human labels keep the sentence readable; the figures come from pricing.ts.
+const RATE_CARD_LINE = (
+  [
+    ['splunk', 'Splunk'],
+    ['datadog', 'Datadog'],
+    ['elasticsearch', 'Elasticsearch'],
+    ['cloudwatch', 'CloudWatch'],
+  ] as [SiemId, string][]
+)
+  .map(([id, label]) => {
+    const r = DEFAULT_ANALYZER_COST_PER_GB[id];
+    // Trim trailing zeros: 6 -> "$6/GB", 2.5 -> "$2.50/GB" keep cents form for
+    // sub-dollar/fractional rates so the card reads like the prior hand-written
+    // version ($2.50, $0.50) while integers stay clean ($6, $1).
+    const shown = Number.isInteger(r) ? `$${r}` : `$${r.toFixed(2)}`;
+    return `${label} ${shown}/GB`;
+  })
+  .join(', ');
+
 const SERVER_OPTIONS = {
     // Declare the `logging` capability so calls to extra.sendNotification
     // ('notifications/message', ...) inside tool handlers don't throw
@@ -833,7 +856,7 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
   — wait for the user to run the script and paste back its results.
 
 Analyzer cost is auto-detected from the user's profile. Typical rates if unspecified:
-Splunk $6/GB, Datadog $2.50/GB, Elasticsearch $1/GB, CloudWatch $0.50/GB.
+${RATE_CARD_LINE}.
 
 TOOL OUTPUT — AUDIENCE-SEPARATED MARKDOWN
 

@@ -1725,6 +1725,12 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   // share in a DisclosedDollarValue so the disclosure tail rides every cell
   // (the rate_source / list-price caveat is no longer inlined per row).
   const siemLabel = SIEM_DISPLAY_NAMES[env.commitment.destination] ?? null;
+  // DISCLOSURE LABEL ONLY (not the dollar source). The dollar math
+  // (env.delivered_dollars) is produced upstream by runEstimateVerify, which
+  // routes through resolveRate (account rate / SIEM lens honoured). This read
+  // fires only AFTER rate_source was already decided as 'list_price' upstream,
+  // so it cannot bypass the account rate — it just names the list rate for the
+  // "list price; actuals may differ" tail.
   const listRatePerGb =
     env.rate_source === 'list_price'
       ? (DEFAULT_ANALYZER_COST_PER_GB[env.commitment.destination] ?? null)

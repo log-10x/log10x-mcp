@@ -62,21 +62,41 @@ export function toSiemId(raw: string | undefined | null): SiemId | null {
 /**
  * Resolve the effective destination for a tool run.
  *
+ * A lens is "in effect" when the EFFECTIVE destination differs from the env's
+ * ACTUAL destination. The effective destination is derived from EITHER the
+ * explicit `siem_lens` arg OR a passed-through `destination`, in that order.
+ * This single-derivation rule closes the class of bug where one transport
+ * (destination) carries the what-if but the lens flag is computed from another
+ * (siem_lens) and silently reads false.
+ *
  * @param requested  the tool's `siem_lens` arg (validated upstream by the
  *                   Zod enum, but tolerated loosely here for direct callers)
  * @param envAnalyzer the resolved env's analyzer (env.analyzer), raw form
+ * @param destination optional resolved destination (e.g. cost_options'
+ *                   effectiveDestination). Used only as a fallback source of
+ *                   the effective destination when `requested` is absent. A
+ *                   destination equal to the actual env destination yields
+ *                   lensed:false (it is NOT a what-if).
  */
 export function resolveSiemLens(
   requested: string | undefined | null,
   envAnalyzer: string | undefined | null,
+  destination?: string | undefined | null,
 ): SiemLensResolution {
   const actual = toSiemId(envAnalyzer);
-  const req = toSiemId(requested);
-  if (requested != null && String(requested).trim() !== '' && req === null) {
+  const reqFromLens = toSiemId(requested);
+  if (requested != null && String(requested).trim() !== '' && reqFromLens === null) {
     throw new Error(
       `siem_lens "${requested}" is not a priceable destination. Valid values: ${SIEM_LENS_IDS.join(', ')}.`,
     );
   }
+  // Effective destination: explicit siem_lens wins, else the passed-through
+  // destination. A bad destination string is tolerated (passes through to
+  // null) — unlike siem_lens, `destination` is not a lens assertion and must
+  // not throw here.
+  const req = reqFromLens ?? toSiemId(destination);
+  // `basis: 'requested'` reflects that the effective came from an explicit
+  // lens/destination request (either transport), as opposed to env detection.
   if (req && req !== actual) {
     return {
       actual,

@@ -250,9 +250,9 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string; monthly_volume_gb?: number }
+  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string; monthly_volume_gb?: number; siem_lens?: string }
 ): CostOptionItem[] {
-  const { target_percent, service, pattern_hash, monthly_volume_gb } = args;
+  const { target_percent, service, pattern_hash, monthly_volume_gb, siem_lens } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
   // The caller-supplied destination (e.g. baseline established datadog as
   // the target) must win over the env-auto-detected siem (which may be the
@@ -279,6 +279,16 @@ function buildModes(
     const out: Record<string, unknown> = {};
     if (effectiveDestination) out.destination = effectiveDestination;
     if (service !== undefined) out.service = service;
+    // Forward the ORIGINAL siem_lens (captured here from args.siem_lens, which
+    // the line-507 destination alias copies FROM but never clears) so the
+    // downstream estimate_savings recomputes resolveSiemLens(siem_lens,
+    // env.analyzer) and skips the env-configured account rate (rungs 2/3) when
+    // the lens destination differs from the env's actual one. Without this the
+    // hop carried destination=<lens> but siem_lens=undefined, so the lens
+    // collapsed to lensed:false and a stray LOG10X_ANALYZER_COST priced the
+    // lensed story. resolveSiemLens still returns lensed:false when the lens
+    // equals the actual destination, so forwarding it verbatim is safe.
+    if (siem_lens !== undefined) out.siem_lens = siem_lens;
     // Forward the volume lens verbatim so the downstream estimate_savings
     // inherits the projection. cost_options itself scales/stamps nothing.
     if (monthly_volume_gb !== undefined) out.monthly_volume_gb = monthly_volume_gb;
@@ -605,7 +615,14 @@ export async function executeCostOptions(args: {
   // Build siem_vendor + source_label from the resolved env-config when
   // available; falls back to siemDetected when the on-prem store is unreachable.
   const sourceDisclosure = await buildSourceDisclosureFromEnv(env, siemDetected);
-  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer ?? siemDetected);
+  // Thread the USER/upstream-supplied `args.destination` so a what-if carried
+  // only via `destination` (no explicit siem_lens) is still detected as a lens
+  // when it differs from the env's actual destination. siem_lens still wins when
+  // present; a destination equal to actual stays lensed:false. Deliberately NOT
+  // effectiveDestination: that falls back to the live-probed siemDetected, which
+  // would spuriously lens whenever the probe differs from the env's actual
+  // destination even though the caller asked for no lens.
+  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer ?? siemDetected, args.destination);
   Object.assign(sourceDisclosure, lensDisclosure(lensRes));
 
   return buildChassisEnvelope({

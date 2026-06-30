@@ -61,6 +61,35 @@ test('resolveSiemLens: unknown env analyzer -> lens still resolves, actual null'
   assert.equal(r.effective, 'datadog');
 });
 
+test('resolveSiemLens: lens derived from destination when no siem_lens (effective != actual)', () => {
+  // Tier 2 shape: a what-if carried only via `destination` is still a lens.
+  const r = resolveSiemLens(undefined, 'cloudwatch', 'splunk');
+  assert.equal(r.lensed, true);
+  assert.equal(r.effective, 'splunk');
+  assert.equal(r.actual, 'cloudwatch');
+  assert.equal(r.basis, 'requested');
+});
+
+test('resolveSiemLens: destination equal to actual is NOT a lens', () => {
+  const r = resolveSiemLens(undefined, 'cloudwatch', 'cloudwatch');
+  assert.equal(r.lensed, false);
+  assert.equal(r.effective, 'cloudwatch');
+  assert.equal(r.disclosure, null);
+});
+
+test('resolveSiemLens: explicit siem_lens wins over the destination arg', () => {
+  const r = resolveSiemLens('splunk', 'cloudwatch', 'datadog');
+  assert.equal(r.lensed, true);
+  assert.equal(r.effective, 'splunk');
+});
+
+test('resolveSiemLens: bad destination string is tolerated (passes through to no-lens), does NOT throw', () => {
+  // Unlike siem_lens, `destination` is not a lens assertion and must not throw.
+  const r = resolveSiemLens(undefined, 'cloudwatch', 'not-a-real-siem');
+  assert.equal(r.lensed, false);
+  assert.equal(r.effective, 'cloudwatch');
+});
+
 test('resolveSiemLens: invalid requested value throws with valid list', () => {
   assert.throws(() => resolveSiemLens('grafana', 'cloudwatch'), /not a priceable destination/);
 });

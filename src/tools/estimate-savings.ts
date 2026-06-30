@@ -736,7 +736,15 @@ export interface RunForecastArgs {
    * use this rate instead of the destination list price (same as the verify path).
    * Surfaces as rate_source='customer_supplied' in the result.
    */
-  effective_ingest_per_gb?: number;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
+  effective_ingest_per_gb?: number;  /**
+   * SIEM lens active: skip env-configured rates (they belong to the actual
+   * destination). FED BY THE EXECUTOR from `lensRes.lensed` (executeEstimateSavings,
+   * ~line 1818 -> 2013), NOT from the public estimate_savings arg. It is read
+   * ONLY at the forecast resolveRate site (~1026). A future refactor that
+   * inlines runEstimateForecast must keep this assignment, or the rate stops
+   * following the SIEM lens. This is the SIEM lens; the VOLUME lens lives in a
+   * separate object (result.volume_lens.lensed) — do not conflate.
+   */
   lensed?: boolean;
   /**
    * Volume projection lens: model the env at this monthly volume (decimal
@@ -1430,7 +1438,15 @@ export interface RunVerifyArgs {
    * shape). Exposed so a customer with a relabeled aggregator can pass
    * the right label without us hard-coding the default in two places.
    */
-  container_label?: string;  /** SIEM lens active: skip env-configured rates (they belong to the actual destination). */
+  container_label?: string;  /**
+   * SIEM lens active: skip env-configured rates (they belong to the actual
+   * destination). FED BY THE EXECUTOR from `lensRes.lensed` (executeEstimateSavings,
+   * ~line 1818 -> 2198), NOT from the public estimate_savings arg. It is read
+   * ONLY at the verify resolveRate site (~1638). A future refactor that inlines
+   * runEstimateVerify must keep this assignment, or the rate stops following the
+   * SIEM lens. This is the SIEM lens; the VOLUME lens is a separate object — do
+   * not conflate.
+   */
   lensed?: boolean;
   /**
    * PromQL duration (e.g. "30d") shifting the BASELINE queries back in time
@@ -1815,7 +1831,10 @@ export async function executeEstimateSavings(
   // siem_lens: stamped alias of destination (same pricing/gating override,
   // plus actual-vs-lens provenance on every emission site).
   if (args.siem_lens && !args.destination) (args as { destination?: string }).destination = args.siem_lens as never;
-  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer);
+  // Thread args.destination so a what-if carried only via `destination` (no
+  // explicit siem_lens) is detected as a lens when it differs from the env's
+  // actual destination. siem_lens still wins; destination == actual => not a lens.
+  const lensRes = resolveSiemLens(args.siem_lens, env?.analyzer, args.destination);
 
   // Helper: build a source_label from the EnvConfig nickname + cluster
   // identity for whatever destination the call settled on. Called per
