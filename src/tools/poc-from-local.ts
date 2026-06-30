@@ -24,6 +24,7 @@ import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
+import { DEFAULT_ANALYZER_COST_PER_GB } from '../lib/siem/pricing.js';
 
 export const pocFromLocalSchema = {
   source: z
@@ -132,13 +133,18 @@ interface PriceRow {
   note: string;
 }
 
+// No-env POC matrix (kubectl scan, no resolved env/destination) so it cannot
+// resolveRate, but its list figures MUST come from the single canonical source
+// (DEFAULT_ANALYZER_COST_PER_GB, synced from vendors.json) instead of duplicated
+// literals that drift. Splunk was hardcoded $5.0 here, contradicting canonical
+// $6. OpenSearch has no SiemId in pricing.ts; it keeps a local baseline figure.
 const INDUSTRY_PRICING: PriceRow[] = [
-  { vendor: 'Datadog', perGb: 2.5, note: '30-day indexed, list price' },
-  { vendor: 'Splunk', perGb: 5.0, note: 'self-hosted ingest license, list price' },
-  { vendor: 'CloudWatch Logs', perGb: 0.5, note: 'ingestion + first-month storage' },
-  { vendor: 'Sumo Logic', perGb: 2.0, note: 'Continuous ingest tier' },
-  { vendor: 'Elastic Cloud', perGb: 0.95, note: 'Hot tier + searchable' },
-  { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline' },
+  { vendor: 'Datadog', perGb: DEFAULT_ANALYZER_COST_PER_GB.datadog, note: '30-day indexed, list price' },
+  { vendor: 'Splunk', perGb: DEFAULT_ANALYZER_COST_PER_GB.splunk, note: 'self-hosted ingest license, list price' },
+  { vendor: 'CloudWatch Logs', perGb: DEFAULT_ANALYZER_COST_PER_GB.cloudwatch, note: 'ingestion + first-month storage' },
+  { vendor: 'Sumo Logic', perGb: DEFAULT_ANALYZER_COST_PER_GB.sumo, note: 'Continuous ingest tier, list price' },
+  { vendor: 'Elastic Cloud', perGb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, note: 'Hot tier + searchable' },
+  { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
 ];
 
 export async function executePocFromLocal(args: PocFromLocalArgs): Promise<StructuredOutput> {

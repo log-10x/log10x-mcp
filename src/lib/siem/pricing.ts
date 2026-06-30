@@ -32,9 +32,10 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   'azure-monitor': 2.3,
   // vendors.json: Google Cloud / GCP Logging cost=0.5
   'gcp-logging': 0.5,
-  // vendors.json: Sumo Logic cost=0.25 (cheaper than handoff's 2.5 estimate;
-  // the vendors.json is authoritative)
-  sumo: 0.25,
+  // vendors.json: Sumo Logic cost=2.5 (dotcom + comsite vendors.json both say
+  // 2.5, matching PRICING.md). A prior entry hardcoded 0.25 with a comment that
+  // misquoted vendors.json; corrected to the canonical 2.5.
+  sumo: 2.5,
   // Not in vendors.json — self-hosted ClickHouse storage cost, approx.
   // Set to 0.15 ($/GB-month) as a conservative default. Override via
   // analyzer_cost_per_gb arg on the submit tool if using ClickHouse Cloud.

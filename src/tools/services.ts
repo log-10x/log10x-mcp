@@ -53,6 +53,7 @@ import { parseCapCsv } from '../lib/cap-csv-parser.js';
 import { normalizeTimeRange } from '../lib/time-range.js';
 import { renderMonospaceTable } from '../lib/render-table.js';
 import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
+import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
 
 /**
  * The rank cutoff that gates whether a service gets a next_action vs is
@@ -73,6 +74,7 @@ export const servicesSchema = {
     .max(50)
     .optional()
     .describe('Customer-flagged services that must stay in the SIEM with full retention (audit / regulatory / executive). Per row, marks current_mode="pass" and points next_action at pattern_mitigate instead of the configure_engine bulk path.'),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the per-service $/mo columns at this destination\'s list rates instead of the connected pipeline\'s (env-configured rates never cross destinations). Volumes/patterns are unaffected; the envelope stamps siem_actual vs siem_lens.'),
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),
@@ -150,12 +152,16 @@ interface ServicesSummary {
 }
 
 export async function executeServices(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number; siem_lens?: string },
   env: EnvConfig
 ): Promise<string | StructuredOutput> {
   const telemetry = newChassisTelemetry();
+  // SIEM lens: a what-if destination prices the same real volumes at that
+  // destination's list rates (skipping the env-configured account rate), so
+  // services agrees with top_patterns / savings / estimate_savings under a lens.
+  const lens = resolveSiemLens(args.siem_lens, env.analyzer);
   const sumOut: { data?: ServicesSummary } = {};
-  await executeServicesInner(args, env, sumOut);
+  await executeServicesInner(args, env, sumOut, lens);
   if (!sumOut.data) {
     const headline = 'No service data available. Data appears after the first 24h of collection.';
     return buildChassisEnvelope({
@@ -224,6 +230,7 @@ export async function executeServices(
     },
     source_disclosure: {
       bytes_source: 'tsdb',
+      ...lensDisclosure(lens),
       // Routed through the shared rate resolver so services/top_patterns/
       // event_lookup/explain_mode/estimate_savings agree on the SAME tag
       // for the same env/window. 'unset' collapses to undefined here per
@@ -282,9 +289,10 @@ export async function executeServices(
 }
 
 async function executeServicesInner(
-  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number },
+  args: { timeRange?: string; analyzerCost?: number; effective_ingest_per_gb?: number; view?: 'summary'; exception_services?: string[]; monthly_volume_gb?: number; siem_lens?: string },
   env: EnvConfig,
-  sumOut?: { data?: ServicesSummary }
+  sumOut?: { data?: ServicesSummary },
+  lens?: SiemLensResolution
 ): Promise<string> {
   // Defensive defaults — match servicesSchema.
   // Normalise '1d' legacy alias → '24h' before query.
@@ -300,7 +308,8 @@ async function executeServicesInner(
   const rate = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb, analyzerCost: args.analyzerCost },
     env,
-    destinationFromEnvAnalyzer(env),
+    lens?.effective ?? destinationFromEnvAnalyzer(env),
+    { lensed: lens?.lensed === true },
   );
   const costPerGb: number | null = rate.rate_per_gb;
   const period = costPeriodLabel(tf.days);
