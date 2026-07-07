@@ -64,16 +64,22 @@ export interface ForwarderSpec {
   /** Default container image reference (for messaging only). */
   primaryImageHint: string;
   /**
-   * Container name that tails + processes events. In embedded-image
-   * mode (fluent-bit, fluentd, filebeat, logstash, otel-collector) the
-   * 10x logic runs *inside* this container — there is no separate
-   * `tenx` sidecar, so verify probes MUST target this container name.
+   * Container name that verify probes MUST target — the one running the
+   * 10x engine. For the sidecar forwarders (Fluent Bit, Fluentd,
+   * Logstash, Vector, OTel Collector) this is the separate `log10x`
+   * sidecar container injected from `log10x/edge-10x`. For Filebeat —
+   * the only embedded forwarder, image-swapped to `log10x/filebeat-10x`
+   * — the engine runs as a child process *inside* the `filebeat`
+   * container, so this points at `filebeat`.
    */
   primaryContainerName: string;
   /**
-   * True when this forwarder uses sidecar mode (separate `tenx`
-   * container in the pod): Vector, and the standalone reporter-10x
-   * chart (fluent-bit tails, the `tenx` container runs the engine).
+   * True when this forwarder uses sidecar mode (a separate 10x
+   * container in the pod running `log10x/edge-10x`): Fluent Bit,
+   * Fluentd, Logstash, Vector, OTel Collector, and the standalone
+   * reporter-10x chart (fluent-bit tails, the `tenx` container runs the
+   * engine). False only for Filebeat, which is embedded via an image
+   * swap to `log10x/filebeat-10x`.
    */
   hasTenxSidecar: boolean;
   /** Label-selector style the chart family uses. */
