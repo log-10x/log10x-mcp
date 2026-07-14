@@ -15,8 +15,17 @@
  *   - splunk           (envelope)         compact ⇒ encode-in-event
  *   - clickhouse       (dict-udf-view)    compact ⇒ dict + UDF + view
  *   - elasticsearch    (index-pruned)     compact ⇒ pruned _source
- *   - datadog/cw/azure/gcp/sumo (no-op)   compact is rejected — solver
- *                                          falls back to drop and warns.
+ *   - datadog/cw/azure/gcp/sumo (no-op)   compact is rejected — the solver
+ *                                          falls back to the destination's
+ *                                          FIRST LEGAL SAVING LEVER, never to
+ *                                          drop: cloudwatch ⇒ tier_down,
+ *                                          datadog ⇒ offload (Flex tier_down
+ *                                          is unpriced), offload-only
+ *                                          destinations ⇒ offload.
+ *
+ * drop/sample are opt-in only. They appear in no DEFAULT_ACTION_BY_DESTINATION
+ * entry, so the auto path never recommends a lossy action; a lossy action is
+ * only ever emitted when the caller explicitly pins one.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
