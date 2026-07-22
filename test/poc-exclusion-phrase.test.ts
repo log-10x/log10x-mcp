@@ -145,6 +145,23 @@ test('cloudwatch exclusion uses a single phrase exclude per pattern', () => {
   assert.match(out, /-"heartbeat ok"/);
 });
 
+test('azure-monitor exclusion emits a DCR transform filtering on the text column, not message', () => {
+  const out = renderNativeExclusion('azure-monitor', [
+    fakePattern({
+      identity: 'heartbeat_loop',
+      literalPhrase: 'heartbeat ok',
+      literalLeading: true,
+    }),
+  ]);
+  assert.match(out, /Data Collection Rule KQL transform/);
+  assert.match(out, /source \| where not \(/);
+  assert.match(out, /text contains "heartbeat ok"/);
+  // The 10x custom-table stream exposes a `text` column, not `message` (verified
+  // against a live DCR stream: TimeGenerated / routeState / text / templateHash);
+  // the old `message` form errored in Azure with BadArgumentError.
+  assert.doesNotMatch(out, /message contains/);
+});
+
 test('approximation footnote surfaces when a pattern lacks a leading literal', () => {
   const out = renderNativeExclusion('datadog', [
     fakePattern({
