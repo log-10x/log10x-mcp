@@ -854,10 +854,16 @@ az monitor log-analytics workspace table create \\
 # Basic/Auxiliary plan. Provision the DCE/DCR with: az monitor data-collection
 # endpoint create; az monitor data-collection rule create.
 
+# Naming contract (both sides): the DCR streamDeclarations key is Custom-${table}
+# (WITH the prefix); the forwarder's table_name is the BARE table name (${table}).
+# The azure_logs_ingestion plugin derives the Custom-<table> stream itself, so a
+# Custom- prefix on the table_name OR a bare key in the DCR both yield 400 InvalidStream.
+#
 # Forwarder side: split on routeState == "tier_down" -> send the marked events to
-# the ${plan}-plan table's DCR stream, everything else to your Analytics table.
-# The forwarder's table_name is the BARE table name (${table}); the azure_logs_ingestion
-# plugin sends to the DCR stream Custom-<table_name>, so do NOT prefix it with Custom-.`,
+# the ${plan}-plan table, everything else to your Analytics table. The forwarder
+# must EMIT routeState in the record payload (add it to the output's field list)
+# for the split filter to match; without it the split silently no-ops and all
+# traffic bills at the Analytics rate.`,
     note:
       `Routes the down-tiered slice to a ${plan}-plan Log Analytics table (${cheaperNote}). ` +
       'The plan is a create-time table property set via the DCR, so like CloudWatch IA there ' +
