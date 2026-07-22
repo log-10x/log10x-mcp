@@ -145,6 +145,19 @@ export interface DestinationCostModel {
    * rates. When absent, tier_down produces bytes_out=bytes_in with a caveat.
    */
   tier_down_target_tier?: TierDownTargetTier;
+  /**
+   * Additional cheaper tiers the destination offers beyond the default
+   * tier_down_target_tier, in order of increasing aggression. The engine is
+   * unaware of which one a deployment uses: the MCP picks the target plan when
+   * it generates the forwarder recipe, and every tier_down event for that
+   * deployment lands in that one chosen plan (no per-pattern split). Consumed by
+   * the offload recipe generator (renderOffloadSection), which emits a
+   * provisioning recipe per plan (the default tier_down_target_tier plus each
+   * alternative here). estimate_savings prices the default target tier; pricing a
+   * caller-selected alternative is a planned follow-up. Example (Azure): default
+   * = Basic Logs; alt = [Auxiliary Logs].
+   */
+  tier_down_alt_tiers?: TierDownTargetTier[];
 }
 
 /**
@@ -360,13 +373,31 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
   },
   'azure-monitor': {
     destination: 'azure-monitor',
-    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB['azure-monitor'],
-    storage_per_gb_month: 0.12,
+    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB['azure-monitor'], // $2.30/GB Analytics (standard) table plan
+    storage_per_gb_month: 0.12, // Analytics interactive retention
     billing_basis: 'compressed-ingest',
     compact_mode: 'no-op',
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
+    // Azure Monitor cheaper table plans. Like CloudWatch IA, the plan is fixed
+    // on the table (via a Data Collection Rule) at creation, so tier_down routes
+    // the marked slice to a table pre-provisioned on the cheaper plan. Default
+    // target is Basic (still KQL-queryable); Auxiliary is the aggressive,
+    // archive-oriented alternative. Both bill a per-GB QUERY fee, so the savings
+    // are ingest-side only.
+    tier_down_target_tier: {
+      name: 'Azure Monitor Basic Logs',
+      ingest_rate_usd_per_gb: 0.5, // vs $2.30 Analytics (~78% off ingest)
+      storage_rate_usd_per_gb_month: 0.1, // interactive retention
+    },
+    tier_down_alt_tiers: [
+      {
+        name: 'Azure Monitor Auxiliary Logs',
+        ingest_rate_usd_per_gb: 0.05, // vs $2.30 Analytics (~98% off ingest)
+        storage_rate_usd_per_gb_month: 0.02, // long-term retention
+      },
+    ],
   },
   'gcp-logging': {
     destination: 'gcp-logging',
@@ -402,6 +433,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
 // The hierarchy comes from the cost-cutting product shape:
 //   - Datadog:                tier_down (Flex)  → offload
 //   - CloudWatch:             tier_down (IA)    → offload
+//   - Azure Monitor:          tier_down (Basic/Auxiliary) → offload
 //   - Splunk Cloud / Ent:     offload           → compact (if 10x app installable)
 //   - Elasticsearch self / OpenSearch self:
 //                             offload           → compact (if 10x plugin installable)
@@ -453,10 +485,12 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   honeycomb: ['offload'],
   grafana_cloud_logs: ['offload'],
   loki: ['offload'],
+  // Azure Monitor: Basic/Auxiliary table plans are the cheap-tier lever
+  // (the analog of CloudWatch IA / Datadog Flex).
+  'azure-monitor': ['tier_down', 'offload'],
   // Map the remaining SiemId entries to the safe single-lever default. These
   // sit at the bottom because the table is keyed by the wider DestinationKey
   // and TypeScript requires every key to be present.
-  'azure-monitor': ['offload'],
   'gcp-logging': ['offload'],
   generic: ['offload'],
 };

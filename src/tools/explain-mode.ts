@@ -61,7 +61,7 @@ export const explainModeSchema = {
       'Which enforcement mode to explain. Keep-everything levers come first, then the lossy opt-ins. ' +
       '`compact` = keeps everything: engine minifies events ~50-80% losslessly; all events still reach the stack. ' +
       '`offload` = keeps everything: engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
-      '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       '`sample` = lossy opt-in: engine passes 1-in-N events through to the stack; the rest are discarded. ' +
       '`drop` = lossy opt-in: engine hard-drops matched patterns at the Receiver before delivery. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
@@ -184,12 +184,12 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   },
   tier_down: {
     what_it_does:
-      'Events reach the stack at a cheaper storage tier (Datadog Flex / CloudWatch IA). ' +
+      'Events reach the stack at a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       'Engine stamps matched events with the routeState marker. ' +
       'Your analyzer routes stamped events to a cheaper storage tier. ' +
-      'Events remain searchable at the lower tier; only storage cost drops.',
+      'Events remain searchable at the lower tier; only ingest/storage cost drops.',
     what_you_need:
-      'The 10x Receiver in-path AND a compatible analyzer (Datadog or CloudWatch). ' +
+      'The 10x Receiver in-path AND a compatible analyzer (Datadog, CloudWatch, or Azure Monitor). ' +
       'Tier-routing must be configured on the analyzer side once.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',

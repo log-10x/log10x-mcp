@@ -809,6 +809,12 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
           recoverable: true, recoverVia: null,
         };
       }
+      if (siem === 'azure-monitor') {
+        return {
+          text: 'Azure Monitor Basic Logs table plan (in-place KQL query, ~78% cheaper ingest than Analytics; Auxiliary ~98% for archive)',
+          recoverable: true, recoverVia: null,
+        };
+      }
       return { text: `${siem} cheaper tier (in-place query)`, recoverable: true, recoverVia: null };
     }
     case 'offload': {

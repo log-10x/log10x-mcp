@@ -1394,8 +1394,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const totalBytes = input.extraction.totalBytes || 1;
   const analyzerCost = input.analyzerCostPerGb;
   // Destination-aware level-1 lever (per DEFAULT_ACTION_BY_DESTINATION):
-  //   datadog/cloudwatch -> tier_down, clickhouse -> compact,
-  //   splunk / es / sumo / azure / gcp / managed offerings -> offload, …
+  //   datadog/cloudwatch/azure -> tier_down, clickhouse -> compact,
+  //   splunk / es / sumo / gcp / managed offerings -> offload, …
   // Threaded into reasoning for high-volume info-class patterns so the
   // recommendation matches the SIEM's cheapest cost-cutting path.
   const destinationAction: CostAction = getDefaultActionForDestination(input.siem, 1);

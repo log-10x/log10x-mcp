@@ -19,6 +19,8 @@ import {
   forwarderWriteTerraform,
   datadogFlexRecipe,
   cloudwatchIaRecipe,
+  azureLogsTierRecipe,
+  renderOffloadSection,
   otherOffloadForwarders,
   type OffloadForwarderId,
 } from '../src/lib/offload-recipes.js';
@@ -214,4 +216,32 @@ test('otherOffloadForwarders excludes the detected one, stable order', () => {
   assert.ok(!rest.includes('fluentd'));
   assert.equal(rest.length, OFFLOAD_FORWARDERS.length - 1);
   assert.deepEqual(rest, OFFLOAD_FORWARDERS.filter(f => f !== 'fluentd'));
+});
+
+test('azureLogsTierRecipe emits Basic by default; Auxiliary on request; both carry the per-query caveat', () => {
+  const basic = azureLogsTierRecipe();
+  assert.equal(basic.target, 'azure-basic');
+  assert.ok(/--plan Basic/.test(basic.body), 'body sets --plan Basic');
+  assert.ok(/routeState/.test(basic.body), 'body routes on the routeState marker');
+  assert.ok(/per-GB QUERY/i.test(basic.note), 'note discloses the per-query fee');
+
+  const aux = azureLogsTierRecipe({ plan: 'Auxiliary' });
+  assert.equal(aux.target, 'azure-auxiliary');
+  assert.ok(/--plan Auxiliary/.test(aux.body), 'body sets --plan Auxiliary');
+
+  // A stamp-miss must honestly bill Analytics (matching CloudWatch), never claim
+  // the opposite, and the forwarder-plugin constraint must be stated.
+  assert.ok(/full Analytics rate/.test(basic.note), 'stamp-miss bills Analytics');
+  assert.ok(!/does not silently bill Analytics/.test(basic.note), 'no inverted note');
+  assert.ok(/azure_logs_ingestion/.test(basic.note) && /Data Collector API/.test(basic.note), 'forwarder constraint stated');
+});
+
+test('renderOffloadSection for azure-monitor renders BOTH Basic and Auxiliary (consumes tier_down_alt_tiers)', () => {
+  const md = renderOffloadSection(PARAMS, 'fluentd', 'azure-monitor');
+  assert.ok(/Azure Monitor Basic Logs/.test(md), 'Basic tier rendered');
+  assert.ok(/Azure Monitor Auxiliary Logs/.test(md), 'Auxiliary tier rendered (field consumed, not dead)');
+  assert.ok(/--plan Auxiliary/.test(md), 'Auxiliary provisioning command rendered');
+  // does NOT render the Azure tier section for a non-Azure destination
+  const cw = renderOffloadSection(PARAMS, 'fluentd', 'cloudwatch');
+  assert.ok(!/Azure Monitor/.test(cw), 'Azure section gated out on cloudwatch');
 });
