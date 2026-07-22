@@ -131,7 +131,8 @@ framing.method          = "newline_delimited"
 # tier_down slice -> your cheaper in-platform tier (destination-specific).
 # PLACEHOLDER: point this at the cheap-tier sink for your SIEM, e.g. a
 # CloudWatch IA log group, a Datadog Flex index, or an ES frozen tier. See
-# datadogFlexRecipe() / cloudwatchIaRecipe() for the destination-side TF.
+# datadogFlexRecipe() / cloudwatchIaRecipe() / azureLogsTierRecipe() for the
+# destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Vector).
 [sinks.tenx_tier_down]
 inputs = ["tenx_action_route.tier_down"]
 encoding.except_fields = ["routeState"]   # strip the marker (tenx_hash kept)
@@ -241,7 +242,8 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
     <!-- PLACEHOLDER: your CHEAP-TIER destination <match> (destination-specific):
          e.g. a second cloudwatch_logs <match> pointed at an Infrequent-Access
          log group, or a datadog <match> tagged to a Flex index. See
-         cloudwatchIaRecipe() / datadogFlexRecipe() for the destination-side TF. -->
+         cloudwatchIaRecipe() / datadogFlexRecipe() / azureLogsTierRecipe() for the
+         destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Fluentd). -->
   </match>
 </label>
 
@@ -354,8 +356,9 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
 # 6) tier_down slice -> your cheaper in-platform SIEM tier.
 #    PLACEHOLDER: replace with the OUTPUT for your cheap tier, e.g. a second
 #    [OUTPUT] Name cloudwatch_logs pointed at an Infrequent-Access log group,
-#    or a datadog output tagged to a Flex index. See cloudwatchIaRecipe() /
-#    datadogFlexRecipe() for the destination-side TF.
+#    a datadog output tagged to a Flex index, or an azure_logs_ingestion output
+#    to an Azure Basic/Auxiliary table. See cloudwatchIaRecipe() /
+#    datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF.
 # [OUTPUT]
 #     Name   <your_cheap_tier_output>
 #     Match  tenx.tier_down
@@ -430,7 +433,8 @@ exporters:
   # PLACEHOLDER: your cheaper in-platform tier exporter (destination-specific),
   # e.g. awscloudwatchlogs pointed at an Infrequent-Access log group, or a
   # datadog exporter tagged to a Flex index. See cloudwatchIaRecipe() /
-  # datadogFlexRecipe() for the destination-side TF.
+  # datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF
+  # (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not the OTel Collector).
   # <your_cheap_tier_exporter>: {}
   nop: {}                                        # drop sink: discards the noise slice
 
@@ -499,8 +503,9 @@ output {
   } else if [@metadata][tenx_route] == "tier_down" {
     # PLACEHOLDER: your cheaper in-platform tier output (destination-specific),
     # e.g. a second cloudwatch_logs output pointed at an Infrequent-Access log
-    # group, or a datadog output tagged to a Flex index. See cloudwatchIaRecipe()
-    # / datadogFlexRecipe() for the destination-side TF.
+    # group, a datadog output tagged to a Flex index, or a microsoft-sentinel-logstash
+    # output to an Azure Basic/Auxiliary table. See cloudwatchIaRecipe() /
+    # datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF.
     # <your_cheap_tier_output> { ... }
   } else if [@metadata][tenx_route] == "drop" {
     # SUPPRESSED: no output for the drop slice (the noise the engine shed).
@@ -543,7 +548,7 @@ Route 2  "tenx-tier-down"
   Filter:      routeState == 'tier_down'
   Output:      <your CHEAP-TIER destination>   (destination-specific PLACEHOLDER:
                a Datadog Flex index / CloudWatch IA log group / ES frozen tier;
-               see datadogFlexRecipe() / cloudwatchIaRecipe() for the TF)
+               see datadogFlexRecipe() / cloudwatchIaRecipe() / azureLogsTierRecipe() for the TF)
   Final:       Yes
 
 Route 3  "tenx-drop"

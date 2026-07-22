@@ -24,7 +24,11 @@ import { loadEnvironments, type EnvConfig } from '../lib/environments.js';
 import { queryInstant } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
-import { parsePrometheusValue, COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
+import {
+  parsePrometheusValue,
+  COST_MODEL_BY_DESTINATION,
+  DEFAULT_ACTION_BY_DESTINATION,
+} from '../lib/cost.js';
 import { resolveRate } from '../lib/rate-resolution.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -90,9 +94,24 @@ export const explainModeSchema = {
  * destination-agnostic. compact has the tightest restrictions; tier_down
  * requires SIEM-side routing support.
  */
+// Derived from the cost/action model (lib/cost.ts), the single source of truth,
+// so this tool cannot drift into a false promise estimate_savings then refuses:
+//   compact  — real only where compact_mode !== 'no-op' (splunk / self-hosted
+//              elasticsearch / clickhouse); a no-op on azure-monitor, cloudwatch,
+//              datadog, gcp-logging, sumo.
+//   tier_down — applies only where the destination's default actions include it
+//              (datadog / cloudwatch / azure-monitor). Mirrors cost-options.ts.
 const MODE_COMPAT: Partial<Record<ExplainMode, Set<string>>> = {
-  compact: new Set(['splunk', 'elasticsearch', 'clickhouse', 'azure-monitor', 'gcp-logging', 'sumo']),
-  tier_down: new Set(['datadog', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix']),
+  compact: new Set(
+    Object.values(COST_MODEL_BY_DESTINATION)
+      .filter((m) => m.compact_mode !== 'no-op')
+      .map((m) => m.destination)
+  ),
+  tier_down: new Set(
+    Object.entries(DEFAULT_ACTION_BY_DESTINATION)
+      .filter(([, actions]) => actions.includes('tier_down'))
+      .map(([dest]) => dest)
+  ),
 };
 
 function isModeCompatible(mode: ExplainMode, destination: string | null): boolean {
@@ -175,7 +194,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
       'All events arrive in the stack; fields stay searchable.',
     what_you_need:
       'The 10x Receiver sidecar must be installed in-path. ' +
-      'Compatible stack (Splunk, Elasticsearch, ClickHouse, Azure Monitor, GCP Logging, Sumo Logic). ' +
+      'Compatible stack (Splunk, self-hosted Elasticsearch/OpenSearch, ClickHouse). ' +
       'GitOps repo configured for the action-plan PR.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',

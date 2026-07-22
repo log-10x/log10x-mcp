@@ -47,6 +47,16 @@ export function buildHashQuery(
       if (severity) sel.push(`$.severity_level = "${severity}"`);
       return `{ ${sel.join(' && ')} }`;
     }
+    case 'azure-monitor': {
+      // KQL. The Azure connector (siem/azure-monitor.ts pullEvents) prefixes a
+      // base table + `|`, so return a bare `where` operator fragment — it becomes
+      // `AppTraces | where tenx_hash == "..."`. Returning `tenx_hash="..."` here
+      // would yield invalid KQL (`AppTraces | tenx_hash="..."`).
+      const parts = [`tenx_hash == "${hash}"`];
+      if (service) parts.push(`tenx_user_service == "${service}"`);
+      if (severity) parts.push(`severity_level == "${severity}"`);
+      return `where ${parts.join(' and ')}`;
+    }
     default:
       return `tenx_hash="${hash}"`;
   }
