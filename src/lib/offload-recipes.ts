@@ -855,15 +855,18 @@ az monitor log-analytics workspace table create \\
 # endpoint create; az monitor data-collection rule create.
 
 # Forwarder side: split on routeState == "tier_down" -> send the marked events to
-# the ${plan}-plan table's DCR stream, everything else to your Analytics table.`,
+# the ${plan}-plan table's DCR stream, everything else to your Analytics table.
+# The forwarder's table_name is the BARE table name (${table}); the azure_logs_ingestion
+# plugin sends to the DCR stream Custom-<table_name>, so do NOT prefix it with Custom-.`,
     note:
       `Routes the down-tiered slice to a ${plan}-plan Log Analytics table (${cheaperNote}). ` +
       'The plan is a create-time table property set via the DCR, so like CloudWatch IA there ' +
       'is no in-platform auto-router: the stamped forwarder split is the missing automation. ' +
       'FORWARDER: the DCR path needs Fluent Bit azure_logs_ingestion (or Logstash Sentinel); the ' +
       'legacy Data Collector API sinks (Vector/Fluentd) write Analytics-only _CL tables and cannot ' +
-      'reach this plan. CAVEAT: Basic/Auxiliary bill a per-GB QUERY fee, so the win is ingest-side; ' +
-      'heavy querying of the down-tiered table erodes it. HARDENING: route to the ' +
+      'reach this plan. CAVEAT: Basic/Auxiliary bill a per-GB QUERY fee (and are queried via the Log ' +
+      'Analytics /search API, not the standard /query API), so the win is ingest-side; heavy querying ' +
+      'of the down-tiered table erodes it. HARDENING: route to the ' +
       `${plan} table only when routeState is present; a stamp-miss falls back to the Analytics ` +
       'table and bills at the full Analytics rate (never silently down-tier un-vetted events), so ' +
       'monitor Analytics-table ingest to catch stamp gaps.',
