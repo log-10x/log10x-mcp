@@ -82,9 +82,12 @@ jobs:
       # npm 11.5.1+ detects the GitHub OIDC context and ignores the bogus
       # token, falling back to Trusted Publishing. Force-upgrading is the
       # cleanest fix until Node 20.x ships with npm 11.5+ by default.
+      # Pin to the 11.x line: npm@latest is now 12.x, which dropped Node 20
+      # support (requires node >=22.22 / >=24.15) and fails to install on this
+      # Node 20 runner with EBADENGINE. 11.x still satisfies the >=11.5.1 floor.
       - name: Upgrade npm to >= 11.5.1 (Trusted Publishing requires it)
         if: steps.ver.outputs.already_shipped == 'false'
-        run: npm install -g npm@latest
+        run: npm install -g 'npm@^11.5.1'
 
       - name: Install dependencies
         if: steps.ver.outputs.already_shipped == 'false'
