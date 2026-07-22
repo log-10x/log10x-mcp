@@ -6,6 +6,11 @@
  *
  * Auth: DefaultAzureCredential walks env vars, managed identity, and
  * `az login` cache — the standard Azure SDK flow.
+ *
+ * LIMITATION: LogsQueryClient uses the Log Analytics /query API, which does NOT
+ * support Basic- or Auxiliary-plan tables (those require the /search API / a
+ * search job). A down-tiered (Basic/Auxiliary) table cannot be read through this
+ * connector; querying one returns a failure, not rows.
  */
 
 import { LogsQueryClient, LogsQueryResultStatus } from '@azure/monitor-query';
@@ -83,7 +88,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   //   - already-starts-with-a-table name (optionally followed by `|` and
   //     more operators): pass through. Table names can be:
   //       * Built-in (AppTraces, AzureDiagnostics, ...) — start with uppercase
-  //       * Custom log10x-ingested tables from HTTP Data Collector
+  //       * Custom log10x-ingested tables (via the Logs Ingestion API / DCR)
   //         — always end with `_CL` (e.g., `log10xPoc_CL`)
   //   - Anything else: prefix with the default `AppTraces |`.
   const userQuery = (opts.query || '').trim();

@@ -1394,8 +1394,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const totalBytes = input.extraction.totalBytes || 1;
   const analyzerCost = input.analyzerCostPerGb;
   // Destination-aware level-1 lever (per DEFAULT_ACTION_BY_DESTINATION):
-  //   datadog/cloudwatch -> tier_down, clickhouse -> compact,
-  //   splunk / es / sumo / azure / gcp / managed offerings -> offload, …
+  //   datadog/cloudwatch/azure -> tier_down, clickhouse -> compact,
+  //   splunk / es / sumo / gcp / managed offerings -> offload, …
   // Threaded into reasoning for high-volume info-class patterns so the
   // recommendation matches the SIEM's cheapest cost-cutting path.
   const destinationAction: CostAction = getDefaultActionForDestination(input.siem, 1);
@@ -1846,11 +1846,15 @@ function azureExclusion(drops: EnrichedPattern[]): string {
   const conds = drops
     .map((p) => {
       const phrase = p.literalPhrase.replace(/"/g, '\\"');
-      return `message contains "${phrase}"`;
+      return `text contains "${phrase}"`;
     })
     .join(' or ');
   return (
     approximationFootnote(drops) +
+    // DCR ingestion-time transform. `text` is the log-line column the 10x
+    // forwarder ships to its custom table (verified against a live DCR stream:
+    // TimeGenerated / routeState / text / templateHash). For a non-10x table,
+    // swap `text` for that table's raw-line column.
     `// Data Collection Rule KQL transform\nsource | where not (${conds})`
   );
 }

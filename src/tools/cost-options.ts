@@ -350,11 +350,15 @@ function buildModes(
 
   const tierDownApplicable =
     caps.tier_down_available &&
-    (effectiveDestination === 'cloudwatch' || effectiveDestination === 'datadog');
+    (effectiveDestination === 'cloudwatch' ||
+      effectiveDestination === 'datadog' ||
+      effectiveDestination === 'azure-monitor');
   const tierDownGatedReason = !caps.tier_down_available
     ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
-    : effectiveDestination !== 'cloudwatch' && effectiveDestination !== 'datadog'
-      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs) and CloudWatch (Infrequent Access). Target log platform: ${effectiveDestination ?? 'unknown'}.`
+    : effectiveDestination !== 'cloudwatch' &&
+        effectiveDestination !== 'datadog' &&
+        effectiveDestination !== 'azure-monitor'
+      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs), CloudWatch (Infrequent Access), and Azure Monitor (Basic/Auxiliary Logs). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
 
   // Menu order is deliberate: lead with the keep-everything levers (compact,
@@ -395,12 +399,12 @@ function buildModes(
       id: 'tier_down',
       label: 'Tier-down (keeps everything): the stack stores events at a cheaper storage tier, still queryable.',
       description:
-        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch).',
+        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch, Basic/Auxiliary Logs on Azure Monitor).',
       who_enforces: 'SIEM',
       applicable: tierDownApplicable,
       gated_reason: tierDownGatedReason,
       what_survives:
-        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Standard Tier). Indexed fields preserved.',
+        'Events reach the stack at a cheaper storage tier (e.g. Flex Logs / Infrequent Access / Basic Logs), still queryable. Indexed fields preserved.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
     },
     {

@@ -43,18 +43,27 @@ import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-ty
  * levels so `data.service` / `data.routes_to` and `data.must_render_verbatim`
  * all resolve. There is no key collision between the two levels.
  *
- * An explicit, fully-compatible destination ('azure-monitor' is in MODE_COMPAT
- * for BOTH compact and tier_down) is passed so the call does not auto-detect a
- * destination from the public demo backend — that auto-detect resolves to
- * cloudwatch, which is incompatible with compact and would flip must_ask_user
- * into the 4-option "choose an alternative" branch. Passing the destination
- * also short-circuits the auto-detect network round-trip, keeping the run
+ * A per-mode compatible destination (compatDestFor) is passed so the call does
+ * not auto-detect one from the public demo backend, and so each mode renders its
+ * APPLY shape rather than the 4-option "choose an alternative" branch. compact
+ * runs only on compaction-capable stacks (splunk / self-hosted ES / clickhouse)
+ * and tier_down only on cheap-tier stacks (azure-monitor / cloudwatch / datadog);
+ * those two sets are disjoint, so there is no single all-modes destination.
+ * Passing it also short-circuits the auto-detect round-trip, keeping runs
  * deterministic.
  */
+const COMPAT_DEST: Partial<Record<ExplainMode, string>> = {
+  compact: 'splunk', // a compaction-capable stack
+  tier_down: 'azure-monitor', // a cheap-tier stack
+};
+// Compatible destination for `mode`; defaults to azure-monitor for the
+// destination-agnostic modes (drop / sample / offload / observe_only).
+const compatDestFor = (mode: ExplainMode): string => COMPAT_DEST[mode] ?? 'azure-monitor';
+
 async function runMode(
   mode: ExplainMode,
   service = 'payments',
-  destination = 'azure-monitor',
+  destination = compatDestFor(mode),
 ): Promise<{
   result: Awaited<ReturnType<typeof executeExplainMode>>;
   data: ExplainModeEnvelope;

@@ -206,7 +206,7 @@ const detectReceiverViaSampleEvent = probeReceiverInPath;
  * Anything outside this set still gets named in option 1's prose but is
  * flagged as "apply manually via the analyzer UI".
  */
-const NATIVE_EXCLUSION_VENDORS = new Set(['datadog', 'splunk', 'elasticsearch', 'cloudwatch']);
+const NATIVE_EXCLUSION_VENDORS = new Set(['datadog', 'splunk', 'elasticsearch', 'cloudwatch', 'azure-monitor']);
 
 const ANALYZER_DISPLAY: Record<string, string> = {
   datadog: 'Datadog',
@@ -775,11 +775,11 @@ async function executePatternMitigateInner(
     );
   } else if (analyzerName) {
     lines.push(
-      `**1. Drop it at ${analyzerName}.** Fastest. Apply an exclusion in ${analyzerName} and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName}, they just don't get indexed. Note: native exclusion configs are generated for Datadog, Splunk, Elasticsearch, and AWS CloudWatch; for ${analyzerName} you'd apply this one manually in the ${analyzerName} UI for now.`
+      `**1. Drop it at ${analyzerName}.** Fastest. Apply an exclusion in ${analyzerName} and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName}, they just don't get indexed. Note: native exclusion configs are generated for Datadog, Splunk, Elasticsearch, AWS CloudWatch, and Azure Monitor; for ${analyzerName} you'd apply this one manually in the ${analyzerName} UI for now.`
     );
   } else {
     lines.push(
-      `**1. Drop it at your analyzer.** Fastest. Save a config in your log analyzer and the cost stops within minutes. Events still flow through your pipeline up to the analyzer, they just don't get indexed or stored. We could not auto-detect which analyzer you ship to. Native configs are generated for Datadog, Splunk, Elasticsearch, and AWS CloudWatch. For any other analyzer the agent should ask the user and either generate the config (when supported) or hand-instruct apply (when not).`
+      `**1. Drop it at your analyzer.** Fastest. Save a config in your log analyzer and the cost stops within minutes. Events still flow through your pipeline up to the analyzer, they just don't get indexed or stored. We could not auto-detect which analyzer you ship to. Native configs are generated for Datadog, Splunk, Elasticsearch, AWS CloudWatch, and Azure Monitor. For any other analyzer the agent should ask the user and either generate the config (when supported) or hand-instruct apply (when not).`
     );
   }
   lines.push('');

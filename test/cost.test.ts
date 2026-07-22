@@ -24,6 +24,7 @@ import {
   getDestinationCostModel,
   projectAction,
   projectActionRange,
+  getAllowedActionsForDestination,
   degradeRatioForSmallEvents,
   annualizeDollars,
   percentReduction,
@@ -452,4 +453,40 @@ test('compact_ratio_override is ignored on a non-envelope destination (clickhous
     action: 'compact', bytes_in: GB, destination: 'clickhouse',
   });
   assert.equal(withOverride.expected.bytes_out, withoutOverride.expected.bytes_out);
+});
+
+// ---------------------------------------------------------------------------
+// Azure Monitor tier_down (Basic default, Auxiliary alt)
+// ---------------------------------------------------------------------------
+
+test('azure-monitor cost model carries Basic (default) + Auxiliary (alt) tiers', () => {
+  const m = COST_MODEL_BY_DESTINATION['azure-monitor'];
+  // default target = Basic ($0.50/GB ingest vs $2.30 Analytics)
+  assert.equal(m.tier_down_target_tier?.name, 'Azure Monitor Basic Logs');
+  assert.equal(m.tier_down_target_tier?.ingest_rate_usd_per_gb, 0.5);
+  // Auxiliary carried as the aggressive alternative ($0.05/GB ingest)
+  assert.equal(m.tier_down_alt_tiers?.length, 1);
+  assert.equal(m.tier_down_alt_tiers?.[0]?.name, 'Azure Monitor Auxiliary Logs');
+  assert.equal(m.tier_down_alt_tiers?.[0]?.ingest_rate_usd_per_gb, 0.05);
+});
+
+test('azure-monitor default action leads with tier_down', () => {
+  assert.deepEqual(getAllowedActionsForDestination('azure-monitor'), [
+    'tier_down',
+    'offload',
+  ]);
+});
+
+test('projectAction tier_down on azure-monitor bills the Basic tier rate, not Analytics', () => {
+  const std = projectAction({ action: 'pass', bytes_in: GB, destination: 'azure-monitor' });
+  const p = projectAction({ action: 'tier_down', bytes_in: GB, destination: 'azure-monitor' });
+  // events still reach the stack — byte axis unchanged
+  assert.equal(p.bytes_out, GB);
+  // ingest billed at Basic ($0.50/GB), not the $2.30 Analytics rate
+  assert.ok(Math.abs(p.ingest_dollars! - 0.5) < 1e-9, `expected 0.50, got ${p.ingest_dollars}`);
+  assert.ok(Math.abs(std.ingest_dollars! - 2.3) < 1e-9, `expected 2.30, got ${std.ingest_dollars}`);
+  // tier_down is strictly cheaper than standard ingest
+  assert.ok(p.total_dollars! < std.total_dollars!);
+  // the routing caveat names the Basic tier
+  assert.ok(p.notes && p.notes.some((n) => /Azure Monitor Basic Logs/.test(n)));
 });

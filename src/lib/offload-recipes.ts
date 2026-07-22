@@ -41,7 +41,7 @@
  * (mirroring the original single-route drop branch).
  */
 
-import { getAllowedActionsForDestination } from './cost.js';
+import { getAllowedActionsForDestination, COST_MODEL_BY_DESTINATION } from './cost.js';
 
 export type OffloadForwarderId =
   | 'vector'
@@ -131,7 +131,8 @@ framing.method          = "newline_delimited"
 # tier_down slice -> your cheaper in-platform tier (destination-specific).
 # PLACEHOLDER: point this at the cheap-tier sink for your SIEM, e.g. a
 # CloudWatch IA log group, a Datadog Flex index, or an ES frozen tier. See
-# datadogFlexRecipe() / cloudwatchIaRecipe() for the destination-side TF.
+# datadogFlexRecipe() / cloudwatchIaRecipe() / azureLogsTierRecipe() for the
+# destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Vector).
 [sinks.tenx_tier_down]
 inputs = ["tenx_action_route.tier_down"]
 encoding.except_fields = ["routeState"]   # strip the marker (tenx_hash kept)
@@ -241,7 +242,8 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
     <!-- PLACEHOLDER: your CHEAP-TIER destination <match> (destination-specific):
          e.g. a second cloudwatch_logs <match> pointed at an Infrequent-Access
          log group, or a datadog <match> tagged to a Flex index. See
-         cloudwatchIaRecipe() / datadogFlexRecipe() for the destination-side TF. -->
+         cloudwatchIaRecipe() / datadogFlexRecipe() / azureLogsTierRecipe() for the
+         destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Fluentd). -->
   </match>
 </label>
 
@@ -354,8 +356,9 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
 # 6) tier_down slice -> your cheaper in-platform SIEM tier.
 #    PLACEHOLDER: replace with the OUTPUT for your cheap tier, e.g. a second
 #    [OUTPUT] Name cloudwatch_logs pointed at an Infrequent-Access log group,
-#    or a datadog output tagged to a Flex index. See cloudwatchIaRecipe() /
-#    datadogFlexRecipe() for the destination-side TF.
+#    a datadog output tagged to a Flex index, or an azure_logs_ingestion output
+#    to an Azure Basic/Auxiliary table. See cloudwatchIaRecipe() /
+#    datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF.
 # [OUTPUT]
 #     Name   <your_cheap_tier_output>
 #     Match  tenx.tier_down
@@ -430,7 +433,8 @@ exporters:
   # PLACEHOLDER: your cheaper in-platform tier exporter (destination-specific),
   # e.g. awscloudwatchlogs pointed at an Infrequent-Access log group, or a
   # datadog exporter tagged to a Flex index. See cloudwatchIaRecipe() /
-  # datadogFlexRecipe() for the destination-side TF.
+  # datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF
+  # (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not the OTel Collector).
   # <your_cheap_tier_exporter>: {}
   nop: {}                                        # drop sink: discards the noise slice
 
@@ -499,8 +503,9 @@ output {
   } else if [@metadata][tenx_route] == "tier_down" {
     # PLACEHOLDER: your cheaper in-platform tier output (destination-specific),
     # e.g. a second cloudwatch_logs output pointed at an Infrequent-Access log
-    # group, or a datadog output tagged to a Flex index. See cloudwatchIaRecipe()
-    # / datadogFlexRecipe() for the destination-side TF.
+    # group, a datadog output tagged to a Flex index, or a microsoft-sentinel-logstash
+    # output to an Azure Basic/Auxiliary table. See cloudwatchIaRecipe() /
+    # datadogFlexRecipe() / azureLogsTierRecipe() for the destination-side TF.
     # <your_cheap_tier_output> { ... }
   } else if [@metadata][tenx_route] == "drop" {
     # SUPPRESSED: no output for the drop slice (the noise the engine shed).
@@ -543,7 +548,7 @@ Route 2  "tenx-tier-down"
   Filter:      routeState == 'tier_down'
   Output:      <your CHEAP-TIER destination>   (destination-specific PLACEHOLDER:
                a Datadog Flex index / CloudWatch IA log group / ES frozen tier;
-               see datadogFlexRecipe() / cloudwatchIaRecipe() for the TF)
+               see datadogFlexRecipe() / cloudwatchIaRecipe() / azureLogsTierRecipe() for the TF)
   Final:       Yes
 
 Route 3  "tenx-drop"
@@ -733,7 +738,7 @@ output "forwarder_offload_role_arn" {
 // marker — no second attribute needed for a binary premium/cheap split).
 // ---------------------------------------------------------------------------
 export interface SiemTierRecipe {
-  /** 'datadog-flex' | 'cloudwatch-ia' */
+  /** 'datadog-flex' | 'cloudwatch-ia' | 'azure-basic' | 'azure-auxiliary' */
   target: string;
   language: 'hcl' | 'text';
   body: string;
@@ -817,6 +822,65 @@ export function cloudwatchIaRecipe(opts: { logGroupName?: string } = {}): SiemTi
       'automation (10x is not redundant here). HARDENING: a stamp-miss routes to ' +
       'the Standard fallback and bills at full rate, so the recipe should fail ' +
       'toward the IA group on the offload path only when `routeState` is present.',
+  };
+}
+
+/** Azure Monitor: route the tier_down slice to a Log Analytics table on the
+ * Basic (default) or Auxiliary plan. Like CloudWatch IA, the table PLAN is
+ * fixed at creation (via a Data Collection Rule), so the split is
+ * forwarder-side: marked events go to a different DCR stream / table. This is
+ * the provisioning for the cheaper-plan table + DCR. */
+export function azureLogsTierRecipe(
+  opts: { plan?: 'Basic' | 'Auxiliary'; tableName?: string } = {}
+): SiemTierRecipe {
+  const plan = opts.plan ?? 'Basic';
+  const table = opts.tableName ?? 'Tenx_Offload_CL';
+  const cheaperNote =
+    plan === 'Basic'
+      ? '~78% cheaper ingest than the Analytics plan ($0.50 vs $2.30/GB), still KQL-queryable'
+      : '~98% cheaper ingest than the Analytics plan ($0.05 vs $2.30/GB), archive-oriented with limited query';
+  return {
+    target: plan === 'Basic' ? 'azure-basic' : 'azure-auxiliary',
+    language: 'text',
+    body: `# Create the cheaper-plan custom table (${plan}) in the Log Analytics workspace.
+# The table PLAN is set at creation and drives the price; ingestion reaches it
+# through a Data Collection Endpoint (DCE) + Data Collection Rule (DCR).
+az monitor log-analytics workspace table create \\
+  --resource-group "<rg>" --workspace-name "<workspace>" \\
+  --name "${table}" --plan ${plan} \\
+  --columns TimeGenerated=datetime routeState=string text=string
+
+# The DCE + DCR (stream -> ${table}) are the ingestion path. Basic/Auxiliary plans
+# accept data ONLY via the DCR Logs Ingestion API, so the forwarder output must be
+# one that targets a DCR: Fluent Bit 'azure_logs_ingestion' (AZURE_DCE_URL /
+# AZURE_DCR_ID / AZURE_STREAM_NAME) or the Logstash Microsoft Sentinel output. The
+# legacy Data Collector API sinks (Vector 'azure_monitor_logs', Fluentd
+# 'azure-loganalytics') write Analytics-only *_CL tables and CANNOT reach a
+# Basic/Auxiliary plan. Provision the DCE/DCR with: az monitor data-collection
+# endpoint create; az monitor data-collection rule create.
+
+# Naming contract (both sides): the DCR streamDeclarations key is Custom-${table}
+# (WITH the prefix); the forwarder's table_name is the BARE table name (${table}).
+# The azure_logs_ingestion plugin derives the Custom-<table> stream itself, so a
+# Custom- prefix on the table_name OR a bare key in the DCR both yield 400 InvalidStream.
+#
+# Forwarder side: split on routeState == "tier_down" -> send the marked events to
+# the ${plan}-plan table, everything else to your Analytics table. The forwarder
+# must EMIT routeState in the record payload (add it to the output's field list)
+# for the split filter to match; without it the split silently no-ops and all
+# traffic bills at the Analytics rate.`,
+    note:
+      `Routes the down-tiered slice to a ${plan}-plan Log Analytics table (${cheaperNote}). ` +
+      'The plan is a create-time table property set via the DCR, so like CloudWatch IA there ' +
+      'is no in-platform auto-router: the stamped forwarder split is the missing automation. ' +
+      'FORWARDER: the DCR path needs Fluent Bit azure_logs_ingestion (or Logstash Sentinel); the ' +
+      'legacy Data Collector API sinks (Vector/Fluentd) write Analytics-only _CL tables and cannot ' +
+      'reach this plan. CAVEAT: Basic/Auxiliary bill a per-GB QUERY fee (and are queried via the Log ' +
+      'Analytics /search API, not the standard /query API), so the win is ingest-side; heavy querying ' +
+      'of the down-tiered table erodes it. HARDENING: route to the ' +
+      `${plan} table only when routeState is present; a stamp-miss falls back to the Analytics ` +
+      'table and bills at the full Analytics rate (never silently down-tier un-vetted events), so ' +
+      'monitor Analytics-table ingest to catch stamp gaps.',
   };
 }
 
@@ -918,8 +982,11 @@ export function renderOffloadSection(
   const showCloudWatch = destination
     ? destination === 'cloudwatch' && getAllowedActionsForDestination('cloudwatch').includes('tier_down')
     : true;
+  const showAzure = destination
+    ? destination === 'azure-monitor' && getAllowedActionsForDestination('azure-monitor').includes('tier_down')
+    : true;
 
-  if (showDatadog || showCloudWatch) {
+  if (showDatadog || showCloudWatch || showAzure) {
     lines.push(
       '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
@@ -945,6 +1012,32 @@ export function renderOffloadSection(
         '```',
         ''
       );
+    }
+    if (showAzure) {
+      // Render a provisioning recipe per Azure plan: the default target (Basic)
+      // plus each alternative carried in the cost model (tier_down_alt_tiers,
+      // e.g. Auxiliary). The MCP picks one plan per deployment when it wires the
+      // recipe; both are shown so the operator can choose Basic (queryable) or
+      // Auxiliary (archive).
+      const azModel = COST_MODEL_BY_DESTINATION['azure-monitor'];
+      const azTiers = [
+        azModel.tier_down_target_tier,
+        ...(azModel.tier_down_alt_tiers ?? []),
+      ].filter((t): t is NonNullable<typeof t> => Boolean(t));
+      for (const tier of azTiers) {
+        const plan: 'Basic' | 'Auxiliary' = /auxiliary/i.test(tier.name)
+          ? 'Auxiliary'
+          : 'Basic';
+        const az = azureLogsTierRecipe({ plan });
+        lines.push(
+          `_${tier.name}_ ($${tier.ingest_rate_usd_per_gb}/GB ingest) — ${az.note}`,
+          '',
+          '```bash',
+          az.body,
+          '```',
+          ''
+        );
+      }
     }
   }
 
