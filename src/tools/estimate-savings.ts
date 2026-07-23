@@ -53,6 +53,7 @@ import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import {
   projectActionRange,
+  resolveTierDownTier,
   getDestinationCostModel,
   getDefaultActionForDestination,
   annualizeDollars,
@@ -175,6 +176,12 @@ export const estimateSavingsSchema = {
     .optional()
     .describe(
       'Elasticsearch only: are compactable fields excluded from _source? Default false — the unpruned ratio band is used.'
+    ),
+  tier_down_plan: z
+    .string()
+    .optional()
+    .describe(
+      'Which tier_down plan to price when the action is tier_down. Matches the plan name (case-insensitive substring): omit for the destination default (e.g. Azure Basic Logs), or pass e.g. "auxiliary" to price the aggressive alternative (Azure Auxiliary Logs). No effect on destinations without an alternative tier.'
     ),
   service: z
     .string()
@@ -713,6 +720,7 @@ export class NoOpActionError extends Error {
 export interface RunForecastArgs {
   destination: SiemId;
   es_pruned?: boolean;
+  tier_down_plan?: string;
   service?: string;
   retention_months: number;
   proposed_config?: Array<{
@@ -1001,8 +1009,9 @@ export async function runEstimateForecast(
       // tier_down: estimate via the IA tier delta when available; fall back
       // to a conservative 50% ingest reduction for destinations with a known
       // cheap tier (CloudWatch IA) and 0 elsewhere.
-      if (model.tier_down_target_tier) {
-        const ingestDelta = model.ingest_per_gb - model.tier_down_target_tier.ingest_rate_usd_per_gb;
+      const solverTier = resolveTierDownTier(model, args.tier_down_plan);
+      if (solverTier) {
+        const ingestDelta = model.ingest_per_gb - solverTier.ingest_rate_usd_per_gb;
         expectedReductionPerByte = model.ingest_per_gb > 0
           ? ingestDelta / model.ingest_per_gb
           : 0.5;
@@ -1083,6 +1092,7 @@ export async function runEstimateForecast(
       destination: args.destination,
       retention_months: args.retention_months,
       esPruned: args.es_pruned,
+      tier_down_plan: args.tier_down_plan,
       customer_rate: customerRate,
     });
 
@@ -2032,6 +2042,7 @@ export async function executeEstimateSavings(
           lensed: lensRes.lensed,
           destination,
           es_pruned: args.es_pruned,
+          tier_down_plan: args.tier_down_plan,
           service: args.service,
           retention_months: args.retention_months ?? 1,
           proposed_config: proposed,

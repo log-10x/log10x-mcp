@@ -582,6 +582,14 @@ export interface ProjectActionArgs {
   retention_months?: number;
   esPruned?: boolean;
   /**
+   * Which tier_down plan to price. Matches (case-insensitive substring) the
+   * name of the destination's default tier_down_target_tier or any
+   * tier_down_alt_tiers entry (e.g. "auxiliary" → Azure Auxiliary Logs). Omit
+   * for the default target tier (e.g. Azure Basic Logs). No effect on
+   * destinations whose tier_down has no alternative tiers.
+   */
+  tier_down_plan?: string;
+  /**
    * Optional customer-supplied rate overrides. When present, the
    * corresponding rate_source axis flips to 'customer_supplied'. When the
    * destination has no list rate AND no override is supplied, that axis
@@ -640,6 +648,28 @@ export function percentReduction(
   };
 }
 
+/**
+ * Resolve which tier_down tier to price for a destination. Without a selector,
+ * returns the default tier_down_target_tier (e.g. Azure Basic Logs). A selector
+ * matches (case-insensitive substring) the name of the default tier or any
+ * tier_down_alt_tiers entry (e.g. "auxiliary" → Azure Auxiliary Logs). Returns
+ * undefined only when the destination has no tier_down tier at all. The engine
+ * is unaware of the plan; this only prices the caller-selected one.
+ */
+export function resolveTierDownTier(
+  model: DestinationCostModel,
+  planSelector?: string | null
+): TierDownTargetTier | undefined {
+  const defaultTier = model.tier_down_target_tier;
+  const alts = model.tier_down_alt_tiers ?? [];
+  if (!defaultTier && alts.length === 0) return undefined;
+  const fallback = defaultTier ?? alts[0];
+  const needle = planSelector?.trim().toLowerCase();
+  if (!needle) return fallback;
+  const all = [...(defaultTier ? [defaultTier] : []), ...alts];
+  return all.find((t) => t.name.toLowerCase().includes(needle)) ?? fallback;
+}
+
 function projectActionWithRatio(
   args: ProjectActionArgs,
   ratio: number,
@@ -650,6 +680,11 @@ function projectActionWithRatio(
   });
   const notes: string[] = [];
   let bytes_out: number;
+  // Caller-selected tier_down plan (default target tier, or a named alternative
+  // such as Azure Auxiliary Logs). undefined for non-tier_down actions and for
+  // destinations with no cheaper tier.
+  const selectedTierDownTier =
+    args.action === 'tier_down' ? resolveTierDownTier(model, args.tier_down_plan) : undefined;
 
   switch (args.action) {
     case 'pass':
@@ -672,9 +707,9 @@ function projectActionWithRatio(
       // still set to bytes_in so the byte-reduction fields reflect 0 — the
       // savings are entirely in the rate axis, not the byte axis.
       bytes_out = args.bytes_in;
-      if (model.tier_down_target_tier) {
+      if (selectedTierDownTier) {
         notes.push(
-          `tier_down: assumes ${model.tier_down_target_tier.name} ($${model.tier_down_target_tier.ingest_rate_usd_per_gb}/GB ingest + $${model.tier_down_target_tier.storage_rate_usd_per_gb_month}/GB-mo storage); destination-side routing rule must be configured to realize.`
+          `tier_down: assumes ${selectedTierDownTier.name} ($${selectedTierDownTier.ingest_rate_usd_per_gb}/GB ingest + $${selectedTierDownTier.storage_rate_usd_per_gb_month}/GB-mo storage); destination-side routing rule must be configured to realize.`
         );
       } else {
         notes.push(
@@ -739,7 +774,7 @@ function projectActionWithRatio(
   // When no tier_down_target_tier is present, fall through to standard rates
   // (which will produce zero savings since bytes_out == bytes_in at the same rate).
   const isTierDown = args.action === 'tier_down';
-  const tierTarget = isTierDown ? model.tier_down_target_tier : undefined;
+  const tierTarget = selectedTierDownTier;
   const effectiveIngestRateList = tierTarget
     ? tierTarget.ingest_rate_usd_per_gb
     : model.ingest_per_gb;

@@ -24,6 +24,7 @@ import {
   getDestinationCostModel,
   projectAction,
   projectActionRange,
+  resolveTierDownTier,
   getAllowedActionsForDestination,
   degradeRatioForSmallEvents,
   annualizeDollars,
@@ -177,6 +178,34 @@ test('projectAction tier_down keeps bytes and emits routing caveat', () => {
   });
   assert.equal(p.bytes_out, GB);
   assert.ok(p.notes && p.notes.some((n) => /tier_down/.test(n)));
+});
+
+test('tier_down prices the caller-selected plan: azure Auxiliary bills below Basic', () => {
+  const model = getDestinationCostModel('azure-monitor');
+  // resolver: no selector -> default target tier (Basic); "auxiliary" -> Auxiliary.
+  assert.match(resolveTierDownTier(model)!.name, /Basic/i);
+  assert.match(resolveTierDownTier(model, 'auxiliary')!.name, /Auxiliary/i);
+  assert.match(resolveTierDownTier(model, 'AUX')!.name, /Auxiliary/i); // case-insensitive substring
+  // unknown selector falls back to the default target tier, never undefined.
+  assert.match(resolveTierDownTier(model, 'nonesuch')!.name, /Basic/i);
+
+  const basic = projectAction({ action: 'tier_down', bytes_in: GB, destination: 'azure-monitor' });
+  const aux = projectAction({
+    action: 'tier_down',
+    bytes_in: GB,
+    destination: 'azure-monitor',
+    tier_down_plan: 'auxiliary',
+  });
+
+  // tier_down is a rate move, not a byte move — bytes unchanged on either plan.
+  assert.equal(basic.bytes_out, GB);
+  assert.equal(aux.bytes_out, GB);
+  // Basic ingest ~ $0.50/GB, Auxiliary ~ $0.05/GB -> Auxiliary bills strictly less.
+  assert.ok(aux.ingest_dollars! < basic.ingest_dollars!);
+  assert.ok(aux.total_dollars! < basic.total_dollars!);
+  // Each projection's caveat names the plan it priced.
+  assert.ok(basic.notes!.some((n) => /Basic/i.test(n)));
+  assert.ok(aux.notes!.some((n) => /Auxiliary/i.test(n)));
 });
 
 test('projectAction offload sends zero bytes downstream, total_dollars is the netted S3 residual', () => {
