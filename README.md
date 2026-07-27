@@ -4,7 +4,7 @@ Ask your AI assistant about log costs, log patterns, and incidents in plain Engl
 
 10x groups your logs by message type. The same lines repeat over and over with only the timestamp or request ID changing, so 10x collapses each flood of near-identical lines into one message type and ranks them by volume and cost. That is how the answers stay exact instead of best-effort clustering, no regex required.
 
-This server is open source under Apache-2.0. A Log10x product license (API key) unlocks the account-scoped tools; without one, the server boots read-only against a public demo dataset so the tools can be explored immediately.
+This server is open source under MIT. A Log10x product license (API key) unlocks the account-scoped tools; without one, the server boots read-only against a public demo dataset so the tools can be explored immediately.
 
 ## What you can ask
 
@@ -95,7 +95,7 @@ The server runs locally as a subprocess of your AI client. Only pre-aggregated m
 
 ## Open source and license
 
-Apache-2.0. Published on npm as `log10x-mcp` (Node 20+). The source is public so the behavior behind every tool can be read directly. Account-scoped tools require a Log10x product license (API key); the public demo dataset needs none.
+MIT. Published on npm as `log10x-mcp` (Node 20+). The source is public so the behavior behind every tool can be read directly. Account-scoped tools require a Log10x product license (API key); the public demo dataset needs none.
 
 MCP clients run the server as a long-lived child process. After upgrading the package, restart the client so the new version takes effect.
 
