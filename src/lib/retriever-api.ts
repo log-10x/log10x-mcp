@@ -1323,19 +1323,44 @@ async function waitForMarkerStability(
 ): Promise<S3ListEntry[]> {
   const started = Date.now();
   let previous: string[] = [];
-  let stableCount = 0;
+  let lastChangeAt = Date.now();
+
+  // Quiet window: how long the marker set must stay UNCHANGED before we call
+  // the fan-out complete. This must exceed the natural inter-marker arrival
+  // gap, or we declare completion mid-flight and silently return a partial
+  // result set.
+  //
+  // Measured on the demo Lambda retriever (20-way fan-out, reserved
+  // concurrency 10, 6144 MB): markers for a single query land over an 8-10 s
+  // span with inter-marker gaps of 0-5 s. The previous heuristic — two
+  // consecutive identical polls at the 1500 ms default, i.e. a ~3 s quiet
+  // window — is SHORTER than the observed 5 s worst-case gap, so it returned
+  // early and non-deterministically: four runs of the same query recovered
+  // 4, 9, 10 and 10 of 10 result blobs (42-100% recall) while all four
+  // reported partial_results: false.
+  //
+  // 12 s gives >2x headroom over the measured worst case. Override with
+  // LOG10X_RETRIEVER_QUIET_MS when a deployment's fan-out is wider or slower.
+  const quietMs = Math.max(
+    pollMs * 2,
+    parseInt(process.env.LOG10X_RETRIEVER_QUIET_MS || '12000', 10)
+  );
 
   while (Date.now() - started < timeoutMs) {
     const entries = await s3List(bucket, markerPrefix);
     const keys = entries.map((e) => e.Key).sort();
 
-    if (keys.length > 0 && keys.length === previous.length && keys.every((k, i) => k === previous[i])) {
-      stableCount++;
-      if (stableCount >= 2) {
+    const unchanged =
+      keys.length > 0 &&
+      keys.length === previous.length &&
+      keys.every((k, i) => k === previous[i]);
+
+    if (unchanged) {
+      if (Date.now() - lastChangeAt >= quietMs) {
         return entries;
       }
     } else {
-      stableCount = keys.length > 0 ? 1 : 0;
+      lastChangeAt = Date.now();
     }
     previous = keys;
     await sleep(pollMs);
