@@ -514,7 +514,7 @@ export async function executeRetrieverQuery(
  * run. No markdown syntax, no dollar figures. Mirrors the canonical
  * buildHumanSummary pattern in src/tools/find-skew.ts:216.
  */
-function buildRetrieverQueryHumanSummary(s: {
+export function buildRetrieverQueryHumanSummary(s: {
   eventsMatched: number;
   eventsReturned: number;
   from: string;
@@ -522,6 +522,7 @@ function buildRetrieverQueryHumanSummary(s: {
   target: string;
   truncated: boolean;
   partialResults: boolean;
+  completenessBasis?: 'marker_count_confirmed' | 'quiet_window_inferred';
   pattern?: string;
   search?: string;
   wallTimeMs: number;
@@ -573,9 +574,21 @@ function buildRetrieverQueryHumanSummary(s: {
   const flags: string[] = [];
   if (s.truncated) flags.push('result set was truncated at the per-worker cap');
   if (s.partialResults) flags.push('one or more workers were partial');
+  // `partialResults` answers "did a worker declare itself short", NOT "did we
+  // collect every worker". On the Lambda flavor the coordinator cannot publish
+  // a marker count, so completion is inferred from a quiet window and the set
+  // may be short with nothing flagging it. Say so rather than reporting clean.
+  const inferred = s.completenessBasis === 'quiet_window_inferred';
+  if (inferred) {
+    flags.push(
+      'completeness INFERRED from a quiet window, not confirmed by a marker count — ' +
+      'this result may be short; re-run to compare, and treat as non-authoritative for ' +
+      'forensic or compliance use'
+    );
+  }
   const second = flags.length > 0
     ? `Caveats: ${flags.join('; ')} — narrow the search or re-run to resume.`
-    : `Wall time was clean and no worker reported partial results.`;
+    : `Completeness confirmed: every dispatched worker marker was counted.`;
   const third = s.offloadedHashCount > 0
     ? `${s.offloadedHashCount} hash(es) in this result set are currently routed to forwarder offload; live events continue to land in the offload bucket.`
     : `No hash in this result set is currently routed to forwarder offload.`;
@@ -944,6 +957,7 @@ async function executeRetrieverQueryInner(
       target: resp.target,
       truncated: !!resp.execution.truncated,
       partialResults,
+      completenessBasis: resp.completenessBasis,
       pattern: args.pattern,
       search: effectiveSearch,
       wallTimeMs: resp.execution.wallTimeMs,
