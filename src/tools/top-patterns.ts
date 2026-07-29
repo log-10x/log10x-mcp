@@ -250,7 +250,13 @@ export async function executeTopPatterns(
   // include is `kept` or `dropped`, the main query already scopes to
   // the right cohort and we skip the dual query.
   const droppedSliceFilters: Record<string, FilterValue> = { ...filters };
-  if (runBoth) droppedSliceFilters['routeState'] = { op: '=', val: 'drop' };
+  // Must match the `dropped` cohort: the acted-on SET, not the literal
+  // `drop` action, or `both` would omit offload/compact/tier_down/sample.
+  if (runBoth)
+    droppedSliceFilters['routeState'] = {
+      op: '=~',
+      val: pql.ACTED_STATES_RE,
+    };
 
   // --- Phase 1: PromQL — ranking, event counts, total-in-scope, distinct,
   //              cost-by-service rollup ---

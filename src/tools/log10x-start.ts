@@ -31,7 +31,7 @@ import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
-import { LABELS } from '../lib/promql.js';
+import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export type Tier = 'dev' | 'reporter' | 'receiver' | 'retriever';
@@ -173,7 +173,7 @@ async function probeReceiverInPath(env: EnvConfig, reporterTier: 'edge' | 'cloud
   try {
     const res = await queryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState="drop"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState=~"${ACTED_STATES_RE}"}) > 0`
     );
     if (res.status === 'success' && res.data.result.length > 0) {
       return { detected: true, uncertain: false };
