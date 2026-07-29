@@ -73,7 +73,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. Omit to scan the full window (bounded by limit/processingTime). Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. REQUIRED unless `pattern` or `pattern_hash` is given: the engine rejects a blank search, so there is no unscoped full-window scan. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()
@@ -318,6 +318,49 @@ async function bridgeEnvConfigToRetrieverEnvVars(): Promise<boolean> {
   return bridged;
 }
 
+/**
+ * Marker prefix for the unscoped-query error. Classified as `schema_invalid`
+ * (caller input), not a backend fault, so it is not retried.
+ */
+export const UNSCOPED_QUERY_PREFIX = 'Unscoped query:';
+
+/**
+ * Reject a query that carries no Bloom scope, before anything is dispatched.
+ *
+ * The engine's IndexQueryWriter rejects a blank search outright:
+ *
+ *   could not launch pipeline: 'run'  /  search cannot be blank
+ *   error initializing pipeline unit #7: 'streamOutput(IndexQueryWriter)'
+ *
+ * That failure lands ~12s in, before any worker runs, so no _DONE marker is
+ * written. The caller then waits out the full marker timeout (380s observed) and
+ * gets NO_MARKER with a diagnostic blaming a stale S3 index and the index-inducer
+ * CronJob: wrong subsystem, six minutes late, and indistinguishable from a
+ * genuinely empty archive to anyone without CloudWatch access.
+ *
+ * Exported so the invariant is testable without a backend.
+ */
+export function assertScopedQuery(args: {
+  search?: string;
+  pattern?: string;
+  pattern_hash?: string;
+}): void {
+  const hasScope =
+    (args.search != null && args.search.trim() !== '') ||
+    (args.pattern != null && args.pattern.trim() !== '') ||
+    (args.pattern_hash != null && args.pattern_hash.trim() !== '');
+  if (hasScope) return;
+  throw new Error(
+    `${UNSCOPED_QUERY_PREFIX} log10x_retriever_query requires one of \`search\`, ` +
+      '`pattern`, or `pattern_hash`. Bloom-filter scoping is what makes this ' +
+      'retrieval cheap, and the engine rejects a blank search outright, so an ' +
+      'unscoped full-window scan is not a supported shape. Scope it with ' +
+      '`pattern_hash` from top_patterns / event_lookup, `pattern` for a ' +
+      'Reporter-named pattern, or a `search` expression such as ' +
+      'severity_level=="ERROR".'
+  );
+}
+
 export async function executeRetrieverQuery(
   args: {
     pattern?: string;
@@ -374,6 +417,9 @@ export async function executeRetrieverQuery(
 
   const sumOut: { data?: RetrieverQuerySummary } = {};
   try {
+    // Runs AFTER the pattern_hash → search translation above, so a caller that
+    // supplied only a hash is already scoped by this point.
+    assertScopedQuery(args);
     await executeRetrieverQueryInner(args, env, sumOut);
   } catch (err: unknown) {
     // Wave 2.F: classify time-window parse failures as schema_invalid
@@ -384,7 +430,10 @@ export async function executeRetrieverQuery(
     // transient backend failure.
     const errMsg = err instanceof Error ? err.message : String(err);
     const isTimeWindowError = errMsg.startsWith('Invalid time window:');
-    const primitiveErr = isTimeWindowError
+    // Same class as the time-window error: the caller's input cannot produce a
+    // query, so retrying it unchanged will fail identically.
+    const isUnscopedError = errMsg.startsWith(UNSCOPED_QUERY_PREFIX);
+    const primitiveErr = isTimeWindowError || isUnscopedError
       ? {
           error_type: 'schema_invalid' as const,
           retryable: false,

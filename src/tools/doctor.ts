@@ -1063,10 +1063,23 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
     process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__
   ) {
     try {
+      // A blank search CANNOT work: the engine's IndexQueryWriter rejects it
+      // ("search cannot be blank"), the coordinator dies ~12s in without writing
+      // a _DONE marker, and this probe then waits out the marker timeout (380s
+      // observed) and reports 0 events. That made the check below accuse the S3
+      // index of being stale on every run, in an environment whose index was
+      // current to within four minutes. Any non-blank expression avoids it.
+      //
+      // Severity is the right probe dimension: `severity_level` is enrichment the
+      // Reporter stamps on every event regardless of source format, so this stays
+      // valid across deployments in a way a service name or pattern hash would
+      // not. Bloom-scoped on three values, so it is still cheap.
+      const probeSearch =
+        'severity_level=="INFO" || severity_level=="WARN" || severity_level=="ERROR"';
       const probeResult = await runRetrieverQuery(env, {
         from: 'now-1h',
         to: 'now',
-        search: '',
+        search: probeSearch,
         format: 'count',
         limit: 1,
       });
@@ -1084,12 +1097,14 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           name: 'retriever_overflow_health',
           status: 'warn',
           message:
-            `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms). ` +
-            `This may indicate the S3 index is stale — check that the index-inducer CronJob is running and that new .log files are being written to the retriever S3 bucket.`,
+            `Retriever endpoint responded but returned 0 events in the last 1h (wall time: ${probeResult.execution.wallTimeMs}ms, worker files: ${probeResult.execution.workerFiles}). ` +
+            `A quiet hour is the most common cause and is not a fault: the probe only reads events the Receiver actually offloaded, so an environment with no offload activity in the last hour reads 0 here while healthy. ` +
+            `Do not conclude the index is stale without checking object recency first.`,
           fix:
-            'Verify: (1) `kubectl get cronjob -n <retriever-ns>` — is the index-inducer running and not Pending? ' +
-            '(2) `aws s3 ls s3://<retriever-bucket>/app/ | tail -5` — are recent .log files present? ' +
-            '(3) Check SQS index queue depth — if 0 and no recent files, the data pipeline upstream of the indexer is stopped.',
+            'In order, cheapest first: (1) `aws s3 ls s3://<retriever-bucket>/app/ --recursive | tail -5` — if the newest object is older than an hour there is nothing to find and this WARN is expected. ' +
+            '(2) Compare against the `offload_delivery` check above: it reads object recency directly, so offload_delivery=pass with this check at 0 means objects are arriving but the read path is not returning them. ' +
+            '(3) Only then suspect indexing: confirm index objects exist under the index prefix with timestamps tracking the data objects. ' +
+            '(4) If bytes are read but no events come back, the query envelope carries a diagnostics_funnel — a PARSE_EMPTY verdict there points at the read/parse path, not at the index.',
         });
       }
     } catch (e) {
