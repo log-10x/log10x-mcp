@@ -17,7 +17,8 @@ export type SiemId =
   | 'elasticsearch'
   | 'azure-monitor'
   | 'splunk'
-  | 'clickhouse';
+  | 'clickhouse'
+  | 'coralogix';
 
 export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // vendors.json: CloudWatch cost=0.5
@@ -40,6 +41,17 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // Set to 0.15 ($/GB-month) as a conservative default. Override via
   // analyzer_cost_per_gb arg on the submit tool if using ClickHouse Cloud.
   clickhouse: 0.15,
+  // Coralogix Frequent Search (the default priority every event lands in when
+  // no TCO policy matches — verified live on a US2 tenant: zero policies =>
+  // priorityclass "high").
+  //
+  // DIVERGENCE FROM PRICING.md, stated so nobody silently "fixes" it:
+  // PRICING.md's vendor table lists Coralogix at $0.50, which is the MONITORING
+  // (Medium) tier rate, not Frequent Search. This entry is the premium tier the
+  // baseline bills at, so tier_down has something to reduce FROM; $0.50 is
+  // modeled below as tier_down_target_tier. Reconcile PRICING.md separately —
+  // it feeds the marketing surfaces, not this model.
+  coralogix: 1.15,
 };
 
 export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
@@ -51,6 +63,7 @@ export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
   'azure-monitor': 'Azure Monitor / Log Analytics',
   splunk: 'Splunk',
   clickhouse: 'ClickHouse',
+  coralogix: 'Coralogix',
 };
 
 export function getAnalyzerCostForSiem(id: SiemId, override?: number): number {

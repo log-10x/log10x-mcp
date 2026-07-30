@@ -63,18 +63,35 @@ test('parsePrometheusValue handles strings, NaN, and missing values', () => {
 // destination model lookup
 // ---------------------------------------------------------------------------
 
-test('COST_MODEL_BY_DESTINATION has all eight SIEMs', () => {
+test('COST_MODEL_BY_DESTINATION has all nine SIEMs', () => {
   const keys = Object.keys(COST_MODEL_BY_DESTINATION).sort();
   assert.deepEqual(keys, [
     'azure-monitor',
     'clickhouse',
     'cloudwatch',
+    'coralogix',
     'datadog',
     'elasticsearch',
     'gcp-logging',
     'splunk',
     'sumo',
   ]);
+});
+
+// Coralogix is the third destination with a modeled cheap tier (after CW IA and
+// Datadog Flex). Guards the specific reason estimate_savings returned nothing
+// for Coralogix: no entry at all, so no tier_down delta to compute.
+test('coralogix models Monitoring as the tier_down target', () => {
+  const m = COST_MODEL_BY_DESTINATION.coralogix;
+  assert.equal(m.ingest_per_gb, 1.15, 'Frequent Search is the billed baseline');
+  const tier = m.tier_down_target_tier;
+  assert.ok(tier, 'tier_down_target_tier must be present or tier_down is a no-op');
+  assert.equal(tier.ingest_rate_usd_per_gb, 0.5, 'Monitoring rate');
+  // The delta is what tier_down actually saves per GB.
+  assert.equal(
+    Number((m.ingest_per_gb - tier.ingest_rate_usd_per_gb).toFixed(2)),
+    0.65,
+  );
 });
 
 test('getDestinationCostModel returns the default ES model when pruned', () => {
