@@ -59,13 +59,13 @@ export const retrieverSeriesSchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message). Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / whats_changing. Mutually exclusive with `search`; `search` wins if both provided.'
+      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload archive: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the archived bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
     ),
   search: z
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic — without one, mode selection falls back to window-length only. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
+      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `includes(text, "<pattern_hash>")`, `severity_level == "ERROR"`) are dramatically cheaper. (legacy example removed: `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic — without one, mode selection falls back to window-length only. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()

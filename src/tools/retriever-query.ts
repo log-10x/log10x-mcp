@@ -33,6 +33,7 @@ import {
   isRetrieverConfigured,
   normalizeTimeExpression,
   buildPatternSearch,
+  buildArchiveHashSearch,
   retrieverResultsLocation,
   type RetrieverQueryRequest,
   type RetrieverEvent,
@@ -61,19 +62,19 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message) to scope the scan to. Auto-translated to `tenx_user_pattern == "<name>"` Bloom-filter expression. Use this when the agent has a pattern name from event_lookup / top_patterns / whats_changing and wants the offloaded events for it without authoring the Bloom expression by hand. Mutually exclusive with `search`; if both are provided, `search` wins and `pattern` is ignored. Example: `pattern: "Payment_Gateway_Timeout"`.'
+      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload archive: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the archived bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
     ),
   pattern_hash: z
     .string()
     .optional()
     .describe(
-      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `tenx_hash == "<hash>"` and no name resolution runs. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the archive re-derives its own `tenx_hash` field per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. REQUIRED unless `pattern` or `pattern_hash` is given: the engine rejects a blank search, so there is no unscoped full-window scan. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. REQUIRED unless `pattern_hash` is given: the engine rejects a blank search, so there is no unscoped full-window scan. To scope to one pattern pass `pattern_hash`, which is matched as a text token; a Reporter-named `pattern` cannot be matched against the archive at all and is refused with a remedy.'
     ),
   from: z
     .string()
@@ -410,9 +411,14 @@ export async function executeRetrieverQuery(
   // the pattern_not_resolved error path. Precedence: explicit `search`
   // wins (agent authored it), then `pattern_hash` (chain-stable identity),
   // then `pattern` (Reporter name, may resolve later via buildPatternSearch).
+  //
+  // The predicate is a TEXT-TOKEN match, NOT a `tenx_hash` field equality. A
+  // field equality here matched nothing, ever: the archive re-derives `tenx_hash`
+  // from the grouped event, so its value is not the per-line hash the metrics
+  // surface publishes. See buildArchiveHashSearch in retriever-api for the
+  // measured evidence.
   if (!args.search && args.pattern_hash) {
-    const safeHash = args.pattern_hash.trim().replace(/"/g, '');
-    args.search = `tenx_hash == "${safeHash}"`;
+    args.search = buildArchiveHashSearch(args.pattern_hash);
   }
 
   const sumOut: { data?: RetrieverQuerySummary } = {};
@@ -507,7 +513,7 @@ export async function executeRetrieverQuery(
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
   }
   // Prior code chained retriever_series only when `d.pattern` was set.
-  // Hash-keyed callers (pattern_hash auto-built a `tenx_hash == "..."`
+  // Hash-keyed callers (pattern_hash auto-built an `includes(text, "...")`
   // search) had pattern undefined and lost the follow-on action entirely.
   // Use pattern_hash → search as the chained identity when pattern is absent.
   if (d.events_matched > 0) {
@@ -828,17 +834,21 @@ async function executeRetrieverQueryInner(
         // offload-positive set, and the retriever is configured (we
         // checked at the outer entry, so it is here). The hash is read
         // off any event carrying args.pattern. See spec section B.
+        // The removed first pass here read `tenx_user_pattern` off each returned
+        // event to find the hash carrying args.pattern. That field does not exist
+        // anywhere in the engine, so `evPattern` was always undefined and the pass
+        // never matched. The comment below blamed an "older offload shape"; the
+        // real reason is that no pattern name is ever on a returned event. The
+        // archive read path registers exactly five enrichment field names
+        // (query_name, index_app, index_file, severity_level, tenx_user_service),
+        // and none of them is a pattern identity.
+        //
+        // Only the single-distinct-hash attribution below was ever reachable, and
+        // it is the sound one. Note args.pattern now throws upstream, so this whole
+        // branch is currently dead; it is left intact so that restoring the name
+        // route (which needs a name->hash resolver) does not have to rediscover
+        // this logic.
         if (offloadByHash && args.pattern) {
-          for (const ev of resp.events) {
-            const evRec = ev as unknown as Record<string, unknown>;
-            const evPattern = evRec.tenx_user_pattern;
-            const evHash = evRec.tenx_hash;
-            if (typeof evPattern === 'string' && evPattern === args.pattern &&
-                typeof evHash === 'string' && offloadByHash[evHash]?.is_offloaded) {
-              patternHashForNudge = evHash;
-              break;
-            }
-          }
           if (!patternHashForNudge && hashes.size === 1) {
             // Pattern name didn't ride on the event payload (older
             // offload shape), but the scan really did bring back a single
