@@ -48,12 +48,15 @@ include:
   - run/initialize/k8s
 
   # The rate regulator: the only thing in the pipeline that calls route().
-  # The MODULE is included directly rather than config/pipelines/run/receive/rate,
-  # because that config already sets containerField / warmupMs / baselineCount /
-  # minRetentionThreshold and the loader rejects a second definition
-  # ("option 'rateReceiverContainerField' should be specified only once") —
-  # a re-declared block is additive, not an override. The full rateReceiver
-  # block below is therefore a copy of that file's with the test values changed.
+  # This includes a local COPY of config/pipelines/run/receive/rate (as ./rate),
+  # not that path directly, for two reasons:
+  #   1. the stock config already sets containerField / warmupMs / baselineCount /
+  #      minRetentionThreshold, and a re-declared block is ADDITIVE, not an
+  #      override ("option 'rateReceiverContainerField' should be specified only once")
+  #   2. the regulator's .js files live in that CONFIG dir, not in the module dir.
+  #      Including run/modules/receive/rate instead loads the settings but not the
+  #      classes, and the launch dies with "function 'shouldRetainEventWithCap'
+  #      not found".
   - rate
 
   # File transport on both ends. The file is the seam we hand to Fluent Bit.
