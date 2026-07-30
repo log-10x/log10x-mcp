@@ -145,6 +145,7 @@ const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'Azure Monitor', perGb: DEFAULT_ANALYZER_COST_PER_GB['azure-monitor'], note: 'Analytics tier ingest, list price' },
   { vendor: 'Sumo Logic', perGb: DEFAULT_ANALYZER_COST_PER_GB.sumo, note: 'Continuous ingest tier, list price' },
   { vendor: 'Elastic Cloud', perGb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, note: 'Hot tier + searchable' },
+  { vendor: 'Coralogix', perGb: DEFAULT_ANALYZER_COST_PER_GB.coralogix, note: 'Frequent Search (High) priority, list price' },
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
 ];
 

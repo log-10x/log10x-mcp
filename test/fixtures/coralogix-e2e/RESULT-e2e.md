@@ -66,16 +66,20 @@ values for the marker.
 
 **Do not overstate that fallback.** It recovers the LABEL only. Verified by
 executing the emitted config in fluent-bit: under the `json` misconfig the
-subsystem comes out right, but `_route` is still nil at the rewrite_tag stage,
-so offload events ship to Coralogix instead of the customer's S3 and drop
-events are NOT dropped. `$d.routeState` also does not exist as a keypath when
+subsystem comes out right, but the ROUTING key is wrong: `cx_route` reads
+`rec["routeState"]`, which is nil under that encoding, so every event takes
+the else-branch and is tagged `_route="siem"`. Offload events therefore ship
+to Coralogix instead of the customer's S3, and drop events are NOT dropped. `$d.routeState` also does not exist as a keypath when
 the record is one string field, so the Form A (dpxl) policy cannot fire either;
 only Form B, which matches the label, would work. Correct claim: *the
 tier_down/pass label survives; routing and tiering may still be broken.*
 
 ## Wire proof
 
-`WIRE-PROOF-sample.jsonl` (first 40 of 320 captured records) shows the engine's
+`WIRE-PROOF-sample.jsonl` is the first 40 of 320 captured records. 320 = the
+same 160-event input captured twice, once per encodeType. The 113/47 counts
+below are the 160 records of one of those runs, not of the 40-line sample.
+The sample shows the engine's
 own output. `strings` over the raw capture gives 113 x `"routeState":"tier_down"`
 and 47 x `"routeState":"pass"` as literal bytes.
 

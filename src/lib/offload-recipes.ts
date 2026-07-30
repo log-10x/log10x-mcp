@@ -1123,10 +1123,14 @@ resource "coralogix_tco_policies_logs" "tenx" {
       'stays in High (Frequent Search) by default. ' +
       'VERIFIED BY APPLY on a live US2 tenant (provider 3.8.0, CORALOGIX_ENV=US2): ' +
       'both forms create successfully and read back enabled at priority ' +
-      'PRIORITY_TYPE_MEDIUM. Still UNVERIFIED: that the TCO usage report actually ' +
-      'BILLS a matching event as Medium (that data lags), and whether the dpxl ' +
-      'expression matches `$d.routeState` on a JSON-parsed payload — Form B is ' +
-      'the safe fallback if it does not. ' +
+      'PRIORITY_TYPE_MEDIUM. Form A is verified to FIRE, not merely to create: ' +
+      'two events in one request, same application and both on the pass ' +
+      'subsystem so no subsystem rule could match, differing only in ' +
+      '`$d.routeState` — the `pass` one stayed in Frequent Search at ' +
+      'priorityclass=high, the `tier_down` one was removed. ' +
+      'Still UNVERIFIED: that the TCO usage report actually BILLS a matching ' +
+      'event at the Medium rate (that data lags and was not checked), and ' +
+      'reading the slice back out of Monitoring. ' +
       'IF YOU ARE DRIVING THIS BY RAW HTTP RATHER THAN TERRAFORM, do not follow ' +
       'the published TCO REST docs; see coralogixTcoApiContract().',
   };
@@ -1234,8 +1238,30 @@ function renderRecipeBlock(fwd: OffloadForwarderId, p: OffloadParams): string[] 
 export function renderOffloadSection(
   params: OffloadParams,
   forwarder: OffloadForwarderId | null,
-  destination?: string
+  rawDestination?: string
 ): string {
+  // `destination` arrives as free-form text from advise_retriever, so an agent
+  // passing "Coralogix" or " coralogix " would miss an exact-match gate and get
+  // the GENERIC recipe, which strips `routeState` and silently disables
+  // tiering. Normalise once, here, so every gate below compares canonical ids.
+  const destination = rawDestination
+    ? (() => {
+        const d = rawDestination.trim().toLowerCase().replace(/[\s_]+/g, '-');
+        const aliases: Record<string, string> = {
+          cx: 'coralogix',
+          dd: 'datadog',
+          cw: 'cloudwatch',
+          es: 'elasticsearch',
+          opensearch: 'elasticsearch',
+          ch: 'clickhouse',
+          azure: 'azure-monitor',
+          'azure-monitor-logs': 'azure-monitor',
+          gcp: 'gcp-logging',
+          stackdriver: 'gcp-logging',
+        };
+        return aliases[d] ?? d;
+      })()
+    : undefined;
   const prefix = params.prefix ?? DEFAULT_PREFIX;
   const lines: string[] = [];
 

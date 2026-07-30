@@ -98,9 +98,10 @@ export const explainModeSchema = {
 // so this tool cannot drift into a false promise estimate_savings then refuses:
 //   compact  — real only where compact_mode !== 'no-op' (splunk / self-hosted
 //              elasticsearch / clickhouse); a no-op on azure-monitor, cloudwatch,
-//              datadog, gcp-logging, sumo.
+//              datadog, gcp-logging, sumo, coralogix.
 //   tier_down — applies only where the destination's default actions include it
-//              (datadog / cloudwatch / azure-monitor). Mirrors cost-options.ts.
+//              (datadog / cloudwatch / azure-monitor / gcp-logging / sumo /
+//              coralogix). Mirrors cost-options.ts.
 const MODE_COMPAT: Partial<Record<ExplainMode, Set<string>>> = {
   compact: new Set(
     Object.values(COST_MODEL_BY_DESTINATION)

@@ -21,8 +21,8 @@
  *     getDestinationCostModel(dest, {esPruned:false}).
  *   - Splunk envelope-in-event: ~92% reduction on the OUTER stream.
  *     Modeled as 0.08..0.15.
- *   - Datadog/CW/Azure/GCP/Sumo: no-op (destination cannot accept encoded
- *     events). compact_ratio = 1.0..1.0; a caveat is emitted by callers.
+ *   - Datadog/CW/Azure/GCP/Sumo/Coralogix: no-op (destination cannot accept
+ *     encoded events). compact_ratio = 1.0..1.0; a caveat is emitted by callers.
  *
  * Small-event degradation: below `small_event_floor_bytes` (default 100),
  * envelope overhead linearly degrades the compact ratio toward 1.0. At

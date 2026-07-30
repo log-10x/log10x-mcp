@@ -399,7 +399,7 @@ async function computeBaseline(
       horizon,
       rateSource: 'unset',
       remediation:
-        'Pass `destination` (splunk | datadog | elasticsearch | clickhouse | cloudwatch | azure-monitor | gcp-logging | sumo) or set the env profile `analyzer` field.',
+        'Pass `destination` (splunk | datadog | elasticsearch | clickhouse | cloudwatch | azure-monitor | gcp-logging | sumo | coralogix) or set the env profile `analyzer` field.',
     });
   }
 
@@ -655,11 +655,14 @@ function autoDetectDestination(env: EnvConfig): SiemId | undefined {
     return 'elasticsearch';
   if (a.includes('clickhouse') || a === 'ch') return 'clickhouse';
   if (a.includes('cloudwatch') || a === 'cw') return 'cloudwatch';
+  // Before the azure test: that one matches the bare substring 'monitor',
+  // so an analyzer string like 'coralogix monitoring' would misdetect as
+  // azure-monitor if coralogix were checked later.
+  if (a.includes('coralogix') || a === 'cx') return 'coralogix';
   if (a.includes('azure') || a.includes('monitor')) return 'azure-monitor';
   if (a.includes('gcp') || a.includes('stackdriver') || a.includes('google'))
     return 'gcp-logging';
   if (a.includes('sumo')) return 'sumo';
-  if (a.includes('coralogix') || a === 'cx') return 'coralogix';
   return undefined;
 }
 

@@ -27,6 +27,7 @@ import { renderOffloadSection } from '../src/lib/offload-recipes.js';
 import { DEFAULT_ANALYZER_COST_PER_GB } from '../src/lib/siem/pricing.js';
 import { COST_MODEL_BY_DESTINATION } from '../src/lib/cost.js';
 
+
 const PARAMS = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
 
 /** Parse just one field of a tool's raw-shape schema. */
@@ -100,11 +101,14 @@ test('the advisor never hands a Coralogix operator a marker-stripping config', (
   // and the TCO policy has nothing to match, so nothing tiers — with HTTP 200
   // and no error anywhere.
   const md = renderOffloadSection(PARAMS, 'fluent-bit', 'coralogix');
-  assert.ok(
-    !/Remove_key\s+routeState\s*\n\s*(?!.*tenx\.offload)/.test(md) ||
-      !/Match\s+tenx\.\*\s*\n\s*Remove_key\s+routeState/.test(md),
-    'a tenx.* routeState strip is rendered on the coralogix path'
-  );
+  // Assert on the SCOPE of every routeState strip: each one must be matched to
+  // tenx.offload. A `Match tenx.*` strip would also take the marker off the
+  // Coralogix path (tenx.app) and silently disable all tiering.
+  const strips = [...md.matchAll(/Match\s+(\S+)\s*\n\s*Remove_key\s+routeState/g)].map(m => m[1]);
+  assert.ok(strips.length > 0, 'expected at least the offload-path strip');
+  for (const tag of strips) {
+    assert.equal(tag, 'tenx.offload', `routeState stripped on '${tag}' — the marker must survive to Coralogix`);
+  }
   assert.match(md, /Coralogix build/, 'must render the Coralogix shipper, not the generic one');
 });
 
@@ -123,5 +127,23 @@ test('other destinations still get the generic recipe unchanged', () => {
     const md = renderOffloadSection(PARAMS, 'fluent-bit', dest as string | undefined);
     assert.ok(!/Coralogix build/.test(md), `destination=${dest} leaked the coralogix shipper`);
     assert.match(md, /Remove_key\s+routeState/, `destination=${dest} lost its marker strip`);
+  }
+});
+
+test('the advisor gate normalises free-form destination text', () => {
+  // advise_retriever takes `destination` as an unconstrained z.string(), so an
+  // agent passing "Coralogix" or " CX " would miss an exact-match gate and be
+  // handed the generic marker-stripping recipe with no warning at all.
+  for (const variant of ['Coralogix', ' coralogix ', 'CORALOGIX', 'cx']) {
+    const md = renderOffloadSection(PARAMS, 'fluent-bit', variant);
+    assert.match(md, /Coralogix build/, `"${variant}" did not resolve to the coralogix path`);
+  }
+});
+
+test('normalisation does not misroute other destinations', () => {
+  for (const [variant, expect] of [['Datadog', /Datadog Flex/], ['DD', /Datadog Flex/], ['CloudWatch', /CloudWatch Infrequent/]] as const) {
+    const md = renderOffloadSection(PARAMS, 'fluent-bit', variant);
+    assert.match(md, expect, `"${variant}" did not resolve correctly`);
+    assert.ok(!/Coralogix build/.test(md), `"${variant}" leaked the coralogix shipper`);
   }
 });

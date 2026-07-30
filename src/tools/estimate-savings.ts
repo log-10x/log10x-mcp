@@ -1963,12 +1963,12 @@ export async function executeEstimateSavings(
           phase: 'target_resolution',
           error: 'destination is required',
         },
-        human_summary: 'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+        human_summary: `estimate_savings refused: destination is required. Pass one of ${VALID_DESTS.join(', ')}.`,
         error: {
           error_type: 'missing_destination',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: 'Pass destination explicitly. Supported: splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+          hint: `Pass destination explicitly. Supported: ${VALID_DESTS.join(', ')}.`,
         },
         telemetry,
       });
