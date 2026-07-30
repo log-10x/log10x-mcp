@@ -65,7 +65,7 @@ import {
   verifyOffloadDelivery,
   defaultOffloadDeliveryDeps,
 } from '../lib/offload-delivery.js';
-import { LABELS } from '../lib/promql.js';
+import { LABELS, KEPT_STATES_RE } from '../lib/promql.js';
 import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import {
@@ -1295,7 +1295,7 @@ export async function fetchHashDescriptors(
   const L = DEFAULT_LABELS;
   const hashList = uniq.map((h) => h.replace(/[\\"]/g, (c) => `\\${c}`)).join('|');
   const selector =
-    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",routeState!="drop"`;
+    `${L.hash}=~"${hashList}",${L.env}="${metricsEnv}",routeState=~"${KEPT_STATES_RE}"`;
   const query =
     `sum by (${L.hash},${L.service},${L.pattern}) ` +
     `(increase(all_events_summaryBytes_total{${selector}}[${range}]))`;

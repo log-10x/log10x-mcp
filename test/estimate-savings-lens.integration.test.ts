@@ -48,8 +48,10 @@ function makeCloudwatchEnvAt1_50(): EnvConfig {
     endpoint: 'stub://lens-rate',
     async queryInstant(promql: string): Promise<PrometheusResponse> {
       if (promql.startsWith('sum by')) return emptyResp();
-      if (promql.includes('routeState="drop"')) return scalarResp(300);
-      if (promql.includes('routeState!="drop"')) return scalarResp(700);
+      // Cohorts are SET selectors now (promql.ACTED_STATES_RE /
+      // KEPT_STATES_RE). Match the distinctive head of each alternation.
+      if (promql.includes('routeState=~"offload|')) return scalarResp(300);
+      if (promql.includes('routeState=~"pass|"')) return scalarResp(700);
       return scalarResp(1000);
     },
     async queryRange(): Promise<PrometheusResponse> {

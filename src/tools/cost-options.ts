@@ -25,7 +25,7 @@ import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
 import { COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
 import { loadEnvironments, type EnvConfig, type Environments } from '../lib/environments.js';
-import { LABELS } from '../lib/promql.js';
+import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import {
   buildChassisEnvelope,
@@ -173,7 +173,7 @@ async function probeReceiverInPath(
   try {
     const res = await queryInstant(
       env,
-      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState="drop"}) > 0`
+      `count(all_events_summaryBytes_total{${LABELS.env}="${reporterTier}",routeState=~"${ACTED_STATES_RE}"}) > 0`
     );
     if (res.status === 'success' && res.data.result.length > 0) {
       return { detected: true, uncertain: false };

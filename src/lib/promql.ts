@@ -63,11 +63,19 @@ function escapeLabel(value: string): string {
 
 /**
  * Filter value: either a plain string (default exact-match `=`) or an
- * object form `{op, val}` that lets callers emit `!=` selectors: the
- * `kept` cohort needs absence-tolerant `routeState!="drop"` to include
- * legacy series that pre-date the receiver's `routeState` label stamping.
+ * object form `{op, val}`.
+ *
+ * The regex ops carry the cohort selectors. A cohort is a SET of routeState
+ * values, not one, and `=`/`!=` cannot express that — which is exactly how
+ * `dropped` came to mean only the literal `drop` action. See
+ * `includeToSelector`.
+ *
+ * `escapeLabel` escapes only backslashes and quotes, so `|` alternation in a
+ * regex value reaches PromQL intact.
  */
-export type FilterValue = string | { op: '=' | '!='; val: string };
+export type FilterValue =
+  | string
+  | { op: '=' | '!=' | '=~' | '!~'; val: string };
 
 function buildSelector(
   filters: Record<string, FilterValue>,
@@ -106,12 +114,16 @@ export type RouteStateAction =
  * exact original semantics; any single `RouteStateAction` selects that
  * action's stamped cohort directly.
  *
- * `kept`    → `routeState!="drop"` (absence-tolerant; matches series with
- *             no `routeState` label AND any non-drop route state).
- * `dropped` → `routeState="drop"` (exact). Alias of passing `'drop'`.
+ * `kept`    → `routeState=~"pass|"` — what actually reached the destination.
+ *             Absence-tolerant: the trailing `|` matches the empty string,
+ *             and PromQL treats an absent label as empty.
+ * `dropped` → `routeState=~"offload|compact|tier_down|drop|sample"` —
+ *             everything the receiver acted on, so everything the
+ *             destination did NOT receive. NOT an alias of `'drop'`; pass
+ *             `'drop'` explicitly for the literal hard-drop cohort alone.
  * `both`    → no selector; caller runs a dual query to recover the
- *             dropped slice for the `dropped_*` envelope fields.
- * `<action>`→ `routeState="<action>"` (exact) for any other action name, so
+ *             acted-on slice for the `dropped_*` envelope fields.
+ * `<action>`→ `routeState="<action>"` (exact) for any single action name, so
  *             a caller can scope to e.g. the `offload` or `tier_down` cohort.
  */
 export type IncludeCohort = 'kept' | 'dropped' | 'both' | RouteStateAction;
@@ -126,24 +138,61 @@ const ROUTE_STATE_ACTIONS: ReadonlySet<string> = new Set<RouteStateAction>([
 ]);
 
 /**
+ * The two cohorts, defined the same way `services` defines its four axes —
+ * which is the authoritative split, read straight off the engine's
+ * `routeState` label.
+ *
+ * KEPT = what actually reached the destination: `pass`, plus series with no
+ * `routeState` label at all. The trailing `|` in the alternation matches the
+ * empty string, and PromQL treats an absent label as empty, so this stays
+ * absence-tolerant for series predating the receiver's label stamping.
+ *
+ * ACTED = everything the receiver did something to, so everything the
+ * destination did NOT receive: offload, compact, tier_down, drop, sample.
+ *
+ * Previously `kept` was `routeState!="drop"` and `dropped` was
+ * `routeState="drop"`. Both were wrong, in opposite directions, because a
+ * cohort is a SET of states and `!=`/`=` can only name one:
+ *
+ *   - `kept` counted offloaded and compacted bytes as delivered. A pattern
+ *     100% routed to S3 reported `kept_share_pct: 100`.
+ *   - `dropped` saw only the literal `drop` action, so the offload cohort was
+ *     invisible to every tool that used it.
+ *
+ * Measured on the demo env: `services` reported cart 88% offloaded
+ * (260.95 GB offload / 34.90 GB passed) while `event_lookup`, `top_patterns`
+ * and `pattern_trend` all reported cart 0% reduced, 100% kept — an 8x
+ * disagreement on the single largest offload claim in the environment. The
+ * same split produced 77% (services/savings, counting drop+offload) versus
+ * 49% (estimate_savings, counting drop only) for one window, and made
+ * `top_patterns(include:"dropped")` emit a false "routeState enrichment is
+ * not wired" diagnostic whenever a service's cohort was offload rather than
+ * drop.
+ */
+export const KEPT_STATES_RE = 'pass|';
+export const ACTED_STATES_RE = 'offload|compact|tier_down|drop|sample';
+
+/**
  * Map the user-facing cohort selector to a single `routeState`
  * filter-value (or null for the pre-decision union).
  *
- * Back-compat: `kept` / `dropped` / `both` behave EXACTLY as before. The
- * generalization is that any other single action name yields an exact
- * `routeState="<action>"` selector (run alone, no dual query).
+ * NOT back-compatible: `kept` and `dropped` now select SETS of route states
+ * (see KEPT_STATES_RE / ACTED_STATES_RE) rather than the single `drop` value.
+ * Any other single action name still yields an exact `routeState="<action>"`
+ * selector (run alone, no dual query), so `'drop'` remains available for the
+ * literal hard-drop cohort.
  *
- * `runBoth` tells the executor whether to issue the second
- * `routeState="drop"` query in parallel (only `both` does).
+ * `runBoth` tells the executor whether to issue the second acted-on-cohort
+ * query in parallel (only `both` does).
  */
 export function includeToSelector(include: IncludeCohort): {
   droppedFilter: FilterValue | null;
   runBoth: boolean;
 } {
   if (include === 'kept')
-    return { droppedFilter: { op: '!=', val: 'drop' }, runBoth: false };
+    return { droppedFilter: { op: '=~', val: KEPT_STATES_RE }, runBoth: false };
   if (include === 'dropped')
-    return { droppedFilter: { op: '=', val: 'drop' }, runBoth: false };
+    return { droppedFilter: { op: '=~', val: ACTED_STATES_RE }, runBoth: false };
   if (include === 'both') return { droppedFilter: null, runBoth: true };
   // Any other action name → that action's exact cohort. `drop` already
   // returned above via the `dropped` alias path is unreachable here, but the

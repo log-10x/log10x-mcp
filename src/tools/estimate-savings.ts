@@ -838,10 +838,10 @@ export async function runEstimateForecast(
     : await resolveMetricsEnv(env, QUERY_BUDGET.cheap);
 
   // Build the scope selector using the same buildSelector path as top_patterns:
-  // routeState!="drop" (absence-tolerant kept cohort) + optional service filter.
+  // the KEPT cohort (absence-tolerant) + optional service filter.
   // This replaces selectorWithEnv() which used tenx_app=~"reporter|receiver".
   const scopeFilters: Record<string, FilterValue> = {
-    routeState: { op: '!=', val: 'drop' },
+    routeState: { op: '=~', val: pql.KEPT_STATES_RE },
   };
   if (args.service) {
     scopeFilters[env.labels.service] = args.service;
@@ -851,7 +851,7 @@ export async function runEstimateForecast(
   // The selector is the routeState+service part; metricsEnv is appended via
   // the promql helpers internally. We build it manually to match the group-by-hash shape.
   const selectorParts: string[] = [
-    `routeState!="drop"`,
+    `routeState=~"${pql.KEPT_STATES_RE}"`,
     `${env.labels.env}="${metricsEnv}"`,
   ];
   if (args.service) {
@@ -877,7 +877,7 @@ export async function runEstimateForecast(
   // Group by hash + service + message_pattern; take the dominant (service,
   // descriptor) per hash by bytes (same tie-break as extractHashContainerMap).
   const hashServiceQuery =
-    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{routeState!="drop",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
+    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{routeState=~"${pql.KEPT_STATES_RE}",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
 
   // increase[observation_window] legs surface exact bytes/$ to the user → heavy
   // budget. distinctCount is a count-of-counts disclosure value → cheap. Each
@@ -1508,21 +1508,26 @@ export async function runEstimateVerify(
     !!args.baseline_offset && PROMQL_DURATION_RE.test(args.baseline_offset);
   const baseOffsetClause = baselineOffsetValid ? ` offset ${args.baseline_offset}` : '';
 
-  // 1. Baseline: bytes that PASSED the engine (no drops) over baseline_window.
-  //    The engine emits the routeState label as a state NAME string
-  //    ("drop" for capped events). Older series may omit the label entirely.
-  //    Using `routeState!="drop"` covers BOTH: matches other states AND
-  //    label-absent. The negative-equality form matches the kept cohort
-  //    without excluding future kept states (regex alternation is reserved).
-  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]${baseOffsetClause}))`;
-  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.baseline_window}]${baseOffsetClause}))`;
+  // 1. Baseline: bytes that actually reached the destination over
+  //    baseline_window. The engine stamps routeState as a state NAME
+  //    ("pass" | "offload" | "compact" | "tier_down" | "sample" | "drop");
+  //    older series may omit the label entirely.
+  //
+  //    KEPT is `routeState=~"pass|"` — the trailing `|` matches the empty
+  //    string and PromQL treats an absent label as empty, so this stays
+  //    absence-tolerant. The former `routeState!="drop"` counted offloaded
+  //    and compacted bytes as delivered, which is why verify mode reported
+  //    49% reduction on a window where services/savings reported 77%: the
+  //    362 GB offload cohort landed on the wrong side of the split.
+  const baselinePassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.KEPT_STATES_RE}"}[${args.baseline_window}]${baseOffsetClause}))`;
+  const baselineByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.KEPT_STATES_RE}"}[${args.baseline_window}]${baseOffsetClause}))`;
   // 2. Post: same query over post_window.
   const postTotalQuery = `sum(increase(${BYTES_METRIC}{${baseSelector}}[${args.post_window}]))`;
-  const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.post_window}]))`;
-  const postDroppedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
-  const postPassedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState!="drop"}[${args.post_window}]))`;
+  const postPassedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.KEPT_STATES_RE}"}[${args.post_window}]))`;
+  const postDroppedQuery = `sum(increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.ACTED_STATES_RE}"}[${args.post_window}]))`;
+  const postPassedByHashQuery = `sum by (${hashLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.KEPT_STATES_RE}"}[${args.post_window}]))`;
   const patternLabel = env.labels.pattern;
-  const postDroppedByHashQuery = `sum by (${hashLabel}, ${patternLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
+  const postDroppedByHashQuery = `sum by (${hashLabel}, ${patternLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.ACTED_STATES_RE}"}[${args.post_window}]))`;
 
   const [
     baselineTotalRes,
@@ -1574,7 +1579,7 @@ export async function runEstimateVerify(
     !!(args.cap_csv_content || args.action_intent_content);
   let patternToContainer = new Map<string, string>();
   if (hasActionSource && postDroppedBytes > 0) {
-    const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState="drop"}[${args.post_window}]))`;
+    const dropByPairQuery = `sum by (${hashLabel}, ${containerLabel}) (increase(${BYTES_METRIC}{${baseSelector},routeState=~"${pql.ACTED_STATES_RE}"}[${args.post_window}]))`;
     // Best-effort container attribution: the per-pair value only ranks which
     // container owns a hash (no exact byte/$ reaches the user), so the cheap
     // budget is right. On timeout/error iQueryInstant resolves null and

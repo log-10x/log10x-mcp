@@ -2,7 +2,7 @@
  * Volume-lens honesty contract for log10x_pattern_trend.
  *
  * Trend-specific: the factor is computed from an ENV-WIDE total (NOT the
- * pattern's own bytes), with routeState!="drop" spliced into the basis query.
+ * pattern's own bytes), with the KEPT cohort selector spliced into the basis query.
  * Magnitudes (time_series[].bytes, totals, peak/low/baseline/recent, $) scale;
  * change_pct / timestamps / sample_count / spike flags are invariant.
  */
@@ -28,8 +28,9 @@ const ENV_WINDOW_BYTES = 600 * GB; // env-wide total over the window
 function backend(opts: { emptyEnvTotal?: boolean } = {}) {
   const instant = (q: string) => {
     if (q.startsWith('count(')) return empty(); // edge probe → cloud
-    // env-total basis: sum(increase(...{... ,routeState!="drop"}...)) — instant
-    if (q.startsWith('sum(increase') && q.includes('routeState!="drop"')) {
+    // env-total basis: sum(increase(...{... ,routeState=~"pass|"}...)) — instant.
+    // KEPT is now a SET selector, not `!="drop"`: see promql.KEPT_STATES_RE.
+    if (q.startsWith('sum(increase') && q.includes('routeState=~"pass|"')) {
       return opts.emptyEnvTotal ? empty() : scalar(ENV_WINDOW_BYTES);
     }
     return empty();

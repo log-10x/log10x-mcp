@@ -800,7 +800,7 @@ async function executeRetrieverQueryInner(
             const sharePhrase =
               share === null || projected.kept_timed_out
                 ? 'kept-side share query slow on a heavy cohort, share not computed'
-                : `~${share.toFixed(0)}% of recent volume marked \`routeState="drop"\``;
+                : `~${share.toFixed(0)}% of recent volume acted on by the receiver (offload | compact | tier_down | drop | sample)`;
             if (resp.events.length === 0) {
               lines.push(
                 `> **Reduction detected, no events found**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}), but this query returned no events. The likely reason: it was HARD-DROPPED (not archived), or the offload bucket is not wired into this retriever. Only patterns the receiver OFFLOADS to S3 are fetchable here — check \`log10x_advise_retriever\` for the bucket recipe.`,
@@ -851,7 +851,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_advise_retriever',
       args: {},
-      reason: 'pattern(s) in the drop/offload cohort (routeState="drop") — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
+      reason: 'pattern(s) in the receiver acted-on cohort (offload | compact | tier_down | drop | sample) — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
     });
   }
   const block = renderNextActions(nextActions);

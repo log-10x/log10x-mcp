@@ -47,20 +47,21 @@ export const trendSchema = {
   ),
   view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
-  // dropped flag. Three states: `kept` (default, pre-PL-12 behavior)
-  // = events the engine forwarded as-is (selector `routeState!="drop"`,
-  // absence-tolerant so legacy series without the label still match);
-  // `dropped` = events stamped routeState="drop" by the engine;
-  // `both` = the pre-decision union, with a parallel `dropped_*` series
-  // added to the envelope so a single call surfaces the offload share
-  // over time. The dual-query path runs both queries in parallel.
+  // dropped flag. Three states: `kept` (default) = events that actually
+  // reached the destination (selector `routeState=~"pass|"`, absence-tolerant
+  // so legacy series without the label still match); `dropped` = everything
+  // the receiver acted on and the destination therefore did NOT receive
+  // (offload | compact | tier_down | drop | sample); `both` = the
+  // pre-decision union, with a parallel `dropped_*` series added to the
+  // envelope so a single call surfaces the offload share over time. The
+  // dual-query path runs both queries in parallel.
   include: z
     .enum(['kept', 'dropped', 'both'])
     .default('kept')
     .describe(
       'Which engine-decision cohort to scope the trend to. ' +
-      '`kept` (default) = events the engine forwarded as-is (routeState!="drop") — the pre-PL-12 behavior. ' +
-      '`dropped` = events stamped routeState="drop" by the engine (the offload/down-tier cohort). ' +
+      '`kept` (default) = events that actually reached the destination (routeState=~"pass|", absence-tolerant). ' +
+      '`dropped` = everything the receiver acted on, so everything the destination did NOT receive (offload | compact | tier_down | drop | sample). Pass `drop` for the literal hard-drop cohort alone. ' +
       '`both` = the pre-decision union; envelope adds a parallel `dropped_time_series` and `dropped_share_pct` so one call shows offload share over time. ' +
       'Use `dropped` to verify post-deploy realised savings or to chart "what we are offloading right now". ' +
       'Use `both` to overlay kept vs dropped on the same window.'
@@ -456,8 +457,11 @@ async function executeTrendInner(
   // selector) AND the dropped slice, joined by timestamp downstream.
   const { droppedFilter, runBoth } = pql.includeToSelector(include);
   const baseQuery = pql.patternBytesOverTime(pattern, metricsEnv, step);
-  const spliceRouteState = (q: string, op: '=' | '!=', val: string) =>
-    q.replace(/\}\[/, `,routeState${op}"${val}"}[`);
+  const spliceRouteState = (
+    q: string,
+    op: '=' | '!=' | '=~' | '!~',
+    val: string,
+  ) => q.replace(/\}\[/, `,routeState${op}"${val}"}[`);
   // `includeToSelector` only returns the object form (never a raw string)
   // for `kept`/`dropped`, so narrow with a type guard the compiler accepts.
   let primaryQuery: string;
@@ -466,16 +470,21 @@ async function executeTrendInner(
   } else {
     primaryQuery = baseQuery;
   }
-  const droppedQuery = runBoth ? spliceRouteState(baseQuery, '=', 'drop') : null;
+  // The `both` dual query must use the same ACTED cohort as `dropped`, or the
+  // `dropped_*` envelope fields would report only hard-drops and silently omit
+  // offload/compact/tier_down/sample.
+  const droppedQuery = runBoth
+    ? spliceRouteState(baseQuery, '=~', pql.ACTED_STATES_RE)
+    : null;
   // Volume-lens basis: the ENV-WIDE total (NOT this pattern's own total —
   // a single-pattern view; scaling against the pattern's own bytes would blow
-  // one pattern up to the whole stated volume). Splice routeState!="drop" into
+  // one pattern up to the whole stated volume). Splice the KEPT cohort into
   // pql.totalBytes (which has no cohort filter) so the denominator matches the
-  // kept cohort and the factor isn't skewed by dropped bytes.
+  // kept cohort and the factor isn't skewed by acted-on bytes.
   const envTotalQuery = spliceRouteState(
     pql.totalBytes(metricsEnv, tf.range, env.labels),
-    '!=',
-    'drop',
+    '=~',
+    pql.KEPT_STATES_RE,
   );
   const [res, droppedRes, envTotalRes] = await Promise.all([
     // Primary + dropped legs surface exact bytes/series to the user → heavy
