@@ -365,6 +365,24 @@ export interface RetrieverSummary {
 }
 
 export interface RetrieverQueryResponse {
+  /**
+   * How the fan-out was judged complete.
+   *
+   * `marker_count_confirmed` — the coordinator published `expectedMarkers` and
+   * we counted exactly that many. The result set is complete.
+   *
+   * `quiet_window_inferred` — the coordinator could not know the count (the
+   * Lambda flavor dispatches scan tasks to SQS and exits; stream markers are
+   * written by other processes whose number depends on bloom matches), so we
+   * waited for the marker set to go quiet. That is a GUESS. It cannot tell
+   * "every worker finished" from "the next worker is slow", and a short read
+   * here is silent.
+   *
+   * Never render an inferred result as verified-complete. Absent this flag a
+   * forensic query returned 330 of 1,217 events while reporting
+   * `partial_results: false` and "no worker reported partial results".
+   */
+  completenessBasis?: 'marker_count_confirmed' | 'quiet_window_inferred';
   queryId: string;
   target: string;
   from: string;
@@ -1323,19 +1341,44 @@ async function waitForMarkerStability(
 ): Promise<S3ListEntry[]> {
   const started = Date.now();
   let previous: string[] = [];
-  let stableCount = 0;
+  let lastChangeAt = Date.now();
+
+  // Quiet window: how long the marker set must stay UNCHANGED before we call
+  // the fan-out complete. This must exceed the natural inter-marker arrival
+  // gap, or we declare completion mid-flight and silently return a partial
+  // result set.
+  //
+  // Measured on the demo Lambda retriever (20-way fan-out, reserved
+  // concurrency 10, 6144 MB): markers for a single query land over an 8-10 s
+  // span with inter-marker gaps of 0-5 s. The previous heuristic — two
+  // consecutive identical polls at the 1500 ms default, i.e. a ~3 s quiet
+  // window — is SHORTER than the observed 5 s worst-case gap, so it returned
+  // early and non-deterministically: four runs of the same query recovered
+  // 4, 9, 10 and 10 of 10 result blobs (42-100% recall) while all four
+  // reported partial_results: false.
+  //
+  // 12 s gives >2x headroom over the measured worst case. Override with
+  // LOG10X_RETRIEVER_QUIET_MS when a deployment's fan-out is wider or slower.
+  const quietMs = Math.max(
+    pollMs * 2,
+    parseInt(process.env.LOG10X_RETRIEVER_QUIET_MS || '12000', 10)
+  );
 
   while (Date.now() - started < timeoutMs) {
     const entries = await s3List(bucket, markerPrefix);
     const keys = entries.map((e) => e.Key).sort();
 
-    if (keys.length > 0 && keys.length === previous.length && keys.every((k, i) => k === previous[i])) {
-      stableCount++;
-      if (stableCount >= 2) {
+    const unchanged =
+      keys.length > 0 &&
+      keys.length === previous.length &&
+      keys.every((k, i) => k === previous[i]);
+
+    if (unchanged) {
+      if (Date.now() - lastChangeAt >= quietMs) {
         return entries;
       }
     } else {
-      stableCount = keys.length > 0 ? 1 : 0;
+      lastChangeAt = Date.now();
     }
     previous = keys;
     await sleep(pollMs);
@@ -1552,9 +1595,19 @@ export async function runRetrieverQuery(
   // stability heuristic for older retrievers that don't write it.
   const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
 
+  // How we decided the fan-out was done. `confirmed` means the coordinator
+  // told us how many markers to expect and we counted them. `inferred` means
+  // we watched the marker set go quiet and GUESSED — correct most of the time,
+  // but it cannot distinguish "all workers finished" from "the next worker is
+  // slow". Callers MUST surface this: silently reporting a quiet-window result
+  // as complete is how a forensic query returned 27% of its events while
+  // stating that no worker reported partial results.
+  let completenessBasis: 'marker_count_confirmed' | 'quiet_window_inferred' = 'quiet_window_inferred';
+
   if (doneInfo && (doneInfo.expectedMarkers ?? 0) > 0) {
     const tailBudgetMs = Math.min(20_000, Math.max(0, timeoutMs - (Date.now() - started)));
     await waitForMarkerCount(bucket, markerPrefix, doneInfo.expectedMarkers ?? 0, pollMs, tailBudgetMs);
+    completenessBasis = 'marker_count_confirmed';
   } else {
     // Two cases land here:
     //   (a) _DONE.json missing entirely (legacy retriever) — pure stability fallback.
@@ -1758,6 +1811,11 @@ export async function runRetrieverQuery(
     ...(transport === 'sqs' && sqsStarted !== undefined
       ? { sqsLatencyMs: Date.now() - sqsStarted }
       : {}),
+    // How the fan-out was judged complete. See the assignment above: on the
+    // Lambda flavor the coordinator cannot know the marker count, so this is
+    // `quiet_window_inferred` and the result may be short. Renderers MUST NOT
+    // present an inferred result as verified-complete.
+    completenessBasis,
   };
 
   // Attach CloudWatch-sourced execution diagnostics. Best-effort — polling

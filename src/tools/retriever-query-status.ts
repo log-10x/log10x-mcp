@@ -337,8 +337,24 @@ async function runDiagnosticsEngine(params: {
   const streamRequests = done.streamRequests ?? 0;
   const scanned = done.scanned ?? 0;
 
-  // Dispatcher failure detection: tasks submitted but nothing scanned or streamed
-  if (reason === 'dispatched' && submittedTasks > 0 && streamRequests === 0 && scanned === 0) {
+  // Dispatcher failure detection: tasks submitted but nothing scanned or streamed.
+  //
+  // GUARD: in remote-dispatch (Lambda) mode the coordinator's scanned /
+  // streamRequests / matched counters only ever see LOCAL work, so they are
+  // STRUCTURALLY zero on every healthy query — the same fingerprint this rule
+  // keys on. Result files under qr/ are written by the remote workers, so
+  // their presence is positive proof the dispatch actually worked. Without
+  // this guard every successful Lambda-flavor query is reported as
+  // `dispatcher_failure` with a remediation ("upgrade to chart 1.0.21+") that
+  // is doubly wrong: the Lambda flavor runs no Helm chart at all, and no
+  // retriever-10x 1.0.21 is published.
+  if (
+    reason === 'dispatched' &&
+    submittedTasks > 0 &&
+    streamRequests === 0 &&
+    scanned === 0 &&
+    eventsReturned === 0
+  ) {
     evidence.push(`_DONE.json: reason="${reason}", submittedTasks=${submittedTasks}, streamRequests=${streamRequests}, scanned=${scanned}`);
     evidence.push(
       'This is the numeric fingerprint of the chart 1.0.20 incomplete streamer->retriever rename: ' +
