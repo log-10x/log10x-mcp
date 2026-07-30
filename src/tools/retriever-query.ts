@@ -33,6 +33,7 @@ import {
   isRetrieverConfigured,
   normalizeTimeExpression,
   buildPatternSearch,
+  buildArchiveHashSearch,
   retrieverResultsLocation,
   type RetrieverQueryRequest,
   type RetrieverEvent,
@@ -67,7 +68,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `tenx_hash == "<hash>"` and no name resolution runs. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the archive re-derives its own `tenx_hash` field per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
@@ -410,9 +411,14 @@ export async function executeRetrieverQuery(
   // the pattern_not_resolved error path. Precedence: explicit `search`
   // wins (agent authored it), then `pattern_hash` (chain-stable identity),
   // then `pattern` (Reporter name, may resolve later via buildPatternSearch).
+  //
+  // The predicate is a TEXT-TOKEN match, NOT a `tenx_hash` field equality. A
+  // field equality here matched nothing, ever: the archive re-derives `tenx_hash`
+  // from the grouped event, so its value is not the per-line hash the metrics
+  // surface publishes. See buildArchiveHashSearch in retriever-api for the
+  // measured evidence.
   if (!args.search && args.pattern_hash) {
-    const safeHash = args.pattern_hash.trim().replace(/"/g, '');
-    args.search = `tenx_hash == "${safeHash}"`;
+    args.search = buildArchiveHashSearch(args.pattern_hash);
   }
 
   const sumOut: { data?: RetrieverQuerySummary } = {};
@@ -507,7 +513,7 @@ export async function executeRetrieverQuery(
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
   }
   // Prior code chained retriever_series only when `d.pattern` was set.
-  // Hash-keyed callers (pattern_hash auto-built a `tenx_hash == "..."`
+  // Hash-keyed callers (pattern_hash auto-built an `includes(text, "...")`
   // search) had pattern undefined and lost the follow-on action entirely.
   // Use pattern_hash → search as the chained identity when pattern is absent.
   if (d.events_matched > 0) {

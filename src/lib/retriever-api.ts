@@ -300,6 +300,49 @@ export function buildPatternSearch(pattern: string): string {
   return `tenx_user_pattern == "${safe}"`;
 }
 
+/**
+ * Build an archive search for a pattern_hash taken from the METRICS surface.
+ *
+ * The metrics surface and the archive do not share an identity space, and that is
+ * the single reason "retrieve the offloaded events for this pattern" came back
+ * empty through the documented chain.
+ *
+ * `tenx_hash` on the archive read path is RE-DERIVED from the grouped event, not
+ * read from the stored envelope (initialize/message/message-template.js stamps it
+ * from the group's symbolSequence). Multi-line grouping collapses many
+ * receiver-stamped lines into ONE read-time identity, so the field value differs
+ * from the per-line hash the Reporter published. Measured against the demo
+ * environment, same window, same archive:
+ *
+ *   metrics (top_patterns): FU1__vh8hbY 57.8%   NiDD7PpZw48 28.6%   +2 more
+ *   archive (read-time):    KJrTvZAaIhI  <- ALL 1,025 events carry this one value
+ *
+ *   tenx_hash == "FU1__vh8hbY"     ->    0 events  (bloomMatched 18, 1.01 MB read)
+ *   tenx_hash == "KJrTvZAaIhI"     -> 1025 events
+ *   includes(text, "FU1__vh8hbY")  ->  608 events  (59.3% vs 57.8% expected)
+ *   includes(text, "NiDD7PpZw48")  ->  290 events  (28.3% vs 28.6% expected)
+ *
+ * The stamped hash survives in the raw event text, which is also why the Bloom
+ * filter matched blobs for a predicate that could never match an event: the index
+ * is built over that text. Matching it as a TOKEN recovers the correct per-pattern
+ * cohort, and the two independent cohorts reconcile against their metrics shares
+ * to within 1.5 points.
+ *
+ * A field equality cannot be used, and a caller cannot discover the read-time
+ * value without first reading a result file, which is not an API.
+ *
+ * Substring rather than equality is a deliberate tradeoff: an 11-char base64url
+ * hash occurring incidentally elsewhere in an event would be a false positive.
+ * That is preferable to silently returning nothing. The clean fix is engine-side,
+ * having the read path preserve the stored per-line `tenx_hash` (the archive
+ * objects already carry it as a JSON field) rather than re-deriving it. This makes
+ * the documented chain work in the meantime.
+ */
+export function buildArchiveHashSearch(hash: string): string {
+  const safe = hash.trim().replace(/"/g, '');
+  return `includes(text, "${safe}")`;
+}
+
 export interface RetrieverEvent {
   timestamp?: string;
   text?: string;

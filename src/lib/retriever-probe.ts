@@ -29,6 +29,10 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+// Pure string builder, and retriever-api does not import this module, so a static
+// import introduces no cycle. The rest of this file imports retriever-api lazily
+// inside the submit helper.
+import { buildArchiveHashSearch } from './retriever-api.js';
 
 const execFileP = promisify(execFile);
 
@@ -479,7 +483,11 @@ export async function runRetrieverProbe(
   let submitErr = '';
   try {
     const resp = await deps.submitRetrieverQuery({
-      search: `tenx_hash == "${pickedHash}"`,
+      // pickedHash comes from the METRICS backend (top-volume hash), which is a
+      // different identity space from the archive's re-derived `tenx_hash`. A field
+      // equality made this probe report a broken chain on a healthy one. See
+      // buildArchiveHashSearch in retriever-api.
+      search: buildArchiveHashSearch(pickedHash),
       from: `now-${windowMinutes}m`,
       to: 'now',
       target: 'app',
