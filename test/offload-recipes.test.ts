@@ -21,6 +21,8 @@ import {
   cloudwatchIaRecipe,
   azureLogsTierRecipe,
   renderOffloadSection,
+  fluentBitCoralogixRecipe,
+  coralogixMonitoringRecipe,
   otherOffloadForwarders,
   type OffloadForwarderId,
 } from '../src/lib/offload-recipes.js';
@@ -244,4 +246,75 @@ test('renderOffloadSection for azure-monitor renders BOTH Basic and Auxiliary (c
   // does NOT render the Azure tier section for a non-Azure destination
   const cw = renderOffloadSection(PARAMS, 'fluentd', 'cloudwatch');
   assert.ok(!/Azure Monitor/.test(cw), 'Azure section gated out on cloudwatch');
+});
+
+// ---------------------------------------------------------------------------
+// Coralogix. This recipe INVERTS the rule every other recipe in the file obeys
+// ("on EVERY branch the routeState marker is stripped"), so the tests below
+// exist to stop someone restoring the strip for consistency and silently
+// breaking tier selection.
+// ---------------------------------------------------------------------------
+
+const CX = { ...PARAMS, domain: 'cx498.coralogix.com' };
+
+test('coralogix recipe does NOT strip routeState (it is what the policy matches)', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // The strip primitives every other fluent-bit branch uses must be absent for
+  // the routeState key specifically.
+  assert.ok(
+    !/Remove_key\s+routeState/.test(r.body),
+    'routeState must survive: TCO policies evaluate BEFORE enrichment, so a stripped marker is unmatchable'
+  );
+  // The internal routing key is still cleaned up.
+  assert.ok(r.body.includes('rec["_route"]=nil'), '_route should be removed from the shipped body');
+});
+
+test('coralogix recipe maps routeState onto subsystemName', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  assert.ok(r.body.includes('out["subsystemName"]'), 'lua must set subsystemName');
+  assert.ok(
+    r.body.includes('(r=="tier_down") and "tier_down" or "app"'),
+    'subsystem must be derived FROM routeState, not hardcoded'
+  );
+  // subsystem is the matcher available on every provider version and on the
+  // plain HTTP API, so it is the fallback when dpxl_expression is unavailable.
+  assert.ok(r.body.includes('ingress.cx498.coralogix.com'), 'ingest host must be templated from domain');
+  assert.ok(r.body.includes('/logs/v1/singles'), 'singles endpoint');
+});
+
+test('coralogix recipe keeps tier_down on the SIEM path, not a second sink', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // Unlike CW-IA / Datadog Flex, tier_down must NOT be retagged away: on
+  // Coralogix it ships to the same endpoint and only the subsystem differs.
+  assert.ok(
+    !/Rule\s+\$_route\s+\^tier_down\$/.test(r.body),
+    'tier_down must not be split to its own tag on the coralogix path'
+  );
+  assert.ok(/Rule\s+\$_route\s+\^offload\$/.test(r.body), 'offload still splits to S3');
+  assert.ok(/Rule\s+\$_route\s+\^drop\$/.test(r.body), 'drop still splits to null');
+});
+
+test('coralogix policy recipe ships both matcher forms and dates the dpxl one', () => {
+  const r = coralogixMonitoringRecipe();
+  assert.ok(r.body.includes('dpxl_expression'), 'form A: direct body-field match');
+  assert.ok(r.body.includes("<v1> $d.routeState == 'tier_down'"), 'dpxl needs the <v1> version prefix');
+  assert.ok(r.body.includes('~> 3.4'), 'dpxl_expression landed in provider 3.4.0; pin must say so');
+  assert.ok(r.body.includes('subsystems'), 'form B: subsystem match for pre-3.4 providers');
+  assert.ok(r.body.includes('medium'), 'medium == Monitoring');
+  // Policy creation is now verified live, but BILLING attribution is not, and
+  // the note must keep saying so. This assertion is the honesty gate: if
+  // someone upgrades the claim to "verified" wholesale, this fails.
+  assert.match(r.note, /VERIFIED BY APPLY/);
+  assert.match(r.note, /Still UNVERIFIED/);
+});
+
+test('the dpxl form documents the WIDER exclusivity the server enforces', () => {
+  const r = coralogixMonitoringRecipe();
+  // The provider docs say dpxl_expression is exclusive with `severities`. The
+  // server also rejects it alongside applicationRule/subsystemRule. Shipping
+  // the narrower claim would produce configs that fail on apply.
+  // The phrase wraps across comment lines, so assert on the parts.
+  assert.ok(r.body.includes('EXCLUSIVITY IS WIDER'), 'must flag the wider exclusivity');
+  assert.ok(r.body.includes('applicationRule'), 'must name applicationRule as also-excluded');
+  assert.ok(r.body.includes('subsystemRule'), 'must name subsystemRule as also-excluded');
 });

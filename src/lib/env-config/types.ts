@@ -66,7 +66,7 @@ export const clusterIdentitySchema = z.object({
  * and the explainer copy on commitment_report.
  */
 export const siemDestinationSchema = z.object({
-  siem_vendor: z.enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'other']),
+  siem_vendor: z.enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix', 'other']),
   region: z.string().optional(),
   log_group_prefix: z.string().optional(),
   ingest_url: z.string().optional(),

@@ -1047,8 +1047,15 @@ resource "coralogix_tco_policies_logs" "tenx" {
   policies = [
     # FORM A — match the routeState body field directly (provider >= 3.4.0).
     # The engine's marker drives tier selection with no label mapping at all.
-    # \`dpxl_expression\` is MUTUALLY EXCLUSIVE with \`severities\`: set exactly one.
     # The \`<v1>\` version prefix is REQUIRED.
+    #
+    # EXCLUSIVITY IS WIDER THAN THE PROVIDER DOCS SAY. They call
+    # \`dpxl_expression\` mutually exclusive with \`severities\`. The server is
+    # stricter: "Cannot have both rules (applicationRule, subsystemRule,
+    # severities) and dpxlExpression". So a dpxl policy CANNOT also be scoped
+    # to an application or subsystem — it is expression-only, evaluated across
+    # everything. Scope it inside the expression instead, e.g.
+    #   "<v1> $d.routeState == '${sub}' && $l.applicationname == 'checkout'"
     {
       name            = "10x tier_down -> Monitoring"
       priority        = "medium"   # medium == Monitoring
@@ -1077,14 +1084,72 @@ resource "coralogix_tco_policies_logs" "tenx" {
       'dashboarding, stored in the customer\'s own S3 — so this is a down-tier, ' +
       'not an archive, and there is no rehydration step. Data matching no policy ' +
       'stays in High (Frequent Search) by default. ' +
-      'UNVERIFIED BY APPLY: the policy half of this path has not been executed. ' +
-      'Every create attempted against the legacy REST surface ' +
-      '(`POST /api/v1/external/tco/policies`) returned HTTP 400 ' +
-      '`ValidationError: Validation Failed` — including that endpoint\'s own ' +
-      'verbatim documented example — so tier ASSIGNMENT is not confirmed. What ' +
-      'is confirmed is that the field the policy matches on arrives and is ' +
-      'addressable. Treat the priority change itself as untested until a ' +
-      '`terraform apply` lands.',
+      'VERIFIED BY APPLY on a live US2 tenant (provider 3.8.0, CORALOGIX_ENV=US2): ' +
+      'both forms create successfully and read back enabled at priority ' +
+      'PRIORITY_TYPE_MEDIUM. Still UNVERIFIED: that the TCO usage report actually ' +
+      'BILLS a matching event as Medium (that data lags), and whether the dpxl ' +
+      'expression matches `$d.routeState` on a JSON-parsed payload — Form B is ' +
+      'the safe fallback if it does not. ' +
+      'IF YOU ARE DRIVING THIS BY RAW HTTP RATHER THAN TERRAFORM, do not follow ' +
+      'the published TCO REST docs; see coralogixTcoApiContract().',
+  };
+}
+
+/**
+ * The TCO policy HTTP contract as the product actually implements it, recovered
+ * by running the Terraform provider under TF_LOG=DEBUG and replaying its
+ * requests with curl until they succeeded standalone.
+ *
+ * This exists because the published REST documentation is wrong in five
+ * independently reproducible ways, and a reader following it cannot succeed.
+ */
+export function coralogixTcoApiContract(): SiemTierRecipe {
+  return {
+    target: 'coralogix-tco-api',
+    language: 'text',
+    body: `WRITE — atomic overwrite of the ENTIRE policy list (not create-one):
+
+  PUT https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/log-policies/v1
+  Authorization: Bearer <user key with LOGS.TCO:UPDATEPOLICIES>
+  Content-Type: application/json
+
+  {"policies":[
+    {"policy":{"name":"10x tier_down -> Monitoring","priority":"PRIORITY_TYPE_MEDIUM","disabled":false,
+               "subsystemRule":{"name":"tier_down","ruleTypeId":"RULE_TYPE_ID_IS"}},
+     "logRules":{"severities":["SEVERITY_INFO"]}}
+  ]}
+
+READ:
+
+  GET https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/policies/v1?source_type=SOURCE_TYPE_LOGS
+
+Note the HOST: the regional host (e.g. api.us2.coralogix.com), NOT the
+per-team host (api.<team>.coralogix.com) the ingest and query APIs use.
+
+WHERE THE PUBLISHED DOCS ARE WRONG (each reproduced independently):
+
+  1. The documented example cannot ever succeed. It violates two rules at once.
+  2. \`severities\` is REQUIRED and must be NON-EMPTY. Omitted -> 400.
+     Empty array -> 500 "failed to create policy". The docs show it empty.
+  3. \`applicationName\` must be absent or COMPLETE. An empty object -> 400.
+     The docs show an empty object.
+  4. The documented write endpoint is not the one the product uses. Docs say
+     POST /api/v1/external/tco/policies (create-one); the provider and UI use
+     the PUT whole-list overwrite above. Different verb, path, host, semantics.
+  5. \`dpxlExpression\` does not exist on the documented REST API, and the
+     legacy GET cannot represent it: a dpxl policy read back through
+     GET /api/v1/external/tco/policies shows NO matching criteria at all, so a
+     reader of the documented API concludes it matches everything.
+
+The documented POST does work, but only in a shape the docs never show:
+\`severities\` as a non-empty array of integers 1-6
+(debug/verbose/info/warning/error/critical) plus a well-formed or absent
+\`applicationName\`.`,
+    note:
+      'Recovered from the wire, not from documentation. Use the Terraform ' +
+      'resource in coralogixMonitoringRecipe() by preference; this contract is ' +
+      'for callers that cannot run Terraform, and as the evidence base when a ' +
+      'customer reports that the documented TCO API rejects their request.',
   };
 }
 

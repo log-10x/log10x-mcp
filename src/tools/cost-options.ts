@@ -60,7 +60,7 @@ export const costOptionsSchema = {
       'Optional pattern hash to scope the cost option menu to a single pattern. When present, routes_to.args will include a proposed_config row for this hash.'
     ),
   destination: z
-    .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo'])
+    .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix'])
     .optional()
     .describe(
       'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings — overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
