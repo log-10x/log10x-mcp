@@ -335,3 +335,36 @@ test('the advisor surfaces the Coralogix down-tier path only on a coralogix dest
     );
   }
 });
+
+test('coralogix recipe requires delimited encoding, not json (live-run correction)', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  const enc = r.prerequisites.find(p => p.startsWith('Encoding:'));
+  assert.ok(enc, 'must carry an encoding prerequisite');
+  // The generic fluent-bit recipe says "must emit JSON". On this path that is
+  // backwards and fails SILENTLY: json collapses the record into one string
+  // field, the lua cannot read routeState, and every event is mislabelled with
+  // the pass subsystem while still returning HTTP 200.
+  assert.ok(/delimited/.test(enc!), 'must name delimited as the required encoding');
+  assert.ok(/Do NOT set it to `json`/.test(enc!), 'must warn against json explicitly');
+  assert.ok(
+    !/must emit JSON/.test(enc!),
+    'must not inherit the generic recipe instruction, which is wrong here'
+  );
+});
+
+test('coralogix lua falls back to a substring match if routeState is not a field', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // Silent mislabelling is the worst failure mode here, so the lua degrades to
+  // scanning string values for the marker rather than defaulting everything to
+  // the pass subsystem.
+  assert.ok(r.body.includes('string.find'), 'lua needs the fallback scan');
+  assert.ok(r.body.includes('r==nil'), 'fallback must trigger only when the field is absent');
+});
+
+test('coralogix prerequisites warn that TCO policy changes are not instant', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  assert.ok(
+    r.prerequisites.some(p => /NOT instant/.test(p)),
+    'measured propagation delay must be stated; the vendor docs claim immediate'
+  );
+});

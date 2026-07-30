@@ -968,7 +968,7 @@ export function fluentBitCoralogixRecipe(
     Name    lua
     Match   tenx.app
     call    cx_singles
-    code    function cx_singles(tag,ts,rec) local r=rec["routeState"] rec["_route"]=nil local out={} out["applicationName"]="${app}" out["subsystemName"]=(r=="${tierSub}") and "${tierSub}" or "${passSub}" out["severity"]=3 out["text"]=rec return 2,ts,out end
+    code    function cx_singles(tag,ts,rec) local r=rec["routeState"] if r==nil then for k,v in pairs(rec) do if type(v)=="string" and string.find(v,'"routeState":"${tierSub}"',1,true) then r="${tierSub}" end end end rec["_route"]=nil local out={} out["applicationName"]="${app}" out["subsystemName"]=(r=="${tierSub}") and "${tierSub}" or "${passSub}" out["severity"]=3 out["text"]=rec return 2,ts,out end
 
 # 4) Coralogix ingest. \`Format json\` emits ONE JSON ARRAY per flush, which is
 #    exactly what /logs/v1/singles accepts. \`json_date_key false\` stops
@@ -1009,8 +1009,17 @@ export function fluentBitCoralogixRecipe(
       'are mutually exclusive in one policy.',
     prerequisites: [
       ...basePrereqs(p),
-      'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `routeState` key is mangled in a delimited round-trip.',
+      // CORRECTED AGAINST A LIVE RUN. The generic fluent-bit recipe carries the
+      // opposite instruction ("must emit JSON"), and following it here breaks
+      // this recipe SILENTLY: under `json` the engine ships the whole rendered
+      // record as ONE msgpack string field named after the encode expression
+      // (`fullText_of_tenx_hash_and_routeState`), so `rec["routeState"]` in the
+      // lua is nil, every event is labelled with the pass subsystem, and
+      // nothing is ever tiered. Observed: 160/160 events landed in subsystem
+      // `app` with HTTP 200 throughout and no error anywhere.
+      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`. Do NOT set it to `json` on this path — `json` collapses the record into a single string field and the lua can no longer read `routeState`, which mislabels every event with no error. (The lua below carries a substring fallback for this case, but delimited is the supported shape.)',
       'Set `CORALOGIX_SEND_KEY` in the forwarder environment to a Send-Your-Data key for the target team (NOT a user/management key).',
+      'TCO policy changes are NOT instant despite the docs saying "changes take effect immediately". Measured on a live tenant: a freshly enabled policy did not affect routing ~60s after enabling, and did ~6min after. Allow several minutes before concluding a policy does not work.',
       'Do NOT add a `record_modifier` that removes `routeState` on this path: it is the field the TCO policy matches.',
       'The destination-side TCO policy is a SEPARATE apply — see coralogixMonitoringRecipe(). Without it every event stays in High (Frequent Search), which is the documented default when no policy matches.',
     ],
