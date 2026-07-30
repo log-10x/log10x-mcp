@@ -241,6 +241,7 @@ export const baselineSchema = {
       'azure-monitor',
       'gcp-logging',
       'sumo',
+      'coralogix',
     ])
     .optional()
     .describe(
@@ -658,6 +659,7 @@ function autoDetectDestination(env: EnvConfig): SiemId | undefined {
   if (a.includes('gcp') || a.includes('stackdriver') || a.includes('google'))
     return 'gcp-logging';
   if (a.includes('sumo')) return 'sumo';
+  if (a.includes('coralogix') || a === 'cx') return 'coralogix';
   return undefined;
 }
 

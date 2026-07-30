@@ -2252,7 +2252,7 @@ export async function executeCommitmentReport(
   // §B.2: compact rows against a no-op destination signal config drift
   // between the cap CSV and the destination cost model.
   const compactNoOp = (() => {
-    const noOpDests: SiemId[] = ['datadog', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo'];
+    const noOpDests: SiemId[] = ['datadog', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix'];
     if (!noOpDests.includes(commitment.destination)) return false;
     return agg.per_pattern_rows.some((r) => r.action_taken === 'compact');
   })();

@@ -259,11 +259,19 @@ const CX = { ...PARAMS, domain: 'cx498.coralogix.com' };
 
 test('coralogix recipe does NOT strip routeState (it is what the policy matches)', () => {
   const r = fluentBitCoralogixRecipe(CX);
-  // The strip primitives every other fluent-bit branch uses must be absent for
-  // the routeState key specifically.
+  // The marker must survive on the CORALOGIX path (tenx.app) — a stream-level
+  // byte-budget decision cannot be derived by any per-event rule at the
+  // destination, so a stripped marker is unrecoverable. It is still stripped on
+  // the S3 path, so assert the SCOPE of the strip, not its absence: a blanket
+  // `Match tenx.*` strip here would silently disable all tiering.
   assert.ok(
-    !/Remove_key\s+routeState/.test(r.body),
-    'routeState must survive: a stream-level byte-budget decision cannot be derived by any per-event rule at the destination, so a stripped marker is unrecoverable'
+    !/Match\s+tenx\.\*\s*\n\s*Remove_key\s+routeState/.test(r.body),
+    'a tenx.* strip would remove the marker from the Coralogix path too'
+  );
+  assert.match(
+    r.body,
+    /Match\s+tenx\.offload\s*\n\s*Remove_key\s+routeState/,
+    'the S3 slice must still be stripped (it is not what Coralogix reads)'
   );
   // The internal routing key is still cleaned up.
   assert.ok(r.body.includes('rec["_route"]=nil'), '_route should be removed from the shipped body');

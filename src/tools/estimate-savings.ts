@@ -124,6 +124,7 @@ const DEST_ENUM = z.enum([
   'azure-monitor',
   'gcp-logging',
   'sumo',
+  'coralogix',
 ]);
 
 export const estimateSavingsSchema = {
@@ -1881,7 +1882,7 @@ export async function executeEstimateSavings(
   // and cost_options use — so all three tools apply consistent detection logic.
   const VALID_DESTS = [
     'splunk', 'datadog', 'elasticsearch', 'clickhouse',
-    'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo',
+    'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix',
   ] as const;
   type ValidDest = typeof VALID_DESTS[number];
 

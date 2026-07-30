@@ -4,12 +4,15 @@ Reproduces the path behind `fluentBitCoralogixRecipe()` and
 `coralogixMonitoringRecipe()`. Read the STATUS section before quoting anything
 from here.
 
-## STATUS: partially proven
+## STATUS
 
-**Proven, with output in this directory:**
+Superseded twice since first written. This section is the entry point, so it
+states the CURRENT position; the RESULT-*.md files are the evidence.
 
-1. The engine routes a pattern to `tier_down` on a real local run.
-   `RESULT-routestate-distribution.txt` is the engine's own field output:
+**Proven, evidence in this directory:**
+
+1. The engine routes a pattern to `tier_down`. `RESULT-routestate-distribution.txt`
+   is the engine's own field output from the file-in/file-out run:
 
    ```
      44 tier_down,checkout,     <- over cap, action from actions.csv
@@ -17,29 +20,30 @@ from here.
      20 pass,payments,          <- CONTROL: no cap entry, regulator opts out
    ```
 
-   The control matters. `payments` has no row in `caps.csv`, so
+   The control is the point. `payments` has no row in `caps.csv`, so
    `rate-object-cap.js` hits `absoluteCap == 0 -> return true` and never routes.
-   A run where everything came back `tier_down` would prove nothing.
+   A run where everything came back `tier_down` would prove nothing. (The
+   separate 160-event forwarder run in `RESULT-e2e.md` has its own, larger
+   control of 40 — do not mix the two runs' numbers.)
 
-2. `routeState` is a first-class, addressable field in Coralogix once it
-   arrives. Verified against live US2 tenant cx498: server-side
-   `filter $d.routeState == 'tier_down'` and `groupby $d.routeState` both work,
-   and a bogus keypath returns `keypath does not exist` while `routeState` does
-   not. `/logs/v1/singles` parses a nested-object `text` identically to a JSON
-   string, which is why the lua needs no JSON encoder.
+2. The marker reaches the wire. See `WIRE-PROOF-sample.jsonl` and
+   `RESULT-e2e.md`.
+
+3. The split lands in Coralogix, and the tiering happens. See `RESULT-e2e.md`:
+   114 -> subsystem `tier_down`, 46 -> subsystem `app`, and with policies
+   enabled the tier_down slice leaves Frequent Search.
+
+4. A TCO policy matches the `routeState` BODY FIELD with no label at all. See
+   `RESULT-tier-assignment.md`, which isolates it against a subsystem rule.
 
 **NOT proven:**
 
-3. The splice landing on the wire. `encodeField` was confirmed to resolve to
-   `fullText("tenx_hash","routeState")` in the running engine, but spliced bytes
-   were never captured. See "the splice trap" below.
-4. The fluent-bit recipe running end to end into Coralogix. Nothing from this
-   harness reached the tenant.
-5. Tier ASSIGNMENT. Every TCO policy create returned HTTP 400, so no policy has
-   ever existed on this tenant. The priority change is untested.
-
-Claim ceiling: *the routing decision reaches Coralogix as a first-class field
-and lands in the subsystem a policy matches on.* Nothing stronger.
+- That the TCO usage report BILLS the down-tiered slice at the Medium rate.
+  Usage data lags and was never checked, so the per-GB delta rests on published
+  pricing, not an observed invoice.
+- Reading the slice back from Monitoring. It lands in customer-owned S3, which
+  this trial tenant has not configured, so `TIER_ARCHIVE` returns nothing.
+  Absence from Frequent Search is the positive signal here.
 
 ## The traps, each of which fails silently
 

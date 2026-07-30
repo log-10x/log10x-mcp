@@ -511,8 +511,8 @@ export async function executeCostOptions(args: {
   target_percent?: number;
   service?: string;
   pattern_hash?: string;
-  destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
-  siem_lens?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo';
+  destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo' | 'coralogix';
+  siem_lens?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo' | 'coralogix';
   monthly_volume_gb?: number;
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();

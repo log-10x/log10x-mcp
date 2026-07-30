@@ -62,8 +62,16 @@ nil and every event takes the pass branch.
 
 Fixed two ways: the prerequisite now requires the shipped `delimited` default
 and warns against `json` by name, and the lua falls back to scanning string
-values for the marker so a misconfigured pipeline degrades to correct behaviour
-instead of silently mislabelling everything.
+values for the marker.
+
+**Do not overstate that fallback.** It recovers the LABEL only. Verified by
+executing the emitted config in fluent-bit: under the `json` misconfig the
+subsystem comes out right, but `_route` is still nil at the rewrite_tag stage,
+so offload events ship to Coralogix instead of the customer's S3 and drop
+events are NOT dropped. `$d.routeState` also does not exist as a keypath when
+the record is one string field, so the Form A (dpxl) policy cannot fire either;
+only Form B, which matches the label, would work. Correct claim: *the
+tier_down/pass label survives; routing and tiering may still be broken.*
 
 ## Wire proof
 
@@ -71,9 +79,20 @@ instead of silently mislabelling everything.
 own output. `strings` over the raw capture gives 113 x `"routeState":"tier_down"`
 and 47 x `"routeState":"pass"` as literal bytes.
 
+Those counts are from a DIFFERENT run than the 114/46 split below. The
+regulator's byte counters carry across runs, so the exact position of the cap
+crossing shifts by an event or two between runs; 113/47 and 114/46 are two runs
+of the same 160-event input, not one chain counted twice. Do not present them
+as a single figure.
+
 Under `delimited` the spliced text is re-parsed so `routeState` arrives as its
 own record field; under `json` it survives as a literal substring inside the
-single string field. Both captures are in the deliverable, tagged by encodeType.
+single string field.
+
+`WIRE-PROOF-sample.jsonl` as committed is 40/40 `encodeType:"json"` — i.e. it
+shows only the MISCONFIGURED encoding. The supported `delimited` wire shape has
+no committed capture; its evidence is the Coralogix-side query in the Run A
+section above, where `$d.routeState` is filterable as a field.
 
 ## Traps that cost the most time
 

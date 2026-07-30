@@ -379,7 +379,14 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
       '`tenx.app` for the SIEM.',
     prerequisites: [
       ...basePrereqs(p),
-      'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `routeState` key is mangled in a delimited round-trip.',
+      // CORRECTED against a live run (see test/fixtures/coralogix-e2e).
+      // This previously said the return path MUST emit json. That is backwards
+      // and it fails silently on every destination that uses the lua branch
+      // below: under `json` the engine ships the whole rendered record as ONE
+      // msgpack string field named after the encode expression, so
+      // `rec["routeState"]` is nil, no branch matches, and offload/drop
+      // routing quietly stops while everything still returns success.
+      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`, which delivers `routeState` as its own record field. Do NOT set it to `json`: that collapses the record into a single string field, the routing lua stops matching, and the offload/drop slices silently fall through to the SIEM with no error.',
       'The lua filter (marker -> routing key) and `KEEP=true` are both mandatory in this shape: the routes are keyed off `_route`, and KEEP=false drops the re-emitted record (verified live on fluent-bit v5).',
     ],
   };
@@ -992,7 +999,19 @@ export function fluentBitCoralogixRecipe(
     tls.verify On
     Header     Authorization Bearer \${CORALOGIX_SEND_KEY}
 
-# 5) offload slice -> customer-owned S3 as JSONL (unchanged from the base recipe)
+# 5) Strip the routing markers from the S3 slice ONLY.
+#    \`Match tenx.offload\` is deliberately narrow: on the Coralogix path
+#    (tenx.app) \`routeState\` MUST survive to the destination, because the TCO
+#    policy matches it. Without this filter the offloaded objects carry
+#    \`routeState\` and the internal \`_route\` key, so the archived shape differs
+#    from every other recipe and the Retriever indexes two junk fields.
+[FILTER]
+    Name       record_modifier
+    Match      tenx.offload
+    Remove_key routeState
+    Remove_key _route
+
+# 6) offload slice -> customer-owned S3 as JSONL (same layout as the base recipe)
 [OUTPUT]
     Name          s3
     Match         tenx.offload
@@ -1002,7 +1021,7 @@ export function fluentBitCoralogixRecipe(
     use_put_object On
     json_date_format iso8601
 
-# 6) drop slice -> SUPPRESSED
+# 7) drop slice -> SUPPRESSED
 [OUTPUT]
     Name   null
     Match  tenx.drop`,
@@ -1147,8 +1166,12 @@ per-team host (api.<team>.coralogix.com) the ingest and query APIs use.
 WHERE THE PUBLISHED DOCS ARE WRONG (each reproduced independently):
 
   1. The documented example cannot ever succeed. It violates two rules at once.
-  2. \`severities\` is REQUIRED and must be NON-EMPTY. Omitted -> 400.
-     Empty array -> 500 "failed to create policy". The docs show it empty.
+  2. On the RULE-MATCHER form, \`severities\` is required and must be NON-EMPTY.
+     Omitted -> 400. Empty array -> 500 "failed to create policy". The docs show
+     it empty, which cannot work. This does NOT apply to a \`dpxlExpression\`
+     policy: that form excludes severities AND rules, and reads back with
+     \`"severities": []\` — so stated unconditionally, this item would make the
+     dpxl policy in coralogixMonitoringRecipe() impossible to create.
   3. \`applicationName\` must be absent or COMPLETE. An empty object -> 400.
      The docs show an empty object.
   4. The documented write endpoint is not the one the product uses. Docs say
@@ -1228,7 +1251,46 @@ export function renderOffloadSection(
     ''
   );
 
-  if (forwarder) {
+  // Coralogix must NOT be shown the generic recipe. Every generic recipe strips
+  // `routeState` on the output path, and on Coralogix that marker IS the routing
+  // signal the TCO policy matches, so applying the generic artifact leaves the
+  // operator with HTTP 200, no error, and nothing ever tiered. Substitute the
+  // Coralogix shipper for the whole recipe block rather than appending a
+  // warning after a config that already does the wrong thing.
+  const coralogixShipper =
+    destination === 'coralogix' &&
+    getAllowedActionsForDestination('coralogix').includes('tier_down');
+
+  if (coralogixShipper) {
+    const cx = fluentBitCoralogixRecipe({ ...params, domain: '<team>.coralogix.com' });
+    lines.push(
+      '**Fluent Bit — Coralogix build.** This is NOT the generic recipe: it keeps ' +
+        '`routeState` on the wire, because on Coralogix the marker is what the TCO ' +
+        'policy matches. Do not substitute the generic fluent-bit recipe here.',
+      '',
+      '```ini',
+      cx.body,
+      '```',
+      '',
+      `Placement: ${cx.placementNote}`,
+      '',
+      'Prerequisites:',
+      ...cx.prerequisites.map(p => `- ${p}`),
+      '',
+      'Replace `<team>.coralogix.com` with the tenant domain, and set ' +
+        '`CORALOGIX_SEND_KEY` to a Send-Your-Data key.',
+      ''
+    );
+    if (forwarder && forwarder !== 'fluent-bit') {
+      lines.push(
+        `Note: the detected forwarder is \`${forwarder}\`, but only the fluent-bit ` +
+          'shipper has been verified end to end against a live Coralogix tenant. ' +
+          'Porting it means preserving one property: `routeState` must reach the ' +
+          'destination unstripped.',
+        ''
+      );
+    }
+  } else if (forwarder) {
     lines.push(...renderRecipeBlock(forwarder, params), '');
     const others = otherOffloadForwarders(forwarder);
     lines.push(`Other supported forwarders: ${others.join(', ')}.`, '');
@@ -1352,9 +1414,9 @@ export function renderOffloadSection(
           'same endpoint and the policy above moves it. That makes the forwarder half ' +
           'load-bearing — `routeState` must survive to the destination. A byte-budget ' +
           'decision is a property of a stream counted in the sidecar, so no ' +
-          'per-event rule at the destination can derive it. Use ' +
-          '`fluentBitCoralogixRecipe()`, which deliberately does not strip ' +
-          'the marker, rather than the generic fluent-bit recipe above (which does).',
+          'per-event rule at the destination can derive it. The fluent-bit ' +
+          'config rendered above is the Coralogix build and already keeps the ' +
+          'marker; do not swap in a generic recipe, which strips it.',
         ''
       );
     }
