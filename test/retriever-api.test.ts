@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfiguredSync, eventTimestampMs, buildPatternSearch } from '../src/lib/retriever-api.js';
+import { parseTimeExpression, normalizeTimeExpression, isRetrieverConfiguredSync, eventTimestampMs, buildPatternSearch, UNRESOLVABLE_PATTERN_PREFIX } from '../src/lib/retriever-api.js';
 
 test('normalizeTimeExpression: bare `now` becomes $=now()', () => {
   assert.equal(normalizeTimeExpression('now'), '$=now()');
@@ -122,31 +122,74 @@ test('eventTimestampMs: numeric string in millis stays as millis', () => {
 
 // ─── buildPatternSearch ─────────────────────────────────────────────────
 //
-// Translates a Reporter-named pattern (Symbol Message) into a Bloom-filter
-// `search` expression. Required because the deprecated `pattern` field on
-// RetrieverQueryRequest is silently dropped by the body builder; tools
-// passing only `pattern` get an unfiltered scan and wrong-data results.
-// Keep the produced format aligned with retriever-fidelity.ts:351's regex
-// extractor so the pair is invertible.
+// These four tests previously asserted that buildPatternSearch produces
+// `tenx_user_pattern == "<name>"`, and one of them verified that it round-trips
+// against retriever-fidelity's extractor regex.
+//
+// THAT FIELD DOES NOT EXIST. Zero occurrences across the engine, the modules tree
+// and pipeline-extensions; the live metrics backend reports 22 labels and it is
+// not among them (the real pattern identity is `message_pattern`, whose hash is
+// `tenx_hash`); and the archive read path registers five enrichment names, none of
+// which is a pattern identity.
+//
+// So the old suite locked in a fabrication, and the round-trip test made it worse
+// by proving two fabrications were mutually consistent — the extractor regex in
+// retriever-fidelity.ts searches for the same non-existent field, alongside two
+// metrics (`log10x_event_count_total`, `log10x_event_bytes_total`) that appear in
+// that one file and nowhere else. Every name-scoped archive query therefore
+// returned BLOOM_REJECTED_ALL: a confident, authoritative empty answer.
+//
+// A pattern NAME is unsatisfiable against the archive by construction, not merely
+// mis-named. A Symbol Message is DERIVED from the event, so it is never a token in
+// the archived bytes, and the Bloom index holds only text tokens plus template
+// hashes. Measured: `message_pattern == "info_cart_..."` also returns
+// BLOOM_REJECTED_ALL, 0 of 40 blobs. The identity that works is the metrics-side
+// pattern_hash matched as a text token, via buildArchiveHashSearch.
+//
+// buildPatternSearch now throws with that remedy. Erroring beats a silent empty.
 
-test('buildPatternSearch: produces canonical tenx_user_pattern equality', () => {
-  assert.equal(buildPatternSearch('Payment_Gateway_Timeout'), 'tenx_user_pattern == "Payment_Gateway_Timeout"');
+test('buildPatternSearch: refuses a pattern name instead of inventing a field', () => {
+  assert.throws(
+    () => buildPatternSearch('Payment_Gateway_Timeout'),
+    (err: Error) => {
+      assert.ok(err.message.startsWith(UNRESOLVABLE_PATTERN_PREFIX));
+      return true;
+    }
+  );
 });
 
-test('buildPatternSearch: round-trips with retriever-fidelity extractor regex', () => {
-  // Mirrors retriever-fidelity.ts:351 — keep these in sync.
-  const built = buildPatternSearch('Auth_Failed');
-  const m = built.match(/tenx_user_pattern\s*==\s*"([^"]+)"/);
-  assert.ok(m, 'expected match');
-  assert.equal(m![1], 'Auth_Failed');
+test('buildPatternSearch: never emits the non-existent tenx_user_pattern field', () => {
+  for (const name of ['Payment_Gateway_Timeout', '  Auth_Failed  ', 'Bad"Pattern']) {
+    let emitted: string | undefined;
+    try {
+      emitted = buildPatternSearch(name);
+    } catch {
+      continue; // refusing is the correct behaviour
+    }
+    assert.fail(`buildPatternSearch returned a predicate instead of refusing: ${emitted}`);
+  }
 });
 
-test('buildPatternSearch: trims whitespace', () => {
-  assert.equal(buildPatternSearch('  Payment_Gateway_Timeout  '), 'tenx_user_pattern == "Payment_Gateway_Timeout"');
+test('buildPatternSearch: the remedy names pattern_hash and where to get it', () => {
+  try {
+    buildPatternSearch('Payment_Gateway_Timeout');
+    assert.fail('expected a throw');
+  } catch (err) {
+    const msg = (err as Error).message;
+    assert.ok(msg.includes('pattern_hash'), 'must name the identity that works');
+    assert.ok(
+      msg.includes('top_patterns') || msg.includes('event_lookup'),
+      'must say where a caller obtains it'
+    );
+  }
 });
 
-test('buildPatternSearch: strips embedded quotes defensively', () => {
-  // Symbol Messages from the templater never contain quotes, but defensive
-  // stripping prevents an injection-style break of the search expression.
-  assert.equal(buildPatternSearch('Bad"Pattern'), 'tenx_user_pattern == "BadPattern"');
+test('buildPatternSearch: quotes in the rejected name do not escape the message', () => {
+  try {
+    buildPatternSearch('Bad"Pattern');
+    assert.fail('expected a throw');
+  } catch (err) {
+    assert.ok(!(err as Error).message.includes('Bad"Pattern'), 'quote should be stripped');
+    assert.ok((err as Error).message.includes('BadPattern'));
+  }
 });

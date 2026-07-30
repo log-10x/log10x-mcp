@@ -280,24 +280,63 @@ export async function fetchExistingResults(
   return { events, truncated, jsonlObjectCount: jsonlKeys.length, done, target, diagnosis, ...(failedWorkerFiles > 0 ? { failedWorkerFiles } : {}) };
 }
 
+/** Marker prefix for the unresolvable-pattern-name error (caller input). */
+export const UNRESOLVABLE_PATTERN_PREFIX = 'Pattern name not resolvable against the archive:';
+
 /**
- * Build a Bloom-filter `search` expression from a Reporter-named pattern
- * (Symbol Message). Tools that take a user-facing pattern name (the same
- * snake_case identity surfaced by event_lookup, top_patterns, cost_drivers)
- * call this before submitting to runRetrieverQuery so the engine actually
- * scopes the scan to the pattern. Without this translation the engine sees
- * `search: ''` (the deprecated `pattern` field is silently dropped at body
- * build time) and runs unfiltered across the window.
+ * A Reporter-named pattern CANNOT be matched against the offload archive, and
+ * every previous attempt to do so failed silently.
  *
- * The inverse — parsing a pattern back out of a search expression — lives
- * in retriever-fidelity.ts as `extractPatternFromSearch`.
+ * This function used to emit `tenx_user_pattern == "<name>"`. **That field does
+ * not exist.** It appears zero times across the engine, the modules tree and
+ * pipeline-extensions. It is a plausible-looking member of a real family
+ * (`tenx_user_service`, `tenx_user_process` do exist) that the product never
+ * stamps, so every name-scoped archive query returned BLOOM_REJECTED_ALL with
+ * 0 of 40 blobs matched, i.e. a confident empty answer.
  *
- * Pattern values are expected to be snake_case (Symbol Message form). Quotes
- * are stripped defensively; legitimate Symbol Messages never contain them.
+ * Nor is there a working field to substitute. The Bloom index is built over
+ * tokens literally present in the archived bytes, plus template hashes.
+ * Measured against the demo environment, same window:
+ *
+ *   includes(text, "FU1__vh8hbY")                      ->  608   in the text
+ *   tenx_hash == "KJrTvZAaIhI"                         -> 1025   a template hash
+ *   severity_level == "INFO"                           -> 1025   "info" is in the text
+ *   message_pattern == "info_cart_..._GetCartAsync..." ->    0   BLOOM_REJECTED_ALL
+ *   tenx_user_pattern == "info_cart_..."               ->    0   field does not exist
+ *
+ * `message_pattern` is the real `symbolMessageField` (the worker logs
+ * "Enriching TenXObjects with message field: 'message_pattern'"), and it still
+ * cannot be matched: a Symbol Message is a DERIVED label, computed from the
+ * event, never a token in the bytes. No derived label is Bloom-matchable.
+ *
+ * So the name route is not a naming bug with a correct field waiting to be
+ * found. It is unsatisfiable by construction.
+ *
+ * The identity that DOES work is the metrics-side `pattern_hash`, matched as a
+ * text token via {@link buildArchiveHashSearch}. Callers always have it wherever
+ * they have the name: top_patterns returns `pattern_hash` and `symbol_message`
+ * on the same row, and event_lookup resolves a name to a hash. Pass the hash.
+ *
+ * This throws rather than returning a predicate. Erroring with a remedy beats
+ * the previous behaviour of a silent, authoritative-looking zero, which is what
+ * made reviewers conclude the retriever was broken. Affects three call sites:
+ * retriever_query, retriever_series and backfill_metric.
+ *
+ * The inverse — parsing a pattern back out of a search expression — lives in
+ * retriever-fidelity.ts as `extractPatternFromSearch`.
  */
 export function buildPatternSearch(pattern: string): string {
   const safe = pattern.trim().replace(/"/g, '');
-  return `tenx_user_pattern == "${safe}"`;
+  throw new Error(
+    `${UNRESOLVABLE_PATTERN_PREFIX} "${safe}". A Symbol Message is a derived ` +
+      'label computed from the event, so it is never a token in the archived bytes ' +
+      'and the Bloom index cannot match it. The field this previously queried, ' +
+      '`tenx_user_pattern`, does not exist in the engine at all. Pass ' +
+      '`pattern_hash` instead: top_patterns returns it on the same row as the ' +
+      'pattern name, and event_lookup resolves a name to a hash. The hash is ' +
+      'matched as a text token, which works because the Receiver stamps it into ' +
+      'each archived event.'
+  );
 }
 
 /**

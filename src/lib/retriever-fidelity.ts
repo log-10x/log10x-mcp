@@ -153,9 +153,28 @@ export async function fetchReporterPatternStats(
   bytesPerEvent?: number;
   note?: string;
 }> {
+  // NOTE: everything past this guard is now UNREACHABLE, and that is a fix rather
+  // than a regression, because it is built on two fabrications:
+  //
+  //   - the label `tenx_user_pattern`, which does not exist. The live backend
+  //     reports 22 labels and it is not among them. The real pattern identity is
+  //     `message_pattern`, whose hash is `tenx_hash`.
+  //   - the metrics `log10x_event_count_total` / `log10x_event_bytes_total`, which
+  //     appear in this file and nowhere else. The real per-pattern bytes metric is
+  //     `all_events_summaryBytes_total`, used in 29 files.
+  //
+  // The comment below rationalises the absence as "earlier Reporter builds emitted
+  // bytes_total but not count_total". They were never emitted at all.
+  //
+  // extractPatternName looks for a `tenx_user_pattern == "..."` equality in the
+  // search expression, and nothing generates that any more (buildPatternSearch
+  // refuses a name outright, buildArchiveHashSearch emits a text-token match), so
+  // this returns early and the fabricated PromQL is never issued. Rewriting it
+  // against the real metric and label is a separate change that needs verifying
+  // against a live backend, not a swap of identifiers on faith.
   const pattern = extractPatternName(search);
   if (!pattern) {
-    return { note: 'no tenx_user_pattern equality in search expression' };
+    return { note: 'pattern-scoped fidelity comparison unavailable: no pattern identity in the search expression' };
   }
 
   // Rate of events per minute over the last 5m for this pattern.

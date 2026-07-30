@@ -25,7 +25,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { buildArchiveHashSearch, buildPatternSearch } from '../src/lib/retriever-api.js';
+import {
+  buildArchiveHashSearch,
+  buildPatternSearch,
+  UNRESOLVABLE_PATTERN_PREFIX,
+} from '../src/lib/retriever-api.js';
 
 function readSource(relPath: string): string {
   let dir = process.cwd();
@@ -62,16 +66,74 @@ test('base64url hash characters survive intact', () => {
   }
 });
 
-test('the name route is left as a field equality, and that is deliberate', () => {
-  // `tenx_user_pattern` is NOT in the Bloom index: a name-scoped query returned
-  // BLOOM_REJECTED_ALL with 0 of 40 blobs matched. The symbolMessage is a derived
-  // label and does not appear in the raw event text, so includes(text, name)
-  // cannot work either. Fixing this needs a name->hash resolver, which the MCP
-  // does not have. Pinned so a future change is a decision, not an accident.
-  assert.equal(
-    buildPatternSearch('info_cart_cartstore_ValkeyCartStore_GetCartAsync_called_with_userId'),
-    'tenx_user_pattern == "info_cart_cartstore_ValkeyCartStore_GetCartAsync_called_with_userId"'
+test('a pattern NAME is refused, because no field can satisfy it', () => {
+  // The old predicate was `tenx_user_pattern == "<name>"`. That field DOES NOT
+  // EXIST: zero occurrences across the engine, the modules tree and
+  // pipeline-extensions. It is a plausible member of a real family
+  // (tenx_user_service, tenx_user_process are real) that the product never
+  // stamps, so every name-scoped archive query returned BLOOM_REJECTED_ALL,
+  // 0 of 40 blobs: a confident empty answer.
+  //
+  // No substitute field works either. Measured, same window:
+  //   message_pattern == "info_cart_..."  -> 0, BLOOM_REJECTED_ALL
+  // and message_pattern IS the real symbolMessageField (workers log
+  // "Enriching TenXObjects with message field: 'message_pattern'"). A Symbol
+  // Message is DERIVED from the event, so it is never a token in the archived
+  // bytes, and the Bloom index only holds text tokens plus template hashes.
+  // The name route is unsatisfiable by construction, not mis-named.
+  assert.throws(
+    () => buildPatternSearch('info_cart_cartstore_ValkeyCartStore_GetCartAsync_called_with_userId'),
+    (err: Error) => {
+      assert.ok(
+        err.message.startsWith(UNRESOLVABLE_PATTERN_PREFIX),
+        'must carry the caller-input marker prefix'
+      );
+      assert.ok(
+        err.message.includes('pattern_hash'),
+        'must name the identity that DOES work'
+      );
+      return true;
+    }
   );
+});
+
+test('the fabricated field is never USED, only described', () => {
+  // The field does not exist, so nothing may build a predicate on it or read it
+  // off a record. Prose that NAMES it is fine and wanted: the error message and
+  // the tool descriptions have to tell a caller why the name route is refused.
+  //
+  // So this forbids the two shapes that constitute use:
+  //   - property access:        evRec.tenx_user_pattern
+  //   - predicate construction: `... tenx_user_pattern == "${x}" ...`
+  for (const rel of [
+    'src/lib/retriever-api.ts',
+    'src/tools/retriever-query.ts',
+    'src/tools/retriever-series.ts',
+    'src/tools/backfill-metric.ts',
+  ]) {
+    const src = readSource(rel);
+    const offenders = src
+      .split('\n')
+      .map((line, n) => ({ line, n: n + 1 }))
+      .filter(({ line }) => {
+        const t = line.trimStart();
+        if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return false;
+        const propertyRead = /\.tenx_user_pattern\b/.test(line);
+        // A predicate is built by interpolating a value into a template literal,
+        // so `${` is the precise tell. Matching on a bare backtick instead would
+        // false-positive on prose that wraps the field name in markdown backticks
+        // to explain that it does not exist, which is exactly what the remediation
+        // message does.
+        const predicateBuild = line.includes('${') && line.includes('tenx_user_pattern');
+        return propertyRead || predicateBuild;
+      })
+      .map(({ n, line }) => `${rel}:${n}: ${line.trim().slice(0, 70)}`);
+    assert.deepEqual(
+      offenders,
+      [],
+      `${rel} still USES the non-existent tenx_user_pattern field (describing it is fine)`
+    );
+  }
 });
 
 test('no archive caller builds a tenx_hash field equality', () => {
