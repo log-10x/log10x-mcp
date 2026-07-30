@@ -318,3 +318,20 @@ test('the dpxl form documents the WIDER exclusivity the server enforces', () => 
   assert.ok(r.body.includes('applicationRule'), 'must name applicationRule as also-excluded');
   assert.ok(r.body.includes('subsystemRule'), 'must name subsystemRule as also-excluded');
 });
+
+test('the advisor surfaces the Coralogix down-tier path only on a coralogix destination', () => {
+  const onCx = renderOffloadSection(PARAMS, 'fluent-bit', 'coralogix');
+  assert.match(onCx, /Coralogix Monitoring/, 'coralogix destination must get the Monitoring recipe');
+  assert.match(onCx, /must survive to the destination/, 'must warn that the marker is load-bearing');
+
+  // The Coralogix block tells the operator NOT to strip routeState. That is
+  // wrong advice everywhere else, so it must not leak into other destinations
+  // or into the unknown-destination fallback.
+  for (const dest of ['datadog', 'cloudwatch', undefined]) {
+    const other = renderOffloadSection(PARAMS, 'fluent-bit', dest as string | undefined);
+    assert.ok(
+      !/Coralogix Monitoring/.test(other),
+      `destination=${dest}: must NOT render the coralogix down-tier block`
+    );
+  }
+});

@@ -1255,7 +1255,16 @@ export function renderOffloadSection(
     ? destination === 'azure-monitor' && getAllowedActionsForDestination('azure-monitor').includes('tier_down')
     : true;
 
-  if (showDatadog || showCloudWatch || showAzure) {
+  // Coralogix is deliberately NOT part of the unknown-destination fallback.
+  // Datadog/CloudWatch render as generic "here are the leads" when destination
+  // is unset, which is harmless. The Coralogix path is different: it tells the
+  // operator NOT to strip routeState, which is wrong advice on every other
+  // destination. So it renders only on an explicit coralogix destination.
+  const showCoralogix =
+    destination === 'coralogix' &&
+    getAllowedActionsForDestination('coralogix').includes('tier_down');
+
+  if (showDatadog || showCloudWatch || showAzure || showCoralogix) {
     lines.push(
       '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
@@ -1307,6 +1316,28 @@ export function renderOffloadSection(
           ''
         );
       }
+    }
+    if (showCoralogix) {
+      const cx = coralogixMonitoringRecipe();
+      lines.push(
+        `_Coralogix Monitoring_ — ${cx.note}`,
+        '',
+        '```hcl',
+        cx.body,
+        '```',
+        '',
+        // The shipper half is load-bearing here in a way it is not for Flex or
+        // IA, where the split is a second sink. On Coralogix the slice stays on
+        // one endpoint and the marker IS the routing signal, so the forwarder
+        // must be told not to strip it.
+        'On Coralogix the down-tiered slice is NOT sent to a second sink: it ships to the ' +
+          'same endpoint and the policy above moves it. That makes the forwarder half ' +
+          'load-bearing — `routeState` must survive to the destination, because TCO ' +
+          'policies evaluate BEFORE enrichment and can only match fields present on ' +
+          'arrival. Use `fluentBitCoralogixRecipe()`, which deliberately does not strip ' +
+          'the marker, rather than the generic fluent-bit recipe above (which does).',
+        ''
+      );
     }
   }
 
