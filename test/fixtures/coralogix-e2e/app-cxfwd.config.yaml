@@ -1,0 +1,54 @@
+#
+# 🔟❎  Coralogix tier_down proof app — FORWARDER topology (LOCAL TEST SCAFFOLD)
+#
+# Sibling of config/apps/cxtest. cxtest proved the regulator stamps
+# routeState=tier_down, but its file OUTPUT could not carry the marker onto the
+# wire, and the reason is structural rather than a config mistake:
+#
+#   EventFullTextFunction.print() splices `,"routeState":"<action>"` only when
+#   the event still has an OuterCharArrayAccessor (its original envelope). When
+#   validateOuterAccessor() fails it falls back to writing the body content
+#   unspliced — same bytes, no marker, no error. File input never establishes an
+#   outer envelope; a FORWARDER input does, because the forwarder record is the
+#   envelope and the log line sits inside it.
+#
+# So the marker can only be produced on the forwarder path. Topology:
+#
+#   fluent-bit tail --forward--> :24224 engine --forward--> :24225 fluent-bit
+#                                                            -> Coralogix HTTP
+#
+# Everything else (regulator tuning, caps.csv, actions.csv) is identical to
+# cxtest and comes from the same tuned ./rate copy.
+
+tenx: run
+
+runtimeName: $=TenXEnv.get("TENX_RUNTIME_NAME", "cxfwd")
+
+include:
+
+  - apps/shared
+
+  - run/initialize/inputField
+  - run/initialize/level
+  - run/initialize/group
+  - run/initialize/message
+
+  # Tuned copy of the rate regulator config (warmup/baseline/floors zeroed,
+  # containerField = plain `container`). Lives in ../cxtest/rate so both apps
+  # share exactly one definition of the test regulator.
+  - ../cxtest/rate
+
+  # The forwarder pair: input on 24224, return path out on 24225.
+  - run/input/forwarder/fluentbit
+
+# `outputOffload` is what makes the forwarder-input config resolve encodeField
+# to fullText("routeState") — the expression that performs the splice. Without
+# it the return path emits fullText with no marker and the whole exercise
+# silently produces unmarked events.
+# outputOffload is NOT a declared option ("Unknown options: 'outputOffload'").
+# It is a TenXEnv lookup, so it is exported as an env var by the run script.
+
+# NOTE: fluentbitOutputEncodeType is NOT set here. The included fluentbit config
+# already defines it, and a second definition is additive, not an override
+# ("option 'fluentbitOutputEncodeType' should be specified only once"). The
+# json value is set in ./fbin/config.yaml, our copy of that config.
