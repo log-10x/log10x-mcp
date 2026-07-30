@@ -25,6 +25,7 @@ import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
 import type { IncidentCluster } from './detectors/incident-cluster.js';
 import type { RedundancyPair } from './poc-enrichers.js';
 import { fmtAge } from './first-seen.js';
+import { isProtectedSeverity, isReducibleSeverity } from './severity-policy.js';
 
 export interface RenderInput {
   siem: SiemId;
@@ -1241,7 +1242,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('## 7. Risk / Dependency Check');
   lines.push('');
   const riskyChanges = patterns.slice(0, 10).filter((p) => p.recommendedAction !== 'keep').filter((p) => {
-    const errorSev = p.severity && /ERROR|CRIT|FATAL|WARN/i.test(p.severity);
+    const errorSev = isProtectedSeverity(p.severity);
     const smallCount = p.count < 10;
     return errorSev || smallCount;
   });
@@ -1253,7 +1254,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
     for (const p of riskyChanges) {
       const why: string[] = [];
-      if (p.severity && /ERROR|CRIT|FATAL|WARN/i.test(p.severity)) {
+      if (isProtectedSeverity(p.severity)) {
         why.push(`severity=${p.severity}, may feed alerts`);
       }
       if (p.count < 10) {
@@ -1331,7 +1332,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     '- **Cost model**: `bytes × analyzer_cost_per_gb` over the pulled window. Window cost is projected to weekly cost via `$/window × (168h / window_hours)`.'
   );
   lines.push(
-    '- **Recommendation rules** (all lossless): for a reducible pattern (DEBUG/INFO/TRACE/WARN or no severity AND ≥1% of total volume), compact in place when the SIEM supports it and the line is compressible (measured ≥40% smaller), else tier_down to a cheaper retained tier (Datadog/CloudWatch), else offload to your own S3 (recoverable). ERROR/CRIT/FATAL and low-volume patterns are kept verbatim. Nothing is sampled or dropped.'
+    '- **Recommendation rules** (all lossless): for a reducible pattern (DEBUG/INFO/TRACE or no severity AND ≥1% of total volume), compact in place when the SIEM supports it and the line is compressible (measured ≥40% smaller), else tier_down to a cheaper retained tier (Datadog/CloudWatch), else offload to your own S3 (recoverable). ERROR/WARN/CRIT/FATAL and low-volume patterns are kept verbatim. Nothing is sampled or dropped.'
   );
   lines.push(
     '- **Confidence** is `high` for patterns with ≥100 events in the window (stable rate), `medium` for 10-99, `low` for <10.'
@@ -1460,9 +1461,13 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     let reasoning = '';
 
     const siemName = SIEM_DISPLAY_NAMES[input.siem];
-    const isErrorClass = /ERROR|CRIT|FATAL/.test(severity);
-    // Reducible severities: DEBUG / INFO / TRACE / WARN / no-severity.
-    const isReducibleSev = /DEBUG|INFO|TRACE|WARN/.test(severity) || !severity;
+    // Both predicates come from lib/severity-policy so this selector, the
+    // risk-review paths below, poc-envelope-v2 and configure_engine's solver
+    // cannot drift apart again. WARN is error-class here (it was reducible
+    // until 2026-07-30), matching the tier the solver puts it in.
+    const isErrorClass = isProtectedSeverity(severity);
+    // Reducible severities: DEBUG / INFO / TRACE / no-severity.
+    const isReducibleSev = isReducibleSeverity(severity);
     const isFrequent = pctOfTotal >= 0.01;
 
     // Measured compaction fraction from the engine's encoded output.
@@ -2115,8 +2120,7 @@ function shortIdentity(identity: string): string {
  *   - low-confidence (too few sample events to be sure the rate is stable)
  */
 function needsReview(p: EnrichedPattern): boolean {
-  const sev = (p.severity || '').toUpperCase();
-  if (/ERROR|WARN|CRIT|FATAL/.test(sev)) return true;
+  if (isProtectedSeverity(p.severity)) return true;
   if (p.confidence === 'low') return true;
   return false;
 }

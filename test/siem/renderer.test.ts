@@ -194,11 +194,17 @@ test('renderPocReport classifies actions losslessly: tier_down for hot reducible
     finishedAt: '2026-04-19T00:00:05Z',
     mcpVersion: '1.4.0',
   });
-  // Datadog cannot compact, so reducible patterns (INFO heartbeat at 80%,
-  // WARN slow-query at ~19.5%) route to its cheaper in-platform tier,
-  // fully retained. ERROR is kept verbatim.
+  // Datadog cannot compact, so the reducible pattern (INFO heartbeat at 80%)
+  // routes to its cheaper in-platform tier, fully retained. ERROR and WARN
+  // are both error-class and kept verbatim (WARN moved to error-class on
+  // 2026-07-30 to match configure_engine's error tier — see
+  // lib/severity-policy.ts).
+  // NOTE: `severity=ERROR` alone does NOT prove the pattern was kept — the
+  // risk-review section renders the same prefix for patterns that were
+  // levered. The structural version of this assertion lives in
+  // test/severity-policy-drift.test.ts, which reads recommendedAction.
   assert.ok(/tier_down/.test(out.markdown), 'hot reducibles -> tier_down on Datadog');
-  assert.ok(/severity=ERROR/i.test(out.markdown), 'ERROR pattern kept');
+  assert.ok(/severity=ERROR/i.test(out.markdown), 'ERROR pattern named');
   // Never auto-recommend a lossy lever.
   assert.ok(!/mute \(drop all events\)/.test(out.markdown), 'no mute');
   assert.ok(!/sample 1\//.test(out.markdown), 'no sample');

@@ -23,9 +23,24 @@
  *                                          is unpriced), offload-only
  *                                          destinations ⇒ offload.
  *
- * drop/sample are opt-in only. They appear in no DEFAULT_ACTION_BY_DESTINATION
- * entry, so the auto path never recommends a lossy action; a lossy action is
- * only ever emitted when the caller explicitly pins one.
+ * drop/sample are opt-in only on the destination-resolution path: they appear
+ * in no DEFAULT_ACTION_BY_DESTINATION entry, so the per-service auto path
+ * never selects a lossy lever.
+ *
+ * Tier defaults are the other half of that contract, and they are caller-
+ * configurable via `action_defaults`:
+ *   - audit  → always `pass` (not configurable)
+ *   - error  → `pass` by default. Severity error/warn/warning is kept
+ *              verbatim unless the caller sets `action_defaults.error`,
+ *              which is what the POC report's recommendation rules promise
+ *              (lib/poc-report-renderer.ts). Until 2026-07-30 this branch
+ *              hardcoded `sample`, which contradicted that promise and
+ *              credited the plan with a ~90% shed on error-tier bytes that
+ *              no emitted artifact performs — see the note on cap semantics
+ *              in renderCsvDiff for why the per-pattern action never
+ *              reaches the engine.
+ *   - debug / synthetic → `drop` by default. These two ARE lossy defaults;
+ *              a caller who needs them lossless sets `action_defaults`.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
@@ -144,7 +159,16 @@ const TARGET_PREAMBLE_RE = /^#\s*target_percent\s*=\s*(\d+(?:\.\d+)?)\s*$/;
 // emits no PR. Caller can override via `tolerance_pct`.
 const DEFAULT_REFRESH_TOLERANCE_PCT = 2;
 
-type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
+export type Tier = 'audit' | 'error' | 'standard' | 'debug' | 'synthetic';
+
+/**
+ * The tiers whose action comes from `action_defaults`. `audit` is excluded:
+ * it is unconditionally `pass` and callers cannot change it.
+ */
+export type ConfigurableTier = Exclude<Tier, 'audit'>;
+
+/** Actions that discard events. Never a default for any tier but debug/synthetic. */
+export const LOSSY_ACTIONS: readonly Action[] = ['sample', 'drop'];
 
 // Severity-weighted ranking for the greedy solver.
 const SEVERITY_WEIGHT: Record<Tier, number> = {
@@ -263,6 +287,12 @@ export const configureEngineSchema = {
     ),
   action_defaults: z
     .object({
+      error: z
+        .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
+        .default('pass')
+        .describe(
+          'Default action for error-tier patterns (severity `error`/`warn`/`warning`; `critical`/`fatal` are audit-tier and always `pass`). Defaults to `pass` — error-class lines are kept verbatim, which is what the POC report tells the customer. Set this explicitly to opt into reducing them, and prefer a lossless lever (`compact`/`tier_down`/`offload`) over `sample`/`drop`.'
+        ),
       standard: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('compact')
@@ -277,12 +307,14 @@ export const configureEngineSchema = {
         .describe('Default action for synthetic / load-gen patterns.'),
     })
     .default({})
-    .describe('Tier-to-action defaults. Audit-tier is always `pass`; error-tier is always `sample(N=2)`.'),
+    .describe(
+      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`. When a pinned `sample` is projected, N=10 (keep 1 in 10).'
+    ),
   respect_default_action: z
     .boolean()
     .default(false)
     .describe(
-      'When false (default), the solver shortcuts to `pass` on standard/debug/synthetic rows once `target_percent` is met by error-tier sampling — minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
+      'When false (default), the solver shortcuts to `pass` on error/standard/debug/synthetic rows once `target_percent` has already been met by higher-priority rows earlier in the greedy walk — minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
     ),
   reduction: z
     .enum(['soft', 'hard'])
@@ -565,16 +597,17 @@ interface ConfigureEngineData {
   error?: string;
   /**
    * Diagnostic record of how the caller's `action_defaults` mapped onto the
-   * actual tier distribution of the candidate patterns. Audit and error tiers
-   * carry hardcoded actions (`pass` and `sample(N=2)`), so a caller's
-   * `action_defaults.standard`/`debug`/`synthetic` only fires when at least
-   * one pattern is classified into that tier. When a requested default does
-   * not fire (e.g. caller asked for standard=`tier_down` but 0 patterns
-   * landed in the standard tier), the unused defaults are surfaced here so
-   * the agent can branch deterministically without parsing prose warnings.
+   * actual tier distribution of the candidate patterns. Audit-tier is the one
+   * hardcoded action (`pass`); `action_defaults.error`/`standard`/`debug`/
+   * `synthetic` only fire when at least one pattern is classified into that
+   * tier. When a requested default does not fire (e.g. caller asked for
+   * standard=`tier_down` but 0 patterns landed in the standard tier), the
+   * unused defaults are surfaced here so the agent can branch
+   * deterministically without parsing prose warnings.
    */
   action_default_resolution?: {
     requested: {
+      error: Action;
       standard: Action;
       debug: Action;
       synthetic: Action;
@@ -590,6 +623,7 @@ interface ConfigureEngineData {
      * what was actually applied.
      */
     effective: {
+      error: Action | null;
       standard: Action | null;
       debug: Action | null;
       synthetic: Action | null;
@@ -603,11 +637,12 @@ interface ConfigureEngineData {
     classified_count_by_tier: Record<Tier, number>;
     /**
      * Count of rows whose final action came from the tier's caller-configured
-     * default (standard/debug/synthetic) and survived the target-met
+     * default (error/standard/debug/synthetic) and survived the target-met
      * downgrade. Distinguishes "default actually drove output" from "patterns
      * landed in this tier but the default was bypassed".
      */
     applied_default_count_by_tier: {
+      error: number;
       standard: number;
       debug: number;
       synthetic: number;
@@ -622,10 +657,10 @@ interface ConfigureEngineData {
     /**
      * Tiers that DID have candidate patterns but where the requested default
      * never made it onto a final row. Common causes: every pattern in the
-     * tier was floor-pinned (`pass`), the target was met by higher-priority
-     * tiers (error sampling) before standard rows ran and they got
-     * downgraded, or `effectiveStandardAction` overrode a compact request on
-     * a destination where compact is a no-op. The reason names which.
+     * tier was floor-pinned (`pass`), the target was already met by rows
+     * earlier in the greedy walk and these got downgraded, or
+     * `effectiveStandardAction` overrode a compact request on a destination
+     * where compact is a no-op. The reason names which.
      */
     defined_but_unused_defaults: Array<{
       tier: Tier;
@@ -1052,6 +1087,9 @@ export async function executeConfigureEngine(
     }))
     .sort((a, b) => b.score - a.score);
 
+  // Error-tier default is `pass`: error/warn/warning is kept verbatim unless
+  // the caller opts out. This is the contract the POC report renders.
+  const errorAction = args.action_defaults?.error ?? 'pass';
   const standardAction = args.action_defaults?.standard ?? 'compact';
   const debugAction = args.action_defaults?.debug ?? 'drop';
   const syntheticAction = args.action_defaults?.synthetic ?? 'drop';
@@ -1123,7 +1161,8 @@ export async function executeConfigureEngine(
   // downgrade demotes to pass). Used by action_default_resolution to
   // distinguish "default fired" from "tier had patterns but default never
   // reached output" (the misleading effective field).
-  const appliedDefaultByTier: { standard: number; debug: number; synthetic: number } = {
+  const appliedDefaultByTier: Record<ConfigurableTier, number> = {
+    error: 0,
     standard: 0,
     debug: 0,
     synthetic: 0,
@@ -1150,46 +1189,48 @@ export async function executeConfigureEngine(
     // pre-downgrade. After the target-met downgrade fires we check if
     // `action` still equals this default: if yes, the default actually
     // drove output for this row.
-    let defaultTier: 'standard' | 'debug' | 'synthetic' | null = null;
+    let defaultTier: ConfigurableTier | null = null;
 
     const floorHit = floorSet.get(c.pattern_hash);
     if (floorHit !== undefined) {
+      // signal_floor pins are checked FIRST and win over every tier.
       action = 'pass';
       reason = 'floor';
       floorReason = `signal_floor: ${floorHit}`;
       floorCount++;
-    } else if (c.tier === 'audit') {
-      action = 'pass';
-      reason = 'tier=audit';
-    } else if (c.tier === 'error') {
-      action = 'sample';
-      reason = 'tier=error';
-    } else if (c.tier === 'standard') {
-      // Phase 2: the standard-tier action is the service's resolved
-      // recommendation (per-container), falling back to the env-wide default.
-      const decision = serviceActionByContainer.get(c.container);
-      action = decision ? decision.action : effectiveStandardAction;
-      reason = 'tier=standard';
-      defaultTier = 'standard';
-    } else if (c.tier === 'debug') {
-      action = debugAction;
-      reason = 'tier=debug';
-      defaultTier = 'debug';
     } else {
-      action = syntheticAction;
-      reason = 'tier=synthetic';
-      defaultTier = 'synthetic';
+      const resolved = _resolveTierAction(
+        c.tier,
+        {
+          error: errorAction,
+          standard: effectiveStandardAction,
+          debug: debugAction,
+          synthetic: syntheticAction,
+        },
+        serviceActionByContainer.get(c.container)?.action
+      );
+      action = resolved.action;
+      reason = resolved.reason;
+      defaultTier = resolved.defaultTier;
     }
 
-    // If target already met, downgrade further standard rows to pass.
+    // If target already met, downgrade further reducing rows to pass.
     // Suppressed when respect_default_action=true so the configured
     // defaults fire on every matching row regardless of target.
+    //
+    // `audit` is exempt only because it is unconditionally `pass` anyway.
+    // The error tier is NOT exempt any more. The old exemption existed to
+    // protect a hardcoded `sample` from being undone; now that the tier
+    // takes a caller-configured default (`pass` unless opted out of), an
+    // error row that IS reducing is an ordinary row and gets downgraded
+    // like every other tier once the target is met. The old
+    // `action !== 'sample'` clause went with it: a caller-pinned `sample`
+    // on any tier is now downgrade-eligible too, which is what every other
+    // caller-pinned action already did.
     if (
       action !== 'pass' &&
-      action !== 'sample' &&
       floorHit === undefined &&
       c.tier !== 'audit' &&
-      c.tier !== 'error' &&
       remainingBytesToShed <= 0 &&
       !args.respect_default_action
     ) {
@@ -1203,11 +1244,13 @@ export async function executeConfigureEngine(
     // still matches the configured default for the row's tier.
     if (defaultTier !== null) {
       const configuredDefault =
-        defaultTier === 'standard'
-          ? effectiveStandardAction
-          : defaultTier === 'debug'
-            ? debugAction
-            : syntheticAction;
+        defaultTier === 'error'
+          ? errorAction
+          : defaultTier === 'standard'
+            ? effectiveStandardAction
+            : defaultTier === 'debug'
+              ? debugAction
+              : syntheticAction;
       if (action === configuredDefault) {
         appliedDefaultByTier[defaultTier] += 1;
       }
@@ -1329,7 +1372,7 @@ export async function executeConfigureEngine(
       );
     } else if (patternsByTier.standard > 0) {
       warnings.push(
-        `\`compact\` is a no-op on ${destination}; the destination-compat fallback would map standard-tier rows to \`${effectiveStandardAction}\`, but all ${patternsByTier.standard} standard-tier row${patternsByTier.standard === 1 ? '' : 's'} were downgraded to \`pass\` because the target was already met by error-tier sampling. No fallback action survived in the final policy.`
+        `\`compact\` is a no-op on ${destination}; the destination-compat fallback would map standard-tier rows to \`${effectiveStandardAction}\`, but all ${patternsByTier.standard} standard-tier row${patternsByTier.standard === 1 ? '' : 's'} were downgraded to \`pass\` because the target was already met by rows earlier in the greedy walk. No fallback action survived in the final policy.`
       );
     }
     // (No warning when patternsByTier.standard === 0 — the
@@ -1348,10 +1391,10 @@ export async function executeConfigureEngine(
   //      proves the contradiction) — a false positive the agent can't
   //      detect structurally. We also null out the corresponding
   //      `effective` field in that case.
-  // Audit and error tiers carry hardcoded actions; only standard/debug/
-  // synthetic are caller-configurable, so those are the only tiers we
-  // surface as potentially-unused. Prose warnings still fire so non-
-  // structured consumers see the signal.
+  // Audit is the only tier with a hardcoded action; error/standard/debug/
+  // synthetic are caller-configurable, so those are the tiers we surface as
+  // potentially-unused. Prose warnings still fire so non-structured
+  // consumers see the signal.
   const totalPatternsClassified =
     patternsByTier.audit +
     patternsByTier.error +
@@ -1369,13 +1412,19 @@ export async function executeConfigureEngine(
     classified_count: number;
     reason: string;
   }> = [];
-  type ConfigurableTier = 'standard' | 'debug' | 'synthetic';
   const configurableTiers: Array<{
     tier: ConfigurableTier;
     requested: Action;
     effective: Action;
     bypassHint: string;
   }> = [
+    {
+      tier: 'error',
+      requested: errorAction,
+      effective: errorAction,
+      bypassHint:
+        'every error-tier row was floor-pinned or downgraded to `pass` because the target was already met by rows earlier in the greedy walk',
+    },
     {
       tier: 'standard',
       requested: standardAction,
@@ -1387,22 +1436,22 @@ export async function executeConfigureEngine(
         effectiveStandardAction !== standardAction
           ? standardFallbackSurvivors > 0
             ? `standard-tier rows took \`${effectiveStandardAction}\` (destination-compat fallback) instead of your requested \`${standardAction}\` (${standardFallbackSurvivors} survived target-met downgrade)`
-            : `standard-tier rows were initially mapped to \`${effectiveStandardAction}\` (destination-compat fallback for \`${standardAction}\` on \`${destination}\`), then ALL downgraded to \`pass\` because the target was already met by error-tier sampling`
-          : 'every standard-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+            : `standard-tier rows were initially mapped to \`${effectiveStandardAction}\` (destination-compat fallback for \`${standardAction}\` on \`${destination}\`), then ALL downgraded to \`pass\` because the target was already met by rows earlier in the greedy walk`
+          : 'every standard-tier row was floor-pinned or downgraded to `pass` because the target was already met by rows earlier in the greedy walk',
     },
     {
       tier: 'debug',
       requested: debugAction,
       effective: debugAction,
       bypassHint:
-        'every debug-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+        'every debug-tier row was floor-pinned or downgraded to `pass` because the target was already met by rows earlier in the greedy walk',
     },
     {
       tier: 'synthetic',
       requested: syntheticAction,
       effective: syntheticAction,
       bypassHint:
-        'every synthetic-tier row was floor-pinned or downgraded to `pass` because the target was already met by error-tier sampling',
+        'every synthetic-tier row was floor-pinned or downgraded to `pass` because the target was already met by rows earlier in the greedy walk',
     },
   ];
   for (const { tier, requested, bypassHint } of configurableTiers) {
@@ -1413,6 +1462,10 @@ export async function executeConfigureEngine(
     // fire a false "downgraded to pass" warning. per_service_summary is the
     // surface that explains each service's chosen standard-tier action.
     if (tier === 'standard' && autoRecommend) continue;
+    // A `pass` default that did not fire is not actionable: `pass` IS the
+    // no-op. Only warn about the error tier when the caller opted into
+    // reducing it and that opt-in was then bypassed.
+    if (tier === 'error' && errorAction === 'pass') continue;
     if (patternsByTier[tier] === 0) {
       const reason =
         `0 of ${totalPatternsClassified} patterns classified as ${tier}-tier; ` +
@@ -1441,6 +1494,7 @@ export async function executeConfigureEngine(
   }
   const actionDefaultResolution: ConfigureEngineData['action_default_resolution'] = {
     requested: {
+      error: errorAction,
       standard: standardAction,
       debug: debugAction,
       synthetic: syntheticAction,
@@ -1450,6 +1504,7 @@ export async function executeConfigureEngine(
       // candidate row was overridden by a floor / target-met downgrade / the
       // destination-compat fallback). Reading the requested action here when
       // nothing actually applied it was the Fix-A false positive.
+      error: appliedDefaultByTier.error > 0 ? errorAction : null,
       standard: appliedDefaultByTier.standard > 0 ? effectiveStandardAction : null,
       debug: appliedDefaultByTier.debug > 0 ? debugAction : null,
       synthetic: appliedDefaultByTier.synthetic > 0 ? syntheticAction : null,
@@ -2751,7 +2806,7 @@ export function _resolveServiceAction(params: {
 }
 
 // ─── tier inference ──────────────────────────────────────────────────
-function inferTier(severity: string): Tier {
+export function inferTier(severity: string): Tier {
   const s = (severity ?? '').toLowerCase();
   if (s === 'audit' || s === 'critical' || s === 'fatal') return 'audit';
   if (s === 'error' || s === 'warn' || s === 'warning') return 'error';
@@ -2759,6 +2814,58 @@ function inferTier(severity: string): Tier {
   if (s === 'synthetic' || s === 'loadgen' || s === 'noise') return 'synthetic';
   // default: info / unknown / empty → standard
   return 'standard';
+}
+
+/** Per-tier actions the solver applies, after `action_defaults` resolution. */
+export interface TierActionDefaults {
+  error: Action;
+  standard: Action;
+  debug: Action;
+  synthetic: Action;
+}
+
+/**
+ * Tier → action for a row that is NOT `signal_floor` pinned.
+ *
+ * The floor pin is deliberately NOT handled here. It is checked at the call
+ * site, ahead of this function, so the floor keeps its visible precedence in
+ * the solver loop instead of being buried in a helper. `_resolveTierAction`
+ * therefore describes only what a tier does when nothing pre-empts it.
+ *
+ * Exported so `test/severity-policy-drift.test.ts` can table-test every tier
+ * against the promises the POC report renders, without standing up a metrics
+ * backend. That test is the reason this is a pure function.
+ *
+ * `audit` and `error` are the severity-protected tiers, and both resolve to
+ * `pass` unless the caller opts out via `action_defaults.error`. Keeping
+ * error-class lines verbatim is what poc-report-renderer tells the customer,
+ * and the solver has to agree with the artifact the customer reads.
+ */
+export function _resolveTierAction(
+  tier: Tier,
+  defaults: TierActionDefaults,
+  standardOverride?: Action
+): { action: Action; reason: string; defaultTier: ConfigurableTier | null } {
+  switch (tier) {
+    case 'audit':
+      // Not caller-configurable, so no defaultTier provenance to record.
+      return { action: 'pass', reason: 'tier=audit', defaultTier: null };
+    case 'error':
+      return { action: defaults.error, reason: 'tier=error', defaultTier: 'error' };
+    case 'standard':
+      // Phase 2: the standard-tier action is the service's resolved
+      // recommendation (per-container), falling back to the env-wide default.
+      return {
+        action: standardOverride ?? defaults.standard,
+        reason: 'tier=standard',
+        defaultTier: 'standard',
+      };
+    case 'debug':
+      return { action: defaults.debug, reason: 'tier=debug', defaultTier: 'debug' };
+    case 'synthetic':
+    default:
+      return { action: defaults.synthetic, reason: 'tier=synthetic', defaultTier: 'synthetic' };
+  }
 }
 
 // ─── cap-per-window math ──────────────────────────────────────────────
