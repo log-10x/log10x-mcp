@@ -76,9 +76,15 @@ The only policy that can explain the removal is order 1:
 ```
 
 **A Coralogix TCO policy matches on a field in the event body, with no label
-mapping.** Policy routing evaluates before enrichment, so the field has to be
-present on arrival — which is exactly what the shipper's un-stripped
-`routeState` marker provides.
+mapping.** The field has to be present on arrival — which is exactly what the
+shipper's un-stripped `routeState` marker provides.
+
+Do NOT justify this with "TCO evaluates before enrichment": that is false, and
+Coralogix's Pipeline Analyzer doc orders it parsing rules, then enrichments,
+then TCO pipelines. The order-independent argument is the correct one and is
+stronger: whether a pattern has passed its byte budget for the window is a fact
+about a STREAM counted in the sidecar across many events, and no per-event rule
+at the destination can derive it whenever it runs.
 
 This reverses the earlier conclusion in this repo's history that the API and
 Terraform expose only application/subsystem/severity matchers. That conclusion

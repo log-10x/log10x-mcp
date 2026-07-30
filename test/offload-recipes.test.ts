@@ -263,7 +263,7 @@ test('coralogix recipe does NOT strip routeState (it is what the policy matches)
   // the routeState key specifically.
   assert.ok(
     !/Remove_key\s+routeState/.test(r.body),
-    'routeState must survive: TCO policies evaluate BEFORE enrichment, so a stripped marker is unmatchable'
+    'routeState must survive: a stream-level byte-budget decision cannot be derived by any per-event rule at the destination, so a stripped marker is unrecoverable'
   );
   // The internal routing key is still cleaned up.
   assert.ok(r.body.includes('rec["_route"]=nil'), '_route should be removed from the shipped body');

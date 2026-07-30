@@ -903,9 +903,16 @@ az monitor log-analytics workspace table create \\
 //     'tier_down'` and `groupby $d.routeState` both work server-side, and a
 //     bogus keypath returns `keypath does not exist` while this one does not.
 //
-//  2. TCO policies are evaluated BEFORE enrichment, so only fields present on
-//     arrival are eligible; Coralogix-side parsing cannot feed the decision.
-//     The shipper is the only place this can come from.
+//  2. The decision cannot be derived at the destination AT ALL, whatever the
+//     pipeline order. Do NOT justify this with "TCO evaluates before
+//     enrichment" — that is false: Coralogix's own Pipeline Analyzer doc
+//     orders it parsing rules, then enrichments, then TCO pipelines.
+//     The order-independent argument is the real one, and it is stronger:
+//     whether a pattern has passed its byte budget for the window is a fact
+//     about a STREAM, counted in the sidecar across many events. A
+//     destination-side rule reads one event at a time and cannot derive it no
+//     matter when it runs. So the routing decision has to arrive stamped on
+//     the event, and the shipper is the only thing that can stamp it.
 //
 // The lua ALSO mirrors routeState onto `subsystemName`. That is belt-and-braces,
 // not redundancy: `dpxl_expression` (body-field match) needs Terraform provider
@@ -1002,8 +1009,10 @@ export function fluentBitCoralogixRecipe(
     placementNote:
       'all FILTERs sit on the 10x return path (`Match tenx.*`). Unlike the other ' +
       'recipes this one does NOT strip `routeState`: on Coralogix the marker is ' +
-      'what the destination reads, because TCO policies evaluate before ' +
-      'enrichment and can only see fields present on arrival. `severity` is ' +
+      'what the destination reads. The reason is NOT pipeline order (Coralogix ' +
+      'runs TCO after enrichment, not before) — it is that a byte-budget ' +
+      'decision is a property of a STREAM counted in the sidecar, which no ' +
+      'per-event destination rule can derive whenever it runs. `severity` is ' +
       'hardcoded to 3 (Info); map it from the event if the policy needs to ' +
       'discriminate on severity, and note that `dpxl_expression` and `severities` ' +
       'are mutually exclusive in one policy.',
@@ -1341,9 +1350,10 @@ export function renderOffloadSection(
         // must be told not to strip it.
         'On Coralogix the down-tiered slice is NOT sent to a second sink: it ships to the ' +
           'same endpoint and the policy above moves it. That makes the forwarder half ' +
-          'load-bearing — `routeState` must survive to the destination, because TCO ' +
-          'policies evaluate BEFORE enrichment and can only match fields present on ' +
-          'arrival. Use `fluentBitCoralogixRecipe()`, which deliberately does not strip ' +
+          'load-bearing — `routeState` must survive to the destination. A byte-budget ' +
+          'decision is a property of a stream counted in the sidecar, so no ' +
+          'per-event rule at the destination can derive it. Use ' +
+          '`fluentBitCoralogixRecipe()`, which deliberately does not strip ' +
           'the marker, rather than the generic fluent-bit recipe above (which does).',
         ''
       );
