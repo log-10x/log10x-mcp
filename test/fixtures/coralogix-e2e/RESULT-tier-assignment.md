@@ -52,3 +52,44 @@ NOT ESTABLISHED: the Medium slice was not read back from its destination.
 Monitoring stores into customer-owned S3, which this trial tenant has not
 configured, so `TIER_ARCHIVE` returns nothing. Absence from Frequent Search is
 the positive signal here; retrieval from Monitoring is untested.
+
+## Body-field match ISOLATED (the original Q2, answered)
+
+The first tier-assignment test could not attribute WHICH policy fired: four of
+the five live policies match subsystem `tier_down`, and policy 1 matches the
+body field, so the matched event satisfied several at once.
+
+This test isolates it. Two events, one HTTP request, same application, and
+**both with subsystem `app`** so no subsystem rule can match. The only
+difference is `$d.routeState`:
+
+```
+applicationName=isolate  subsystem=app  routeState=pass       -> priorityclass=high, VISIBLE
+applicationName=isolate  subsystem=app  routeState=tier_down  -> ABSENT from Frequent Search
+```
+
+The only policy that can explain the removal is order 1:
+
+```json
+"logRules": { "severities": [], "dpxlExpression": "<v1> $d.routeState == 'tier_down'" }
+"enabled": true, "priority": "PRIORITY_TYPE_MEDIUM", "order": 1
+```
+
+**A Coralogix TCO policy matches on a field in the event body, with no label
+mapping.** Policy routing evaluates before enrichment, so the field has to be
+present on arrival — which is exactly what the shipper's un-stripped
+`routeState` marker provides.
+
+This reverses the earlier conclusion in this repo's history that the API and
+Terraform expose only application/subsystem/severity matchers. That conclusion
+came from the `coralogix-management-sdk` v1 protos, which are stale relative to
+the shipped product: `CreatePolicyRequest` there has no expression field, but
+the live API and provider 3.4.0+ both do.
+
+Note the field path: `dpxlExpression` sits INSIDE `logRules`, alongside
+`severities` — not at the top level of the policy object.
+
+Consequence for the shipper: the subsystem mapping in
+`fluentBitCoralogixRecipe()` is now defence in depth, not a requirement. Keep it
+for pre-3.4.0 providers and for operators who prefer a label they can see in
+the UI, but the body field alone is sufficient.
