@@ -23,6 +23,7 @@ import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.
 import { getAllowedActionsForDestination, getDefaultActionForDestination, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
+import { isProtectedSeverity } from './severity-policy.js';
 
 /**
  * Categories the POC did NOT verify. Forced into every feasibility
@@ -1227,7 +1228,9 @@ function buildActions(
   const level2: CostAction = allowed[1] ?? level1;
 
   const sev = (p.severity || '').toUpperCase();
-  const isError = /ERROR|CRIT|FATAL/.test(sev);
+  // Shared with the report renderer and configure_engine's error tier via
+  // lib/severity-policy. WARN is error-class (was reducible until 2026-07-30).
+  const isError = isProtectedSeverity(sev);
   const isHotLoop = p.pctOfTotal >= 0.02;
   const isFrequent = p.pctOfTotal >= 0.01;
   const refined = p.poc.refinedAction ?? p.recommendedAction;
