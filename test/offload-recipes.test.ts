@@ -21,6 +21,8 @@ import {
   cloudwatchIaRecipe,
   azureLogsTierRecipe,
   renderOffloadSection,
+  fluentBitCoralogixRecipe,
+  coralogixMonitoringRecipe,
   otherOffloadForwarders,
   type OffloadForwarderId,
 } from '../src/lib/offload-recipes.js';
@@ -244,4 +246,133 @@ test('renderOffloadSection for azure-monitor renders BOTH Basic and Auxiliary (c
   // does NOT render the Azure tier section for a non-Azure destination
   const cw = renderOffloadSection(PARAMS, 'fluentd', 'cloudwatch');
   assert.ok(!/Azure Monitor/.test(cw), 'Azure section gated out on cloudwatch');
+});
+
+// ---------------------------------------------------------------------------
+// Coralogix. This recipe INVERTS the rule every other recipe in the file obeys
+// ("on EVERY branch the routeState marker is stripped"), so the tests below
+// exist to stop someone restoring the strip for consistency and silently
+// breaking tier selection.
+// ---------------------------------------------------------------------------
+
+const CX = { ...PARAMS, domain: 'cx498.coralogix.com' };
+
+test('coralogix recipe does NOT strip routeState (it is what the policy matches)', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // The marker must survive on the CORALOGIX path (tenx.app) — a stream-level
+  // byte-budget decision cannot be derived by any per-event rule at the
+  // destination, so a stripped marker is unrecoverable. It is still stripped on
+  // the S3 path, so assert the SCOPE of the strip, not its absence: a blanket
+  // `Match tenx.*` strip here would silently disable all tiering.
+  assert.ok(
+    !/Match\s+tenx\.\*\s*\n\s*Remove_key\s+routeState/.test(r.body),
+    'a tenx.* strip would remove the marker from the Coralogix path too'
+  );
+  assert.match(
+    r.body,
+    /Match\s+tenx\.offload\s*\n\s*Remove_key\s+routeState/,
+    'the S3 slice must still be stripped (it is not what Coralogix reads)'
+  );
+  // The internal routing key is still cleaned up.
+  assert.ok(r.body.includes('rec["_route"]=nil'), '_route should be removed from the shipped body');
+});
+
+test('coralogix recipe maps routeState onto subsystemName', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  assert.ok(r.body.includes('out["subsystemName"]'), 'lua must set subsystemName');
+  assert.ok(
+    r.body.includes('(r=="tier_down") and "tier_down" or "app"'),
+    'subsystem must be derived FROM routeState, not hardcoded'
+  );
+  // subsystem is the matcher available on every provider version and on the
+  // plain HTTP API, so it is the fallback when dpxl_expression is unavailable.
+  assert.ok(r.body.includes('ingress.cx498.coralogix.com'), 'ingest host must be templated from domain');
+  assert.ok(r.body.includes('/logs/v1/singles'), 'singles endpoint');
+});
+
+test('coralogix recipe keeps tier_down on the SIEM path, not a second sink', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // Unlike CW-IA / Datadog Flex, tier_down must NOT be retagged away: on
+  // Coralogix it ships to the same endpoint and only the subsystem differs.
+  assert.ok(
+    !/Rule\s+\$_route\s+\^tier_down\$/.test(r.body),
+    'tier_down must not be split to its own tag on the coralogix path'
+  );
+  assert.ok(/Rule\s+\$_route\s+\^offload\$/.test(r.body), 'offload still splits to S3');
+  assert.ok(/Rule\s+\$_route\s+\^drop\$/.test(r.body), 'drop still splits to null');
+});
+
+test('coralogix policy recipe ships both matcher forms and dates the dpxl one', () => {
+  const r = coralogixMonitoringRecipe();
+  assert.ok(r.body.includes('dpxl_expression'), 'form A: direct body-field match');
+  assert.ok(r.body.includes("<v1> $d.routeState == 'tier_down'"), 'dpxl needs the <v1> version prefix');
+  assert.ok(r.body.includes('~> 3.4'), 'dpxl_expression landed in provider 3.4.0; pin must say so');
+  assert.ok(r.body.includes('subsystems'), 'form B: subsystem match for pre-3.4 providers');
+  assert.ok(r.body.includes('medium'), 'medium == Monitoring');
+  // Policy creation is now verified live, but BILLING attribution is not, and
+  // the note must keep saying so. This assertion is the honesty gate: if
+  // someone upgrades the claim to "verified" wholesale, this fails.
+  assert.match(r.note, /VERIFIED BY APPLY/);
+  assert.match(r.note, /Still UNVERIFIED/);
+});
+
+test('the dpxl form documents the WIDER exclusivity the server enforces', () => {
+  const r = coralogixMonitoringRecipe();
+  // The provider docs say dpxl_expression is exclusive with `severities`. The
+  // server also rejects it alongside applicationRule/subsystemRule. Shipping
+  // the narrower claim would produce configs that fail on apply.
+  // The phrase wraps across comment lines, so assert on the parts.
+  assert.ok(r.body.includes('EXCLUSIVITY IS WIDER'), 'must flag the wider exclusivity');
+  assert.ok(r.body.includes('applicationRule'), 'must name applicationRule as also-excluded');
+  assert.ok(r.body.includes('subsystemRule'), 'must name subsystemRule as also-excluded');
+});
+
+test('the advisor surfaces the Coralogix down-tier path only on a coralogix destination', () => {
+  const onCx = renderOffloadSection(PARAMS, 'fluent-bit', 'coralogix');
+  assert.match(onCx, /Coralogix Monitoring/, 'coralogix destination must get the Monitoring recipe');
+  assert.match(onCx, /must survive to the destination/, 'must warn that the marker is load-bearing');
+
+  // The Coralogix block tells the operator NOT to strip routeState. That is
+  // wrong advice everywhere else, so it must not leak into other destinations
+  // or into the unknown-destination fallback.
+  for (const dest of ['datadog', 'cloudwatch', undefined]) {
+    const other = renderOffloadSection(PARAMS, 'fluent-bit', dest as string | undefined);
+    assert.ok(
+      !/Coralogix Monitoring/.test(other),
+      `destination=${dest}: must NOT render the coralogix down-tier block`
+    );
+  }
+});
+
+test('coralogix recipe requires delimited encoding, not json (live-run correction)', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  const enc = r.prerequisites.find(p => p.startsWith('Encoding:'));
+  assert.ok(enc, 'must carry an encoding prerequisite');
+  // The generic fluent-bit recipe says "must emit JSON". On this path that is
+  // backwards and fails SILENTLY: json collapses the record into one string
+  // field, the lua cannot read routeState, and every event is mislabelled with
+  // the pass subsystem while still returning HTTP 200.
+  assert.ok(/delimited/.test(enc!), 'must name delimited as the required encoding');
+  assert.ok(/Do NOT set it to `json`/.test(enc!), 'must warn against json explicitly');
+  assert.ok(
+    !/must emit JSON/.test(enc!),
+    'must not inherit the generic recipe instruction, which is wrong here'
+  );
+});
+
+test('coralogix lua falls back to a substring match if routeState is not a field', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  // Silent mislabelling is the worst failure mode here, so the lua degrades to
+  // scanning string values for the marker rather than defaulting everything to
+  // the pass subsystem.
+  assert.ok(r.body.includes('string.find'), 'lua needs the fallback scan');
+  assert.ok(r.body.includes('r==nil'), 'fallback must trigger only when the field is absent');
+});
+
+test('coralogix prerequisites warn that TCO policy changes are not instant', () => {
+  const r = fluentBitCoralogixRecipe(CX);
+  assert.ok(
+    r.prerequisites.some(p => /NOT instant/.test(p)),
+    'measured propagation delay must be stated; the vendor docs claim immediate'
+  );
 });

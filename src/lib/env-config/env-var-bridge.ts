@@ -66,7 +66,7 @@ type OffloadType = OffloadDestination['type'];
 const CLUSTER_TYPES: readonly ClusterType[] = ['eks', 'gke', 'aks', 'kind', 'minikube', 'bare_metal', 'other'];
 const SIEM_VENDORS: readonly SiemVendor[] = [
   'splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch',
-  'azure-monitor', 'gcp-logging', 'sumo', 'other',
+  'azure-monitor', 'gcp-logging', 'sumo', 'coralogix', 'other',
 ];
 const OFFLOAD_TYPES: readonly OffloadType[] = ['s3', 'gcs', 'azure_blob', 'file'];
 

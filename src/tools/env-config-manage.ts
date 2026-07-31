@@ -123,6 +123,7 @@ const SIEM_VENDOR_ENUM = [
   'azure-monitor',
   'gcp-logging',
   'sumo',
+  'coralogix',
   'other',
 ] as const;
 

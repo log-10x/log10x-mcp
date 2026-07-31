@@ -21,8 +21,8 @@
  *     getDestinationCostModel(dest, {esPruned:false}).
  *   - Splunk envelope-in-event: ~92% reduction on the OUTER stream.
  *     Modeled as 0.08..0.15.
- *   - Datadog/CW/Azure/GCP/Sumo: no-op (destination cannot accept encoded
- *     events). compact_ratio = 1.0..1.0; a caveat is emitted by callers.
+ *   - Datadog/CW/Azure/GCP/Sumo/Coralogix: no-op (destination cannot accept
+ *     encoded events). compact_ratio = 1.0..1.0; a caveat is emitted by callers.
  *
  * Small-event degradation: below `small_event_floor_bytes` (default 100),
  * envelope overhead linearly degrades the compact ratio toward 1.0. At
@@ -419,6 +419,33 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
   },
+  coralogix: {
+    destination: 'coralogix',
+    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.coralogix, // $1.15/GB Frequent Search
+    storage_per_gb_month: 0.0, // unit-based pricing bundles retention into the priority
+    billing_basis: 'compressed-ingest',
+    // Coralogix cannot decode a 10x envelope at query time, so compact is a
+    // no-op here exactly as it is for Datadog/CW. tier_down is the lever.
+    compact_mode: 'no-op',
+    compact_ratio_low: 1.0,
+    compact_ratio_high: 1.0,
+    small_event_floor_bytes: 100,
+    // Coralogix TCO priority levels: High (Frequent Search) is the default for
+    // anything no policy matches; Medium (Monitoring) is the cheap tier, still
+    // DataPrime-queryable with alerting and dashboarding (so tier_down here is
+    // NOT a loss of queryability, unlike an archive).
+    //
+    // Storage is 0.0 on both sides because Monitoring stores into the
+    // CUSTOMER's own S3 bucket: those bytes are not billed by Coralogix at all.
+    // Netting the customer's own S3 cost is the caller's job via
+    // S3_STORAGE_PER_GB_MONTH, the same way `offload` is netted; folding it in
+    // here would double-count it.
+    tier_down_target_tier: {
+      name: 'Coralogix Monitoring (Medium priority)',
+      ingest_rate_usd_per_gb: 0.5,
+      storage_rate_usd_per_gb_month: 0.0,
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -468,6 +495,12 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // SIEM-billed analyzers with cheap-tier in-platform options.
   datadog: ['tier_down', 'offload'],
   cloudwatch: ['tier_down', 'offload'],
+  // Coralogix: Monitoring (Medium) is an in-platform cheap tier that stays
+  // DataPrime-queryable, so tier_down is the level-1 lever, offload the
+  // fallback. Unlike Datadog Flex / CW IA, the tier_down slice goes to the SAME
+  // ingest endpoint — only the subsystem differs, and a TCO policy keyed on
+  // that subsystem does the routing.
+  coralogix: ['tier_down', 'offload'],
   // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
   splunk: ['offload', 'compact'],
   splunk_cloud: ['offload', 'compact'],

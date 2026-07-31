@@ -124,6 +124,7 @@ const DEST_ENUM = z.enum([
   'azure-monitor',
   'gcp-logging',
   'sumo',
+  'coralogix',
 ]);
 
 export const estimateSavingsSchema = {
@@ -1881,7 +1882,7 @@ export async function executeEstimateSavings(
   // and cost_options use — so all three tools apply consistent detection logic.
   const VALID_DESTS = [
     'splunk', 'datadog', 'elasticsearch', 'clickhouse',
-    'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo',
+    'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix',
   ] as const;
   type ValidDest = typeof VALID_DESTS[number];
 
@@ -1962,12 +1963,12 @@ export async function executeEstimateSavings(
           phase: 'target_resolution',
           error: 'destination is required',
         },
-        human_summary: 'estimate_savings refused: destination is required. Pass one of splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+        human_summary: `estimate_savings refused: destination is required. Pass one of ${VALID_DESTS.join(', ')}.`,
         error: {
           error_type: 'missing_destination',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: 'Pass destination explicitly. Supported: splunk, datadog, elasticsearch, clickhouse, cloudwatch, azure-monitor, gcp-logging, sumo.',
+          hint: `Pass destination explicitly. Supported: ${VALID_DESTS.join(', ')}.`,
         },
         telemetry,
       });

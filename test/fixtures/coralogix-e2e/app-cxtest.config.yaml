@@ -1,0 +1,94 @@
+#
+# 🔟❎  Coralogix tier_down proof app  (LOCAL TEST SCAFFOLD, not a shipped app)
+#
+# Purpose: produce REAL engine output carrying `routeState":"tier_down"` so the
+# Coralogix Fluent Bit recipe can be exercised end to end against a live tenant.
+#
+# Modelled on config/apps/recvtest. The one structural difference matters:
+# recvtest declares `include:` TWICE (lines 25 and 102), and the second block
+# overrides the first in YAML, so `run/receive/rate` never actually loads there
+# and no regulator runs. This app uses a SINGLE include block.
+#
+# The regulator gates that must all pass before `this.route(action)` fires
+# (rate-object-cap.js, shouldRetainEventWithCap):
+#   - a cap entry exists for the container      -> caps.csv
+#   - warmup elapsed                            -> rateReceiverWarmupMs 0
+#   - pattern count >= baseline                 -> rateReceiverBaselineCount 0
+#   - pattern bytes exceed the cap              -> tiny cap in caps.csv
+#   - pattern share >= minSharePercent          -> one pattern per container
+#   - random() >= floor                         -> rateReceiverMinRetentionThreshold 0
+# A container with NO cap entry hits `absoluteCap == 0 -> return true` and is
+# never routed, which is what makes the second container a real control.
+
+tenx: run
+
+runtimeName: $=TenXEnv.get("TENX_RUNTIME_NAME", "cxtest")
+
+include:
+
+  # NOTE: the `receiver` app bundle is deliberately NOT included. It passes
+  # `airgapped` on the command line, an option no run-pipeline module declares
+  # in this tree, so the launch dies with "Unmatched arguments ... 'airgapped'".
+  # That option belongs to the CLOUD flavor licensing path; the local binary is
+  # `tenx --version` => flavor 'edge'. The regulator is what calls route(), and
+  # it does not need the receiver bundle.
+
+  # Base runtime: bootstrap, symbol, template, transform, reload, monitor,
+  # console. Without this the launch dies with "no 'symbolPaths' set" —
+  # the symbol library is loaded by run/symbol, which lives in this bundle.
+  - apps/shared
+
+  # Parsing + enrichment. `message` is required: the regulator keys its pattern
+  # bucket on symbolMessageField, and an empty fieldSetKey short-circuits to
+  # "retain" before any routing decision is reached.
+  - run/initialize/inputField
+  - run/initialize/level
+  - run/initialize/group
+  - run/initialize/message
+  - run/initialize/k8s
+
+  # The rate regulator: the only thing in the pipeline that calls route().
+  # This includes a local COPY of config/pipelines/run/receive/rate (as ./rate),
+  # not that path directly, for two reasons:
+  #   1. the stock config already sets containerField / warmupMs / baselineCount /
+  #      minRetentionThreshold, and a re-declared block is ADDITIVE, not an
+  #      override ("option 'rateReceiverContainerField' should be specified only once")
+  #   2. the regulator's .js files live in that CONFIG dir, not in the module dir.
+  #      Including run/modules/receive/rate instead loads the settings but not the
+  #      classes, and the launch dies with "function 'shouldRetainEventWithCap'
+  #      not found".
+  - rate
+
+  # File transport on both ends. The file is the seam we hand to Fluent Bit.
+  - run/input/file
+  - run/output/event/file
+
+
+# Write the forwarder-shaped envelope: full event text plus the spliced
+# routeState marker, as JSON. This is the same expression the forwarder input
+# config resolves encodeField to under outputOffload
+# (config/pipelines/run/input/forwarder/config.yaml), reproduced here because
+# this app uses the file transport rather than the forward protocol.
+outputFile:
+  # The wire shape the forwarder would see: the ORIGINAL event text with
+  # `,"routeState":"<action>"` spliced in before the closing brace by
+  # OuterTextSpliceUtil.writeExtras. encodeType `delimited` with an empty line
+  # prefix writes that text verbatim, one event per line. `json` would instead
+  # wrap it as {"fullText_of_routeState": "<escaped text>"}, which is a
+  # different shape than the forwarder emits.
+  - path: $=path("data/sample/output") + "/routed.json"
+    encodeType: delimited
+    encodedLinePrefix: ""
+    fields:
+      - fullText("routeState")
+
+  # Diagnostic: did the regulator actually route anything, and for which
+  # container? Written separately so a splice problem and a routing problem
+  # cannot be confused for each other.
+  - path: $=path("data/sample/output") + "/diag.csv"
+    encodeType: delimited
+    encodedLinePrefix: ""
+    fields:
+      - routeState
+      - container
+      - k8s_container

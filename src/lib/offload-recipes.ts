@@ -379,7 +379,14 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
       '`tenx.app` for the SIEM.',
     prerequisites: [
       ...basePrereqs(p),
-      'Encoding: the 10x return path must emit JSON (`fluentbitOutputEncodeType: json`), or the `routeState` key is mangled in a delimited round-trip.',
+      // CORRECTED against a live run (see test/fixtures/coralogix-e2e).
+      // This previously said the return path MUST emit json. That is backwards
+      // and it fails silently on every destination that uses the lua branch
+      // below: under `json` the engine ships the whole rendered record as ONE
+      // msgpack string field named after the encode expression, so
+      // `rec["routeState"]` is nil, no branch matches, and offload/drop
+      // routing quietly stops while everything still returns success.
+      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`, which delivers `routeState` as its own record field. Do NOT set it to `json`: that collapses the record into a single string field, the routing lua stops matching, and the offload/drop slices silently fall through to the SIEM with no error.',
       'The lua filter (marker -> routing key) and `KEEP=true` are both mandatory in this shape: the routes are keyed off `_route`, and KEEP=false drops the re-emitted record (verified live on fluent-bit v5).',
     ],
   };
@@ -884,6 +891,313 @@ az monitor log-analytics workspace table create \\
   };
 }
 
+// ---------------------------------------------------------------------------
+// Coralogix  (tier_down without a second sink)
+//
+// Coralogix differs structurally from Datadog Flex and CloudWatch IA: the
+// down-tiered slice is NOT sent somewhere else. It goes to the SAME ingest
+// endpoint, and a TCO policy moves it from High (Frequent Search) to Medium
+// (Monitoring). So the forwarder's job here is to make the routing decision
+// VISIBLE to policy evaluation, not to fan out to a second output.
+//
+// Two things follow, and they are the reason this recipe exists separately:
+//
+//  1. `routeState` must NOT be stripped. Every other recipe in this file drops
+//     the marker once it has routed (see the module docstring). On Coralogix the
+//     marker IS the signal the destination reads, so stripping it removes the
+//     only thing a `dpxl_expression` policy can match. VERIFIED live on a US2
+//     tenant: it arrives as a first-class body field, `filter $d.routeState ==
+//     'tier_down'` and `groupby $d.routeState` both work server-side, and a
+//     bogus keypath returns `keypath does not exist` while this one does not.
+//
+//  2. The decision cannot be derived at the destination AT ALL, whatever the
+//     pipeline order. Do NOT justify this with "TCO evaluates before
+//     enrichment" — that is false: Coralogix's own Pipeline Analyzer doc
+//     orders it parsing rules, then enrichments, then TCO pipelines.
+//     The order-independent argument is the real one, and it is stronger:
+//     whether a pattern has passed its byte budget for the window is a fact
+//     about a STREAM, counted in the sidecar across many events. A
+//     destination-side rule reads one event at a time and cannot derive it no
+//     matter when it runs. So the routing decision has to arrive stamped on
+//     the event, and the shipper is the only thing that can stamp it.
+//
+// The lua ALSO mirrors routeState onto `subsystemName`. That is belt-and-braces,
+// not redundancy: `dpxl_expression` (body-field match) needs Terraform provider
+// >= 3.4.0, while `subsystems` matching works on every provider version and on
+// the plain HTTP API. See coralogixMonitoringRecipe() for both policy forms.
+// ---------------------------------------------------------------------------
+export interface CoralogixTierParams {
+  /** Coralogix ingest domain for the tenant's region, e.g. `cx498.coralogix.com` (US2). */
+  domain: string;
+  /** applicationName stamped on every shipped event. */
+  applicationName?: string;
+  /** subsystemName carrying the untouched premium slice. */
+  passSubsystem?: string;
+  /** subsystemName the tier_down slice is moved to (what a `subsystems` policy matches). */
+  tierDownSubsystem?: string;
+}
+
+export function fluentBitCoralogixRecipe(
+  p: OffloadParams & CoralogixTierParams,
+): OffloadRecipe {
+  const prefix = p.prefix ?? DEFAULT_PREFIX;
+  const app = p.applicationName ?? 'tenx';
+  const passSub = p.passSubsystem ?? 'app';
+  const tierSub = p.tierDownSubsystem ?? 'tier_down';
+  return {
+    language: 'ini',
+    body: `[SERVICE]
+    Flush 1
+    Grace 5                # let the re-emitted chunks flush before shutdown
+
+# 1) Only the slices that LEAVE Coralogix get their own tag. tier_down is
+#    deliberately NOT retagged: it ships to the same endpoint and is separated
+#    by subsystemName + the routeState body field.
+[FILTER]
+    Name    lua
+    Match   tenx.*
+    call    tag_route
+    code    function tag_route(tag,ts,rec) local r=rec["routeState"] if r=="offload" then rec["_route"]="offload" elseif r=="drop" then rec["_route"]="drop" else rec["_route"]="siem" end return 2,ts,rec end
+
+[FILTER]
+    Name    rewrite_tag
+    Match   tenx.*
+    Rule    $_route ^offload$ tenx.offload true
+    Rule    $_route ^drop$    tenx.drop    true
+
+# 2) keep the routed slices out of the Coralogix path. What remains on tenx.app
+#    is pass/compact/sample AND tier_down.
+[FILTER]
+    Name    grep
+    Match   tenx.app
+    Regex   _route ^siem$
+
+# 3) Build the /logs/v1/singles envelope. subsystemName is derived FROM
+#    routeState, and routeState itself stays inside \`text\` (NOT stripped) so it
+#    arrives as an addressable body field. Only \`_route\`, the internal routing
+#    key, is removed.
+#    \`text\` may be a nested object: verified live that Coralogix parses it
+#    identically to a JSON string, so no JSON encoder is needed in lua.
+[FILTER]
+    Name    lua
+    Match   tenx.app
+    call    cx_singles
+    code    function cx_singles(tag,ts,rec) local r=rec["routeState"] if r==nil then for k,v in pairs(rec) do if type(v)=="string" and string.find(v,'"routeState":"${tierSub}"',1,true) then r="${tierSub}" end end end rec["_route"]=nil local out={} out["applicationName"]="${app}" out["subsystemName"]=(r=="${tierSub}") and "${tierSub}" or "${passSub}" out["severity"]=3 out["text"]=rec return 2,ts,out end
+
+# 4) Coralogix ingest. \`Format json\` emits ONE JSON ARRAY per flush, which is
+#    exactly what /logs/v1/singles accepts. \`json_date_key false\` stops
+#    fluent-bit adding a stray top-level date key beside the envelope fields.
+[OUTPUT]
+    Name       http
+    Match      tenx.app
+    Host       ingress.${p.domain}
+    Port       443
+    URI        /logs/v1/singles
+    Format     json
+    json_date_key false
+    tls        On
+    tls.verify On
+    Header     Authorization Bearer \${CORALOGIX_SEND_KEY}
+
+# 5) Strip the routing markers from the S3 slice ONLY.
+#    \`Match tenx.offload\` is deliberately narrow: on the Coralogix path
+#    (tenx.app) \`routeState\` MUST survive to the destination, because the TCO
+#    policy matches it. Without this filter the offloaded objects carry
+#    \`routeState\` and the internal \`_route\` key, so the archived shape differs
+#    from every other recipe and the Retriever indexes two junk fields.
+[FILTER]
+    Name       record_modifier
+    Match      tenx.offload
+    Remove_key routeState
+    Remove_key _route
+
+# 6) offload slice -> customer-owned S3 as JSONL (same layout as the base recipe)
+[OUTPUT]
+    Name          s3
+    Match         tenx.offload
+    bucket        ${p.bucket}
+    region        ${p.region}
+    s3_key_format /${prefix}/$UUID.jsonl
+    use_put_object On
+    json_date_format iso8601
+
+# 7) drop slice -> SUPPRESSED
+[OUTPUT]
+    Name   null
+    Match  tenx.drop`,
+    placementNote:
+      'all FILTERs sit on the 10x return path (`Match tenx.*`). Unlike the other ' +
+      'recipes this one does NOT strip `routeState`: on Coralogix the marker is ' +
+      'what the destination reads. The reason is NOT pipeline order (Coralogix ' +
+      'runs TCO after enrichment, not before) — it is that a byte-budget ' +
+      'decision is a property of a STREAM counted in the sidecar, which no ' +
+      'per-event destination rule can derive whenever it runs. `severity` is ' +
+      'hardcoded to 3 (Info); map it from the event if the policy needs to ' +
+      'discriminate on severity, and note that `dpxl_expression` and `severities` ' +
+      'are mutually exclusive in one policy.',
+    prerequisites: [
+      ...basePrereqs(p),
+      // CORRECTED AGAINST A LIVE RUN. The generic fluent-bit recipe carries the
+      // opposite instruction ("must emit JSON"), and following it here breaks
+      // this recipe SILENTLY: under `json` the engine ships the whole rendered
+      // record as ONE msgpack string field named after the encode expression
+      // (`fullText_of_tenx_hash_and_routeState`), so `rec["routeState"]` in the
+      // lua is nil, every event is labelled with the pass subsystem, and
+      // nothing is ever tiered. Observed: 160/160 events landed in subsystem
+      // `app` with HTTP 200 throughout and no error anywhere.
+      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`. Do NOT set it to `json` on this path — `json` collapses the record into a single string field and the lua can no longer read `routeState`, which mislabels every event with no error. (The lua below carries a substring fallback for this case, but delimited is the supported shape.)',
+      'Set `CORALOGIX_SEND_KEY` in the forwarder environment to a Send-Your-Data key for the target team (NOT a user/management key).',
+      'TCO policy changes are NOT instant despite the docs saying "changes take effect immediately". Measured on a live tenant: a freshly enabled policy did not affect routing ~60s after enabling, and did ~6min after. Allow several minutes before concluding a policy does not work.',
+      'Do NOT add a `record_modifier` that removes `routeState` on this path: it is the field the TCO policy matches.',
+      'The destination-side TCO policy is a SEPARATE apply — see coralogixMonitoringRecipe(). Without it every event stays in High (Frequent Search), which is the documented default when no policy matches.',
+    ],
+  };
+}
+
+/** Coralogix: move the `tier_down` slice from High (Frequent Search) to Medium
+ * (Monitoring). Two policy forms, because which one is available depends on the
+ * provider version. */
+export function coralogixMonitoringRecipe(
+  opts: { tierDownSubsystem?: string } = {},
+): SiemTierRecipe {
+  const sub = opts.tierDownSubsystem ?? 'tier_down';
+  return {
+    target: 'coralogix-monitoring',
+    language: 'hcl',
+    body: `terraform {
+  required_providers {
+    coralogix = {
+      source  = "coralogix/coralogix"
+      version = "~> 3.4"   # dpxl_expression added in provider 3.4.0
+    }
+  }
+}
+
+provider "coralogix" {
+  # env     = "US2"   # or CORALOGIX_ENV
+  # api_key = "..."   # or CORALOGIX_API_KEY (needs LOGS.TCO:UPDATEPOLICIES)
+}
+
+# ONE resource holds the ORDERED policy list; first match wins, so the 10x entry
+# must precede any broader catch-all already in the list.
+resource "coralogix_tco_policies_logs" "tenx" {
+  policies = [
+    # FORM A — match the routeState body field directly (provider >= 3.4.0).
+    # The engine's marker drives tier selection with no label mapping at all.
+    # The \`<v1>\` version prefix is REQUIRED.
+    #
+    # EXCLUSIVITY IS WIDER THAN THE PROVIDER DOCS SAY. They call
+    # \`dpxl_expression\` mutually exclusive with \`severities\`. The server is
+    # stricter: "Cannot have both rules (applicationRule, subsystemRule,
+    # severities) and dpxlExpression". So a dpxl policy CANNOT also be scoped
+    # to an application or subsystem — it is expression-only, evaluated across
+    # everything. Scope it inside the expression instead, e.g.
+    #   "<v1> $d.routeState == '${sub}' && $l.applicationname == 'checkout'"
+    {
+      name            = "10x tier_down -> Monitoring"
+      priority        = "medium"   # medium == Monitoring
+      dpxl_expression = "<v1> $d.routeState == '${sub}'"
+    },
+
+    # FORM B — match the subsystem the forwarder lua set from routeState.
+    # Works on every provider version and on the plain HTTP API, which exposes
+    # only application / subsystem / severity matchers. Use this if you are
+    # pinned below 3.4.0, or keep it as a second entry for defence in depth.
+    # {
+    #   name       = "10x tier_down -> Monitoring (subsystem form)"
+    #   priority   = "medium"
+    #   severities = ["debug", "verbose", "info", "warning", "error", "critical"]
+    #   subsystems = {
+    #     rule_type = "is"
+    #     names     = ["${sub}"]
+    #   }
+    # },
+
+    # ... your existing policies follow, unchanged.
+  ]
+}`,
+    note:
+      'Medium (Monitoring) keeps the slice DataPrime-queryable with alerting and ' +
+      'dashboarding, stored in the customer\'s own S3 — so this is a down-tier, ' +
+      'not an archive, and there is no rehydration step. Data matching no policy ' +
+      'stays in High (Frequent Search) by default. ' +
+      'VERIFIED BY APPLY on a live US2 tenant (provider 3.8.0, CORALOGIX_ENV=US2): ' +
+      'both forms create successfully and read back enabled at priority ' +
+      'PRIORITY_TYPE_MEDIUM. Form A is verified to FIRE, not merely to create: ' +
+      'two events in one request, same application and both on the pass ' +
+      'subsystem so no subsystem rule could match, differing only in ' +
+      '`$d.routeState` — the `pass` one stayed in Frequent Search at ' +
+      'priorityclass=high, the `tier_down` one was removed. ' +
+      'Still UNVERIFIED: that the TCO usage report actually BILLS a matching ' +
+      'event at the Medium rate (that data lags and was not checked), and ' +
+      'reading the slice back out of Monitoring. ' +
+      'IF YOU ARE DRIVING THIS BY RAW HTTP RATHER THAN TERRAFORM, do not follow ' +
+      'the published TCO REST docs; see coralogixTcoApiContract().',
+  };
+}
+
+/**
+ * The TCO policy HTTP contract as the product actually implements it, recovered
+ * by running the Terraform provider under TF_LOG=DEBUG and replaying its
+ * requests with curl until they succeeded standalone.
+ *
+ * This exists because the published REST documentation is wrong in five
+ * independently reproducible ways, and a reader following it cannot succeed.
+ */
+export function coralogixTcoApiContract(): SiemTierRecipe {
+  return {
+    target: 'coralogix-tco-api',
+    language: 'text',
+    body: `WRITE — atomic overwrite of the ENTIRE policy list (not create-one):
+
+  PUT https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/log-policies/v1
+  Authorization: Bearer <user key with LOGS.TCO:UPDATEPOLICIES>
+  Content-Type: application/json
+
+  {"policies":[
+    {"policy":{"name":"10x tier_down -> Monitoring","priority":"PRIORITY_TYPE_MEDIUM","disabled":false,
+               "subsystemRule":{"name":"tier_down","ruleTypeId":"RULE_TYPE_ID_IS"}},
+     "logRules":{"severities":["SEVERITY_INFO"]}}
+  ]}
+
+READ:
+
+  GET https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/policies/v1?source_type=SOURCE_TYPE_LOGS
+
+Note the HOST: the regional host (e.g. api.us2.coralogix.com), NOT the
+per-team host (api.<team>.coralogix.com) the ingest and query APIs use.
+
+WHERE THE PUBLISHED DOCS ARE WRONG (each reproduced independently):
+
+  1. The documented example cannot ever succeed. It violates two rules at once.
+  2. On the RULE-MATCHER form, \`severities\` is required and must be NON-EMPTY.
+     Omitted -> 400. Empty array -> 500 "failed to create policy". The docs show
+     it empty, which cannot work. This does NOT apply to a \`dpxlExpression\`
+     policy: that form excludes severities AND rules, and reads back with
+     \`"severities": []\` — so stated unconditionally, this item would make the
+     dpxl policy in coralogixMonitoringRecipe() impossible to create.
+  3. \`applicationName\` must be absent or COMPLETE. An empty object -> 400.
+     The docs show an empty object.
+  4. The documented write endpoint is not the one the product uses. Docs say
+     POST /api/v1/external/tco/policies (create-one); the provider and UI use
+     the PUT whole-list overwrite above. Different verb, path, host, semantics.
+  5. \`dpxlExpression\` does not exist on the documented REST API, and the
+     legacy GET cannot represent it: a dpxl policy read back through
+     GET /api/v1/external/tco/policies shows NO matching criteria at all, so a
+     reader of the documented API concludes it matches everything.
+
+The documented POST does work, but only in a shape the docs never show:
+\`severities\` as a non-empty array of integers 1-6
+(debug/verbose/info/warning/error/critical) plus a well-formed or absent
+\`applicationName\`.`,
+    note:
+      'Recovered from the wire, not from documentation. Use the Terraform ' +
+      'resource in coralogixMonitoringRecipe() by preference; this contract is ' +
+      'for callers that cannot run Terraform, and as the evidence base when a ' +
+      'customer reports that the documented TCO API rejects their request.',
+  };
+}
+
 /** Forwarders besides the detected one, stable order, for the "also supports"
  * hint. */
 export function otherOffloadForwarders(detected: OffloadForwarderId): OffloadForwarderId[] {
@@ -924,8 +1238,30 @@ function renderRecipeBlock(fwd: OffloadForwarderId, p: OffloadParams): string[] 
 export function renderOffloadSection(
   params: OffloadParams,
   forwarder: OffloadForwarderId | null,
-  destination?: string
+  rawDestination?: string
 ): string {
+  // `destination` arrives as free-form text from advise_retriever, so an agent
+  // passing "Coralogix" or " coralogix " would miss an exact-match gate and get
+  // the GENERIC recipe, which strips `routeState` and silently disables
+  // tiering. Normalise once, here, so every gate below compares canonical ids.
+  const destination = rawDestination
+    ? (() => {
+        const d = rawDestination.trim().toLowerCase().replace(/[\s_]+/g, '-');
+        const aliases: Record<string, string> = {
+          cx: 'coralogix',
+          dd: 'datadog',
+          cw: 'cloudwatch',
+          es: 'elasticsearch',
+          opensearch: 'elasticsearch',
+          ch: 'clickhouse',
+          azure: 'azure-monitor',
+          'azure-monitor-logs': 'azure-monitor',
+          gcp: 'gcp-logging',
+          stackdriver: 'gcp-logging',
+        };
+        return aliases[d] ?? d;
+      })()
+    : undefined;
   const prefix = params.prefix ?? DEFAULT_PREFIX;
   const lines: string[] = [];
 
@@ -941,7 +1277,46 @@ export function renderOffloadSection(
     ''
   );
 
-  if (forwarder) {
+  // Coralogix must NOT be shown the generic recipe. Every generic recipe strips
+  // `routeState` on the output path, and on Coralogix that marker IS the routing
+  // signal the TCO policy matches, so applying the generic artifact leaves the
+  // operator with HTTP 200, no error, and nothing ever tiered. Substitute the
+  // Coralogix shipper for the whole recipe block rather than appending a
+  // warning after a config that already does the wrong thing.
+  const coralogixShipper =
+    destination === 'coralogix' &&
+    getAllowedActionsForDestination('coralogix').includes('tier_down');
+
+  if (coralogixShipper) {
+    const cx = fluentBitCoralogixRecipe({ ...params, domain: '<team>.coralogix.com' });
+    lines.push(
+      '**Fluent Bit — Coralogix build.** This is NOT the generic recipe: it keeps ' +
+        '`routeState` on the wire, because on Coralogix the marker is what the TCO ' +
+        'policy matches. Do not substitute the generic fluent-bit recipe here.',
+      '',
+      '```ini',
+      cx.body,
+      '```',
+      '',
+      `Placement: ${cx.placementNote}`,
+      '',
+      'Prerequisites:',
+      ...cx.prerequisites.map(p => `- ${p}`),
+      '',
+      'Replace `<team>.coralogix.com` with the tenant domain, and set ' +
+        '`CORALOGIX_SEND_KEY` to a Send-Your-Data key.',
+      ''
+    );
+    if (forwarder && forwarder !== 'fluent-bit') {
+      lines.push(
+        `Note: the detected forwarder is \`${forwarder}\`, but only the fluent-bit ` +
+          'shipper has been verified end to end against a live Coralogix tenant. ' +
+          'Porting it means preserving one property: `routeState` must reach the ' +
+          'destination unstripped.',
+        ''
+      );
+    }
+  } else if (forwarder) {
     lines.push(...renderRecipeBlock(forwarder, params), '');
     const others = otherOffloadForwarders(forwarder);
     lines.push(`Other supported forwarders: ${others.join(', ')}.`, '');
@@ -986,7 +1361,16 @@ export function renderOffloadSection(
     ? destination === 'azure-monitor' && getAllowedActionsForDestination('azure-monitor').includes('tier_down')
     : true;
 
-  if (showDatadog || showCloudWatch || showAzure) {
+  // Coralogix is deliberately NOT part of the unknown-destination fallback.
+  // Datadog/CloudWatch render as generic "here are the leads" when destination
+  // is unset, which is harmless. The Coralogix path is different: it tells the
+  // operator NOT to strip routeState, which is wrong advice on every other
+  // destination. So it renders only on an explicit coralogix destination.
+  const showCoralogix =
+    destination === 'coralogix' &&
+    getAllowedActionsForDestination('coralogix').includes('tier_down');
+
+  if (showDatadog || showCloudWatch || showAzure || showCoralogix) {
     lines.push(
       '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
@@ -1038,6 +1422,29 @@ export function renderOffloadSection(
           ''
         );
       }
+    }
+    if (showCoralogix) {
+      const cx = coralogixMonitoringRecipe();
+      lines.push(
+        `_Coralogix Monitoring_ — ${cx.note}`,
+        '',
+        '```hcl',
+        cx.body,
+        '```',
+        '',
+        // The shipper half is load-bearing here in a way it is not for Flex or
+        // IA, where the split is a second sink. On Coralogix the slice stays on
+        // one endpoint and the marker IS the routing signal, so the forwarder
+        // must be told not to strip it.
+        'On Coralogix the down-tiered slice is NOT sent to a second sink: it ships to the ' +
+          'same endpoint and the policy above moves it. That makes the forwarder half ' +
+          'load-bearing — `routeState` must survive to the destination. A byte-budget ' +
+          'decision is a property of a stream counted in the sidecar, so no ' +
+          'per-event rule at the destination can derive it. The fluent-bit ' +
+          'config rendered above is the Coralogix build and already keeps the ' +
+          'marker; do not swap in a generic recipe, which strips it.',
+        ''
+      );
     }
   }
 
