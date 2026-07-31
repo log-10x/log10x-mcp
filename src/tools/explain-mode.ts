@@ -98,7 +98,8 @@ export const explainModeSchema = {
 // so this tool cannot drift into a false promise estimate_savings then refuses:
 //   compact  — real only where compact_mode !== 'no-op' (splunk / self-hosted
 //              elasticsearch / clickhouse); a no-op on azure-monitor, cloudwatch,
-//              datadog, gcp-logging, sumo, coralogix.
+//              datadog, gcp-logging, sumo, coralogix. Elastic Cloud Serverless
+//              DOES support it (index-pruned), same as self-hosted.
 //   tier_down — applies only where the destination's default actions include it
 //              (datadog / cloudwatch / azure-monitor / gcp-logging / sumo /
 //              coralogix). Mirrors cost-options.ts.

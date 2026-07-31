@@ -125,6 +125,7 @@ const DEST_ENUM = z.enum([
   'gcp-logging',
   'sumo',
   'coralogix',
+  'elastic-serverless',
 ]);
 
 export const estimateSavingsSchema = {
@@ -1883,6 +1884,7 @@ export async function executeEstimateSavings(
   const VALID_DESTS = [
     'splunk', 'datadog', 'elasticsearch', 'clickhouse',
     'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix',
+    'elastic-serverless',
   ] as const;
   type ValidDest = typeof VALID_DESTS[number];
 

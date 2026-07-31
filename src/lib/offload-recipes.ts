@@ -1249,6 +1249,8 @@ export function renderOffloadSection(
         const d = rawDestination.trim().toLowerCase().replace(/[\s_]+/g, '-');
         const aliases: Record<string, string> = {
           cx: 'coralogix',
+          'elastic-cloud-serverless': 'elastic-serverless',
+          'elasticsearch-serverless': 'elastic-serverless',
           dd: 'datadog',
           cw: 'cloudwatch',
           es: 'elasticsearch',

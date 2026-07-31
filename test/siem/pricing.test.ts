@@ -7,7 +7,7 @@ import {
   getAnalyzerCostForSiem,
 } from '../../src/lib/siem/pricing.js';
 
-test('all 9 SIEMs have pricing defined', () => {
+test('all 10 SIEMs have pricing defined', () => {
   const ids = Object.keys(DEFAULT_ANALYZER_COST_PER_GB).sort();
   assert.deepEqual(ids, [
     'azure-monitor',
@@ -15,6 +15,7 @@ test('all 9 SIEMs have pricing defined', () => {
     'cloudwatch',
     'coralogix',
     'datadog',
+    'elastic-serverless',
     'elasticsearch',
     'gcp-logging',
     'splunk',
