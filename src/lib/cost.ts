@@ -341,6 +341,30 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 0.3,
     compact_ratio_high: 0.4,
     small_event_floor_bytes: 100,
+    // Frozen tier via searchable snapshots. VERIFIED on a live Elastic Cloud
+    // Hosted deployment 2026-07-31: the marked slice routed to its own index,
+    // ILM mounted it as partial-<index> on the data_frozen node, and the index
+    // dropped to store=0b local while the hot control stayed at 19.2kb.
+    // Critically, identity SURVIVED the transition -- a term query on
+    // tenx_hash returned 400/400 and routeState stayed aggregatable -- so the
+    // down-tiered slice is still retrievable, not merely cheap.
+    //
+    // RATE DERIVATION, stated because it is weaker than the mechanism. Elastic
+    // publishes frozen at roughly one fifth to one tenth of hot. We apply the
+    // CONSERVATIVE end (1/5) to our blended $1/GB, giving $0.20. That blend is
+    // a vendors.json infrastructure figure, not a list price, so treat the
+    // ratio as sound and the absolute as an estimate; override with
+    // analyzer_cost_per_gb for a known deployment.
+    //
+    // ON ELASTIC CLOUD HOSTED THE SAVING IS NOT AUTOMATIC. Hosted is priced by
+    // provisioned resources, so moving data out of hot creates HEADROOM; the
+    // deployment still has to be resized to bank it. That is unlike Coralogix,
+    // where the policy changed the billed rate on its own. Callers must say so.
+    tier_down_target_tier: {
+      name: 'Elasticsearch frozen tier (searchable snapshots)',
+      ingest_rate_usd_per_gb: 0.2,
+      storage_rate_usd_per_gb_month: 0.01,
+    },
   },
   // Elastic Cloud Serverless. Split out from `elasticsearch` because the two
   // bill on different axes and the self-hosted assumption overstates a
@@ -531,7 +555,10 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   splunk: ['offload', 'compact'],
   splunk_cloud: ['offload', 'compact'],
   // Self-hosted ES/OS can run the 10x plugin; managed offerings cannot.
-  elasticsearch: ['offload', 'compact'], // back-compat default = self-hosted assumption
+  // tier_down proven live 2026-07-31 (frozen searchable snapshot, identity
+  // survives). Needs an Enterprise licence self-managed, or Gold+ on Elastic
+  // Cloud Hosted; the recipe states that as a prerequisite.
+  elasticsearch: ['tier_down', 'offload', 'compact'],
   // Same actions as self-hosted, different rates. tier_down is absent on
   // purpose: Serverless retention is already near object-storage cost.
   'elastic-serverless': ['offload', 'compact'],

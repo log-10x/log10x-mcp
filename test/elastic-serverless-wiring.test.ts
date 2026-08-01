@@ -25,6 +25,9 @@ import { envConfigFromEnvVars } from '../src/lib/env-config/env-var-bridge.js';
 import { siemDestinationSchema } from '../src/lib/env-config/types.js';
 import { DEFAULT_ANALYZER_COST_PER_GB } from '../src/lib/siem/pricing.js';
 import { COST_MODEL_BY_DESTINATION, getAllowedActionsForDestination } from '../src/lib/cost.js';
+import { elasticFrozenTierRecipe as elasticFrozenTierRecipeSync, renderOffloadSection } from '../src/lib/offload-recipes.js';
+
+const PARAMS = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
 
 function parseField(shape: Record<string, unknown>, field: string, value: unknown) {
   const s = shape[field];
@@ -99,5 +102,71 @@ test('analyzer sniffing puts serverless BEFORE the bare elastic match', async ()
   // Self-hosted spellings must be untouched.
   for (const s of ['elasticsearch', 'elastic', 'es', 'opensearch']) {
     assert.equal(detect(s), 'elasticsearch', `"${s}" should stay self-hosted`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Frozen tier. Proven live 2026-07-31 on Elastic Cloud Hosted: the marked slice
+// mounted as partial-<index> on the frozen node at store=0b, and a term query
+// on tenx_hash returned 400/400 with routeState still aggregatable.
+// ---------------------------------------------------------------------------
+
+test('elasticsearch offers tier_down with a genuinely cheaper target', () => {
+  const actions = getAllowedActionsForDestination('elasticsearch');
+  assert.ok(actions.includes('tier_down'), 'frozen tier is proven; tier_down must be offered');
+  const m = COST_MODEL_BY_DESTINATION.elasticsearch;
+  const t = m.tier_down_target_tier;
+  assert.ok(t, 'no target tier — estimate_savings would return no delta');
+  assert.ok(
+    t.ingest_rate_usd_per_gb < m.ingest_per_gb,
+    'target must be cheaper than the baseline or tier_down saves nothing'
+  );
+  assert.match(t.name, /frozen/i, 'target tier should name the frozen tier');
+});
+
+test('serverless still does NOT offer tier_down', () => {
+  // Its retention is already near object-storage cost. Offering a "cheaper
+  // tier" there would be a saving that does not exist.
+  assert.ok(!getAllowedActionsForDestination('elastic-serverless').includes('tier_down'));
+});
+
+test('the frozen recipe emits the artifacts the live run actually used', async () => {
+  const { elasticFrozenTierRecipe } = await import('../src/lib/offload-recipes.js');
+  const r = elasticFrozenTierRecipe();
+  // The action that does the work.
+  assert.match(r.body, /"searchable_snapshot"/, 'must use the searchable_snapshot action');
+  assert.match(r.body, /"snapshot_repository": "found-snapshots"/, 'needs a repository');
+  // Both policies: without the control you cannot distinguish "the slice moved"
+  // from "everything moved".
+  assert.match(r.body, /_ilm\/policy\/tenx-tier-down/);
+  assert.match(r.body, /_ilm\/policy\/tenx-keep/);
+  // Bootstrap indices: omitting is_write_index is the usual reason ILM sits in
+  // check-rollover-ready forever. This bit me in the live run.
+  assert.match(r.body, /"is_write_index": true/, 'rollover needs a bootstrapped write index');
+  // Identity must be mapped as keyword or the post-transition query cannot work.
+  assert.match(r.body, /"tenx_hash":\s*\{ "type": "keyword" \}/);
+  assert.match(r.body, /"routeState": \{ "type": "keyword" \}/);
+});
+
+test('the frozen recipe does not promise an automatic bill drop on Hosted', () => {
+  const r = elasticFrozenTierRecipeSync();
+  // Hosted is resource-priced: moving data out of hot creates headroom, and the
+  // deployment must be resized to bank it. Claiming otherwise is the kind of
+  // overclaim that cost us two review rounds on Coralogix.
+  assert.match(r.note, /NOT AUTOMATIC/i, 'must state the saving is not automatic on Hosted');
+  assert.match(r.note, /RESIZED|resize/i, 'must say the deployment has to be resized');
+  assert.match(r.note, /Enterprise licence|Gold/i, 'must state the licence prerequisite');
+});
+
+test('the advisor renders the frozen tier on elasticsearch only', async () => {
+  const md = renderOffloadSection(PARAMS, 'fluent-bit', 'elasticsearch');
+  assert.match(md, /Elasticsearch frozen tier/, 'elasticsearch must get the frozen recipe');
+  assert.match(md, /searchable_snapshot/, 'the actual mechanism must be rendered');
+  for (const dest of ['elastic-serverless', 'datadog', 'coralogix', undefined]) {
+    const other = renderOffloadSection(PARAMS, 'fluent-bit', dest as string | undefined);
+    assert.ok(
+      !/Elasticsearch frozen tier/.test(other),
+      `destination=${dest} must NOT render the frozen tier block`
+    );
   }
 });

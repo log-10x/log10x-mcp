@@ -1054,6 +1054,132 @@ export function fluentBitCoralogixRecipe(
   };
 }
 
+
+/**
+ * Elasticsearch frozen tier. VERIFIED END TO END on a live Elastic Cloud Hosted
+ * deployment (v9.4.4, enterprise licence) on 2026-07-31, and this emits the
+ * artifacts that run actually used, not an idealised version of them.
+ *
+ * What was observed:
+ *   partial-tenx-tierdown-000001  400 docs  store=0b      node roles=f (frozen)
+ *   tenx-app-000001  (control)    200 docs  store=19.2kb  node roles=himrst (hot)
+ * and, the reason the feature is worth shipping, IDENTITY SURVIVED the move:
+ * a term query on `tenx_hash` returned 400/400 against the partially-mounted
+ * index and `routeState` was still aggregatable.
+ *
+ * Why this shape and not a row-level rule: ILM is INDEX-level. That is a good
+ * fit for a per-event marker, because the forwarder can put the marked slice in
+ * its own index and the policy handles the rest. Contrast ClickHouse, where
+ * `TTL ... TO VOLUME` is evaluated per PART and takes no WHERE clause, so the
+ * same idea needs the routing key baked into the partition key.
+ */
+export function elasticFrozenTierRecipe(
+  opts: { repository?: string; tierDownAlias?: string; keepAlias?: string; frozenMinAge?: string } = {}
+): SiemTierRecipe {
+  const repo = opts.repository ?? 'found-snapshots';
+  const tdAlias = opts.tierDownAlias ?? 'tenx-tierdown';
+  const keepAlias = opts.keepAlias ?? 'tenx-app';
+  const minAge = opts.frozenMinAge ?? '7d';
+  return {
+    target: 'elasticsearch-frozen',
+    language: 'text',
+    body: `# 1) Policy for the tier_down slice: leave hot on rollover, then mount as a
+#    PARTIALLY-MOUNTED searchable snapshot in the frozen tier.
+PUT _ilm/policy/tenx-tier-down
+{
+  "policy": { "phases": {
+    "hot":    { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "1d" } } },
+    "frozen": { "min_age": "${minAge}", "actions": { "searchable_snapshot": { "snapshot_repository": "${repo}" } } }
+  }}
+}
+
+# 2) Policy for everything we keep. Same rollover, never leaves hot. This is the
+#    control: without it you cannot tell "the slice moved" from "everything moved".
+PUT _ilm/policy/tenx-keep
+{
+  "policy": { "phases": {
+    "hot": { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "30d" } } }
+  }}
+}
+
+# 3) Templates. The marker decides WHICH INDEX an event lands in; the index
+#    decides which policy governs it. tenx_hash and routeState are mapped as
+#    keyword so both survive as queryable fields in frozen (verified).
+PUT _index_template/tenx-tierdown-tpl
+{
+  "index_patterns": ["${tdAlias}-*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "tenx-tier-down",
+      "index.lifecycle.rollover_alias": "${tdAlias}",
+      "number_of_replicas": 0
+    },
+    "mappings": { "properties": {
+      "tenx_hash":  { "type": "keyword" },
+      "routeState": { "type": "keyword" },
+      "@timestamp": { "type": "date" }
+    }}
+  }
+}
+
+PUT _index_template/tenx-app-tpl
+{
+  "index_patterns": ["${keepAlias}-*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "tenx-keep",
+      "index.lifecycle.rollover_alias": "${keepAlias}",
+      "number_of_replicas": 0
+    },
+    "mappings": { "properties": {
+      "tenx_hash":  { "type": "keyword" },
+      "routeState": { "type": "keyword" },
+      "@timestamp": { "type": "date" }
+    }}
+  }
+}
+
+# 4) Bootstrap the write indices. Both policies use rollover, so each alias
+#    needs an initial backing index flagged is_write_index. Skipping this is the
+#    usual reason ILM sits in check-rollover-ready forever.
+PUT ${tdAlias}-000001
+{ "aliases": { "${tdAlias}": { "is_write_index": true } } }
+
+PUT ${keepAlias}-000001
+{ "aliases": { "${keepAlias}": { "is_write_index": true } } }
+
+# 5) Verify, once data has rolled over and aged past min_age. The frozen index
+#    is RENAMED with a partial- prefix, which is how you know it mounted:
+#
+#   GET _cat/indices/*${tdAlias}*?h=index,docs.count,store.size
+#     partial-${tdAlias}-000001   <docs>   0b     <- data now in ${repo}
+#
+#   GET ${tdAlias}-000001/_ilm/explain        -> phase: frozen, step: complete
+#   POST partial-${tdAlias}-000001/_search
+#     { "query": { "term": { "tenx_hash": "<a hash you indexed>" } } }
+#   ...must still return the documents. If it does not, STOP: the slice is
+#   cheap but unretrievable and the down-tier is not worth doing.`,
+    note:
+      'Elasticsearch tiering is INDEX-level, so the shipper routes the marked ' +
+      'slice to its own index and ILM does the rest. Verified live: the frozen ' +
+      'index reported store=0b locally while the hot control stayed at 19.2kb, ' +
+      'and a term query on `tenx_hash` still returned 400/400 with `routeState` ' +
+      'aggregatable, so the down-tiered slice remains retrievable by stamped ' +
+      'identity. ' +
+      'PREREQUISITE: searchable snapshots need an Enterprise licence self-managed, ' +
+      'or Gold and above on Elastic Cloud Hosted, plus a registered snapshot ' +
+      'repository (Elastic Cloud provides `found-snapshots` by default). ' +
+      'ON ELASTIC CLOUD HOSTED THE SAVING IS NOT AUTOMATIC: Hosted is priced by ' +
+      'provisioned resources, so moving data out of hot creates headroom and the ' +
+      'deployment must then be RESIZED to bank it. Do not tell a Hosted customer ' +
+      'their bill drops on its own; tell them their hot tier can shrink. ' +
+      'Self-managed differs: the saving is disk you stop buying. ' +
+      'OPERATIONAL NOTE: ILM polls every 10 minutes by default ' +
+      '(`indices.lifecycle.poll_interval`), so a transition will not be visible ' +
+      'immediately after rollover; that is not a failure.',
+  };
+}
+
 /** Coralogix: move the `tier_down` slice from High (Frequent Search) to Medium
  * (Monitoring). Two policy forms, because which one is available depends on the
  * provider version. */
@@ -1372,7 +1498,14 @@ export function renderOffloadSection(
     destination === 'coralogix' &&
     getAllowedActionsForDestination('coralogix').includes('tier_down');
 
-  if (showDatadog || showCloudWatch || showAzure || showCoralogix) {
+  // Self-hosted Elasticsearch and Elastic Cloud Hosted both reach the frozen
+  // tier through ILM. Serverless is excluded on purpose: its retention is
+  // already at roughly object-storage cost, so there is no premium to escape.
+  const showElastic =
+    destination === 'elasticsearch' &&
+    getAllowedActionsForDestination('elasticsearch').includes('tier_down');
+
+  if (showDatadog || showCloudWatch || showAzure || showCoralogix || showElastic) {
     lines.push(
       '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
@@ -1445,6 +1578,24 @@ export function renderOffloadSection(
           'per-event rule at the destination can derive it. The fluent-bit ' +
           'config rendered above is the Coralogix build and already keeps the ' +
           'marker; do not swap in a generic recipe, which strips it.',
+        ''
+      );
+    }
+    if (showElastic) {
+      const el = elasticFrozenTierRecipe();
+      lines.push(
+        `_Elasticsearch frozen tier_ — ${el.note}`,
+        '',
+        '```text',
+        el.body,
+        '```',
+        '',
+        // Index-level, so unlike Flex/IA there is no second sink to stand up:
+        // the shipper picks the index and the policy does the tiering.
+        'Point the forwarder at the `tenx-tierdown` alias for events where ' +
+          '`routeState == "tier_down"`, and at `tenx-app` for everything else. ' +
+          'There is no separate cheap-tier endpoint to configure: on Elasticsearch ' +
+          'the index IS the tier selector.',
         ''
       );
     }
