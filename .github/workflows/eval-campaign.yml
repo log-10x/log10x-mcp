@@ -16,14 +16,15 @@ name: Eval campaign (score-only)
 #   ANTHROPIC_API_KEY=... LOG10X_EVAL_ENV=demo \
 #     node eval/bin/run-campaign.mjs
 
+# DISABLED on pull_request. `eval/` is gitignored (.gitignore:17) — it was made
+# private in f0d1c41 — so a CI checkout never contains it and every step below
+# fails at `working directory .../eval: No such file or directory`. That failed
+# on every PR regardless of content, which trains people to ignore a red check.
+#
+# Kept, not deleted: if `eval/` is ever tracked again, restore the
+# pull_request trigger below and this works as written.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'eval/**'
-      - 'src/tools/**'
-      - 'src/lib/**'
-      - 'package.json'
+  workflow_dispatch:
 
 jobs:
   campaign-rescore:
