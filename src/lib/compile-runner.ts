@@ -55,7 +55,8 @@
  * the link stage need the full JRE-packaged cloud distribution. Docker
  * mode uses the cloud image by contract; local mode probes the binary's
  * version banner (`10x engine v…, flavor: 'cloud'`) and refuses anything
- * that isn't cloud.
+ * that isn't cloud — including a banner it cannot read at all, which is not
+ * evidence of cloud. See `assertCloudFlavor`.
  */
 
 import { spawn } from 'node:child_process';
