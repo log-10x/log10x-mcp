@@ -146,6 +146,7 @@ const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'Sumo Logic', perGb: DEFAULT_ANALYZER_COST_PER_GB.sumo, note: 'Continuous ingest tier, list price' },
   { vendor: 'Elastic Cloud', perGb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, note: 'Hot tier + searchable' },
   { vendor: 'Coralogix', perGb: DEFAULT_ANALYZER_COST_PER_GB.coralogix, note: 'Frequent Search (High) priority, list price' },
+  { vendor: 'Elastic Cloud Serverless', perGb: DEFAULT_ANALYZER_COST_PER_GB['elastic-serverless'], note: 'Logs Essentials ingest floor; retention billed separately' },
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
 ];
 

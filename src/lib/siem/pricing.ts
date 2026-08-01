@@ -18,7 +18,8 @@ export type SiemId =
   | 'azure-monitor'
   | 'splunk'
   | 'clickhouse'
-  | 'coralogix';
+  | 'coralogix'
+  | 'elastic-serverless';
 
 export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // vendors.json: CloudWatch cost=0.5
@@ -52,6 +53,21 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // modeled below as tier_down_target_tier. Reconcile PRICING.md separately —
   // it feeds the marketing surfaces, not this model.
   coralogix: 1.15,
+  // Elastic Cloud Serverless, Logs Essentials. Verified 2026-07-31 on
+  // elastic.co/pricing/serverless-observability: "As low as $0.07" per GB
+  // ingested, "As low as $0.017" per GB retained per month. The Complete plan
+  // is $0.09 / $0.019.
+  //
+  // We take the ESSENTIALS FLOOR deliberately. These are "as low as" prices, so
+  // a real bill is >= this, which makes any savings estimate built on it a
+  // FLOOR too. Understating the saving is the safe direction; overstating it is
+  // the one that loses trust. Override with analyzer_cost_per_gb for a tenant
+  // on Complete or with a negotiated rate.
+  //
+  // This entry exists because `elasticsearch` (1.0, from vendors.json) is a
+  // SELF-HOSTED assumption. Charging a Serverless tenant against it overstates
+  // their bill ~14x and inflates every savings number in proportion.
+  'elastic-serverless': 0.07,
 };
 
 export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
@@ -60,6 +76,7 @@ export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
   sumo: 'Sumo Logic',
   'gcp-logging': 'GCP Cloud Logging',
   elasticsearch: 'Elasticsearch',
+  'elastic-serverless': 'Elastic Cloud Serverless',
   'azure-monitor': 'Azure Monitor / Log Analytics',
   splunk: 'Splunk',
   clickhouse: 'ClickHouse',

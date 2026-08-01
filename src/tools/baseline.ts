@@ -242,6 +242,7 @@ export const baselineSchema = {
       'gcp-logging',
       'sumo',
       'coralogix',
+      'elastic-serverless',
     ])
     .optional()
     .describe(
@@ -651,6 +652,9 @@ function autoDetectDestination(env: EnvConfig): SiemId | undefined {
   if (!a) return undefined;
   if (a.includes('splunk')) return 'splunk';
   if (a.includes('datadog') || a === 'dd') return 'datadog';
+  // Serverless first: a bare `elastic` test would swallow it and bill the
+  // tenant against the self-hosted rate.
+  if (a.includes('serverless') && a.includes('elastic')) return 'elastic-serverless';
   if (a.includes('elastic') || a === 'es' || a.includes('opensearch'))
     return 'elasticsearch';
   if (a.includes('clickhouse') || a === 'ch') return 'clickhouse';
@@ -1085,3 +1089,12 @@ function headlineFor(d: BaselineEnvelopeData): string {
 // Re-export Action so callers that want to type per-contributor tier choices
 // can do so without re-importing from cost.ts.
 export type { Action };
+
+/**
+ * Test hook. `autoDetectDestination` decides which cost model a tenant is
+ * billed against from a free-text `analyzer` string, and its CLAUSE ORDER is
+ * load-bearing: a bare `elastic` test would swallow "elastic serverless" and
+ * price a Serverless tenant at the self-hosted rate. Exported so that ordering
+ * is covered rather than assumed.
+ */
+export const _internals = { autoDetectDestination };

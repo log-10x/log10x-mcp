@@ -63,7 +63,7 @@ test('parsePrometheusValue handles strings, NaN, and missing values', () => {
 // destination model lookup
 // ---------------------------------------------------------------------------
 
-test('COST_MODEL_BY_DESTINATION has all nine SIEMs', () => {
+test('COST_MODEL_BY_DESTINATION has all ten SIEMs', () => {
   const keys = Object.keys(COST_MODEL_BY_DESTINATION).sort();
   assert.deepEqual(keys, [
     'azure-monitor',
@@ -71,6 +71,7 @@ test('COST_MODEL_BY_DESTINATION has all nine SIEMs', () => {
     'cloudwatch',
     'coralogix',
     'datadog',
+    'elastic-serverless',
     'elasticsearch',
     'gcp-logging',
     'splunk',

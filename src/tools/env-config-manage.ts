@@ -124,6 +124,7 @@ const SIEM_VENDOR_ENUM = [
   'gcp-logging',
   'sumo',
   'coralogix',
+  'elastic-serverless',
   'other',
 ] as const;
 
