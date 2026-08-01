@@ -32,7 +32,7 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, dirname, extname, basename } from 'node:path';
-import { DevCliNotInstalledError } from './dev-cli.js';
+import { DevCliNotInstalledError, resolveInstallPaths } from './dev-cli.js';
 
 const execFileP = promisify(execFile);
 
@@ -102,44 +102,68 @@ export interface ValidateRunOptions {
   timeout_ms?: number;
 }
 
-// Defaults point at canonical git-clone locations under /git/l1x-co. Each
-// env var can override. The /git clones are the source of truth — the
-// eclipse-workspace copies are legacy mirrors during wean-off and should
-// NOT be referenced by default from a tool that publishes structured
-// diagnostics. Caller env-var override still supported for non-default
-// local checkouts.
+// Resolution order: explicit LOG10X_* override, then whatever install the host
+// actually has, via the shared resolver in dev-cli.
+//
+// These used to default to '/Users/talweiss/git/l1x-co/{config,modules}'. That is
+// one developer's home directory, and this package publishes to npm, so on every
+// other machine the default pointed at nothing. dev-cli already solves this
+// properly for the paste tools: TENX_MODULES+TENX_CONFIG, then TENX_HOME, then
+// per-OS install locations, then a clear error naming what to set. Reusing it
+// keeps one definition of "where is the engine installed" instead of two that
+// disagree.
+//
+// The LOG10X_*_ROOT overrides are kept: pointing at a working checkout rather
+// than an install is a legitimate dev workflow, and it is what the old defaults
+// were really encoding.
 function configRoot(): string {
-  return (
-    process.env.LOG10X_TENX_CONFIG_ROOT ||
-    '/Users/talweiss/git/l1x-co/config'
-  );
+  return process.env.LOG10X_TENX_CONFIG_ROOT || resolveInstallPaths().config;
 }
 
 function modulesRoot(): string {
-  return (
-    process.env.LOG10X_TENX_MODULES_ROOT ||
-    '/Users/talweiss/git/l1x-co/modules'
-  );
+  return process.env.LOG10X_TENX_MODULES_ROOT || resolveInstallPaths().modules;
 }
 
 function symbolsPath(): string {
-  // Symbol library files (`symbols.csv`, `symbols.10x.json`) are *generated*
-  // by `tenx @apps/compile`, not committed to the config repo — the dir
-  // under /git/.../config/data/shared/symbols/ is .gitignored on purpose.
-  // Default to the eclipse workspace's generated copy at
-  // `/eclipse-workspace/l1x-co/config/config/shared/symbols/` because that
-  // location persists compile output across dev sessions. Override with
-  // LOG10X_TENX_SYMBOLS_PATH if the caller keeps symbols elsewhere, or
-  // run `tenx @apps/compile` first to seed a fresh location.
+  // Symbol library files are *generated* by `tenx @apps/compile` and are not
+  // committed, so there is no single repo-relative answer. Resolution order:
+  //
+  //   1. LOG10X_TENX_SYMBOLS_PATH  explicit override for this tool
+  //   2. TENX_SYMBOLS_PATH         what the engine itself uses, and what every
+  //                                install wrapper exports (brew's tenx sets it
+  //                                to <prefix>/etc/tenx/symbols)
+  //   3. <config>/data/shared/symbols  the layout shipped in the config tree
+  //
+  // This defaulted to '/Users/talweiss/eclipse-workspace/...', which is a
+  // developer's home directory in a package published to npm. Worse, the comment
+  // above configRoot in this same file states that the eclipse copies "should
+  // NOT be referenced by default from a tool that publishes structured
+  // diagnostics" — the file contradicted its own rule.
+  //
+  // Deferring to TENX_SYMBOLS_PATH means a stock install is self-consistent for
+  // free: the engine and this tool read the same symbols.
   return (
     process.env.LOG10X_TENX_SYMBOLS_PATH ||
-    '/Users/talweiss/eclipse-workspace/l1x-co/config/config/shared/symbols'
+    process.env.TENX_SYMBOLS_PATH ||
+    join(configRoot(), 'data', 'shared', 'symbols')
   );
+}
+
+// Single definition of which binary this module runs, so the version we REPORT
+// and the binary we EXECUTE can never diverge.
+//
+// Both call sites below used a bare 'tenx' while ten other sites across the
+// codebase honour LOG10X_TENX_PATH. Anyone setting that variable to test a
+// specific engine got a run against whatever was first on PATH, reported under
+// the PATH binary's version string. A validator that misreports which binary it
+// ran is worse than one that does not report at all.
+function tenxBinary(): string {
+  return process.env.LOG10X_TENX_PATH || 'tenx';
 }
 
 async function captureCliVersion(): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileP('tenx', ['--version']);
+    const { stdout } = await execFileP(tenxBinary(), ['--version']);
     return stdout.trim().split('\n')[0];
   } catch {
     return undefined;
@@ -302,7 +326,7 @@ export async function runValidate(opts: ValidateRunOptions): Promise<ValidateRun
       TENX_MODULES: modulesRoot(),
     };
 
-    const child = spawn('tenx', args, { env });
+    const child = spawn(tenxBinary(), args, { env });
 
     // Feed stdin: one line per input event + trailing newline.
     const stdinPayload = opts.input_lines.join('\n') + '\n';

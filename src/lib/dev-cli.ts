@@ -825,7 +825,39 @@ async function runViaDocker(
     }
   );
 
-  return `docker:${image}`;
+  // Report the ENGINE version, not just the image reference.
+  //
+  // This returned `docker:log10x/pipeline-10x:latest`, which names a moving tag
+  // and therefore says nothing about what actually ran. A host with a stale
+  // cached `:latest` produced output indistinguishable from a current one:
+  // engine 1.1.6 and engine 1.1.32 both reported that identical string, and the
+  // only way to tell them apart was to inspect the local image by hand.
+  // Provenance that cannot distinguish a 26-version gap is not provenance.
+  //
+  // Best-effort: if the probe fails, the image ref alone is still returned, so a
+  // labelling problem never fails the run.
+  const engineVersion = await tryGetDockerEngineVersion(image);
+  return engineVersion ? `docker:${image} (${engineVersion})` : `docker:${image}`;
+}
+
+/**
+ * Ask an already-pulled image which engine it carries. Short timeout and a
+ * swallowed failure: this is a labelling aid, never a gate.
+ */
+async function tryGetDockerEngineVersion(image: string): Promise<string | undefined> {
+  try {
+    const out = await runCommand(
+      'docker',
+      [
+        'run', '--rm', '--entrypoint', 'sh', image,
+        '-c', '$TENX_BIN --version 2>/dev/null || tenx --version 2>/dev/null',
+      ],
+      { timeoutMs: 15_000 }
+    );
+    return out.trim().split('\n')[0]?.slice(0, 120) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Config resolution ──
