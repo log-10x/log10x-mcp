@@ -254,6 +254,45 @@ export class NotCloudFlavorError extends Error {
 }
 
 /**
+ * Thrown when a local `tenx` is present but its flavor could NOT be determined.
+ *
+ * This used to be the fall-through case: `if (flavor && flavor !== 'cloud')`
+ * skipped the gate whenever the probe came back null, so an unreadable banner
+ * was treated as a confirmed Cloud install. A flavor that cannot be read is not
+ * evidence of the right flavor, and the Runtime binary carries no `generate`
+ * pipeline-unit factory, so proceeding buys a failure minutes later inside a
+ * detached job instead of one here.
+ */
+export class FlavorUndetectedError extends Error {
+  readonly outcome: 'unreadable' | 'unrunnable';
+  readonly raw: string;
+  constructor(binary: string, probe: { outcome: 'unreadable' | 'unrunnable'; raw: string }) {
+    const why =
+      probe.outcome === 'unrunnable'
+        ? `neither \`${binary} --version\` nor \`${binary} --help\` could be executed (spawn failed, or the binary is not runnable on this machine)`
+        : `\`${binary} --version\` and \`${binary} --help\` both ran, but neither printed the engine's \`flavor: '<name>'\` banner`;
+    const sample = probe.raw.trim().split('\n').slice(0, 3).join(' | ').slice(0, 300);
+    super(
+      [
+        `Cannot determine the flavor of the local tenx at '${binary}', and the Compiler app requires the Cloud flavor.`,
+        `Reason: ${why}.`,
+        ...(sample ? [`What it printed: ${sample}`] : []),
+        '',
+        'An unreadable flavor is not a Cloud flavor. The Runtime binary has no `generate` pipeline-unit factory, so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
+        '',
+        'Three ways forward:',
+        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the cloud compiler image log10x/compiler-10x.',
+        '  2. Check LOG10X_TENX_PATH points at a working Cloud install and that `tenx --version` prints a banner: https://doc.log10x.com/install/',
+        `  3. If you are knowingly running a build whose banner this parser cannot read, set ${ALLOW_UNVERIFIED_FLAVOR_ENV}=1 to proceed unverified.`,
+      ].join('\n'),
+    );
+    this.name = 'FlavorUndetectedError';
+    this.outcome = probe.outcome;
+    this.raw = probe.raw;
+  }
+}
+
+/**
  * Thrown when a `helm repo add` pre-step fails (bad name/url, unreachable repo,
  * or it ran past the shared deadline). The message is agent-facing; `detail`
  * has URL userinfo redacted so an embedded `user:pass@` can't leak.
@@ -399,10 +438,9 @@ async function spawnLocalCompileDetached(
   if (!(await isBinaryOnPath(binary))) {
     throw new DevCliNotInstalledError();
   }
-  const { flavor } = await detectFlavor(binary);
-  if (flavor && flavor !== 'cloud') {
-    throw new NotCloudFlavorError(binary, flavor);
-  }
+  // Cloud-flavor gate — see assertCloudFlavor. A wrong flavor and an
+  // unreadable one are both refusals here; neither is evidence of Cloud.
+  await assertCloudFlavor(binary);
 
   const overlayDir = join(spawnOpts.workspaceDir, 'overlays');
   await mkdir(overlayDir, { recursive: true });
@@ -831,13 +869,9 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   }
 
   // Cloud-flavor gate. A positively-detected non-cloud flavor is a hard
-  // refusal. If the banner can't be parsed (older/newer build with a
-  // different format) we proceed rather than block a possibly-valid cloud
-  // install, @apps/compiler will fail loudly downstream if it really is edge.
-  const { flavor } = await detectFlavor(binary);
-  if (flavor && flavor !== 'cloud') {
-    throw new NotCloudFlavorError(binary, flavor);
-  }
+  // refusal, and so is a flavor that cannot be read at all — see
+  // assertCloudFlavor for why the old "proceed on null" branch was wrong.
+  const probe = await assertCloudFlavor(binary);
 
   // Local mode can't bind-mount, so config injection rides a temp overlay
   // dir placed FIRST on TENX_INCLUDE_PATHS (first-match-wins shadowing, the
@@ -873,8 +907,8 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     const scanned = await scanSymbolOutputs(cfg.output.folder);
     return {
       mode: 'local',
-      flavor: flavor ?? null,
-      flavorVerified: flavor === 'cloud',
+      flavor: probe.flavor,
+      flavorVerified: probe.flavor === 'cloud',
       exitCode: r.exitCode,
       timedOut: r.timedOut,
       wallTimeMs,
@@ -1069,22 +1103,91 @@ export function buildLocalIncludePaths(
 // ── Flavor detection ───────────────────────────────────────────────────────
 
 /**
+ * How the flavor probe ended. `unrunnable` and `unreadable` are both "we do not
+ * know", but they need different remediation, so they stay distinct rather than
+ * collapsing into one null.
+ */
+export type FlavorProbe =
+  /** A flavor token was read off the banner. */
+  | { outcome: 'parsed'; flavor: string; raw: string }
+  /** Every probe invocation ran, none printed a `flavor: '<name>'` banner. */
+  | { outcome: 'unreadable'; flavor: null; raw: string }
+  /** No probe invocation could be executed at all (spawn error every time). */
+  | { outcome: 'unrunnable'; flavor: null; raw: string };
+
+/**
  * Probe the binary's version banner for its flavor token. The engine prints
  * `10x engine v<VERSION>, flavor: '<name>'` (PipelineLauncher.engineVersion);
  * the cloud factory's name is `cloud`. Try `--version` first (the dedicated
  * version provider), then `--help`, and read either stream.
+ *
+ * Reports WHY it came back empty. The old signature returned a bare
+ * `flavor: null` for "banner in an unknown format", "binary segfaulted" and
+ * "probe timed out" alike, and the caller could not tell them apart — which is
+ * how a null came to mean "carry on".
  */
-async function detectFlavor(binary: string): Promise<{ raw: string; flavor: string | null }> {
+export async function detectFlavor(binary: string): Promise<FlavorProbe> {
+  let anyRan = false;
+  let lastOutput = '';
+
   for (const flag of ['--version', '--help']) {
     try {
       const r = await execCapture(binary, [flag], { timeoutMs: 10_000 });
+      anyRan = true;
+      const combined = [r.stdout, r.stderr].filter(Boolean).join('\n');
+      if (combined.trim()) lastOutput = combined;
       const flavor = parseFlavor(r.stdout) ?? parseFlavor(r.stderr);
-      if (flavor) return { raw: r.stdout || r.stderr, flavor };
+      if (flavor) return { outcome: 'parsed', flavor, raw: r.stdout || r.stderr };
     } catch {
-      // try the next flag
+      // spawn failed for this flag; try the next one
     }
   }
-  return { raw: '', flavor: null };
+
+  return anyRan
+    ? { outcome: 'unreadable', flavor: null, raw: lastOutput }
+    : { outcome: 'unrunnable', flavor: null, raw: '' };
+}
+
+/** Env var that turns the undetected-flavor refusal back into a warning-free pass. */
+export const ALLOW_UNVERIFIED_FLAVOR_ENV = 'LOG10X_ALLOW_UNVERIFIED_FLAVOR';
+
+/**
+ * The Compiler app's flavor gate, for every local-binary path.
+ *
+ * Three outcomes, all of them explicit:
+ *   - flavor reads `cloud`               -> proceed
+ *   - flavor reads anything else         -> NotCloudFlavorError
+ *   - flavor cannot be read at all       -> FlavorUndetectedError
+ *
+ * The third case used to fall through. The gate was
+ * `if (flavor && flavor !== 'cloud') throw`, so a null — a segfaulting binary, a
+ * probe that timed out, a banner in a format this parser does not know — skipped
+ * the check entirely and the run proceeded as though `cloud` had been confirmed.
+ * The stated reasoning was that @apps/compiler would fail loudly downstream if it
+ * really were edge. It does not fail usefully: the runtime flavor has no
+ * `generate` pipeline-unit factory, so the failure arrives minutes later, inside
+ * a detached job, as an engine error about a missing app rather than as "your
+ * local tenx is the wrong flavor". An unverifiable flavor is now a refusal at
+ * the same point a wrong one is.
+ *
+ * `LOG10X_ALLOW_UNVERIFIED_FLAVOR=1` restores the old behaviour for whoever
+ * genuinely runs a build whose banner this parser cannot read. That is an
+ * explicit, greppable opt-out rather than a silent default.
+ *
+ * Returns the probe so callers can report what was actually seen — with the
+ * opt-out set, `flavor` comes back null and `flavorVerified` is false, which is
+ * the honest record of a run that proceeded unverified.
+ */
+export async function assertCloudFlavor(binary: string): Promise<FlavorProbe> {
+  const probe = await detectFlavor(binary);
+  // Discriminate on `outcome`, not on `flavor != null`: the whole defect was a
+  // null standing in for two different unknowns and reading as "fine".
+  if (probe.outcome === 'parsed') {
+    if (probe.flavor === 'cloud') return probe;
+    throw new NotCloudFlavorError(binary, probe.flavor);
+  }
+  if (process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] === '1') return probe;
+  throw new FlavorUndetectedError(binary, probe);
 }
 
 /**

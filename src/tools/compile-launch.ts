@@ -25,6 +25,7 @@ import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import {
   spawnCompileDetached,
   NotCloudFlavorError,
+  FlavorUndetectedError,
   HelmRepoAddError,
   type CompileConfig,
   type CompileSpawnHandle,
@@ -82,7 +83,8 @@ export async function launchCompileJob(p: LaunchParams): Promise<string | Struct
     if (
       e instanceof DevCliNotInstalledError ||
       e instanceof DockerNotAvailableError ||
-      e instanceof NotCloudFlavorError
+      e instanceof NotCloudFlavorError ||
+      e instanceof FlavorUndetectedError
     ) {
       return buildNotConfiguredEnvelope({ tool: p.tool, kind: 'generic', remediation: e.message });
     }
