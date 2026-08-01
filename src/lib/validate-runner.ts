@@ -137,9 +137,21 @@ function symbolsPath(): string {
   );
 }
 
+// Single definition of which binary this module runs, so the version we REPORT
+// and the binary we EXECUTE can never diverge.
+//
+// Both call sites below used a bare 'tenx' while ten other sites across the
+// codebase honour LOG10X_TENX_PATH. Anyone setting that variable to test a
+// specific engine got a run against whatever was first on PATH, reported under
+// the PATH binary's version string. A validator that misreports which binary it
+// ran is worse than one that does not report at all.
+function tenxBinary(): string {
+  return process.env.LOG10X_TENX_PATH || 'tenx';
+}
+
 async function captureCliVersion(): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileP('tenx', ['--version']);
+    const { stdout } = await execFileP(tenxBinary(), ['--version']);
     return stdout.trim().split('\n')[0];
   } catch {
     return undefined;
@@ -302,7 +314,7 @@ export async function runValidate(opts: ValidateRunOptions): Promise<ValidateRun
       TENX_MODULES: modulesRoot(),
     };
 
-    const child = spawn('tenx', args, { env });
+    const child = spawn(tenxBinary(), args, { env });
 
     // Feed stdin: one line per input event + trailing newline.
     const stdinPayload = opts.input_lines.join('\n') + '\n';
