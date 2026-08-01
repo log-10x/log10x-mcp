@@ -45,8 +45,8 @@ export const backfillMetricSchema = {
     .string()
     .describe('Destination metric name. Follow the destination TSDB\'s naming convention (e.g., `log10x.payment_retry_by_tenant`).'),
   destination: z
-    .enum(['datadog', 'prometheus', 'cloudwatch', 'elastic', 'signalfx'])
-    .describe('Destination TSDB. Datadog and Prometheus (via remote_write adapter) are wired in this build; CloudWatch/Elastic/SignalFx return a clear "not yet implemented" error.'),
+    .enum(['datadog', 'prometheus', 'cloudwatch', 'elastic'])
+    .describe('Destination TSDB. Datadog and Prometheus (via remote_write adapter) are wired in this build; CloudWatch/Elastic return a clear "not yet implemented" error.'),
   bucket_size: z
     .string()
     .default('5m')

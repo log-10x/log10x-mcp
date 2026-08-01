@@ -319,13 +319,6 @@ export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpe
     plain: [{ envVar: 'CW_NAMESPACE', placeholder: '<your-cloudwatch-namespace>' }],
   },
 
-  // signalfx — engine reads SIGNALFX_ACCESS_TOKEN + SIGNALFX_INGEST_URL
-  // (defaults to https://ingest.signalfx.com if unset).
-  signalfx: {
-    secret: [{ envVar: 'SIGNALFX_ACCESS_TOKEN', secretKey: 'access-token' }],
-    plain: [{ envVar: 'SIGNALFX_INGEST_URL', default: 'https://ingest.signalfx.com' }],
-  },
-
   // prometheus (remote-write) — engine reads PROMETHEUS_REMOTE_WRITE_URL
   // + USERNAME + PASSWORD. The URL has a localhost default but the
   // wizard treats it as user-required (no sensible cluster-wide default).

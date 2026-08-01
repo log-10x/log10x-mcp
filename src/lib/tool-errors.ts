@@ -78,7 +78,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
         return 'Set DATADOG_API_KEY (or DD_API_KEY) on the MCP server process. Generate a key in Datadog: Organization Settings → API Keys.';
       }
       if (/not yet implemented/i.test(msg)) {
-        return 'Use destination=datadog or destination=prometheus in this build. CloudWatch / Elastic / SignalFx ship in a follow-up release.';
+        return 'Use destination=datadog or destination=prometheus in this build. CloudWatch / Elastic ship in a follow-up release.';
       }
       return undefined;
 

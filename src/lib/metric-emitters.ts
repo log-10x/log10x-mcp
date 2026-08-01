@@ -3,7 +3,7 @@
  *
  * The MVP supports Datadog (api.datadoghq.com /api/v2/series) out of the
  * box because it needs only a public API key. Prometheus remote_write,
- * CloudWatch, Elastic, and SignalFx are wired as stub destinations that
+ * CloudWatch and Elastic are wired as stub destinations that
  * return a clear "not yet implemented" error at runtime — the caller
  * sees exactly which destinations work today without the tool silently
  * dropping the call.
@@ -16,7 +16,7 @@
 import type { MetricPoint } from './aggregator.js';
 import { resolveBackend } from './customer-metrics.js';
 
-export type Destination = 'datadog' | 'prometheus' | 'cloudwatch' | 'elastic' | 'signalfx';
+export type Destination = 'datadog' | 'prometheus' | 'cloudwatch' | 'elastic';
 
 export interface EmitOptions {
   destination: Destination;
@@ -57,7 +57,6 @@ export async function emitSeries(
       return emitPrometheus(points, options);
     case 'cloudwatch':
     case 'elastic':
-    case 'signalfx':
       throw new Error(
         `Destination "${options.destination}" is not yet implemented in this MCP build. ` +
           `Supported today: datadog, prometheus (remote_write). ` +
