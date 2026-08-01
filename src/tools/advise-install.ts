@@ -90,7 +90,6 @@ const SUPPORTED_BACKENDS: MetricsBackendKind[] = [
   'datadog',
   'elastic',
   'cloudwatch',
-  'signalfx',
   'prometheus',
 ];
 
@@ -114,7 +113,7 @@ export const adviseInstallSchema = {
     .array(z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]))
     .optional()
     .describe(
-      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (Log10x-managed Prometheus — recommended; no infra to run), **datadog**, **elastic**, **cloudwatch**, **signalfx**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
+      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (Log10x-managed Prometheus — recommended; no infra to run), **datadog**, **elastic**, **cloudwatch**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
     ),
   airgapped: z
     .boolean()
@@ -139,7 +138,7 @@ export const adviseInstallSchema = {
     )
     .optional()
     .describe(
-      'Per-backend credential configuration, keyed by backend kind (must be one of: log10x, datadog, elastic, cloudwatch, signalfx, prometheus). **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
+      'Per-backend credential configuration, keyed by backend kind (must be one of: log10x, datadog, elastic, cloudwatch, prometheus). **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
     ),
   license_source: z
     .enum(['signin', 'demo', 'paste'])
