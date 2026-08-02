@@ -1,8 +1,15 @@
 /**
- * Compiler app runner, runs `tenx @apps/compiler` (CLOUD flavor only) to
+ * Compiler app runner, runs `tenx @apps/compiler` (COMPILER flavor only) to
  * scan a local source folder and emit a symbol library (`.10x.json` units +
- * a linked `.10x.tar`). Docker-first (the cloud compiler image log10x/compiler-10x),
- * with a local CLOUD-flavor `tenx` binary as an opt-in fallback.
+ * a linked `.10x.tar`). Docker-first (the compiler image log10x/compiler-10x),
+ * with a local COMPILER-flavor `tenx` binary as an opt-in fallback.
+ *
+ * Flavor vocabulary: the engine reports two flavors, `compiler` (the JVM /
+ * container build, which carries the `generate` pipeline unit) and `runtime`
+ * (the native binary, which does not). Engines built before that rename report
+ * the same two as `cloud` and `edge`/`native`, and installed binaries keep
+ * reporting the old tokens until their owner upgrades, so BOTH spellings are
+ * read here permanently, not as a transition shim. See `COMPILER_FLAVORS`.
  *
  * Why a dedicated runner (not dev-cli's runners): the streaming apps
  * (@apps/mcp / @apps/mcp-file) are stdin-in / templates-out over a
@@ -24,7 +31,7 @@
  *                             side, the pull/<source>/config.yaml overlays),
  *     3. @overlay launch args(the engine's native config layering),
  *     4. mounts              (docker only).
- *   Mode selection, the cloud-flavor gate, process exec, and output
+ *   Mode selection, the compiler-flavor gate, process exec, and output
  *   scanning are written once and don't change as axes are added.
  *
  * GitHub pull: the engine's github scanner uses the GitHub REST API (no git
@@ -50,12 +57,14 @@
  * Local mode renders the overlay without a `command` override (the engine's
  * platform default applies) and needs a docker/podman CLI on the host.
  *
- * The cloud-flavor gate: the compiler is absent from the Edge (native /
- * JIT) flavor, its scanners (ANTLR, bytecode, archive, executable) and
- * the link stage need the full JRE-packaged cloud distribution. Docker
- * mode uses the cloud image by contract; local mode probes the binary's
- * version banner (`10x engine v…, flavor: 'cloud'`) and refuses anything
- * that isn't cloud.
+ * The compiler-flavor gate: the compiler app is absent from the runtime
+ * (native) flavor, its scanners (ANTLR, bytecode, archive, executable) and
+ * the link stage need the full JRE-packaged compiler distribution. Docker
+ * mode uses the compiler image by contract; local mode probes the binary's
+ * version banner (`10x engine v…, flavor: 'compiler'`, or `'cloud'` on an
+ * engine built before the rename) and refuses anything else — including a
+ * banner it cannot read at all, which is not evidence of the compiler
+ * flavor. See `assertCompilerFlavor`.
  */
 
 import { spawn } from 'node:child_process';
@@ -208,7 +217,7 @@ export interface CompileRunResult {
   image?: string;
   /** Detected flavor token from the local binary banner (local mode only). */
   flavor?: string | null;
-  /** True when we positively confirmed the cloud flavor before running. */
+  /** True when we positively confirmed the compiler flavor before running. */
   flavorVerified: boolean;
   exitCode: number;
   timedOut: boolean;
@@ -229,27 +238,75 @@ export interface CompileRunResult {
 // ── Errors ─────────────────────────────────────────────────────────────────
 
 /**
- * Thrown when a local `tenx` is present but is NOT the cloud flavor. The
+ * Thrown when a local `tenx` is present but is NOT the compiler flavor. The
  * message doubles as the agent-facing remediation (mirrors
  * DevCliNotInstalledError's self-describing-message convention).
+ *
+ * The install commands deliberately still say `log10x-cloud` / `--flavor cloud`:
+ * the flavor the ENGINE reports was renamed, the cask token and the installer's
+ * flag were not (the cask token is pinned to its file name by Homebrew and by
+ * the engine's release job). Printing the new word in a command a user is about
+ * to paste would hand them a command that fails.
  */
-export class NotCloudFlavorError extends Error {
+export class NotCompilerFlavorError extends Error {
   readonly flavor: string;
   constructor(binary: string, flavor: string) {
+    const which = RUNTIME_FLAVORS.has(flavor.toLowerCase())
+      ? `The local tenx at '${binary}' is the native runtime build (it reports flavor '${flavor}'), which carries no \`generate\` pipeline unit and cannot compile.`
+      : `The local tenx at '${binary}' reports the '${flavor}' flavor, which is not a compiler build.`;
     super(
       [
-        `The local tenx at '${binary}' is the '${flavor}' flavor, but the Compiler app requires the Cloud flavor.`,
+        `${which} The Compiler app needs the compiler flavor (an engine built before the flavor rename reports it as 'cloud').`,
         '',
         'Two ways forward:',
-        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the cloud compiler image log10x/compiler-10x.',
-        '  2. Install the Cloud flavor locally: https://doc.log10x.com/install/ ' +
-          "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`).",
+        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
+        '  2. Install the compiler flavor locally: https://doc.log10x.com/install/ ' +
+          "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`; those two names still spell it the old way).",
         '',
-        'Note: with a local cloud install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host, and helm_charts pull needs the helm CLI (plus a container engine if pulling the charts’ referenced images). The docker compiler-10x image (option 1) bundles all of these, podman included, daemonless.',
+        'Note: with a local compiler install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host, and helm_charts pull needs the helm CLI (plus a container engine if pulling the charts’ referenced images). The docker compiler-10x image (option 1) bundles all of these, podman included, daemonless.',
       ].join('\n'),
     );
-    this.name = 'NotCloudFlavorError';
+    this.name = 'NotCompilerFlavorError';
     this.flavor = flavor;
+  }
+}
+
+/**
+ * Thrown when a local `tenx` is present but its flavor could NOT be determined.
+ *
+ * This used to be the fall-through case: `if (flavor && flavor !== 'cloud')`
+ * skipped the gate whenever the probe came back null, so an unreadable banner
+ * was treated as a confirmed compiler install. A flavor that cannot be read is
+ * not evidence of the right flavor, and the runtime binary carries no `generate`
+ * pipeline-unit factory, so proceeding buys a failure minutes later inside a
+ * detached job instead of one here.
+ */
+export class FlavorUndetectedError extends Error {
+  readonly outcome: 'unreadable' | 'unrunnable';
+  readonly raw: string;
+  constructor(binary: string, probe: { outcome: 'unreadable' | 'unrunnable'; raw: string }) {
+    const why =
+      probe.outcome === 'unrunnable'
+        ? `neither \`${binary} --version\` nor \`${binary} --help\` could be executed (spawn failed, or the binary is not runnable on this machine)`
+        : `\`${binary} --version\` and \`${binary} --help\` both ran, but neither printed the engine's \`flavor: '<name>'\` banner`;
+    const sample = probe.raw.trim().split('\n').slice(0, 3).join(' | ').slice(0, 300);
+    super(
+      [
+        `Cannot determine the flavor of the local tenx at '${binary}', and the Compiler app requires the compiler flavor (reported as 'compiler', or 'cloud' by an engine built before the flavor rename).`,
+        `Reason: ${why}.`,
+        ...(sample ? [`What it printed: ${sample}`] : []),
+        '',
+        'An unreadable flavor is not a compiler flavor. The native runtime binary has no `generate` pipeline-unit factory, so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
+        '',
+        'Three ways forward:',
+        '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
+        '  2. Check LOG10X_TENX_PATH points at a working compiler install and that `tenx --version` prints a banner: https://doc.log10x.com/install/',
+        `  3. If you are knowingly running a build whose banner this parser cannot read, set ${ALLOW_UNVERIFIED_FLAVOR_ENV}=1 to proceed unverified.`,
+      ].join('\n'),
+    );
+    this.name = 'FlavorUndetectedError';
+    this.outcome = probe.outcome;
+    this.raw = probe.raw;
   }
 }
 
@@ -329,7 +386,7 @@ export interface CompileSpawnHandle {
  * under `workspaceDir` (a PERSISTED per-job dir, not a mkdtemp that gets
  * cleaned in a `finally`), so the bind-mounts outlive this call for the whole
  * run. The same precondition gates as runCompile apply (docker availability /
- * cloud-flavor) and throw the same errors before anything is spawned.
+ * compiler-flavor) and throw the same errors before anything is spawned.
  */
 export async function spawnCompileDetached(
   cfg: CompileConfig,
@@ -399,10 +456,10 @@ async function spawnLocalCompileDetached(
   if (!(await isBinaryOnPath(binary))) {
     throw new DevCliNotInstalledError();
   }
-  const { flavor } = await detectFlavor(binary);
-  if (flavor && flavor !== 'cloud') {
-    throw new NotCloudFlavorError(binary, flavor);
-  }
+  // Compiler-flavor gate — see assertCompilerFlavor. A wrong flavor and an
+  // unreadable one are both refusals here; neither is evidence of a compiler
+  // build.
+  await assertCompilerFlavor(binary);
 
   const overlayDir = join(spawnOpts.workspaceDir, 'overlays');
   await mkdir(overlayDir, { recursive: true });
@@ -625,9 +682,10 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     return {
       mode: 'docker',
       image,
-      // The cloud image is cloud-flavor by contract, we don't pay a second
-      // container start to probe it. A non-cloud LOG10X_TENX_IMAGE override is
-      // the operator's responsibility; @apps/compiler will fail loudly there.
+      // The compiler image is compiler-flavor by contract, we don't pay a
+      // second container start to probe it. A LOG10X_TENX_IMAGE override that
+      // points somewhere else is the operator's responsibility; @apps/compiler
+      // will fail loudly there.
       flavor: undefined,
       flavorVerified: false,
       exitCode: r.exitCode,
@@ -830,14 +888,10 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     throw new DevCliNotInstalledError();
   }
 
-  // Cloud-flavor gate. A positively-detected non-cloud flavor is a hard
-  // refusal. If the banner can't be parsed (older/newer build with a
-  // different format) we proceed rather than block a possibly-valid cloud
-  // install, @apps/compiler will fail loudly downstream if it really is edge.
-  const { flavor } = await detectFlavor(binary);
-  if (flavor && flavor !== 'cloud') {
-    throw new NotCloudFlavorError(binary, flavor);
-  }
+  // Compiler-flavor gate. A positively-detected non-compiler flavor is a hard
+  // refusal, and so is a flavor that cannot be read at all — see
+  // assertCompilerFlavor for why the old "proceed on null" branch was wrong.
+  const probe = await assertCompilerFlavor(binary);
 
   // Local mode can't bind-mount, so config injection rides a temp overlay
   // dir placed FIRST on TENX_INCLUDE_PATHS (first-match-wins shadowing, the
@@ -873,8 +927,8 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     const scanned = await scanSymbolOutputs(cfg.output.folder);
     return {
       mode: 'local',
-      flavor: flavor ?? null,
-      flavorVerified: flavor === 'cloud',
+      flavor: probe.flavor,
+      flavorVerified: isCompilerFlavor(probe.flavor),
       exitCode: r.exitCode,
       timedOut: r.timedOut,
       wallTimeMs,
@@ -1069,26 +1123,131 @@ export function buildLocalIncludePaths(
 // ── Flavor detection ───────────────────────────────────────────────────────
 
 /**
- * Probe the binary's version banner for its flavor token. The engine prints
- * `10x engine v<VERSION>, flavor: '<name>'` (PipelineLauncher.engineVersion);
- * the cloud factory's name is `cloud`. Try `--version` first (the dedicated
- * version provider), then `--help`, and read either stream.
+ * How the flavor probe ended. `unrunnable` and `unreadable` are both "we do not
+ * know", but they need different remediation, so they stay distinct rather than
+ * collapsing into one null.
  */
-async function detectFlavor(binary: string): Promise<{ raw: string; flavor: string | null }> {
+export type FlavorProbe =
+  /** A flavor token was read off the banner. */
+  | { outcome: 'parsed'; flavor: string; raw: string }
+  /** Every probe invocation ran, none printed a `flavor: '<name>'` banner. */
+  | { outcome: 'unreadable'; flavor: null; raw: string }
+  /** No probe invocation could be executed at all (spawn error every time). */
+  | { outcome: 'unrunnable'; flavor: null; raw: string };
+
+/**
+ * Probe the binary's version banner for its flavor token. The engine prints
+ * `10x engine v<VERSION>, flavor: '<name>'` (PipelineLauncher.engineVersion),
+ * where `<name>` is the pipeline factory's own name: `compiler` (`cloud` before
+ * the rename) or `runtime` (`edge`/`native` before it). Try `--version` first
+ * (the dedicated version provider), then `--help`, and read either stream.
+ *
+ * Reports WHY it came back empty. The old signature returned a bare
+ * `flavor: null` for "banner in an unknown format", "binary segfaulted" and
+ * "probe timed out" alike, and the caller could not tell them apart — which is
+ * how a null came to mean "carry on".
+ */
+export async function detectFlavor(binary: string): Promise<FlavorProbe> {
+  let anyRan = false;
+  let lastOutput = '';
+
   for (const flag of ['--version', '--help']) {
     try {
       const r = await execCapture(binary, [flag], { timeoutMs: 10_000 });
+      anyRan = true;
+      const combined = [r.stdout, r.stderr].filter(Boolean).join('\n');
+      if (combined.trim()) lastOutput = combined;
       const flavor = parseFlavor(r.stdout) ?? parseFlavor(r.stderr);
-      if (flavor) return { raw: r.stdout || r.stderr, flavor };
+      if (flavor) return { outcome: 'parsed', flavor, raw: r.stdout || r.stderr };
     } catch {
-      // try the next flag
+      // spawn failed for this flag; try the next one
     }
   }
-  return { raw: '', flavor: null };
+
+  return anyRan
+    ? { outcome: 'unreadable', flavor: null, raw: lastOutput }
+    : { outcome: 'unrunnable', flavor: null, raw: '' };
+}
+
+/** Env var that turns the undetected-flavor refusal back into a warning-free pass. */
+export const ALLOW_UNVERIFIED_FLAVOR_ENV = 'LOG10X_ALLOW_UNVERIFIED_FLAVOR';
+
+/**
+ * Banner tokens that mean "this build carries the Compiler app".
+ *
+ * `compiler` is what CloudPipelineFactory.name() returns from the flavor rename
+ * on. `cloud` is what every engine built before it returns, and what every
+ * ALREADY-INSTALLED binary keeps returning until its owner upgrades. Both are
+ * permanent readers here: an install that predates the rename is a working
+ * compiler install, and refusing it would break the very users who have one.
+ */
+export const COMPILER_FLAVORS: ReadonlySet<string> = new Set(['compiler', 'cloud']);
+
+/**
+ * Banner tokens that mean "this build is the native runtime", the one that has
+ * no `generate` pipeline-unit factory and therefore cannot compile. `runtime` is
+ * the current name; `edge` (jpackage JIT build, removed) and `native` are what
+ * older engines and older installers call the same thing.
+ *
+ * Not consulted by the gate, which refuses everything outside COMPILER_FLAVORS
+ * regardless. It exists so the refusal can say WHICH build the user has instead
+ * of quoting a raw token at them.
+ */
+export const RUNTIME_FLAVORS: ReadonlySet<string> = new Set(['runtime', 'edge', 'native']);
+
+/** True when a parsed banner token names a build that carries the Compiler app. */
+export function isCompilerFlavor(flavor: string | null | undefined): boolean {
+  return flavor != null && COMPILER_FLAVORS.has(flavor.toLowerCase());
 }
 
 /**
- * Extract the flavor token from a `10x engine v…, flavor: 'cloud'` banner.
+ * The Compiler app's flavor gate, for every local-binary path.
+ *
+ * Three outcomes, all of them explicit:
+ *   - flavor reads `compiler` or `cloud`  -> proceed
+ *   - flavor reads anything else          -> NotCompilerFlavorError
+ *   - flavor cannot be read at all        -> FlavorUndetectedError
+ *
+ * Two spellings pass, permanently. The engine renamed its flavors (`cloud` ->
+ * `compiler`, `edge`/`native` -> `runtime`), but a banner is read off whatever
+ * binary is on this machine, and installed binaries keep printing the old token
+ * until their owner upgrades. Accepting only the new one would hard-refuse every
+ * working compiler install in the field; accepting only the old one is the
+ * defect this branch fixes.
+ *
+ * The third case used to fall through. The gate was
+ * `if (flavor && flavor !== 'cloud') throw`, so a null — a segfaulting binary, a
+ * probe that timed out, a banner in a format this parser does not know — skipped
+ * the check entirely and the run proceeded as though the compiler flavor had been
+ * confirmed. The stated reasoning was that @apps/compiler would fail loudly
+ * downstream if it really were the runtime build. It does not fail usefully: the
+ * runtime flavor has no `generate` pipeline-unit factory, so the failure arrives
+ * minutes later, inside a detached job, as an engine error about a missing app
+ * rather than as "your local tenx is the wrong flavor". An unverifiable flavor is
+ * now a refusal at the same point a wrong one is.
+ *
+ * `LOG10X_ALLOW_UNVERIFIED_FLAVOR=1` restores the old behaviour for whoever
+ * genuinely runs a build whose banner this parser cannot read. That is an
+ * explicit, greppable opt-out rather than a silent default.
+ *
+ * Returns the probe so callers can report what was actually seen — with the
+ * opt-out set, `flavor` comes back null and `flavorVerified` is false, which is
+ * the honest record of a run that proceeded unverified.
+ */
+export async function assertCompilerFlavor(binary: string): Promise<FlavorProbe> {
+  const probe = await detectFlavor(binary);
+  // Discriminate on `outcome`, not on `flavor != null`: the whole defect was a
+  // null standing in for two different unknowns and reading as "fine".
+  if (probe.outcome === 'parsed') {
+    if (isCompilerFlavor(probe.flavor)) return probe;
+    throw new NotCompilerFlavorError(binary, probe.flavor);
+  }
+  if (process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] === '1') return probe;
+  throw new FlavorUndetectedError(binary, probe);
+}
+
+/**
+ * Extract the flavor token from a `10x engine v…, flavor: 'compiler'` banner.
  * Returns the lowercased token, or null if absent.
  *
  * Pure so it is unit-testable.
@@ -1099,8 +1258,8 @@ export function parseFlavor(output: string): string | null {
 }
 
 /** Convenience predicate over a version-banner string. Pure / testable. */
-export function isCloudFlavorOutput(output: string): boolean {
-  return parseFlavor(output) === 'cloud';
+export function isCompilerFlavorOutput(output: string): boolean {
+  return isCompilerFlavor(parseFlavor(output));
 }
 
 // ── Shared env builder ─────────────────────────────────────────────────────

@@ -24,7 +24,8 @@ import { buildChassisEnvelope, buildChassisErrorEnvelope } from '../lib/chassis-
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import {
   spawnCompileDetached,
-  NotCloudFlavorError,
+  NotCompilerFlavorError,
+  FlavorUndetectedError,
   HelmRepoAddError,
   type CompileConfig,
   type CompileSpawnHandle,
@@ -69,7 +70,7 @@ export async function launchCompileJob(p: LaunchParams): Promise<string | Struct
   const containerName = `log10x-${p.kind}-${jobId}`;
 
   // Spawn detached, mapping the same precondition failures the synchronous
-  // runner surfaced (docker missing / non-cloud flavor / helm repo add) to
+  // runner surfaced (docker missing / non-compiler flavor / helm repo add) to
   // branchable envelopes, these throw BEFORE anything is spawned.
   let handle: CompileSpawnHandle;
   try {
@@ -82,7 +83,8 @@ export async function launchCompileJob(p: LaunchParams): Promise<string | Struct
     if (
       e instanceof DevCliNotInstalledError ||
       e instanceof DockerNotAvailableError ||
-      e instanceof NotCloudFlavorError
+      e instanceof NotCompilerFlavorError ||
+      e instanceof FlavorUndetectedError
     ) {
       return buildNotConfiguredEnvelope({ tool: p.tool, kind: 'generic', remediation: e.message });
     }

@@ -5,7 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   parseFlavor,
-  isCloudFlavorOutput,
+  isCompilerFlavor,
+  isCompilerFlavorOutput,
+  COMPILER_FLAVORS,
+  RUNTIME_FLAVORS,
   buildDockerArgs,
   buildLocalIncludePaths,
   renderScannersOverlay,
@@ -33,25 +36,42 @@ function fixtureConfig(overrides: Partial<CompileConfig> = {}): CompileConfig {
   };
 }
 
-// ── parseFlavor / isCloudFlavorOutput ────────────────────────────────────
+// ── parseFlavor / isCompilerFlavorOutput ─────────────────────────────────
 
-test('parseFlavor extracts the cloud token from the engine version banner', () => {
-  assert.equal(parseFlavor("10x engine v1.0.21, flavor: 'cloud'"), 'cloud');
-  assert.equal(isCloudFlavorOutput("10x engine v1.0.21, flavor: 'cloud'"), true);
+test('parseFlavor extracts the compiler token from the engine version banner', () => {
+  assert.equal(parseFlavor("10x engine v1.2.0, flavor: 'compiler'"), 'compiler');
+  assert.equal(isCompilerFlavorOutput("10x engine v1.2.0, flavor: 'compiler'"), true);
 });
 
-test('parseFlavor reports a non-cloud flavor (edge) and isCloudFlavorOutput rejects it', () => {
-  assert.equal(parseFlavor("10x engine v1.0.21, flavor: 'edge'"), 'edge');
-  assert.equal(isCloudFlavorOutput("10x engine v1.0.21, flavor: 'edge'"), false);
+test('the pre-rename cloud token still reads as a compiler build', () => {
+  assert.equal(parseFlavor("10x engine v1.0.21, flavor: 'cloud'"), 'cloud');
+  assert.equal(isCompilerFlavorOutput("10x engine v1.0.21, flavor: 'cloud'"), true);
+});
+
+test('runtime tokens, new and old, are not compiler builds', () => {
+  for (const flavor of ['runtime', 'edge', 'native']) {
+    const banner = `10x engine v1.2.0, flavor: '${flavor}'`;
+    assert.equal(parseFlavor(banner), flavor);
+    assert.equal(isCompilerFlavorOutput(banner), false, `${flavor} must not read as compiler`);
+  }
+});
+
+test('the two flavor sets do not overlap', () => {
+  for (const f of COMPILER_FLAVORS) assert.equal(RUNTIME_FLAVORS.has(f), false, f);
+  for (const f of RUNTIME_FLAVORS) assert.equal(isCompilerFlavor(f), false, f);
 });
 
 test('parseFlavor is case-insensitive on the label and lowercases the token', () => {
   assert.equal(parseFlavor("10x engine v9, Flavor: 'Cloud'"), 'cloud');
+  assert.equal(parseFlavor("10x engine v9, Flavor: 'Compiler'"), 'compiler');
+  assert.equal(isCompilerFlavorOutput("10x engine v9, Flavor: 'Compiler'"), true);
 });
 
 test('parseFlavor returns null when no flavor token is present', () => {
   assert.equal(parseFlavor('some unrelated --help output with no banner'), null);
-  assert.equal(isCloudFlavorOutput(''), false);
+  assert.equal(isCompilerFlavorOutput(''), false);
+  assert.equal(isCompilerFlavor(null), false);
+  assert.equal(isCompilerFlavor(undefined), false);
 });
 
 // ── buildDockerArgs ──────────────────────────────────────────────────────
