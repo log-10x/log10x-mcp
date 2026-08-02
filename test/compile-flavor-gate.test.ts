@@ -126,7 +126,7 @@ test('assertCompilerFlavor refuses a binary that reports the RENAMED runtime fla
   });
 });
 
-// THE THIRD FLAVOR. `runtime-jvm` is the JVM-packaged runtime — not a new
+// THE THIRD FLAVOR. `runtime-jvm` is the JVM-packaged runtime, not a new
 // build, those .deb/.rpm/.msi/.dmg artifacts ship in every release, and on
 // Windows they are the ONLY runtime because no native Windows binary is built.
 // It must still be REFUSED by the compile gate: the JVM/native axis is not the
@@ -188,7 +188,7 @@ test('runtime-jvm is a runtime flavor, and is not a compiler flavor', () => {
   assert.equal(isCompilerFlavor('runtime-jvm'), false);
   assert.equal(isCompilerFlavorOutput("10x engine v1.1.38, flavor: 'runtime-jvm'"), false);
   assert.equal(parseFlavor("10x engine v1.1.38, flavor: 'runtime-jvm'"), 'runtime-jvm');
-  // The hyphen must survive the parser — a token clipped to 'runtime' would
+  // The hyphen must survive the parser, a token clipped to 'runtime' would
   // still be refused, but the refusal would name the wrong build.
   assert.equal(parseFlavor("10x engine v1.1.38, flavor: 'RUNTIME-JVM'"), 'runtime-jvm');
 });

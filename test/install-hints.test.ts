@@ -10,12 +10,12 @@ import {
 // THE REGRESSION THESE PIN. The runtime hint used to be flavor-blind: it printed
 // `install.ps1` on Windows with no TENX_FLAVOR set, and install.ps1 defaults to
 // the COMPILER. So a user who needed a runtime (Reporter / Receiver / Retriever
-// / CLI — every non-compile tool in this server) was handed the one flavor that
+// / CLI, every non-compile tool in this server) was handed the one flavor that
 // is a whole JVM compiler toolchain, and the only flavor they could not get any
 // other way was the one they actually wanted.
 //
-// Windows has no native runtime binary — the release carries no
-// `tenx-*-windows-*-native` asset — so `runtime-jvm` IS the runtime there.
+// Windows has no native runtime binary, the release carries no
+// `tenx-*-windows-*-native` asset, so `runtime-jvm` IS the runtime there.
 
 /** Run `fn` as though the process were on `platform`. */
 function onPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
@@ -61,7 +61,7 @@ test('the compiler is installable on all three platforms, Windows included', () 
     assert.equal(hint.flavor, 'compiler', `${platform} must have a compiler install path`);
     assert.notEqual(hint.command, 'see docs for install instructions');
   }
-  // macOS ships the compiler as a .dmg, which install.sh refuses by name — it is
+  // macOS ships the compiler as a .dmg, which install.sh refuses by name, it is
   // a cask, and the cask token is the frozen PACKAGE id, not the flavor name.
   assert.match(onPlatform('darwin', compilerInstallHintForPlatform).command, /--cask log-10x\/tap\/log10x-cloud/);
   assert.match(onPlatform('win32', compilerInstallHintForPlatform).command, /TENX_FLAVOR="compiler"/);

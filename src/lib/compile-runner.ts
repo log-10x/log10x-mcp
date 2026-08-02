@@ -4,15 +4,15 @@
  * a linked `.10x.tar`). Docker-first (the compiler image log10x/compiler-10x),
  * with a local COMPILER-flavor `tenx` binary as an opt-in fallback.
  *
- * Flavor vocabulary: three flavors ship, on two axes — what the build can DO
+ * Flavor vocabulary: three flavors ship, on two axes, what the build can DO
  * (compile+run vs run only) and how it is BUILT (JVM vs native image):
  *
  *                 | JVM           | native
- *   compile + run | compiler      | — (compiling needs dynamic class loading)
+ *   compile + run | compiler      | none (compiling needs dynamic class loading)
  *   run only      | runtime-jvm   | runtime
  *
  * Exactly one of them carries the `generate` pipeline unit: `compiler`. Both
- * runtime flavors are refused here, `runtime-jvm` included — it runs on a JVM,
+ * runtime flavors are refused here, `runtime-jvm` included, it runs on a JVM,
  * but it is packaged from the same runtime pipeline factory as the native
  * binary, so being a JVM build buys it no `generate`. Engines built before the
  * rename report the compiler as `cloud` and the runtime as `edge`/`native`, and
@@ -255,14 +255,14 @@ export interface CompileRunResult {
  *
  * The refusal names WHICH wrong build the user has, because the three cases
  * need different things said to them:
- *   - the native runtime  — no `generate`, and it is native, so it never could
- *   - `runtime-jvm`       — a JVM build that still has no `generate`. This one
+ *   - the native runtime, no `generate`, and it is native, so it never could
+ *   - `runtime-jvm`, a JVM build that still has no `generate`. This one
  *                           has to be said explicitly: a user who installed a
  *                           JVM package on Windows has every reason to assume
  *                           the JVM part is what mattered. It is not. The
  *                           capability split is baked into the artifact by the
  *                           pipeline factory it was packaged from.
- *   - `edge`              — the pre-rename token, printed by both packagings.
+ *   - `edge`, the pre-rename token, printed by both packagings.
  *
  * The macOS install command says `log10x-cloud` on purpose: the cask token is
  * the PACKAGE id, which is frozen (Homebrew and the engine's release job pin it
@@ -278,7 +278,7 @@ export class NotCompilerFlavorError extends Error {
       which =
         `The local tenx at '${binary}' is the JVM runtime build (it reports flavor '${flavor}'), which cannot compile. ` +
         'Running on a JVM is not what makes a build a compiler: `runtime-jvm` is packaged from the same runtime pipeline factory as the native binary, so it carries no `generate` pipeline unit either. ' +
-        'It exists because Windows has no native runtime binary — it is a delivery format for the runtime, not a compiler substitute.';
+        'It exists because Windows has no native runtime binary, it is a delivery format for the runtime, not a compiler substitute.';
     } else if (NATIVE_RUNTIME_FLAVORS.has(token)) {
       which = `The local tenx at '${binary}' is the native runtime build (it reports flavor '${flavor}'), which carries no \`generate\` pipeline unit and cannot compile.`;
     } else if (RUNTIME_FLAVORS.has(token)) {
@@ -298,7 +298,7 @@ export class NotCompilerFlavorError extends Error {
         '',
         'Two ways forward:',
         '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
-        `  2. Install the compiler flavor locally (${process.platform}): ${compiler.command} — docs: ${compiler.docsUrl}`,
+        `  2. Install the compiler flavor locally (${process.platform}): ${compiler.command}, docs: ${compiler.docsUrl}`,
         '',
         'Note: with a local compiler install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host, and helm_charts pull needs the helm CLI (plus a container engine if pulling the charts’ referenced images). The docker compiler-10x image (option 1) bundles all of these, podman included, daemonless.',
       ].join('\n'),
@@ -333,7 +333,7 @@ export class FlavorUndetectedError extends Error {
         `Reason: ${why}.`,
         ...(sample ? [`What it printed: ${sample}`] : []),
         '',
-        'An unreadable flavor is not a compiler flavor. Neither runtime flavor has a `generate` pipeline-unit factory — not the native binary, and not the JVM-packaged `runtime-jvm` — so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
+        'An unreadable flavor is not a compiler flavor. Neither runtime flavor has a `generate` pipeline-unit factory, not the native binary, and not the JVM-packaged `runtime-jvm`, so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
         '',
         'Three ways forward:',
         '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
@@ -1254,7 +1254,7 @@ export const COMPILER_FLAVORS: ReadonlySet<string> = new Set(['compiler', 'cloud
 export const NATIVE_RUNTIME_FLAVORS: ReadonlySet<string> = new Set(['runtime', 'native']);
 
 /**
- * Banner tokens for the JVM-packaged runtime — same runtime capabilities as the
+ * Banner tokens for the JVM-packaged runtime, same runtime capabilities as the
  * native binary, delivered as .deb/.rpm/.msi/.dmg. Not a separate build: those
  * artifacts ship in every release, and on Windows they are the ONLY runtime,
  * because no `tenx-*-windows-*-native` asset is produced.
@@ -1295,7 +1295,7 @@ export function isCompilerFlavor(flavor: string | null | undefined): boolean {
  *   - flavor reads anything else          -> NotCompilerFlavorError
  *   - flavor cannot be read at all        -> FlavorUndetectedError
  *
- * Two spellings pass, permanently — and only two: `runtime-jvm` is refused
+ * Two spellings pass, permanently, and only two: `runtime-jvm` is refused
  * alongside the native runtime, because the JVM/native axis is not the axis
  * that decides who can compile. The engine renamed its flavors (`cloud` ->
  * `compiler`, `edge`/`native` -> `runtime`), but a banner is read off whatever

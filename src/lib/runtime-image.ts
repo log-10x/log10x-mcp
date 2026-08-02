@@ -13,12 +13,12 @@
  *   - runtime flavor (GraalVM native): carries the run/tokenize/group units
  *     that `@apps/mcp` needs, and nothing else. Shipped as `log10x/edge-10x`.
  *   - runtime-jvm flavor: the same runtime capabilities, JVM-packaged, and a
- *     HOST package rather than an image — it ships as the .deb/.rpm/.msi/.dmg
+ *     HOST package rather than an image, it ships as the .deb/.rpm/.msi/.dmg
  *     in each release, and exists because Windows has no native runtime binary.
  *     Nothing below resolves to it: it reaches this server through
  *     LOG10X_TENX_PATH in local mode, never through an image ref. The compile
  *     gate refuses it there exactly as it refuses the native runtime (see
- *     `NotCompilerFlavorError`) — running on a JVM is not what makes a build a
+ *     `NotCompilerFlavorError`), running on a JVM is not what makes a build a
  *     compiler.
  *
  * The run-path default stays `log10x/pipeline-10x:latest` — changing a default

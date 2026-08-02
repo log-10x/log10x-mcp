@@ -42,7 +42,7 @@ export const compileLinkSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend, same contract as log10x_compile: `auto` prefers the compiler image, `docker` forces it, `local` uses a compiler-flavor tenx (an engine built before the flavor rename reports that flavor as `cloud`; both are accepted). Both runtime flavors are refused — `runtime` (native binary) and `runtime-jvm` (JVM-packaged, the only runtime on Windows) — neither carries the `generate` pipeline unit.',
+      'Execution backend, same contract as log10x_compile: `auto` prefers the compiler image, `docker` forces it, `local` uses a compiler-flavor tenx (an engine built before the flavor rename reports that flavor as `cloud`; both are accepted). Both runtime flavors are refused, `runtime` (native binary) and `runtime-jvm` (JVM-packaged, the only runtime on Windows), neither carries the `generate` pipeline unit.',
     ),
   timeout_ms: z
     .number()
