@@ -203,3 +203,47 @@ test('guard (d) dedupeVisibleNames: appends differing token, then hash4 last res
   assert.ok(twins[0].display_name.includes('#CcCc'));
   assert.ok(twins[1].display_name.includes('#EeEe'));
 });
+
+// ── Anchor regression: a name must say WHAT the statement is ────────────────
+//
+// Pinned from a real capture. When many patterns share a long lead-in (an
+// exporter error storm), every shared token is boilerplate by document
+// frequency. Selecting discriminators alone then rendered
+// `Try enabling sending survive temporary` — unique, and unreadable. The
+// anchor reserves the leading subject tokens so the label keeps its meaning.
+// Neither of these cases was pinned before; the suite passed with and without
+// the anchor, so this file did not protect the behaviour it now protects.
+test('anchor keeps the statement subject under a shared lead-in', () => {
+  const storm = [
+    'error_internal_base_exporter_go_Exporting_failed_Rejecting_data_Try_enabling_sending_queue_to_survive_temporary_failures_resource',
+    'error_internal_base_exporter_go_Exporting_failed_Rejecting_data_resource_service_instance_id_service_name_otelcol_contrib',
+    'info_internal_retry_sender_go_Exporting_failed_Will_retry_the_request_after_interval_resource_service_instance',
+    'error_opensearchexporter_v_logger_go_Request_failed_resource_service_instance_id_service_name_otelcol_contrib',
+    'warn_batchprocessor_v_batch_processor_go_Sender_failed_resource_service_instance_id_service_name_otelcol',
+  ];
+  // Pad to clear MIN_CORPUS so the df path engages, which is when the
+  // discriminator-only selection used to strip the subject.
+  const filler = Array.from({ length: 30 }, (_, i) => `svc_${i}_handler_processed_request_ok_resource_service`);
+  const df = buildDfContext([...storm, ...filler]);
+  const name = buildDisplayName(storm[0], { df, width: 56 }).display_name;
+  assert.match(name, /base|exporter/i,
+    `name lost its subject and rendered only discriminators: ${name}`);
+});
+
+test('anchor skips hyphenated service names and severity words', () => {
+  const rows = [
+    'INFO_main_product_reviews_server_py_trace_id_span_id_resource_service_name_product_reviews_Invoking_the_LLM',
+    'INFO_main_product_reviews_server_py_trace_id_span_id_resource_service_name_product_reviews_Returning_assistant',
+    'INFO_main_product_reviews_server_py_trace_id_span_id_resource_service_name_product_reviews_Processing_tool_call',
+  ];
+  const filler = Array.from({ length: 30 }, (_, i) => `other_${i}_component_did_something_resource_service`);
+  const df = buildDfContext([...rows, ...filler]);
+  const name = buildDisplayName(rows[0], {
+    df, width: 56, service: 'product-reviews', severity: 'TRACE',
+  }).display_name;
+  // `product-reviews` is hyphenated; splitting head tokens on whitespace and
+  // underscores alone let its own name back into the anchor, and the row's
+  // severity label (TRACE) never matched the in-message token (INFO).
+  assert.ok(!/^INFO\b/i.test(name), `anchor led with a severity word: ${name}`);
+  assert.ok(!/\bproduct\b.*\breviews\b/i.test(name), `anchor echoed the service column: ${name}`);
+});

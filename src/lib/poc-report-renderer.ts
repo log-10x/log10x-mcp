@@ -1027,7 +1027,15 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 1: Executive summary
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
   const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
-  const top3 = patterns.slice(0, 3);
+  // "Wins" must be things that actually save something. `patterns` is sorted
+  // by COST, and on a real window the biggest cost drivers are frequently
+  // ERROR-class and therefore deliberately protected — which rendered three
+  // `keep` rows under a "Top 3 wins" heading, advertising no-ops as wins.
+  // Rank by projected savings and admit only patterns with savings to show.
+  const top3 = [...patterns]
+    .filter((p) => p.projectedSavings > 0)
+    .sort((a, b) => b.projectedSavings - a.projectedSavings)
+    .slice(0, 3);
   // Lossless headline: lead with the % cut and "without losing data". The
   // levers behind it are compact (stays searchable) + offload (recoverable);
   // we never sample or drop. Volume framing first, dollars trail in the body.
@@ -1097,6 +1105,26 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // "we could not tell". Withhold the savings lines instead.
     if (severityUsable) {
       lines.push(`- **Lossless reduction**: about ${savingsPctAnnual} of volume, with every line kept (${losslessClauseShort(input.siem)}).`);
+      // Say WHY the number is not larger, in the same breath as the number.
+      // On a real window the biggest cost drivers are routinely error-class
+      // and deliberately untouched, so a bare percentage reads as a weak
+      // result when it is actually the safety rule doing its job. A reader
+      // asks "why only that much" immediately; answer it before they do.
+      const protectedCost = patterns
+        .filter((p) => p.recommendedAction === 'keep')
+        .reduce((sum, p) => sum + p.costPerWindow, 0);
+      if (protectedCost > 0 && totalCost > 0) {
+        const protectedPct = fmtPct((protectedCost / totalCost) * 100);
+        const sevProtected = patterns.filter(
+          (p) => p.recommendedAction === 'keep' && p.severity && !isReducibleSeverity(p.severity)
+        ).length;
+        const why = sevProtected > 0
+          ? `${sevProtected} of them error-class and kept verbatim for incident diagnosis`
+          : 'kept verbatim as too low-volume to be worth a lever';
+        lines.push(
+          `- **Why not more**: ${protectedPct} of analyzed cost sits on patterns 10x refuses to touch (${why}). The reduction above is what remains after those are protected.`
+        );
+      }
     }
     lines.push(`- **Projected daily cost**: ${formatCostRange(input, dailyCost, m)}`);
     lines.push(`- **Projected monthly cost**: ${formatCostRange(input, monthlyCost, m)}`);
