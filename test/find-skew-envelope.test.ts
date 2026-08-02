@@ -86,6 +86,9 @@ function syntheticPatterns(opts: {
     templaterWallTimeMs: 0,
     executionMode: 'local_cli',
     severityCoverage: 1,
+    positionalBindingExact: true,
+    inputLinesSubmitted: 0,
+    inputLinesAccountedFor: 0,
   };
 }
 

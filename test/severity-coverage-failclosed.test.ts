@@ -32,6 +32,9 @@ function fixture(coverage: number, withSeverity: boolean): ExtractedPatterns {
     templaterWallTimeMs: 1200,
     executionMode: 'local_cli',
     severityCoverage: coverage,
+    positionalBindingExact: true,
+    inputLinesSubmitted: 0,
+    inputLinesAccountedFor: 0,
     patterns: [
       {
         // High-volume, well over the 1% reducible threshold. With severity

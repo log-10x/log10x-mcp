@@ -12,6 +12,9 @@ function fixture(): ExtractedPatterns {
     templaterWallTimeMs: 1200,
     executionMode: 'local_cli',
     severityCoverage: 1,
+    positionalBindingExact: true,
+    inputLinesSubmitted: 0,
+    inputLinesAccountedFor: 0,
     patterns: [
       {
         hash: 'h_a',
@@ -127,6 +130,9 @@ test('renderPocReport flags low-confidence when <10k events pulled', () => {
     templaterWallTimeMs: 50,
     executionMode: 'local_cli',
     severityCoverage: 1,
+    positionalBindingExact: true,
+    inputLinesSubmitted: 0,
+    inputLinesAccountedFor: 0,
     patterns: [
       {
         hash: 'h',
@@ -272,6 +278,9 @@ test('renderPocReport handles zero patterns gracefully', () => {
     templaterWallTimeMs: 0,
     executionMode: 'local_cli',
     severityCoverage: 1,
+    positionalBindingExact: true,
+    inputLinesSubmitted: 0,
+    inputLinesAccountedFor: 0,
     patterns: [],
   };
   const out = renderPocReport({
