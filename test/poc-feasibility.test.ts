@@ -83,6 +83,7 @@ function makeRenderInput(siem: SiemId): RenderInput {
       inputLineCount: 30_000,
       templaterWallTimeMs: 100,
       executionMode: 'local_cli',
+      severityCoverage: 1,
     },
     targetEventCount: 100_000,
     pullWallTimeMs: 1000,

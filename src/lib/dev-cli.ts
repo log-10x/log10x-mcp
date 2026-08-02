@@ -10,8 +10,11 @@
  *   - file:  reads from a path/glob (log10x_extract_templates)
  *
  * Backend selection via LOG10X_TENX_MODE (see resolveTenxMode):
- *   - unset (default): auto-detect. Probe `docker info`; if Docker is
- *     reachable, use it, otherwise fall back to the host-installed tenx binary.
+ *   - unset (default): auto-detect. Prefer the host-installed tenx binary;
+ *     fall back to docker only when no binary is on PATH. The host install is
+ *     a version the operator chose, whereas the default image tag is mutable,
+ *     so preferring docker made a report's engine build depend on whatever
+ *     `:latest` happened to be that day.
  *   - "local": invoke the host-installed tenx binary.
  *     Binary lookup: LOG10X_TENX_PATH env var wins; otherwise `tenx` on PATH.
  *   - "docker": `docker run --rm -i log10x/pipeline-10x:latest` (or
@@ -209,17 +212,28 @@ async function runAppsMcpFileViaLocalBinary(
       'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
     );
   }
+  // tenx-mcp-file.config.yaml is a FILE-input config: it reads from
+  // LOG10X_MCP_INPUT_PATH, not from stdin. Piping the batch to stdin (as
+  // this used to) left the input path unset, so the engine read nothing,
+  // exited immediately, and the pending stdin write died with EPIPE. The
+  // docker backend already writes an input.log and mounts it; do the same
+  // here so both backends drive the identical config.
+  const outputDir = '/tmp/log10x-mcp-pull/' + runtimeName;
+  await mkdir(outputDir, { recursive: true });
+  const inputFile = join(outputDir, 'input.log');
+  await fsWriteFile(inputFile, rawLogText, 'utf8');
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     LOG10X_MCP_RUNTIME_NAME: runtimeName,
     TENX_INCLUDE_PATHS: includePaths,
-    LOG10X_MCP_OUTPUT_DIR: '/tmp/log10x-mcp-pull/' + runtimeName,
+    LOG10X_MCP_OUTPUT_DIR: outputDir,
+    LOG10X_MCP_INPUT_PATH: inputFile,
     TENX_API_KEY: resolvedApiKey,
   };
   await runCommandWithStdin(
     binary,
     ['@' + configPath],
-    rawLogText,
+    null,
     { env, timeoutMs: 300_000, configPath },
   );
   return { cliVersion };
@@ -260,7 +274,20 @@ async function runAppsMcpFileViaDocker(
     '@' + containerConfigPath,
   ];
   await runCommandWithStdin('docker', args, null, { timeoutMs: 300_000, configPath: hostConfigPath });
-  return { cliVersion: undefined };
+  // Record WHICH image ran. The default tag is mutable, so `:latest` alone
+  // does not identify a build; append the local image id when docker can
+  // resolve one. Best-effort: a failed inspect must not fail the run.
+  let ref = `docker ${image}`;
+  try {
+    const id = await runCommand('docker', ['image', 'inspect', '--format', '{{.Id}}', image], {
+      timeoutMs: 5_000,
+    });
+    const digest = id.trim().split('\n')[0]?.trim();
+    if (digest) ref = `docker ${image} (${digest.slice(0, 19)})`;
+  } catch {
+    // leave the bare image ref
+  }
+  return { cliVersion: ref };
 }
 
 /**
@@ -500,7 +527,18 @@ export async function resolveTenxMode(): Promise<'local' | 'docker'> {
         `Valid values: "local", "docker", or unset for auto-detect.`
     );
   }
-  // Unset — try docker first.
+  // Unset — prefer the host binary, fall back to docker.
+  //
+  // This order used to be reversed, and the reversal was silently
+  // load-bearing: the default runtime image tag is MUTABLE, so a host with
+  // Docker running would get whatever `:latest` happened to be, at a
+  // different version and flavor than the `tenx` on its PATH. A POC report
+  // generated on one machine was not reproducible on another, and nothing
+  // in the output said which engine had produced it. The host binary is a
+  // pinned install with a version the caller chose, so prefer it and treat
+  // docker as the fallback for hosts with no install.
+  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  if (await isBinaryOnPath(binary)) return 'local';
   try {
     await runCommand('docker', ['info'], { timeoutMs: 2_000 });
     return 'docker';
@@ -892,7 +930,10 @@ export async function isBinaryOnPath(binary: string): Promise<boolean> {
 async function tryGetVersion(binary: string): Promise<string | undefined> {
   try {
     const out = await runCommand(binary, ['--version'], { timeoutMs: 3000 });
-    return out.trim().slice(0, 120);
+    // First line only. `tenx --version` follows the version with a
+    // "Need help? See ..." line, and this string is embedded in report
+    // provenance where a stray newline breaks the surrounding markdown.
+    return out.trim().split('\n')[0].trim().slice(0, 120);
   } catch {
     return undefined;
   }

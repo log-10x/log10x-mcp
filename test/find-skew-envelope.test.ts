@@ -85,6 +85,7 @@ function syntheticPatterns(opts: {
     inputLineCount: opts.count,
     templaterWallTimeMs: 0,
     executionMode: 'local_cli',
+    severityCoverage: 1,
   };
 }
 

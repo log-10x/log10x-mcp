@@ -47,6 +47,12 @@ export interface ChunkedTemplaterResult {
   encodedLog: string;
   aggregatedCsv: string;
   wallTimeMs: number;
+  /**
+   * Which engine build ran the chunks. Same field the single-shot runners
+   * return, so callers can record engine identity without branching on
+   * which path produced the result.
+   */
+  cliVersion?: string;
   /** Per-chunk timings + sizes for telemetry. */
   chunkStats: Array<{
     chunkIndex: number;
@@ -85,6 +91,7 @@ export async function runChunkedTemplater(
       encodedLog: result.encodedLog,
       aggregatedCsv: result.aggregatedCsv,
       wallTimeMs: wallMs,
+      cliVersion: result.cliVersion,
       chunkStats: [
         {
           chunkIndex: 0,
@@ -130,6 +137,9 @@ export async function runChunkedTemplater(
   let aggHeader = '';
 
   const runId = `chunked-${Date.now()}-${process.pid}`;
+  // Every chunk runs the same backend, so the first non-empty value
+  // identifies the build for the whole run.
+  let chunkCliVersion: string | undefined;
   for (let i = 0; i < chunks.length; i++) {
     const chunkIndex = i;
     const chunkText = chunks[i];
@@ -143,6 +153,7 @@ export async function runChunkedTemplater(
       // dir and clobber each other.
       const result = await runDevCliFileOutput(chunkText, `${runId}-${chunkIndex}`);
       const chunkMs = Date.now() - chunkStart;
+      if (!chunkCliVersion && result.cliVersion) chunkCliVersion = result.cliVersion;
 
       // Merge templates: dedupe by templateHash.
       let templatesCount = 0;
@@ -234,6 +245,7 @@ export async function runChunkedTemplater(
     encodedLog: encodedLogMerged,
     aggregatedCsv: aggregatedCsvMerged,
     wallTimeMs: Date.now() - t0,
+    cliVersion: chunkCliVersion,
     chunkStats,
   };
 }

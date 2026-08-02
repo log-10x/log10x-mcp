@@ -108,6 +108,22 @@ export interface ExtractedPatterns {
   templaterWallTimeMs: number;
   /** Always `local_cli` — the engine runs on the caller's machine. */
   executionMode: 'local_cli';
+  /**
+   * Which engine build actually produced the numbers: `tenx 1.1.32 (edge)`
+   * for the host binary, `docker log10x/pipeline-10x:latest` otherwise.
+   *
+   * Recorded because the docker default tag is mutable. A report generated
+   * against one `:latest` was not reproducible against another, and the
+   * output said nothing about which build had run. Surfaced in the report's
+   * methodology block so the engine identity travels with the numbers.
+   */
+  engineBuild?: string;
+  /**
+   * Fraction of patterns that resolved a severity, 0..1. Feeds the
+   * fail-closed guard: when the engine emits no severity, every pattern
+   * reads as reducible and the ERROR safety rail cannot fire.
+   */
+  severityCoverage: number;
 }
 
 export interface ExtractPatternsOptions {
@@ -197,6 +213,7 @@ export async function extractPatterns(
       inputLineCount: 0,
       templaterWallTimeMs: 0,
       executionMode: 'local_cli',
+      severityCoverage: 0,
     };
   }
 
@@ -204,6 +221,7 @@ export async function extractPatterns(
   const mergedEncoded: EncodedEvent[] = [];
   const mergedAggregated: AggregatedRow[] = [];
   let totalWallTimeMs = 0;
+  let engineBuild: string | undefined;
   const executionMode = 'local_cli' as const;
 
   // The local 10x engine absorbs the full batch in one shot.
@@ -224,6 +242,7 @@ export async function extractPatterns(
         : opts.useFileOutput
         ? await runDevCliFileOutput(text)
         : await runDevCli(text);
+      engineBuild = local.cliVersion;
       for (const [hash, tpl] of parseTemplates(local.templatesJson)) {
         mergedTemplates.set(hash, tpl);
       }
@@ -397,6 +416,9 @@ export async function extractPatterns(
     inputLineCount: lines.length,
     templaterWallTimeMs: totalWallTimeMs,
     executionMode,
+    engineBuild,
+    severityCoverage:
+      patterns.length === 0 ? 0 : patterns.filter((p) => p.severity).length / patterns.length,
   };
 }
 

@@ -68,10 +68,24 @@ export interface PocInput {
   };
   stop: {
     reason: string;
-    saturation_reached: boolean;
+    /**
+     * Whether pattern discovery saturated (new patterns per 100k events below
+     * 2%). `null` means not measured — nothing computes the discovery curve
+     * yet. It is deliberately nullable rather than defaulting to false: the
+     * previous code derived it from the pull's stop reason, which is a
+     * different question entirely.
+     */
+    saturation_reached: boolean | null;
     events_when_saturated: number | null;
+    /** Every sampled sub-window drained. Says nothing about saturation. */
+    sample_windows_exhausted: boolean;
   };
   coverage: {
+    /** Share of PATTERNS carrying the attribute, 0..1. */
+    patterns_with_timestamp_pct: number;
+    patterns_with_service_attribution_pct: number;
+    patterns_with_severity_attribution_pct: number;
+    /** Share of EVENTS carrying the attribute, 0..1. */
     events_with_timestamp_pct: number;
     events_with_service_attribution_pct: number;
     events_with_severity_attribution_pct: number;
@@ -396,12 +410,21 @@ export function buildPocEnvelopeV2(
   let withTimestamp = 0;
   let withService = 0;
   let withSeverity = 0;
+  let eventsWithTimestamp = 0;
+  let eventsWithService = 0;
+  let eventsWithSeverity = 0;
+  let coveredEvents = 0;
   for (const p of input.extraction.patterns) {
     if (p.firstSeenMs !== undefined) withTimestamp++;
     if (p.service) withService++;
     if (p.severity) withSeverity++;
+    coveredEvents += p.count;
+    if (p.firstSeenMs !== undefined) eventsWithTimestamp += p.count;
+    if (p.service) eventsWithService += p.count;
+    if (p.severity) eventsWithSeverity += p.count;
   }
   const totalPatterns = Math.max(1, input.extraction.patterns.length);
+  const totalEventsForCoverage = Math.max(1, coveredEvents);
 
   // Compute total cost. When the caller supplied rawIngestBytes (the
   // size of the actual SIEM payload, envelope and all), project
@@ -597,13 +620,34 @@ export function buildPocEnvelopeV2(
       },
       stop: {
         reason: input.reasonStopped,
-        saturation_reached: input.reasonStopped === 'source_exhausted',
-        events_when_saturated: input.reasonStopped === 'source_exhausted' ? input.extraction.totalEvents : null,
+        // Saturation is "new patterns per 100k events fell below 2%", which
+        // is a property of pattern discovery. It was being read off the pull's
+        // stop reason instead, and `source_exhausted` is the value every
+        // connector INITIALISES to — so a stratified sample that drained its
+        // 24 sub-windows reported "pattern discovery saturated" to the
+        // customer, and the cost extrapolation carried a coverage confidence
+        // it never earned. Nothing measures the discovery curve today, so the
+        // honest value is null: unknown, not true.
+        saturation_reached: null,
+        events_when_saturated: null,
+        // What the pull actually established, kept separate from the claim
+        // above so the two can never be conflated again.
+        sample_windows_exhausted: input.reasonStopped === 'source_exhausted',
       },
+      // These are PATTERN-weighted, and the field names now say so. They
+      // read `events_with_*` while dividing by pattern count, which reports
+      // a different quantity than the one named: a long tail of tiny
+      // unattributed patterns drags the figure down while nearly every
+      // event is attributed, and the reverse hides a gap on the heaviest
+      // patterns. Event-weighted figures sit alongside rather than
+      // replacing them, because the two answer different questions.
       coverage: {
-        events_with_timestamp_pct: ratio(withTimestamp / totalPatterns),
-        events_with_service_attribution_pct: ratio(withService / totalPatterns),
-        events_with_severity_attribution_pct: ratio(withSeverity / totalPatterns),
+        patterns_with_timestamp_pct: ratio(withTimestamp / totalPatterns),
+        patterns_with_service_attribution_pct: ratio(withService / totalPatterns),
+        patterns_with_severity_attribution_pct: ratio(withSeverity / totalPatterns),
+        events_with_timestamp_pct: ratio(eventsWithTimestamp / totalEventsForCoverage),
+        events_with_service_attribution_pct: ratio(eventsWithService / totalEventsForCoverage),
+        events_with_severity_attribution_pct: ratio(eventsWithSeverity / totalEventsForCoverage),
       },
       methodology: {
         engine: 'engine_fingerprint',
