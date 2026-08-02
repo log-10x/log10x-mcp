@@ -47,6 +47,38 @@ export const MIN_CORPUS = 20;
 /** Discriminator tokens surfaced before packing to width. */
 export const MAX_DISCRIMINATORS = 5;
 
+/**
+ * Leading tokens always kept, regardless of document frequency, so a name
+ * says WHAT the statement is and not merely which variant it is. Without
+ * this, a set of patterns sharing a long lead-in loses every shared word to
+ * the boilerplate cutoff and renders as its statistical tail.
+ */
+export const ANCHOR_TOKENS = 3;
+
+/**
+ * Anchor size scales with the column budget. A fixed constant cannot serve
+ * three different widths: the report has 56 codepoints and can afford three
+ * subject tokens, while the 40-44 surfaces cannot, and spending their budget
+ * on an anchor pushes discriminators past the ellipsis and mints collisions
+ * that did not exist. Measured on 164 real patterns: at width 40 an anchor of
+ * 3 produces a four-row collision, an anchor of 2 does not.
+ */
+function anchorBudget(width: number): number {
+  return width >= 56 ? ANCHOR_TOKENS : 2;
+}
+
+/**
+ * Severity words are skipped in the anchor whatever the row's severity label
+ * says. The label is the ENGINE's classification (`TRACE`) while the token
+ * inside the message is whatever the application printed (`INFO`), so keying
+ * the skip off the label alone lets the mismatch through and the anchor leads
+ * with a severity the table already shows, sometimes contradicting it.
+ */
+const SEVERITY_WORDS = new Set([
+  'fatal', 'critical', 'crit', 'error', 'err', 'warn', 'warning',
+  'info', 'information', 'debug', 'trace', 'notice',
+]);
+
 /** One render token: the verbatim text + whether df marked it a discriminator. */
 export interface DisplayToken {
   text: string;
@@ -172,7 +204,11 @@ function headTokenSet(service?: string | null, severity?: string | null): Set<st
   const out = new Set<string>();
   for (const src of [service, severity]) {
     if (!src) continue;
-    for (const t of src.split(/[_\s]+/)) {
+    // Split on hyphens too: services are routinely hyphenated
+    // (`product-reviews`, `opentelemetry-collector`), and without this the
+    // head-skip never matches their own tokens, so the anchor spends its
+    // budget re-printing the service column.
+    for (const t of src.split(/[-_\s]+/)) {
       const k = t.trim().toLowerCase();
       if (k) out.add(k);
     }
@@ -216,8 +252,15 @@ export function buildDisplayName(
   // every token is non-distinctive (Layer 1 territory).
   const isDistinctive = (tok: string): boolean => {
     if (!haveDf) return false;
+    const lower = tok.toLowerCase();
     if (codepointLength(tok) <= 2) return false;
-    if (heads.has(tok.toLowerCase())) return false;
+    if (heads.has(lower)) return false;
+    // Severity words are never discriminators. The table renders severity in
+    // its own column, and the token inside the message is what the
+    // application printed, which routinely disagrees with the engine's
+    // classification — so letting it through both wastes the budget and can
+    // contradict the severity shown beside it.
+    if (SEVERITY_WORDS.has(lower)) return false;
     const df = opts.df!.dfMap.get(tok) ?? 1;
     return df < threshold;
   };
@@ -243,6 +286,28 @@ export function buildDisplayName(
     return { display_name: midEllipsis(spaced, width), display_tokens };
   }
 
+  // ANCHOR. Discriminators alone answer "which one of these" but not "what
+  // is this". When many patterns share a long lead-in -- an exporter error
+  // storm, a retry loop -- every shared word is boilerplate by df and gets
+  // dropped, leaving only the statistical tail: `Try enabling sending
+  // survive temporary`. Unique, and unreadable.
+  //
+  // So reserve the front of the budget for the first few tokens in their
+  // original order, whatever their df, and spend the remainder on
+  // discriminators. The anchor says what the statement is; the
+  // discriminators say which variant. Head tokens (service/severity) are
+  // skipped because the report already renders those in their own columns.
+  const anchorTokens: string[] = [];
+  for (const t of tokens) {
+    if (anchorTokens.length >= anchorBudget(width)) break;
+    const lower = t.toLowerCase();
+    if (codepointLength(t) <= 2) continue;
+    if (heads.has(lower)) continue;
+    if (SEVERITY_WORDS.has(lower)) continue;
+    if (anchorTokens.includes(t)) continue;
+    anchorTokens.push(t);
+  }
+
   // First-occurrence index for a stable tie-break (rarest-first, then
   // original order) so the selection is deterministic.
   const firstIndex = new Map<string, number>();
@@ -259,6 +324,8 @@ export function buildDisplayName(
 
   // Ranking SELECTS which tokens; ORIGINAL order RENDERS them (so a tail
   // discriminator surfaces in place). De-dupe repeats, keeping first position.
+  // The anchor is unioned in so the name keeps its subject.
+  for (const t of anchorTokens) selected.add(t);
   const seen = new Set<string>();
   const ordered: string[] = [];
   for (const t of tokens) {
