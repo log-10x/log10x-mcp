@@ -2,7 +2,7 @@
  * log10x_compile_link, link an existing folder of `.10x.json` symbol units
  * into a single `.10x.tar` library, with no source scan.
  *
- * This is the same Cloud-flavor Compiler app (`@apps/compiler`) invoked with
+ * This is the same compiler-flavor Compiler app (`@apps/compiler`) invoked with
  * link-only args: point `outputSymbolFolder` at the units folder and mount no
  * source, so the engine reuses the units already on disk (scans 0 new files)
  * and merges them into the library. No separate link app or pipeline, just
@@ -42,7 +42,7 @@ export const compileLinkSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend, same contract as log10x_compile: `auto` prefers the cloud compiler image, `docker` forces it, `local` uses a cloud-flavor tenx. The Edge flavor is refused.',
+      'Execution backend, same contract as log10x_compile: `auto` prefers the compiler image, `docker` forces it, `local` uses a compiler-flavor tenx (an engine built before the flavor rename reports that flavor as `cloud`; both are accepted). The native runtime flavor is refused.',
     ),
   timeout_ms: z
     .number()

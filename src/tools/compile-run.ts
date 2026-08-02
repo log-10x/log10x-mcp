@@ -4,7 +4,7 @@
  * it is not.
  *
  * This is the primary, agent-facing compiler entry point. It validates the
- * sources, spawns the Cloud-flavor Compiler app, and waits up to `max_wait_ms`
+ * sources, spawns the compiler-flavor Compiler app, and waits up to `max_wait_ms`
  * (default 45s) for completion: a small compile, and EVERY re-run (which reuses
  * prior units via the pinned output folder), finishes in that window and the
  * tool returns the finished library plus the full scan/link diagnostics in one
@@ -14,7 +14,7 @@
  * calling this tool again later. `max_wait_ms: 0` returns the job_id
  * immediately (fire-and-forget).
  *
- * Validation, the source set, credentials, output pinning, and the cloud-flavor
+ * Validation, the source set, credentials, output pinning, and the compiler-flavor
  * gate are shared with compile.ts (`prepareCompile`); the launch + wait is
  * shared with log10x_compile_link via compile-launch.ts.
  */

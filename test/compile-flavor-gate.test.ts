@@ -5,8 +5,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   detectFlavor,
-  assertCloudFlavor,
-  NotCloudFlavorError,
+  assertCompilerFlavor,
+  NotCompilerFlavorError,
   FlavorUndetectedError,
   ALLOW_UNVERIFIED_FLAVOR_ENV,
 } from '../src/lib/compile-runner.js';
@@ -14,9 +14,13 @@ import {
 // The gate the Compiler app runs before it will spawn a local `tenx`. It used to
 // read `if (flavor && flavor !== 'cloud') throw`, so every case where the flavor
 // could not be READ — a banner in an unknown format, a binary that will not
-// execute — skipped the check and the run proceeded as though Cloud had been
-// confirmed. These tests pin all four outcomes against real spawned binaries,
-// not against a mock of the probe.
+// execute — skipped the check and the run proceeded as though a compiler build
+// had been confirmed. It then required the token to be exactly `cloud`, which
+// hard-refuses the renamed compiler binary that reports `compiler`.
+//
+// These tests pin every outcome against real spawned binaries, not against a
+// mock of the probe: both accepted spellings, both rejected runtime spellings,
+// and the three "cannot tell" cases.
 
 let dir: string;
 
@@ -74,30 +78,88 @@ test('detectFlavor reads a banner printed on stderr', async () => {
   assert.equal((await detectFlavor(bin)).flavor, 'cloud');
 });
 
-// ── assertCloudFlavor: the gate itself ───────────────────────────────────
+// ── assertCompilerFlavor: the gate itself ───────────────────────────────────
 
-test('assertCloudFlavor passes a confirmed cloud binary', async () => {
+// THE RENAME. log-10x/engine#94 changes CloudPipelineFactory.name() from
+// 'cloud' to 'compiler' and EdgePipelineFactory.name() from 'edge' to
+// 'runtime'. A gate that demands exactly 'cloud' hard-refuses the renamed
+// compiler binary, so BOTH spellings must be accepted — and permanently, not as
+// a transition shim: a binary already installed keeps printing 'cloud' until
+// its owner upgrades.
+test('assertCompilerFlavor accepts a binary that reports the RENAMED compiler flavor', async () => {
+  const bin = await fakeTenx(
+    'gate-compiler',
+    "#!/bin/sh\necho \"10x engine v1.2.0, flavor: 'compiler'\"\n",
+  );
+  const probe = await assertCompilerFlavor(bin); // must not throw
+  assert.equal(probe.outcome, 'parsed');
+  assert.equal(probe.flavor, 'compiler');
+});
+
+test('assertCompilerFlavor still accepts the pre-rename cloud spelling', async () => {
   const bin = await fakeTenx(
     'gate-cloud',
     "#!/bin/sh\necho \"10x engine v1.1.32, flavor: 'cloud'\"\n",
   );
-  await assertCloudFlavor(bin); // must not throw
+  const probe = await assertCompilerFlavor(bin); // must not throw
+  assert.equal(probe.flavor, 'cloud');
 });
 
-test('assertCloudFlavor refuses a positively-detected non-cloud flavor', async () => {
-  const bin = await fakeTenx('gate-edge', "#!/bin/sh\necho \"10x engine v1.1.32, flavor: 'edge'\"\n");
-  await assert.rejects(() => assertCloudFlavor(bin), (e: Error) => {
-    assert.ok(e instanceof NotCloudFlavorError);
-    assert.match(e.message, /is the 'edge' flavor/);
+test('assertCompilerFlavor refuses a binary that reports the RENAMED runtime flavor', async () => {
+  const bin = await fakeTenx(
+    'gate-runtime',
+    "#!/bin/sh\necho \"10x engine v1.2.0, flavor: 'runtime'\"\n",
+  );
+  await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {
+    assert.ok(e instanceof NotCompilerFlavorError, `expected NotCompilerFlavorError, got ${e.name}`);
+    assert.equal((e as NotCompilerFlavorError).flavor, 'runtime');
+    assert.match(e.message, /native runtime build/);
+    assert.match(e.message, /reports flavor 'runtime'/);
     return true;
   });
 });
 
+test('assertCompilerFlavor refuses the pre-rename runtime spellings too', async () => {
+  for (const flavor of ['edge', 'native']) {
+    const bin = await fakeTenx(
+      `gate-${flavor}`,
+      `#!/bin/sh\necho "10x engine v1.1.32, flavor: '${flavor}'"\n`,
+    );
+    await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {
+      assert.ok(e instanceof NotCompilerFlavorError);
+      assert.match(e.message, new RegExp(`reports flavor '${flavor}'`));
+      return true;
+    }, `flavor '${flavor}' must not open the gate`);
+  }
+});
+
+test('assertCompilerFlavor refuses a flavor it has never heard of', async () => {
+  const bin = await fakeTenx(
+    'gate-unknown',
+    "#!/bin/sh\necho \"10x engine v9.9.9, flavor: 'lambda'\"\n",
+  );
+  await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {
+    assert.ok(e instanceof NotCompilerFlavorError);
+    assert.match(e.message, /reports the 'lambda' flavor, which is not a compiler build/);
+    return true;
+  });
+});
+
+test('the gate is case-insensitive on the token, both spellings', async () => {
+  for (const banner of ["flavor: 'Compiler'", "flavor: 'CLOUD'"]) {
+    const bin = await fakeTenx(
+      `gate-case-${banner.replace(/\W/g, '')}`,
+      `#!/bin/sh\necho "10x engine v1.2.0, ${banner}"\n`,
+    );
+    await assertCompilerFlavor(bin); // must not throw
+  }
+});
+
 // THE REGRESSION. Before the fix both of these resolved, and the Compiler app
 // went on to spawn the binary.
-test('assertCloudFlavor refuses a binary whose banner carries no flavor token', async () => {
+test('assertCompilerFlavor refuses a binary whose banner carries no flavor token', async () => {
   const bin = await fakeTenx('gate-noflavor', '#!/bin/sh\necho "10x engine v1.1.32"\n');
-  await assert.rejects(() => assertCloudFlavor(bin), (e: Error) => {
+  await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {
     assert.ok(e instanceof FlavorUndetectedError, `expected FlavorUndetectedError, got ${e.name}`);
     assert.equal((e as FlavorUndetectedError).outcome, 'unreadable');
     assert.match(e.message, /Cannot determine the flavor/);
@@ -106,9 +168,9 @@ test('assertCloudFlavor refuses a binary whose banner carries no flavor token', 
   });
 });
 
-test('assertCloudFlavor refuses a binary that cannot be executed at all', async () => {
+test('assertCompilerFlavor refuses a binary that cannot be executed at all', async () => {
   await assert.rejects(
-    () => assertCloudFlavor(path.join(dir, 'gate-absent')),
+    () => assertCompilerFlavor(path.join(dir, 'gate-absent')),
     (e: Error) => {
       assert.ok(e instanceof FlavorUndetectedError);
       assert.equal((e as FlavorUndetectedError).outcome, 'unrunnable');
@@ -117,20 +179,20 @@ test('assertCloudFlavor refuses a binary that cannot be executed at all', async 
   );
 });
 
-test('assertCloudFlavor refuses a binary that dies without printing a banner', async () => {
+test('assertCompilerFlavor refuses a binary that dies without printing a banner', async () => {
   const bin = await fakeTenx('gate-crash', '#!/bin/sh\necho "Segmentation fault" >&2\nexit 139\n');
-  await assert.rejects(() => assertCloudFlavor(bin), FlavorUndetectedError);
+  await assert.rejects(() => assertCompilerFlavor(bin), FlavorUndetectedError);
 });
 
-test('a non-cloud flavor is refused even with the unverified-flavor opt-out set', async () => {
+test('a runtime flavor is refused even with the unverified-flavor opt-out set', async () => {
   const bin = await fakeTenx(
-    'gate-edge-optout',
-    "#!/bin/sh\necho \"10x engine v1.1.32, flavor: 'edge'\"\n",
+    'gate-runtime-optout',
+    "#!/bin/sh\necho \"10x engine v1.2.0, flavor: 'runtime'\"\n",
   );
   const prev = process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
   process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = '1';
   try {
-    await assert.rejects(() => assertCloudFlavor(bin), NotCloudFlavorError);
+    await assert.rejects(() => assertCompilerFlavor(bin), NotCompilerFlavorError);
   } finally {
     if (prev === undefined) delete process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
     else process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = prev;
@@ -142,13 +204,13 @@ test(`${ALLOW_UNVERIFIED_FLAVOR_ENV}=1 lets an unreadable banner through, and on
   const prev = process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
   try {
     process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = '1';
-    await assertCloudFlavor(bin); // must not throw
+    await assertCompilerFlavor(bin); // must not throw
 
     // A truthy-looking but non-'1' value must NOT open the gate: the opt-out is
     // exact, so `=0`, `=false` and `=true` all keep the refusal.
     for (const v of ['0', 'false', 'true', 'yes', '']) {
       process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = v;
-      await assert.rejects(() => assertCloudFlavor(bin), FlavorUndetectedError, `value ${JSON.stringify(v)} should not open the gate`);
+      await assert.rejects(() => assertCompilerFlavor(bin), FlavorUndetectedError, `value ${JSON.stringify(v)} should not open the gate`);
     }
   } finally {
     if (prev === undefined) delete process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
@@ -158,7 +220,7 @@ test(`${ALLOW_UNVERIFIED_FLAVOR_ENV}=1 lets an unreadable banner through, and on
 
 test('the refusal message names the remediation paths, not just the failure', async () => {
   const bin = await fakeTenx('gate-msg', '#!/bin/sh\necho "10x engine v1.1.32"\n');
-  const err = await assertCloudFlavor(bin).then(
+  const err = await assertCompilerFlavor(bin).then(
     () => null,
     (e: Error) => e,
   );

@@ -6,7 +6,7 @@
  * validators here (docker-ref / helm-ref / artifactory shape, the stable output
  * key) are also exercised directly by the unit tests.
  *
- * The compile itself scans source code / binaries with the CLOUD-flavor
+ * The compile itself scans source code / binaries with the COMPILER-flavor
  * Compiler app (`tenx @apps/compiler`) and writes a symbol library, per-file
  * `.10x.json` units plus a linked `.10x.tar`, that the 10x runtime later uses
  * to assign hidden classes (TenXTemplates) to events.
@@ -30,10 +30,13 @@
  * full transitive dependency graph and floods the library with third-party
  * symbols.
  *
- * Backend: Docker-first. By default it runs the cloud image
- * log10x/compiler-10x (which is cloud-flavor by construction); if the caller
- * has a local CLOUD-flavor `tenx` it can use that instead. The Edge (native /
- * JIT) flavor cannot compile and is refused with a clear remediation.
+ * Backend: Docker-first. By default it runs the image log10x/compiler-10x
+ * (which is compiler-flavor by construction); if the caller has a local
+ * COMPILER-flavor `tenx` it can use that instead. The runtime (native) flavor
+ * carries no `generate` pipeline unit, cannot compile, and is refused with a
+ * clear remediation. An engine built before the flavor rename reports the
+ * compiler flavor as `cloud` and the runtime flavor as `edge`; both
+ * vocabularies are read, so an existing install keeps working un-upgraded.
  */
 
 import { createHash } from 'node:crypto';
@@ -175,7 +178,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (cloud image, guaranteed cloud flavor) and falls back to a local cloud-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses if it is not the cloud flavor. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
+      'Execution backend. `auto` (default) prefers Docker (the compiler image, guaranteed compiler flavor) and falls back to a local compiler-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses it unless its version banner reports the compiler flavor (`compiler`, or `cloud` on an engine built before the flavor rename); the native runtime build is refused. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
     ),
   timeout_ms: z
     .number()
