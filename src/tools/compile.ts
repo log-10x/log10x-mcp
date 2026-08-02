@@ -32,10 +32,12 @@
  *
  * Backend: Docker-first. By default it runs the image log10x/compiler-10x
  * (which is compiler-flavor by construction); if the caller has a local
- * COMPILER-flavor `tenx` it can use that instead. The runtime (native) flavor
- * carries no `generate` pipeline unit, cannot compile, and is refused with a
- * clear remediation. An engine built before the flavor rename reports the
- * compiler flavor as `cloud` and the runtime flavor as `edge`; both
+ * COMPILER-flavor `tenx` it can use that instead. Three flavors ship and two of
+ * them are refused here: `runtime` (the native binary) and `runtime-jvm` (the
+ * JVM-packaged runtime, the only runtime built for Windows) carry no `generate`
+ * pipeline unit, cannot compile, and are refused with a clear remediation that
+ * names which one the caller has. An engine built before the flavor rename
+ * reports the compiler flavor as `cloud` and the runtime flavor as `edge`; both
  * vocabularies are read, so an existing install keeps working un-upgraded.
  */
 
@@ -178,7 +180,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (the compiler image, guaranteed compiler flavor) and falls back to a local compiler-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses it unless its version banner reports the compiler flavor (`compiler`, or `cloud` on an engine built before the flavor rename); the native runtime build is refused. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
+      'Execution backend. `auto` (default) prefers Docker (the compiler image, guaranteed compiler flavor) and falls back to a local compiler-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:latest). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses it unless its version banner reports the compiler flavor (`compiler`, or `cloud` on an engine built before the flavor rename). Of the three shipped flavors only `compiler` can compile: `runtime` (native binary) and `runtime-jvm` (JVM-packaged runtime, the only runtime available on Windows) are both refused, since neither carries the `generate` pipeline unit. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
     ),
   timeout_ms: z
     .number()
