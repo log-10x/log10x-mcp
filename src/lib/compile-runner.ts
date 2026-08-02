@@ -80,6 +80,7 @@ import {
   DockerNotAvailableError,
 } from './dev-cli.js';
 import { spawnToLog } from './compile-jobs.js';
+import { assertNotRuntimeImage } from './runtime-image.js';
 
 // ── Config descriptor (the extension seam) ─────────────────────────────────
 
@@ -325,6 +326,33 @@ export class HelmRepoAddError extends Error {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const DEFAULT_IMAGE = 'log10x/compiler-10x:latest';
+
+/**
+ * Which image the docker compile path runs.
+ *
+ * Precedence is unchanged (LOG10X_COMPILER_IMAGE → LOG10X_TENX_IMAGE →
+ * DEFAULT_IMAGE); what is new is the refusal. Docker mode deliberately skips
+ * the flavor probe that local mode runs, so before this a runtime image here
+ * failed ~4s into the container with `could not find pipeline unit factory
+ * for: discoverSources` and a Jackson mapping chain — measured on
+ * log10x/edge-10x:latest (1.1.38), exit code 1, zero units, no library. The
+ * likely way to arrive there is setting the SHARED LOG10X_TENX_IMAGE to a
+ * runtime image in order to change the run path, which drags the compiler
+ * along with it; `LOG10X_RUNTIME_IMAGE` exists so that is no longer necessary.
+ */
+export function resolveCompilerImage(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = (env.LOG10X_COMPILER_IMAGE || '').trim();
+  if (explicit) {
+    assertNotRuntimeImage(explicit, false);
+    return explicit;
+  }
+  const shared = (env.LOG10X_TENX_IMAGE || '').trim();
+  if (shared) {
+    assertNotRuntimeImage(shared, true);
+    return shared;
+  }
+  return DEFAULT_IMAGE;
+}
 /** The bundled @apps/compiler config's default inputPaths location inside the image. */
 const CONTAINER_SOURCES_PATH = '/etc/tenx/config/data/compile/sources';
 /** Where we mount the host output folder inside the container. */
@@ -405,7 +433,7 @@ async function spawnDockerCompileDetached(
   spawnOpts: { workspaceDir: string; logPath: string; containerName: string },
 ): Promise<CompileSpawnHandle> {
   await probeDocker();
-  const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
+  const image = resolveCompilerImage();
   // The helm pre-steps share one absolute deadline so they can't run past the
   // caller's timeout; the long compile itself is unbounded here (compile_status
   // enforces the wall-cap and can reap a container that overruns).
@@ -622,7 +650,7 @@ async function writeLocalOverlays(cfg: CompileConfig, overlayDir: string): Promi
 
 async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
   await probeDocker();
-  const image = process.env.LOG10X_COMPILER_IMAGE || process.env.LOG10X_TENX_IMAGE || DEFAULT_IMAGE;
+  const image = resolveCompilerImage();
   // One absolute deadline shared by the helm pre-steps AND the compile run, so
   // the caller's timeout is a true total wall-cap (not per-container).
   const deadline = Date.now() + cfg.timeoutMs;

@@ -15,8 +15,11 @@
  *   - "local": invoke the host-installed tenx binary.
  *     Binary lookup: LOG10X_TENX_PATH env var wins; otherwise `tenx` on PATH.
  *   - "docker": `docker run --rm -i log10x/pipeline-10x:latest` (or
- *     LOG10X_TENX_IMAGE). Works on hosts without a native tenx install,
- *     and for hermetic/offline-capable invocation.
+ *     LOG10X_RUNTIME_IMAGE / LOG10X_TENX_IMAGE — see resolveRuntimeImage;
+ *     `LOG10X_RUNTIME_IMAGE=native` selects the GraalVM-native
+ *     log10x/edge-10x, which runs @apps/mcp identically at 391 MB instead of
+ *     926 MB). Works on hosts without a native tenx install, and for
+ *     hermetic/offline-capable invocation.
  *
  * Config lookup: LOG10X_MCP_STDIN_CONFIG_PATH / LOG10X_MCP_FILE_CONFIG_PATH
  *   wins; otherwise the packaged configs shipped alongside the MCP.
@@ -34,6 +37,7 @@ import { basename, join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 import { tenxAvailabilityHint } from './install-hints.js';
+import { resolveRuntimeImage } from './runtime-image.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -230,7 +234,7 @@ async function runAppsMcpFileViaDocker(
   } catch (e) {
     throw new DockerNotAvailableError((e as Error).message || String(e));
   }
-  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+  const image = resolveRuntimeImage();
   const hostConfigPath = resolveConfigPath('LOG10X_MCP_FILE_CONFIG_PATH', 'tenx-mcp-file.config.yaml');
   const containerConfigPath = '/mcp/config/tenx-mcp-file.config.yaml';
   const hostOutputDir = `/tmp/log10x-mcp-pull/${runtimeName}`;
@@ -562,7 +566,7 @@ async function runAppsMcpViaDocker(
   } catch (e) {
     throw new DockerNotAvailableError((e as Error).message || String(e));
   }
-  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+  const image = resolveRuntimeImage();
   const args = [
     'run', '--rm', '-i',
     '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
@@ -738,7 +742,8 @@ async function runViaLocalBinary(
 
 /**
  * Run tenx inside a container. Opt-in via LOG10X_TENX_MODE=docker.
- * Image is `log10x/pipeline-10x:latest` (override via LOG10X_TENX_IMAGE).
+ * Image is `log10x/pipeline-10x:latest` (override via LOG10X_RUNTIME_IMAGE,
+ * which also accepts the alias `native`, or the shared LOG10X_TENX_IMAGE).
  *
  * Mounts:
  *   - <tempDir>              → /mcp/output  (rw) — result files
@@ -762,7 +767,7 @@ async function runViaDocker(
     throw new DockerNotAvailableError((e as Error).message || String(e));
   }
 
-  const image = process.env.LOG10X_TENX_IMAGE || 'log10x/pipeline-10x:latest';
+  const image = resolveRuntimeImage();
 
   // Resolve to absolute paths — bind mounts reject relative paths and
   // the user may pass a relative configPath via LOG10X_MCP_*_CONFIG_PATH.
