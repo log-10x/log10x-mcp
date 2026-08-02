@@ -25,6 +25,7 @@ function fixture(): ExtractedPatterns {
     inputLineCount: 50_000,
     templaterWallTimeMs: 1000,
     executionMode: 'local_cli',
+    severityCoverage: 1,
     patterns: [
       {
         hash: 'h_a',

@@ -58,6 +58,17 @@ export interface PullEventsOptions {
   buckets?: number;
 }
 
+/**
+ * Why a pull stopped.
+ *
+ * `source_exhausted` means "every slice we asked for came back empty", which
+ * for a stratified sampler (CloudWatch draws 24 scattered sub-windows) says
+ * only that the sample was drawn — not that the source held nothing more.
+ * Every connector initialises its reason to this value and overwrites it on
+ * the other outcomes, so it is a fall-through, never a positive finding. It
+ * must not be read as evidence about pattern discovery; see
+ * `saturation_reached` in poc-envelope-v2, which is measured separately.
+ */
 export type PullStopReason = 'target_reached' | 'time_exhausted' | 'source_exhausted' | 'error';
 
 export interface PullEventsResult {

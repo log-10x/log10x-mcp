@@ -53,6 +53,31 @@ export function isReducibleSeverity(severity?: string | null): boolean {
 }
 
 /**
+ * Minimum share of patterns that must carry a severity before any auto path
+ * may recommend a lossless lever.
+ *
+ * `isReducibleSeverity(undefined)` returning true is correct per-pattern (a
+ * single unlabelled INFO line should not block a recommendation) but it fails
+ * OPEN in aggregate: when severity extraction returns nothing at all, every
+ * pattern reads as reducible and the "ERROR/WARN/CRIT/FATAL kept verbatim"
+ * promise silently cannot fire. That is what happened on the 2026-08-02 POC
+ * dry run, where the engine config omitted its aggregator, coverage was 0%,
+ * and three ERROR patterns were queued for reduction.
+ *
+ * A gate has to fail on the known-broken input, so below this floor the
+ * recommender refuses rather than guesses.
+ */
+export const MIN_SEVERITY_COVERAGE = 0.5;
+
+/**
+ * True when enough patterns carry a severity to honour the protected-severity
+ * promise. `coverage` is a 0..1 fraction of patterns, not of events.
+ */
+export function severityAttributionSufficient(coverage: number | undefined): boolean {
+  return typeof coverage === 'number' && coverage >= MIN_SEVERITY_COVERAGE;
+}
+
+/**
  * The severity names the report's "kept verbatim" sentence lists, in the
  * order it lists them. The drift test reads this, not the prose, so a prose
  * edit that drops a severity cannot silently widen what gets reduced.

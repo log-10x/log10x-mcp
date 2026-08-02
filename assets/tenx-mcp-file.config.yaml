@@ -30,6 +30,13 @@ include:
   - run/initialize/custom
   - run/initialize/k8s
 
+  # Aggregator. Without this NO TenXSummary is produced, so the
+  # `filter: isSummary` output below matches nothing and aggregated.csv
+  # is a header with zero data rows. That silently strips the only
+  # source of per-pattern severity, and `isReducibleSeverity(undefined)`
+  # then treats every ERROR pattern as reducible. Do not remove.
+  - run/aggregate/mcp
+
   # Output module
   - run/modules/output/event/file
 
@@ -55,9 +62,20 @@ outputFile:
     writeTemplates: true
     append: false
 
+  # The four anchor fields after encode() are what carry Reporter-tier
+  # identity out of the engine: `pattern=,<symbolMessage>` and
+  # `patternHash=,<tenx_hash>`. cli-output-parser reads them off each
+  # encoded line, and pattern-extraction joins aggregated.csv on the
+  # tenx_hash to resolve severity. Drop them and every pattern loses its
+  # tenxHash, the aggregated join misses, and collapseBySymbolMessage
+  # becomes a no-op.
   - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/encoded.log"
     fields:
       - encode()
+      - patternPrefix="pattern="
+      - $=yield TenXEnv.get("symbolMessageField")
+      - patternHashPrefix="patternHash="
+      - $=yield TenXEnv.get("symbolMessageHashField")
 
   - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/decoded.log"
     filter: isEncoded

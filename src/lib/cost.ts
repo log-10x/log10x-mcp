@@ -612,6 +612,32 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
 }
 
 /**
+ * THE predicate for "does `compact` keep the line queryable in this
+ * destination, in place".
+ *
+ * True only where the destination has a real compaction mechanism: Splunk
+ * (envelope), self-hosted Elasticsearch/OpenSearch (index-pruned) and
+ * ClickHouse (dict-UDF-view). Everywhere else `compact_mode` is `no-op`
+ * with ratio 1.0, and claiming in-place compaction there is a false
+ * statement about the customer's own platform.
+ *
+ * Every surface that renders or gates compaction language routes through
+ * this. Before it existed the renderer carried three rival notions of the
+ * same fact: unconditional prose in four places, a hardcoded
+ * `splunk || elasticsearch || clickhouse` gating the measured-ratio
+ * section, and an allowed-actions lookup in the action selector. A
+ * CloudWatch report asserted in-place compaction in its opening paragraph
+ * while the section that would have proven it was skipped, so the section
+ * numbering jumped 5 to 7. `test/compaction-claim-drift.test.ts` fails if
+ * a fourth notion appears.
+ */
+export function compactsInPlace(destination: string): boolean {
+  const model = COST_MODEL_BY_DESTINATION[destination as SiemId];
+  if (!model) return false;
+  return model.compact_mode !== 'no-op';
+}
+
+/**
  * Returns the cost model for a destination, with ES-unpruned override.
  *
  * ES-unpruned ratios default to the 0.45-0.55 band. Pruning detection is
