@@ -332,14 +332,37 @@ function displayNameCompact(
  * omitted (the caller falls back to the template heuristic).
  */
 function setDifferenceLabels(
-  rows: Array<{ identity: string; symbolMessage?: string; service?: string; severity?: string }>,
+  rows: Array<{ identity: string; symbolMessage?: string; service?: string; severity?: string; template?: string }>,
 ): Map<string, string> {
   const out = new Map<string, string>();
   const withSym = rows.filter((r) => r.symbolMessage && r.symbolMessage.length > 0);
   if (withSym.length === 0) return out;
+
+  // Set-difference labels are chosen to DISCRIMINATE, not to read. They pick
+  // the tokens that distinguish one pattern from its neighbours, which yields
+  // "Try enabling sending survive temporary" and "internal base Exporting
+  // Rejecting contrib" — unambiguous and close to unreadable. The heuristic
+  // name reads as a sentence but collides when two statements share a
+  // four-token prefix.
+  //
+  // So: use the readable name by default, and spend the discriminating label
+  // only where it is actually needed. Before identity landed, every name
+  // collided and the labeller looked like the fix; now that patterns collapse
+  // properly, collisions are rare and paying for them everywhere is a
+  // regression in readability for no gain.
+  const heuristicCounts = new Map<string, number>();
+  for (const r of withSym) {
+    const h = heuristicName(r.template ?? '', r.identity);
+    heuristicCounts.set(h, (heuristicCounts.get(h) ?? 0) + 1);
+  }
+
   // One df-map over the visible pattern set — same basis as top_patterns.
   const df = buildDfContext(withSym.map((r) => r.symbolMessage as string));
   for (const r of withSym) {
+    const h = heuristicName(r.template ?? '', r.identity);
+    // Unnamed pattern is the honest fallback for a body-less hash; it is
+    // expected to repeat and must not drag every row onto the noisy labeller.
+    if (h !== 'Unnamed pattern' && (heuristicCounts.get(h) ?? 0) <= 1) continue;
     // Wider budget than the console (56 vs 44) — the markdown report has room,
     // and it avoids mid-cropping a discriminator token ("transport" -> "tra…rt").
     const { display_name } = buildDisplayName(r.symbolMessage as string, {
@@ -1027,7 +1050,15 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 1: Executive summary
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
   const projectedSavings = patterns.reduce((s, p) => s + p.projectedSavings, 0);
-  const top3 = patterns.slice(0, 3);
+  // "Wins" means patterns a lever actually saves money on. Ranking by volume
+  // and taking the first three listed `keep` rows saving $0 under a heading
+  // that promised wins — which is what a report full of correctly-kept ERROR
+  // patterns produces once the severity rail works. Rank by savings, and drop
+  // the section rather than pad it.
+  const top3 = patterns
+    .filter((p) => p.recommendedAction !== 'keep' && p.projectedSavings > 0)
+    .sort((a, b) => b.projectedSavings - a.projectedSavings)
+    .slice(0, 3);
   // Lossless headline: lead with the % cut and "without losing data". The
   // levers behind it are compact (stays searchable) + offload (recoverable);
   // we never sample or drop. Volume framing first, dollars trail in the body.
@@ -1177,7 +1208,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('');
   if (top3.length > 0) {
-    lines.push('**Top 3 wins** (lossless):');
+    lines.push(`**Top ${top3.length} ${top3.length === 1 ? 'win' : 'wins'}** (lossless):`);
     for (const p of top3) {
       const dn = displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity));
       lines.push(`- ${top3WinLabel(p, dn, fmtCostDisclosed(input, p.projectedSavings))}`);
@@ -1205,7 +1236,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       const p = patterns[i];
       const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || 'unknown'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
       );
     }
     lines.push('');
@@ -1224,7 +1255,19 @@ export function renderPocReport(input: RenderInput): RenderResult {
     }))
     .sort((a, b) => b.cost - a.cost);
   if (svcRows.length === 0) {
-    lines.push('_No service labels resolved from the pulled events._');
+    if (!input.extraction.positionalBindingExact) {
+      // Say which of the two it is. "No service labels" reads as "your logs
+      // carry none", when the truth is that we had them and refused to trust
+      // the binding.
+      lines.push(
+        `_Service attribution withheld. The engine returned ${fmtCount(input.extraction.inputLinesAccountedFor)} ` +
+          `records for ${fmtCount(input.extraction.inputLinesSubmitted)} submitted lines, and service is read from each ` +
+          `event's own envelope by position, so the two could not be reconciled. Rather than publish a breakdown that ` +
+          `could be skewed, it is omitted. Severity is unaffected: it joins on pattern identity, not position._`
+      );
+    } else {
+      lines.push('_No service labels resolved from the pulled events._');
+    }
     lines.push('');
   } else {
     lines.push('| service | events | $/window | severity mix |');
