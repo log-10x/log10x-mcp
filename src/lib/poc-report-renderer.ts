@@ -1428,7 +1428,16 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // rendered report already said "DEBUG/INFO/TRACE/WARN ... reducible"
     // and "ERROR/CRIT/FATAL ... kept verbatim" while the policy protected
     // WARN, which is the reverse of what a reader would conclude.
-    `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), compact in place when the SIEM supports it and the line is compressible (measured ≥40% smaller), else tier_down to a cheaper retained tier (Datadog/CloudWatch), else offload to your own S3 (recoverable). ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
+    // Describes the levers available on THIS destination, not the generic
+    // rule set. The generic version hedged correctly ("compact in place when
+    // the SIEM supports it") but still put the words in front of a reader
+    // whose platform cannot do it, which is how the false claim survived
+    // four rounds of review: it reads as a promise, not a conditional.
+    `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${
+      compactsInPlace(input.siem)
+        ? `compact in place when the line is compressible (measured ≥40% smaller), else offload to your own S3 (recoverable)`
+        : `tier_down to a cheaper retained tier where ${siemName} offers one, else offload to your own S3 (recoverable). ${siemName} has no in-place compaction, so that lever is not used here`
+    }. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
   );
   lines.push(
     '- **Confidence** is `high` for patterns with ≥100 events in the window (stable rate), `medium` for 10-99, `low` for <10.'
