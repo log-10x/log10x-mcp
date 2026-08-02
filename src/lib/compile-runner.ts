@@ -4,12 +4,21 @@
  * a linked `.10x.tar`). Docker-first (the compiler image log10x/compiler-10x),
  * with a local COMPILER-flavor `tenx` binary as an opt-in fallback.
  *
- * Flavor vocabulary: the engine reports two flavors, `compiler` (the JVM /
- * container build, which carries the `generate` pipeline unit) and `runtime`
- * (the native binary, which does not). Engines built before that rename report
- * the same two as `cloud` and `edge`/`native`, and installed binaries keep
- * reporting the old tokens until their owner upgrades, so BOTH spellings are
- * read here permanently, not as a transition shim. See `COMPILER_FLAVORS`.
+ * Flavor vocabulary: three flavors ship, on two axes, what the build can DO
+ * (compile+run vs run only) and how it is BUILT (JVM vs native image):
+ *
+ *                 | JVM           | native
+ *   compile + run | compiler      | none (compiling needs dynamic class loading)
+ *   run only      | runtime-jvm   | runtime
+ *
+ * Exactly one of them carries the `generate` pipeline unit: `compiler`. Both
+ * runtime flavors are refused here, `runtime-jvm` included, it runs on a JVM,
+ * but it is packaged from the same runtime pipeline factory as the native
+ * binary, so being a JVM build buys it no `generate`. Engines built before the
+ * rename report the compiler as `cloud` and the runtime as `edge`/`native`, and
+ * installed binaries keep printing the old tokens until their owner upgrades,
+ * so every spelling is read here permanently, not as a transition shim.
+ * See `COMPILER_FLAVORS` / `RUNTIME_FLAVORS`.
  *
  * Why a dedicated runner (not dev-cli's runners): the streaming apps
  * (@apps/mcp / @apps/mcp-file) are stdin-in / templates-out over a
@@ -57,8 +66,8 @@
  * Local mode renders the overlay without a `command` override (the engine's
  * platform default applies) and needs a docker/podman CLI on the host.
  *
- * The compiler-flavor gate: the compiler app is absent from the runtime
- * (native) flavor, its scanners (ANTLR, bytecode, archive, executable) and
+ * The compiler-flavor gate: the compiler app is absent from BOTH runtime
+ * flavors, its scanners (ANTLR, bytecode, archive, executable) and
  * the link stage need the full JRE-packaged compiler distribution. Docker
  * mode uses the compiler image by contract; local mode probes the binary's
  * version banner (`10x engine v…, flavor: 'compiler'`, or `'cloud'` on an
@@ -79,6 +88,7 @@ import {
   DevCliNotInstalledError,
   DockerNotAvailableError,
 } from './dev-cli.js';
+import { compilerInstallHintForPlatform, FLAVOR_SUMMARY } from './install-hints.js';
 import { spawnToLog } from './compile-jobs.js';
 import { assertNotRuntimeImage } from './runtime-image.js';
 
@@ -243,26 +253,52 @@ export interface CompileRunResult {
  * message doubles as the agent-facing remediation (mirrors
  * DevCliNotInstalledError's self-describing-message convention).
  *
- * The install commands deliberately still say `log10x-cloud` / `--flavor cloud`:
- * the flavor the ENGINE reports was renamed, the cask token and the installer's
- * flag were not (the cask token is pinned to its file name by Homebrew and by
- * the engine's release job). Printing the new word in a command a user is about
- * to paste would hand them a command that fails.
+ * The refusal names WHICH wrong build the user has, because the three cases
+ * need different things said to them:
+ *   - the native runtime, no `generate`, and it is native, so it never could
+ *   - `runtime-jvm`, a JVM build that still has no `generate`. This one
+ *                           has to be said explicitly: a user who installed a
+ *                           JVM package on Windows has every reason to assume
+ *                           the JVM part is what mattered. It is not. The
+ *                           capability split is baked into the artifact by the
+ *                           pipeline factory it was packaged from.
+ *   - `edge`, the pre-rename token, printed by both packagings.
+ *
+ * The macOS install command says `log10x-cloud` on purpose: the cask token is
+ * the PACKAGE id, which is frozen (Homebrew and the engine's release job pin it
+ * to the file name) and does not follow the flavor rename. The install-script
+ * FLAG does follow it, so that one now reads `--flavor compiler`.
  */
 export class NotCompilerFlavorError extends Error {
   readonly flavor: string;
   constructor(binary: string, flavor: string) {
-    const which = RUNTIME_FLAVORS.has(flavor.toLowerCase())
-      ? `The local tenx at '${binary}' is the native runtime build (it reports flavor '${flavor}'), which carries no \`generate\` pipeline unit and cannot compile.`
-      : `The local tenx at '${binary}' reports the '${flavor}' flavor, which is not a compiler build.`;
+    const token = flavor.toLowerCase();
+    let which: string;
+    if (JVM_RUNTIME_FLAVORS.has(token)) {
+      which =
+        `The local tenx at '${binary}' is the JVM runtime build (it reports flavor '${flavor}'), which cannot compile. ` +
+        'Running on a JVM is not what makes a build a compiler: `runtime-jvm` is packaged from the same runtime pipeline factory as the native binary, so it carries no `generate` pipeline unit either. ' +
+        'It exists because Windows has no native runtime binary, it is a delivery format for the runtime, not a compiler substitute.';
+    } else if (NATIVE_RUNTIME_FLAVORS.has(token)) {
+      which = `The local tenx at '${binary}' is the native runtime build (it reports flavor '${flavor}'), which carries no \`generate\` pipeline unit and cannot compile.`;
+    } else if (RUNTIME_FLAVORS.has(token)) {
+      which =
+        `The local tenx at '${binary}' is a runtime build (it reports flavor '${flavor}', the pre-rename token printed by both the native binary and the JVM package), ` +
+        'which carries no `generate` pipeline unit and cannot compile.';
+    } else {
+      which = `The local tenx at '${binary}' reports the '${flavor}' flavor, which is not a compiler build.`;
+    }
+    const compiler = compilerInstallHintForPlatform();
     super(
       [
         `${which} The Compiler app needs the compiler flavor (an engine built before the flavor rename reports it as 'cloud').`,
         '',
+        'Three flavors ship. Only one of them compiles:',
+        ...FLAVOR_SUMMARY,
+        '',
         'Two ways forward:',
         '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
-        '  2. Install the compiler flavor locally: https://doc.log10x.com/install/ ' +
-          "(e.g. `brew install --cask log10x-cloud` on macOS, or the install script with `--flavor cloud`; those two names still spell it the old way).",
+        `  2. Install the compiler flavor locally (${process.platform}): ${compiler.command}, docs: ${compiler.docsUrl}`,
         '',
         'Note: with a local compiler install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host, and helm_charts pull needs the helm CLI (plus a container engine if pulling the charts’ referenced images). The docker compiler-10x image (option 1) bundles all of these, podman included, daemonless.',
       ].join('\n'),
@@ -297,7 +333,7 @@ export class FlavorUndetectedError extends Error {
         `Reason: ${why}.`,
         ...(sample ? [`What it printed: ${sample}`] : []),
         '',
-        'An unreadable flavor is not a compiler flavor. The native runtime binary has no `generate` pipeline-unit factory, so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
+        'An unreadable flavor is not a compiler flavor. Neither runtime flavor has a `generate` pipeline-unit factory, not the native binary, and not the JVM-packaged `runtime-jvm`, so running the compile anyway fails minutes later inside a detached job with an unrelated-looking engine error.',
         '',
         'Three ways forward:',
         '  1. Docker (recommended): set LOG10X_TENX_MODE=docker (or call this tool with mode="docker") to run the compiler image log10x/compiler-10x.',
@@ -1212,16 +1248,39 @@ export const ALLOW_UNVERIFIED_FLAVOR_ENV = 'LOG10X_ALLOW_UNVERIFIED_FLAVOR';
 export const COMPILER_FLAVORS: ReadonlySet<string> = new Set(['compiler', 'cloud']);
 
 /**
- * Banner tokens that mean "this build is the native runtime", the one that has
- * no `generate` pipeline-unit factory and therefore cannot compile. `runtime` is
- * the current name; `edge` (jpackage JIT build, removed) and `native` are what
- * older engines and older installers call the same thing.
+ * Banner tokens for the NATIVE runtime build (GraalVM image). `runtime` is the
+ * current name, `native` is what older engines and older installers call it.
+ */
+export const NATIVE_RUNTIME_FLAVORS: ReadonlySet<string> = new Set(['runtime', 'native']);
+
+/**
+ * Banner tokens for the JVM-packaged runtime, same runtime capabilities as the
+ * native binary, delivered as .deb/.rpm/.msi/.dmg. Not a separate build: those
+ * artifacts ship in every release, and on Windows they are the ONLY runtime,
+ * because no `tenx-*-windows-*-native` asset is produced.
+ *
+ * It is refused by the compile gate exactly like the native runtime. The JVM/
+ * native axis is not the axis that decides who can compile: `runtime-jvm` is
+ * packaged from the runtime pipeline factory, so it carries no `generate`
+ * pipeline unit no matter what it runs on.
+ */
+export const JVM_RUNTIME_FLAVORS: ReadonlySet<string> = new Set(['runtime-jvm']);
+
+/**
+ * Every banner token that means "this build cannot compile". `edge` is the
+ * pre-rename token and sits in neither sub-set on purpose: an engine that old
+ * printed it from BOTH the native binary and the jpackage package, so the token
+ * alone does not say which packaging is on the machine.
  *
  * Not consulted by the gate, which refuses everything outside COMPILER_FLAVORS
  * regardless. It exists so the refusal can say WHICH build the user has instead
  * of quoting a raw token at them.
  */
-export const RUNTIME_FLAVORS: ReadonlySet<string> = new Set(['runtime', 'edge', 'native']);
+export const RUNTIME_FLAVORS: ReadonlySet<string> = new Set([
+  ...NATIVE_RUNTIME_FLAVORS,
+  ...JVM_RUNTIME_FLAVORS,
+  'edge',
+]);
 
 /** True when a parsed banner token names a build that carries the Compiler app. */
 export function isCompilerFlavor(flavor: string | null | undefined): boolean {
@@ -1236,7 +1295,9 @@ export function isCompilerFlavor(flavor: string | null | undefined): boolean {
  *   - flavor reads anything else          -> NotCompilerFlavorError
  *   - flavor cannot be read at all        -> FlavorUndetectedError
  *
- * Two spellings pass, permanently. The engine renamed its flavors (`cloud` ->
+ * Two spellings pass, permanently, and only two: `runtime-jvm` is refused
+ * alongside the native runtime, because the JVM/native axis is not the axis
+ * that decides who can compile. The engine renamed its flavors (`cloud` ->
  * `compiler`, `edge`/`native` -> `runtime`), but a banner is read off whatever
  * binary is on this machine, and installed binaries keep printing the old token
  * until their owner upgrades. Accepting only the new one would hard-refuse every

@@ -2,7 +2,8 @@
  * Which docker image the RUNTIME-side tools pull, and the guard that keeps a
  * runtime image out of the compiler-side tools.
  *
- * Two engine builds exist, and they are not interchangeable:
+ * Three flavors ship, but only two of them are reachable as an IMAGE, which is
+ * why this file names two:
  *
  *   - compiler flavor (JVM): carries the `discoverSources` / link pipeline
  *     units, so it is the only build that can run `@apps/compiler`. Shipped as
@@ -11,6 +12,14 @@
  *     reports `flavor: 'compiler'`).
  *   - runtime flavor (GraalVM native): carries the run/tokenize/group units
  *     that `@apps/mcp` needs, and nothing else. Shipped as `log10x/edge-10x`.
+ *   - runtime-jvm flavor: the same runtime capabilities, JVM-packaged, and a
+ *     HOST package rather than an image, it ships as the .deb/.rpm/.msi/.dmg
+ *     in each release, and exists because Windows has no native runtime binary.
+ *     Nothing below resolves to it: it reaches this server through
+ *     LOG10X_TENX_PATH in local mode, never through an image ref. The compile
+ *     gate refuses it there exactly as it refuses the native runtime (see
+ *     `NotCompilerFlavorError`), running on a JVM is not what makes a build a
+ *     compiler.
  *
  * The run-path default stays `log10x/pipeline-10x:latest` — changing a default
  * image silently changes what every existing install downloads. Opting into the

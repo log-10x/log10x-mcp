@@ -6,6 +6,13 @@ import * as path from 'node:path';
 import {
   detectFlavor,
   assertCompilerFlavor,
+  isCompilerFlavor,
+  isCompilerFlavorOutput,
+  parseFlavor,
+  COMPILER_FLAVORS,
+  RUNTIME_FLAVORS,
+  NATIVE_RUNTIME_FLAVORS,
+  JVM_RUNTIME_FLAVORS,
   NotCompilerFlavorError,
   FlavorUndetectedError,
   ALLOW_UNVERIFIED_FLAVOR_ENV,
@@ -117,6 +124,73 @@ test('assertCompilerFlavor refuses a binary that reports the RENAMED runtime fla
     assert.match(e.message, /reports flavor 'runtime'/);
     return true;
   });
+});
+
+// THE THIRD FLAVOR. `runtime-jvm` is the JVM-packaged runtime, not a new
+// build, those .deb/.rpm/.msi/.dmg artifacts ship in every release, and on
+// Windows they are the ONLY runtime because no native Windows binary is built.
+// It must still be REFUSED by the compile gate: the JVM/native axis is not the
+// axis that decides who can compile. And the refusal has to say that, because a
+// user who just installed a JVM package has every reason to assume otherwise.
+test('assertCompilerFlavor refuses runtime-jvm, and says WHY a JVM build still cannot compile', async () => {
+  const bin = await fakeTenx(
+    'gate-runtime-jvm',
+    "#!/bin/sh\necho \"10x engine v1.1.38, flavor: 'runtime-jvm'\"\n",
+  );
+  await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {
+    assert.ok(e instanceof NotCompilerFlavorError, `expected NotCompilerFlavorError, got ${e.name}`);
+    assert.equal((e as NotCompilerFlavorError).flavor, 'runtime-jvm');
+    // Names the build it actually is...
+    assert.match(e.message, /JVM runtime build/);
+    assert.match(e.message, /reports flavor 'runtime-jvm'/);
+    // ...and the specific reason, not the generic "not a compiler build".
+    assert.match(e.message, /Running on a JVM is not what makes a build a compiler/);
+    assert.match(e.message, /no `generate` pipeline unit/);
+    assert.doesNotMatch(e.message, /is the native runtime build/);
+    assert.doesNotMatch(e.message, /which is not a compiler build/);
+    return true;
+  });
+});
+
+test('the runtime-jvm refusal enumerates all three flavors', async () => {
+  const bin = await fakeTenx(
+    'gate-runtime-jvm-enum',
+    "#!/bin/sh\necho \"10x engine v1.1.38, flavor: 'runtime-jvm'\"\n",
+  );
+  const err = await assertCompilerFlavor(bin).then(() => null, (e: Error) => e);
+  assert.ok(err, 'gate did not throw');
+  for (const flavor of ['compiler', 'runtime', 'runtime-jvm']) {
+    assert.match(err.message, new RegExp(`\\b${flavor}\\b`), `refusal must name the ${flavor} flavor`);
+  }
+  assert.match(err.message, /only runtime available on Windows/);
+});
+
+test('runtime-jvm is refused even with the unverified-flavor opt-out set', async () => {
+  const bin = await fakeTenx(
+    'gate-runtime-jvm-optout',
+    "#!/bin/sh\necho \"10x engine v1.1.38, flavor: 'runtime-jvm'\"\n",
+  );
+  const prev = process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
+  process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = '1';
+  try {
+    await assert.rejects(() => assertCompilerFlavor(bin), NotCompilerFlavorError);
+  } finally {
+    if (prev === undefined) delete process.env[ALLOW_UNVERIFIED_FLAVOR_ENV];
+    else process.env[ALLOW_UNVERIFIED_FLAVOR_ENV] = prev;
+  }
+});
+
+test('runtime-jvm is a runtime flavor, and is not a compiler flavor', () => {
+  assert.equal(JVM_RUNTIME_FLAVORS.has('runtime-jvm'), true);
+  assert.equal(RUNTIME_FLAVORS.has('runtime-jvm'), true);
+  assert.equal(NATIVE_RUNTIME_FLAVORS.has('runtime-jvm'), false);
+  assert.equal(COMPILER_FLAVORS.has('runtime-jvm'), false);
+  assert.equal(isCompilerFlavor('runtime-jvm'), false);
+  assert.equal(isCompilerFlavorOutput("10x engine v1.1.38, flavor: 'runtime-jvm'"), false);
+  assert.equal(parseFlavor("10x engine v1.1.38, flavor: 'runtime-jvm'"), 'runtime-jvm');
+  // The hyphen must survive the parser, a token clipped to 'runtime' would
+  // still be refused, but the refusal would name the wrong build.
+  assert.equal(parseFlavor("10x engine v1.1.38, flavor: 'RUNTIME-JVM'"), 'runtime-jvm');
 });
 
 test('assertCompilerFlavor refuses the pre-rename runtime spellings too', async () => {
