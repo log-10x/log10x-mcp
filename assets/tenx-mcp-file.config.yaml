@@ -35,6 +35,15 @@ include:
   # is a header with zero data rows. That silently strips the only
   # source of per-pattern severity, and `isReducibleSeverity(undefined)`
   # then treats every ERROR pattern as reducible. Do not remove.
+  #
+  # DELIBERATELY EXPLICIT. DO NOT RELY ON FLAVOR DEFAULTS. If a future
+  # engine emits summary rows by default, this stays. Flavors differ:
+  # the compiler-flavor image emitted neither summary rows nor anchors
+  # while the edge-flavor host binary emitted both, on the same input
+  # and version family. A pinned older image, or a flavor we have not
+  # met, silently stops producing them, severity coverage returns to
+  # 0%, every ERROR pattern is marked reducible, and NOTHING ERRORS.
+  # That silence is how this defect survived unnoticed the first time.
   - run/aggregate/mcp
 
   # Output module
@@ -62,6 +71,11 @@ outputFile:
     writeTemplates: true
     append: false
 
+  # DELIBERATELY EXPLICIT. DO NOT RELY ON FLAVOR DEFAULTS. Asking for
+  # these here is not redundant even once the engine emits them by
+  # default: it is what makes the MCP independent of which flavor and
+  # which image tag it happens to be talking to. See the note above.
+  #
   # The four anchor fields after encode() are what carry Reporter-tier
   # identity out of the engine: `pattern=,<symbolMessage>` and
   # `patternHash=,<tenx_hash>`. cli-output-parser reads them off each
