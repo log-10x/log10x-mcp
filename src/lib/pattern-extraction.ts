@@ -54,7 +54,12 @@ export interface ExtractedPattern {
   tenxHash?: string;
   /** Template body with `$` marking variable slots. */
   template: string;
-  /** Dominant service label, when resolvable from sample events. */
+  /**
+   * Dominant service label, from the envelope of the events bound to this
+   * pattern. Only populated when `positionalBindingExact` held: when the
+   * engine's record count does not reconcile against the submitted lines,
+   * this is left unset rather than guessed.
+   */
   service?: string;
   /** Dominant severity (uppercase standard form). */
   severity?: string;
@@ -108,6 +113,31 @@ export interface ExtractedPatterns {
   templaterWallTimeMs: number;
   /** Always `local_cli` — the engine runs on the caller's machine. */
   executionMode: 'local_cli';
+  /**
+   * Which engine build actually produced the numbers: `tenx 1.1.32 (edge)`
+   * for the host binary, `docker log10x/pipeline-10x:latest` otherwise.
+   *
+   * Recorded because the docker default tag is mutable. A report generated
+   * against one `:latest` was not reproducible against another, and the
+   * output said nothing about which build had run. Surfaced in the report's
+   * methodology block so the engine identity travels with the numbers.
+   */
+  engineBuild?: string;
+  /**
+   * Fraction of patterns that resolved a severity, 0..1. Feeds the
+   * fail-closed guard: when the engine emits no severity, every pattern
+   * reads as reducible and the ERROR safety rail cannot fire.
+   */
+  severityCoverage: number;
+  /**
+   * Whether encoded records reconciled against input lines, so that
+   * envelope-derived fields (service, first-seen) could be bound to patterns.
+   * False means they were deliberately left unset rather than guessed.
+   */
+  positionalBindingExact: boolean;
+  /** Input lines submitted, and the line count the engine's records account for. */
+  inputLinesSubmitted: number;
+  inputLinesAccountedFor: number;
 }
 
 export interface ExtractPatternsOptions {
@@ -197,6 +227,10 @@ export async function extractPatterns(
       inputLineCount: 0,
       templaterWallTimeMs: 0,
       executionMode: 'local_cli',
+      severityCoverage: 0,
+      positionalBindingExact: true,
+      inputLinesSubmitted: 0,
+      inputLinesAccountedFor: 0,
     };
   }
 
@@ -204,6 +238,7 @@ export async function extractPatterns(
   const mergedEncoded: EncodedEvent[] = [];
   const mergedAggregated: AggregatedRow[] = [];
   let totalWallTimeMs = 0;
+  let engineBuild: string | undefined;
   const executionMode = 'local_cli' as const;
 
   // The local 10x engine absorbs the full batch in one shot.
@@ -224,6 +259,7 @@ export async function extractPatterns(
         : opts.useFileOutput
         ? await runDevCliFileOutput(text)
         : await runDevCli(text);
+      engineBuild = local.cliVersion;
       for (const [hash, tpl] of parseTemplates(local.templatesJson)) {
         mergedTemplates.set(hash, tpl);
       }
@@ -259,6 +295,30 @@ export async function extractPatterns(
     tenxHash?: string;
   }>();
 
+  // Envelope enrichment is paired to patterns BY POSITION: encoded record i
+  // is assumed to be input line i. The engine does not guarantee that. Two
+  // mechanisms break it, and both are real:
+  //
+  //   1. Multi-line grouping folds continuation lines into one record, so a
+  //      grouped template spans `1 + newlines` input lines.
+  //   2. The engine drops some lines outright. Measured on 3,000 live
+  //      CloudWatch events: 2,970 records for 3,000 inputs with ZERO grouped
+  //      templates, so span expansion does not recover it. 17 of the 30 were
+  //      events with an empty `log` field; the rest are unaccounted.
+  //
+  // Expanding by span reconciles case 1 exactly (verified at 30,000/30,000 on
+  // envelope-shaped input). When the totals still disagree, position is not a
+  // key and anything derived from it is a guess. Rather than publish a skewed
+  // service breakdown, drop envelope-derived attribution and say so — the
+  // same fail-closed rule severity coverage already follows.
+  let expectedLines = 0;
+  for (const ev of mergedEncoded) {
+    const t = mergedTemplates.get(ev.templateHash);
+    expectedLines += t ? 1 + (t.template.split('\n').length - 1) : 1;
+  }
+  const positionalBindingExact = expectedLines === lines.length;
+
+  let cursor = 0;
   for (let i = 0; i < mergedEncoded.length; i++) {
     const ev = mergedEncoded[i];
     const rec = byHash.get(ev.templateHash) || {
@@ -277,12 +337,18 @@ export async function extractPatterns(
     // line plus newline). cli-output-parser computes this per-event;
     // we sum it into the pattern record for the real compact-byte ratio.
     if (typeof ev.lineBytes === 'number') rec.encodedBytes += ev.lineBytes;
-    // Best-effort: attribute the raw-line bytes to this pattern by index into `lines`.
-    const raw = i < lines.length ? lines[i] : undefined;
-    if (raw) {
+    // Span this record covers in the input: the whole group when the engine
+    // folded continuation lines into it, otherwise one line.
+    const tplForSpan = mergedTemplates.get(ev.templateHash);
+    const span = tplForSpan ? 1 + (tplForSpan.template.split('\n').length - 1) : 1;
+    // Raw bytes are the sum over every input line this record covers, so a
+    // grouped stack trace is charged its real size instead of its head line.
+    for (let k = 0; k < span; k++) {
+      const raw = cursor + k < lines.length ? lines[cursor + k] : undefined;
+      if (!raw) continue;
       rec.bytes += Buffer.byteLength(raw, 'utf8');
       if (!rec.sampleEvent) rec.sampleEvent = raw;
-      rec.lineIndices.push(i);
+      rec.lineIndices.push(cursor + k);
     }
     // Capture engine-emitted Reporter-tier name + hash from the first
     // event we see for this templateHash. They're constant per template
@@ -290,8 +356,13 @@ export async function extractPatterns(
     // the TenXTemplate.
     if (!rec.symbolMessage && ev.symbolMessage) rec.symbolMessage = ev.symbolMessage;
     if (!rec.tenxHash && ev.tenxHash) rec.tenxHash = ev.tenxHash;
-    // Aggregate envelope-derived service/severity for majority voting.
-    const enr = i < enrichments.length ? enrichments[i] : undefined;
+    // Envelope-derived fields, taken from the HEAD line of the span. Skipped
+    // entirely when the record/line totals did not reconcile: severity has an
+    // identity-keyed source (the aggregated join on tenx_hash) and survives,
+    // but service and first-seen have only this one, and a wrong service
+    // breakdown is worse than an absent one.
+    const enr = positionalBindingExact && cursor < enrichments.length ? enrichments[cursor] : undefined;
+    cursor += span;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
     if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
     if (typeof enr?.timestampMs === 'number') {
@@ -397,6 +468,12 @@ export async function extractPatterns(
     inputLineCount: lines.length,
     templaterWallTimeMs: totalWallTimeMs,
     executionMode,
+    engineBuild,
+    severityCoverage:
+      patterns.length === 0 ? 0 : patterns.filter((p) => p.severity).length / patterns.length,
+    positionalBindingExact,
+    inputLinesSubmitted: lines.length,
+    inputLinesAccountedFor: expectedLines,
   };
 }
 

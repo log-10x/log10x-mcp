@@ -795,7 +795,7 @@ function syntheticSkew(): ExtractedPatterns {
     variables: { verb: ['get', 'post'] },
     slotDistinctCounts: { verb: 2 },
   };
-  return { patterns: [pattern], totalEvents: 100, totalBytes: 6400, inputLineCount: 100, templaterWallTimeMs: 0, executionMode: 'local_cli' };
+  return { patterns: [pattern], totalEvents: 100, totalBytes: 6400, inputLineCount: 100, templaterWallTimeMs: 0, executionMode: 'local_cli', severityCoverage: 1, positionalBindingExact: true, inputLinesSubmitted: 0, inputLinesAccountedFor: 0 };
 }
 
 // ════════════════════════════════════════════════════════════════════════
