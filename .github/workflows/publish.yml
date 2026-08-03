@@ -1,10 +1,14 @@
 name: Publish to npm
 
-# Auto-publishes on every merge to main where `package.json.version` differs
-# from the most recently shipped version (detected by the absence of a
-# `v<version>` git tag). PR validation in ci.yml refuses to merge a PR that
-# doesn't bump the version, so any push that lands here represents an
-# intentional release.
+# Auto-publishes on every merge to main. `.github/scripts/check-publish-version.sh`
+# gates the run: it refuses a version already on npm, a version already tagged
+# here, and a version BEHIND the current npm `latest` (publishing that would
+# move the `latest` dist-tag backwards and un-ship every fix since).
+#
+# The gate FAILS the job on refusal. It used to set a flag that every later step
+# skipped on, so a merge that forgot the version bump produced an all-skipped run
+# with conclusion "success", indistinguishable from a real release, and the src
+# change sat unpublished. A merge that ships nothing must go red.
 #
 # Tag is created AFTER a successful publish so the tag always points at code
 # that actually shipped to npm. A failed publish leaves no tag, which is the
@@ -16,8 +20,10 @@ name: Publish to npm
 # `--provenance` attaches a Sigstore attestation tying the published tarball
 # to this workflow run, verifiable via `npm audit signatures`.
 #
-# Manual `workflow_dispatch` is wired for re-runs after editing this file
-# without forcing an empty version-bump merge.
+# Manual `workflow_dispatch` is wired for retrying a run that failed after the
+# gate, without forcing an empty version-bump merge. A dispatch runs the same
+# gate, so it only proceeds while the version is still unpublished and untagged,
+# which is exactly the state a failed publish leaves behind.
 
 on:
   push:
@@ -54,22 +60,14 @@ jobs:
           # Need full history so `git rev-parse v<version>` can see all tags.
           fetch-depth: 0
 
-      - name: Detect version + check whether already shipped
+      # Fails the job unless package.json holds a version that is new to npm,
+      # untagged here, and ahead of the npm `latest`. Local cases:
+      #   .github/scripts/check-publish-version.test.sh
+      - name: Gate the release (npm + git tag)
         id: ver
-        run: |
-          set -euo pipefail
-          version=$(node -p "require('./package.json').version")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
-            echo "already_shipped=true" >> "$GITHUB_OUTPUT"
-            echo "v$version already tagged — nothing to publish."
-          else
-            echo "already_shipped=false" >> "$GITHUB_OUTPUT"
-            echo "v$version not yet tagged — will publish."
-          fi
+        run: .github/scripts/check-publish-version.sh
 
       - name: Setup Node 20 with npm registry
-        if: steps.ver.outputs.already_shipped == 'false'
         uses: actions/setup-node@v6
         with:
           node-version: '20.x'
@@ -86,11 +84,9 @@ jobs:
       # support (requires node >=22.22 / >=24.15) and fails to install on this
       # Node 20 runner with EBADENGINE. 11.x still satisfies the >=11.5.1 floor.
       - name: Upgrade npm to >= 11.5.1 (Trusted Publishing requires it)
-        if: steps.ver.outputs.already_shipped == 'false'
         run: npm install -g 'npm@^11.5.1'
 
       - name: Install dependencies
-        if: steps.ver.outputs.already_shipped == 'false'
         run: npm ci
 
       # product_qa's docs corpus lives in the separate (private) log-10x/mksite
@@ -105,7 +101,6 @@ jobs:
       # mksite-read and nothing more. This job runs on push to main only, so
       # the secret is always available (no fork-PR concern).
       - name: Checkout mksite (product_qa docs corpus)
-        if: steps.ver.outputs.already_shipped == 'false'
         uses: actions/checkout@v6
         with:
           repository: log-10x/mksite
@@ -114,7 +109,6 @@ jobs:
           fetch-depth: 1
 
       - name: Stage latest mksite docs into the build source
-        if: steps.ver.outputs.already_shipped == 'false'
         run: |
           set -euo pipefail
           rm -rf config/mksite/docs
@@ -126,11 +120,9 @@ jobs:
           echo "Staged $(find config/mksite/docs -name '*.md' | wc -l) docs from mksite@$(git -C mksite-src rev-parse --short HEAD)"
 
       - name: Build
-        if: steps.ver.outputs.already_shipped == 'false'
         run: npm run build
 
       - name: Test
-        if: steps.ver.outputs.already_shipped == 'false'
         run: npm test
         env:
           LOG10X_INTEGRATION_TESTS: '0'
@@ -143,7 +135,6 @@ jobs:
       # `npm pack` does not trigger prepublishOnly, and `npm publish <tarball>`
       # uploads the file as-is without re-running it.
       - name: Pack and verify the publish artifact
-        if: steps.ver.outputs.already_shipped == 'false'
         run: |
           set -euo pipefail
           npm pack
@@ -158,11 +149,9 @@ jobs:
           echo "TARBALL=$tarball" >> "$GITHUB_ENV"
 
       - name: Publish to npm (Trusted Publishing + provenance)
-        if: steps.ver.outputs.already_shipped == 'false'
         run: npm publish "$TARBALL" --access public --provenance
 
       - name: Tag v${{ steps.ver.outputs.version }} (post-publish, ship-of-record)
-        if: steps.ver.outputs.already_shipped == 'false'
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
