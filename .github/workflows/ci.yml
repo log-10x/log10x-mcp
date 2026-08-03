@@ -98,6 +98,38 @@ jobs:
   # publish.yml refuses to re-publish a version that's already on npm, so
   # without a bump the merge would land but never ship. Catch it here so the
   # PR author fixes it before merge instead of after.
+  # The boot smoke above runs build/index.js from the repo, where assets/ exists
+  # on disk whether or not it ships. That is exactly how `assets` missing from
+  # package.json "files" reached 1.25.0, 1.26.0 and 1.27.0: server booted, all
+  # tests green, and docker mode died for every customer with the engine config
+  # absent from the tarball.
+  #
+  # This installs the PACKED artifact outside the repo and drives the engine
+  # through it, asserting a non-empty template_hash. It catches the packaging
+  # omission and the class of defect where the engine runs but emits no
+  # identity, which is what made severity coverage 0%.
+  packaged-engine-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+      - name: Pack, install outside the repo, drive the engine
+        run: |
+          set -euo pipefail
+          TB="$(npm pack --silent | tail -1)"
+          WORK="$(mktemp -d)"
+          cp "$TB" "$WORK/pkg.tgz"
+          ( cd "$WORK" && npm init -y >/dev/null && npm i ./pkg.tgz --silent )
+          test -f "$WORK/node_modules/log10x-mcp/assets/tenx-mcp-file.config.yaml" \
+            || { echo "::error::assets/ is not in the packaged artifact; add \"assets\" to package.json files"; exit 1; }
+          node scripts/packaged-engine-smoke.mjs "$WORK/node_modules/log10x-mcp"
+
   version-bump-check:
     runs-on: ubuntu-latest
     steps:
