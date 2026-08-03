@@ -14,7 +14,7 @@
 
 import { promises as fs } from 'fs';
 import { z } from 'zod';
-import { runDevCli, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
+import { runDevCli, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError, describeDevCliFailure } from '../lib/dev-cli.js';
 import { agentOnly } from '../lib/agent-only.js';
 import {
   parseTemplates,
@@ -149,7 +149,7 @@ export async function executeResolveBatch(args: {
           error_type: 'backend_unavailable',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: `Local tenx CLI exited with code ${e.exitCode}. Check that tenx v1.0.21+ is installed and TENX_API_KEY is set if required.`,
+          hint: describeDevCliFailure(e.exitCode, e.stderr),
         },
         contextPayload: { debug_stderr: e.stderr.slice(0, 2000) },
       });

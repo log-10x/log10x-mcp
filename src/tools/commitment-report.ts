@@ -76,6 +76,7 @@ import {
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { DEFAULT_LABELS } from '../lib/promql.js';
 import { patternDescriptor } from '../lib/pattern-descriptor.js';
+import { isDemoFallbackActive } from '../lib/demo-env.js';
 import { boundedFanout, withTimeout } from '../lib/concurrency.js';
 import { QUERY_BUDGET } from '../lib/interactive-query.js';
 
@@ -1852,8 +1853,16 @@ export async function executeCommitmentReport(
       : args.service
         ? `No commitment record found for service "${args.service}".`
         : 'No commitment record found. Provide commitment_id or service.';
+    // log10x_configure_engine is denylisted in demo fallback and never
+    // registers there, so naming it as the next step hands the agent a call
+    // it cannot make. log10x_signin_start is registered in that mode and is
+    // what unlocks configure_engine.
+    const demoMode = isDemoFallbackActive();
+    const createStep = demoMode
+      ? 'This session is in demo mode (keyless boot), where log10x_configure_engine is not registered, so no commitment can be created here. Call log10x_signin_start to mint an API key for your own account and restart the MCP; configure_engine registers once a key is present, and running it with target_percent persists the commitment record this tool reads.'
+      : 'Create a commitment first by running log10x_configure_engine with target_percent. After the generated PR merges, configure_engine persists a commitment record this tool can read.';
     const remediation = [
-      'Create a commitment first by running log10x_configure_engine with target_percent. After the generated PR merges, configure_engine persists a commitment record this tool can read.',
+      createStep,
       '',
       'If a commitment already exists, the id is printed in the configure_engine output and lives at $LOG10X_ADVISOR_STATE_DIR/commitments/<id>.json (or $TMPDIR/log10x-advisor-snapshots/commitments/<id>.json).',
     ].join('\n');
@@ -1868,12 +1877,20 @@ export async function executeCommitmentReport(
       contextPayload: { ok: false, phase: 'not_ready', reason: 'commitment_not_found', remediation },
       source_disclosure: {},
       actions: [
-        {
-          tool: 'log10x_configure_engine',
-          args: { service: args.service ?? '' },
-          reason: 'Create a commitment record first. configure_engine with target_percent persists the record this tool reads.',
-          role: 'recommended-next',
-        },
+        demoMode
+          ? {
+              tool: 'log10x_signin_start',
+              args: {},
+              reason:
+                'demo mode: log10x_configure_engine is not registered. Sign in to mint an API key, then run configure_engine with target_percent to create the commitment record this tool reads.',
+              role: 'recommended-next' as const,
+            }
+          : {
+              tool: 'log10x_configure_engine',
+              args: { service: args.service ?? '' },
+              reason: 'Create a commitment record first. configure_engine with target_percent persists the record this tool reads.',
+              role: 'recommended-next' as const,
+            },
       ],
     });
   }

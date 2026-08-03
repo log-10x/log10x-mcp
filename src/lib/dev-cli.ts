@@ -98,6 +98,51 @@ export class DevCliRunError extends Error {
 }
 
 /**
+ * Turn a non-zero local-engine exit into a hint the caller can act on.
+ *
+ * The old hint named `TENX_API_KEY` and stopped there. That variable is not
+ * what the engine refused on, and the engine's own diagnosis sat unread in
+ * `debug_stderr`. An unlicensed `tenx` on PATH (the state every Homebrew
+ * install starts in) therefore produced a message that pointed nowhere.
+ *
+ * Promote the engine's first stderr line into the headline, and name the
+ * docker backend, which carries a built-in limited license and needs no
+ * local install.
+ */
+export function describeDevCliFailure(exitCode: number, stderr: string): string {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const licenseLine = lines.find((l) => l.toLowerCase().startsWith('license required:'));
+  const engineLine = licenseLine ?? lines[0];
+  const escape =
+    'Set LOG10X_TENX_MODE=docker to run the engine image instead of the local binary ' +
+    '(no license needed), or point the local engine at a license with TENX_LICENSE_KEY ' +
+    'or TENX_LICENSE_FILE.';
+  return [
+    `Local tenx CLI exited with code ${exitCode}.`,
+    engineLine ? `Engine said: ${engineLine.slice(0, 400)}` : undefined,
+    escape,
+    'Full engine output is in data.payload.debug_stderr.',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * Bare `-e VAR` pass-through for the engine license, mirroring the compile
+ * path (compile-runner buildDockerArgs). Bare form so the value is inherited
+ * from the spawning process env and never lands in argv.
+ *
+ * The runtime docker path used to forward nothing, so a caller with
+ * TENX_LICENSE_KEY set watched the key get silently dropped.
+ */
+export function dockerLicenseArgs(): string[] {
+  return process.env.TENX_LICENSE_KEY ? ['-e', 'TENX_LICENSE_KEY'] : [];
+}
+
+/**
  * Thrown before spawning the CLI when a required configuration value is
  * absent (e.g. LOG10X_API_KEY unset and the bootstrap config path requires
  * it). Callers convert this to a `config_missing` chassis error envelope
@@ -264,6 +309,7 @@ async function runAppsMcpFileViaDocker(
   // not the @apps/mcp-file macro which requires TENX_HOME inside the container.
   const args = [
     'run', '--rm',
+    ...dockerLicenseArgs(),
     '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
     '-e', `LOG10X_MCP_OUTPUT_DIR=${containerOutputDir}`,
     '-e', `LOG10X_MCP_INPUT_PATH=${containerInputFile}`,
@@ -607,6 +653,7 @@ async function runAppsMcpViaDocker(
   const image = resolveRuntimeImage();
   const args = [
     'run', '--rm', '-i',
+    ...dockerLicenseArgs(),
     '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
     image,
     '@apps/mcp',
@@ -843,6 +890,7 @@ async function runViaDocker(
     containerInputPath = `${CONTAINER_INPUT_DIR}/${inName}`;
   }
 
+  args.push(...dockerLicenseArgs());
   args.push('-e', `LOG10X_MCP_OUTPUT_DIR=${CONTAINER_OUTPUT}`);
   args.push('-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`);
   if (containerInputPath) {

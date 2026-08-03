@@ -13,7 +13,7 @@ This server is open source under MIT. A Log10x product license (API key) unlocks
 | "Where do I start? Help me cut log costs." | A guided menu asks what you want (cut cost, investigate, install) and routes to the right next step, plus what's new and what changed. `log10x_start`, `log10x_whats_new`, `log10x_whats_changing` |
 | "Sign me in." / "Who am I connected as?" | GitHub sign-in mints and stores an API key, and shows the environments your account can reach. `log10x_signin_start`, `log10x_login_status`, `log10x_create_env` |
 | "Show me how to install this on my stack." | Paste-ready setup steps for your own pipeline, fetch-back wiring, and a recommended action per service. `log10x_advise_install`, `log10x_advise_retriever`, `log10x_configure_engine` |
-| "Estimate savings on my data before I deploy." | A no-install savings report from a local log file or your existing log platform. `log10x_poc_from_local`, `log10x_poc_from_siem_submit`, `log10x_poc_from_siem_status` |
+| "Estimate savings on my data before I deploy." | A no-install savings report from a local log file or your existing log platform. `log10x_poc_from_local`, `log10x_poc_from_siem_submit`, `log10x_poc_from_siem_status`. **POC mode only**: a keyless boot attaches to the public demo dataset and does not register these three. Set `LOG10X_DEMO_FALLBACK=off` to boot into POC mode. The cost is a smaller tool set: POC mode drops `log10x_top_patterns`, `log10x_investigate`, `log10x_savings` and every Retriever tool. |
 | "How much can I cut, and how much have I cut?" | Projected and realized savings with the per-pattern math behind every number. `log10x_estimate_savings`, `log10x_savings`, `log10x_commitment_report` |
 | "What's driving my cost right now?" | The repeating message types and services driving volume and cost, and what moved week over week. `log10x_top_patterns`, `log10x_whats_changing`, `log10x_services` |
 | "Why did payments-svc spike?" | A single-call investigation: timeline, correlated patterns, and the strongest temporal evidence, with confidence shown so nothing is presented as proven cause. `log10x_investigate`, `log10x_metrics_that_moved`, `log10x_metric_overlay` |
@@ -82,7 +82,13 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 | `LOG10X_RETRIEVER_TIMEOUT_MS` / `LOG10X_RETRIEVER_POLL_MS` | Fetch-back query timeout (default 90000) and poll interval (default 1500). |
 | `LOG10X_RETRIEVER_AUTH_HEADER` / `LOG10X_RETRIEVER_AUTH_VALUE` | Override the fetch-back auth header (defaults derive from the active environment). |
 | `LOG10X_OFFLOAD_BUCKET` / `LOG10X_STREAMER_BUCKET` | S3 bucket names the offload tools manage. |
-| `TENX_LICENSE_KEY` / `LOG10X_TENX_PATH` | Engine license key and local engine binary path for local compile operations. |
+| `TENX_LICENSE_KEY` | Engine license key. Passed through to the engine on both the compile path and the local-engine run path (`log10x_resolve_batch`, `log10x_extract_templates`), in docker mode as well as local mode. |
+| `TENX_LICENSE_FILE` | Path to an engine license file, the alternative to `TENX_LICENSE_KEY`. Read by the engine itself, so it must name a path the engine process can see (inside the container when the engine runs in docker). |
+| `LOG10X_TENX_MODE` | `local` or `docker` for the local-engine and compile tools. Unset auto-detects: a `tenx` on PATH wins, docker is the fallback. Set `docker` to run the engine image instead of a local install, which is also the escape when a local `tenx` has no license. |
+| `LOG10X_TENX_PATH` | Path to the local `tenx` binary (used when the resolved mode is `local`). Defaults to `tenx` on PATH. |
+| `LOG10X_RUNTIME_IMAGE` | Engine image for the run path in docker mode (default `log10x/pipeline-10x:latest`). Accepts the alias `native`, which selects the GraalVM-native `log10x/edge-10x`. |
+| `LOG10X_TENX_IMAGE` | Engine image shared by the run path and, as a fallback, `log10x_compile`. A runtime-flavor image here is refused on the compile path. |
+| `LOG10X_COMPILER_IMAGE` | Compiler image for `log10x_compile` / `log10x_compile_link` (default `log10x/compiler-10x:latest`, falls back to `LOG10X_TENX_IMAGE` when unset). Only the compiler flavor can build a symbol library. |
 | `LOG10X_GH_REPO` / `LOG10X_GITOPS_REPO_PATH` | GitHub repo and local path for GitOps-aware config tools. |
 
 ## Connect your own data (optional)
