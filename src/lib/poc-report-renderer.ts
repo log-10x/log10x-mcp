@@ -19,7 +19,7 @@ import {
   buildDisclosedDollarValue,
 } from './cost.js';
 import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtDollar, fmtGb, fmtPct } from './format.js';
-import { buildDfContext, buildDisplayName } from './pattern-df.js';
+import { buildDfContext, buildDisplayName, type DfContext } from './pattern-df.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
@@ -591,6 +591,12 @@ interface EnrichedPattern extends ExtractedPattern {
  * terminal screen.
  */
 export function renderPocSummary(input: RenderInput, topN = 5): string {
+  // Shared document-frequency basis for every name rendered in this view.
+  const summaryDf = buildDfContext(
+    (input.extraction.patterns ?? [])
+      .map((p) => p.symbolMessage || p.hash)
+      .filter((x): x is string => !!x)
+  );
   const { patterns, clusters, redundancyPairs } = enrichPatternsWithSections(input);
   const setDiff = setDifferenceLabels(patterns);
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
@@ -641,6 +647,9 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // before the top-N table so the agent sees co-occurring failures
   // grouped. The detector itself sits in detectors/incident-cluster.ts.
   if (clusters.length > 0) {
+    // One df over the whole visible set, shared by the incident and
+    // redundancy tables so their names are chosen on the same basis as the
+    // drivers table below rather than by string length.
     lines.push('### Same incident, multiple patterns');
     lines.push('');
     lines.push(
@@ -652,7 +661,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     for (let i = 0; i < clusters.length; i++) {
       const c = clusters[i];
       const label = truncate(c.representativeLabel, 60);
-      const ids = c.members.map((m) => `\`${shortIdentity(m.identity)}\``).join(', ');
+      const ids = c.members.map((m) => `\`${shortIdentity(m.identity, summaryDf)}\``).join(', ');
       lines.push(
         `| ${i + 1}. ${label} | ${c.service} | ${ids} | ${fmtCostDisclosed(input, c.combinedMonthlyUsd)} | ${c.joinSignal} (${(c.confidence * 100).toFixed(0)}%) |`,
       );
@@ -678,16 +687,27 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('|---|---|---|---|');
     for (const pair of redundancyPairs.slice(0, 5)) {
       lines.push(
-        `| \`${shortIdentity(pair.identityA)}\` | \`${shortIdentity(pair.identityB)}\` | ${pair.ratio.toFixed(2)} | ${fmtCount(pair.minCount)} |`,
+        `| \`${shortIdentity(pair.identityA, summaryDf)}\` | \`${shortIdentity(pair.identityB, summaryDf)}\` | ${pair.ratio.toFixed(2)} | ${fmtCount(pair.minCount)} |`,
       );
     }
     lines.push('');
   }
 
-  // Top-N table.
+  // Top-N table, ordered by COST and deliberately including protected rows.
+  //
+  // This was briefly changed to rank by savings and drop `keep` rows, because
+  // "Top N wins" listing three rows that save $0 reads badly — the same fix
+  // that is correct in renderPocReport, where a separate full drivers table
+  // still shows everything. It is WRONG here: this is the only table in the
+  // summary view, so filtering removed the ERROR/WARN patterns and with them
+  // the ⚠ risk banner that tells a reader which patterns feed live alerts.
+  // Three tests caught it. Hiding a safety signal to tidy a heading is a bad
+  // trade, so the content stays and the heading is what changes: these are
+  // cost drivers with a recommended action, and some of those actions are
+  // deliberately to leave the pattern alone.
   const top = patterns.slice(0, topN);
   if (top.length > 0) {
-    lines.push(`### Top ${top.length} wins`);
+    lines.push(`### Top ${top.length} cost drivers`);
     lines.push('');
     // New columns: Action (refined from dep-check + severity), Slot fan-out
     // (top cardinality), Age (first-seen from engine or `(unknown)`).
@@ -2303,13 +2323,23 @@ function renderAgeCell(p: EnrichedPattern): string {
 }
 
 /**
- * Display a raw identity tersely when no AI pretty name is available.
- * Caps length so a 120-char identity doesn't blow out a CLI table.
+ * Display an identity tersely in the incident / redundancy tables.
+ *
+ * This used to swap underscores for spaces and hard-cut at 46 characters,
+ * which is not a name: every pattern sharing a 46-character prefix rendered
+ * as the SAME string. On a real pull that put five identical-looking rows in
+ * one incident and printed both sides of a redundant pair as the same text,
+ * which reads as a bug even though the identities underneath differ.
+ *
+ * Route through `buildDisplayName` — the same path the drivers table uses —
+ * so a name is chosen by what distinguishes it, not by where the 46th
+ * character happens to fall. `df` is optional: without it buildDisplayName
+ * falls back to a mid-ellipsis of the whole name, which is still better than
+ * a prefix cut, and callers that have a df pass it.
  */
-function shortIdentity(identity: string): string {
-  const spaced = identity.replace(/_/g, ' ');
-  if (spaced.length <= 48) return spaced;
-  return spaced.slice(0, 46) + '…';
+function shortIdentity(identity: string, df?: DfContext): string {
+  const { display_name } = buildDisplayName(identity, { df, width: 46 });
+  return display_name || identity.replace(/_/g, ' ').slice(0, 46);
 }
 
 /**
