@@ -137,3 +137,54 @@ test('full severity coverage is unaffected', () => {
   const md = renderPocReport(input(fixture(1, true))).markdown;
   assert.ok(!/No recommendations in this report/i.test(md));
 });
+
+/**
+ * The service half of the same fail-closed rule.
+ *
+ * When the engine's record count does not reconcile against the submitted
+ * lines, `pattern-extraction` leaves every pattern's `service` unset. That is
+ * correct, and on its own it was not enough: the renderer grouped on
+ * `p.service || 'unknown'`, which collapsed the whole window into a single
+ * `unknown` row at 100% of cost, and the dominant-service anomaly check then
+ * fired on it and told the customer they had a hot-loop emitter or a
+ * mis-routed service. A fabricated finding about their infrastructure is
+ * worse than the skew the guard exists to prevent.
+ */
+function unboundFixture(): ExtractedPatterns {
+  const f = fixture(1, true);
+  return {
+    ...f,
+    positionalBindingExact: false,
+    inputLinesSubmitted: 3000,
+    inputLinesAccountedFor: 2970,
+    // What extractPatterns produces on this path: severity survives (it joins
+    // on tenx_hash), service does not.
+    patterns: f.patterns.map((p) => ({ ...p, service: undefined })),
+  };
+}
+
+test('an unreconciled binding withholds the service table rather than inventing one', () => {
+  const md = renderPocReport(input(unboundFixture())).markdown;
+  assert.ok(
+    !/\|\s*unknown\s*\|/.test(md),
+    'the service breakdown rendered an "unknown" bucket instead of withholding the table',
+  );
+  assert.ok(
+    !/Anomaly.*unknown/is.test(md),
+    'the dominant-service anomaly fired on the withheld bucket, fabricating a finding',
+  );
+  assert.match(
+    md,
+    /Service attribution withheld/i,
+    'the report must say the attribution was withheld, and why',
+  );
+  // The counts that justify the refusal belong in the reader-facing text.
+  assert.match(md, /2,970/);
+  assert.match(md, /3,000/);
+});
+
+test('a reconciled binding still renders the service table', () => {
+  const md = renderPocReport(input(fixture(1, true))).markdown;
+  assert.ok(!/Service attribution withheld/i.test(md));
+  assert.match(md, /checkout-svc|auth-svc/, 'services from the fixture should appear');
+});

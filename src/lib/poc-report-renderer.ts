@@ -1266,23 +1266,34 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 3: Service-level breakdown
   lines.push(sec('Service-Level Breakdown'));
   lines.push('');
-  const byService = groupBy(patterns, (p) => p.service || 'unknown');
-  const svcRows = Array.from(byService.entries())
-    .map(([svc, ps]) => ({
-      svc,
-      cost: ps.reduce((s, p) => s + p.costPerWindow, 0),
-      events: ps.reduce((s, p) => s + p.count, 0),
-      severityMix: severityMix(ps),
-    }))
-    .sort((a, b) => b.cost - a.cost);
+  // When the binding did not reconcile, every pattern's service is unset, and
+  // grouping on `p.service || 'unknown'` collapses the whole window into one
+  // `unknown` bucket at 100% of cost. The anomaly check below then fires on
+  // it and tells the customer they have a hot-loop emitter or a mis-routed
+  // service — a fabricated finding about their infrastructure, which is worse
+  // than the skew this path exists to prevent. Withhold the table entirely.
+  const svcRows = input.extraction.positionalBindingExact
+    ? Array.from(groupBy(patterns, (p) => p.service || 'unknown').entries())
+        .map(([svc, ps]) => ({
+          svc,
+          cost: ps.reduce((s, p) => s + p.costPerWindow, 0),
+          events: ps.reduce((s, p) => s + p.count, 0),
+          severityMix: severityMix(ps),
+        }))
+        .sort((a, b) => b.cost - a.cost)
+    : [];
   if (svcRows.length === 0) {
     if (!input.extraction.positionalBindingExact) {
       // Say which of the two it is. "No service labels" reads as "your logs
       // carry none", when the truth is that we had them and refused to trust
       // the binding.
       lines.push(
-        `_Service attribution withheld. The engine returned ${fmtCount(input.extraction.inputLinesAccountedFor)} ` +
-          `records for ${fmtCount(input.extraction.inputLinesSubmitted)} submitted lines, and service is read from each ` +
+        // EXACT counts, not fmtCount: the whole point of the sentence is the
+        // discrepancy, and fmtCount rounds 2,970 and 3,000 both to "3.0K",
+        // so the reader is told "3.0K records for 3.0K lines" and cannot see
+        // why anything was withheld.
+        `_Service attribution withheld. The engine returned ${input.extraction.inputLinesAccountedFor.toLocaleString()} ` +
+          `records for ${input.extraction.inputLinesSubmitted.toLocaleString()} submitted lines, and service is read from each ` +
           `event's own envelope by position, so the two could not be reconciled. Rather than publish a breakdown that ` +
           `could be skewed, it is omitted. Severity is unaffected: it joins on pattern identity, not position._`
       );
