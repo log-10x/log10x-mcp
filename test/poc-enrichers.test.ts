@@ -103,22 +103,34 @@ test('detectRedundancyPairs rejects ratios outside tolerance', () => {
   assert.equal(detectRedundancyPairs(patterns).length, 0);
 });
 
-test('refineAction returns FIX for ERROR with dial-failure descriptor', () => {
+/**
+ * These two used to assert `refineAction` returns 'fix' for an ERROR-class
+ * dependency failure, which rendered as **FIX** in the Action column and told
+ * the reader to go repair their own code.
+ *
+ * That is gone. The Action column carries only what the receiver config
+ * performs, and a dependency failure is not something we perform, verify or
+ * price. The report is a cost report, not a code review.
+ *
+ * The assertion is inverted rather than deleted so a future re-introduction
+ * fails here instead of quietly shipping.
+ */
+test('refineAction does not advise a fix for ERROR with dial-failure descriptor', () => {
   const p = mkPattern({
     severity: 'ERROR',
     template: 'dial tcp lookup opensearch no such host',
     recommendedAction: 'keep',
   });
-  assert.equal(refineAction(p, null), 'fix');
+  assert.equal(refineAction(p, null), 'keep');
 });
 
-test('refineAction returns FIX for ERROR with timeout descriptor', () => {
+test('refineAction does not advise a fix for ERROR with timeout descriptor', () => {
   const p = mkPattern({
     severity: 'CRITICAL',
     template: 'request timeout exceeded',
     recommendedAction: 'keep',
   });
-  assert.equal(refineAction(p, null), 'fix');
+  assert.equal(refineAction(p, null), 'keep');
 });
 
 test('refineAction promotes a reducing lever to blocked when dep_count > 0', () => {
@@ -229,9 +241,12 @@ test('enrichForPoc end-to-end on a 5-pattern fixture', () => {
   assert.equal(chargeEnrichment.dependencyCount, 2);
   assert.equal(chargeEnrichment.topSlot?.slot, 'user_id');
 
-  // The two opensearch errors should refine to FIX (dial+no_such_host).
-  assert.equal(enrichments[0].refinedAction, 'fix');
-  assert.equal(enrichments[1].refinedAction, 'fix');
+  // The two opensearch errors are error-class, so they are protected and
+  // pass through as `keep`. They used to refine to FIX on the dial /
+  // no_such_host descriptors; the report no longer tells a customer to go
+  // repair their own dependency.
+  assert.equal(enrichments[0].refinedAction, 'keep');
+  assert.equal(enrichments[1].refinedAction, 'keep');
 
   // transaction_complete + redundant_with should include charge_request_received.
   assert.ok(enrichments[3].redundantWith.includes('charge_request_received'));

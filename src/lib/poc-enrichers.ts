@@ -109,12 +109,13 @@ export interface PocEnrichment {
   firstSeenAgeSeconds: number | null;
   /**
    * Action category after dependency-check fold-in. Carries the renderer's
-   * lossless lever (compact / offload / tier_down / keep) plus two
-   * refinements: `fix` (ERROR-severity patterns are not noise, the right
-   * action is upstream) and `blocked` (dep-check found refs, do not
-   * auto-act). `mute`/`sample` remain for back-compat with older callers.
+   * lossless lever (compact / offload / tier_down / keep) plus one
+   * refinement: `blocked` (dep-check found refs, do not auto-act).
+   * `mute`/`sample` remain for back-compat with older callers.
+   *
+   * There is deliberately no `fix`. See `refineAction` for why.
    */
-  refinedAction: 'fix' | 'compact' | 'offload' | 'tier_down' | 'keep' | 'blocked' | 'mute' | 'sample';
+  refinedAction: 'compact' | 'offload' | 'tier_down' | 'keep' | 'blocked' | 'mute' | 'sample';
   /** Number of dependencies (monitors/dashboards/saved-searches) found, when checked. */
   dependencyCount: number | null;
   /** Source of the dep-check result (or `null` when not run for this pattern). */
@@ -297,31 +298,33 @@ export function computeEmergence(
  * results + severity. The existing renderer logic returns mute / sample
  * / keep purely from cost-tier. This refiner adds:
  *
- *   - `fix`: ERROR-class patterns with a clear upstream root (e.g.,
- *     opensearchexporter dial-tcp failure). The right action is open a
- *     ticket, not mute. Lifted from action label heuristic in
- *     poc-report-renderer.ts:actionLabel.
  *   - `blocked`: dependency_check found refs (monitors / dashboards /
  *     saved searches). Even if the original recommendation was mute,
  *     don't auto-act.
  *
  * `keep` / `sample` / `mute` are passed through when no refinement applies.
+ *
+ * REMOVED: `fix`. It fired on ERROR-class patterns whose text matched
+ * dial/timeout/no-such-host/refused and rendered as **FIX** in the Action
+ * column, meaning "this is a broken dependency, open a ticket".
+ *
+ * Three reasons it is gone. It was not an action: every other value in that
+ * column is something the receiver config performs, while `fix` is something
+ * a human does in a codebase we do not touch, cannot verify, and cannot
+ * price. It had no enforcement consequence: `poc-envelope-v2` already mapped
+ * it to `pass`, byte-identical to `keep`, so it changed a label and nothing
+ * else. And it turned a cost report into a code review, which is not the job
+ * — the report exists to stabilise and enforce a budget, not to act as
+ * someone's SRE.
+ *
+ * The same fact still reaches the reader, in the only framing we own: an
+ * error-class pattern is protected, and protected spend is what sets the
+ * ceiling on achievable savings. That is the "Why not more" line.
  */
 export function refineAction(
   p: EnrichableForPoc,
   dependencyCount: number | null,
 ): PocEnrichment['refinedAction'] {
-  const sev = (p.severity || '').toUpperCase();
-  const isError = /ERROR|CRIT|FATAL/.test(sev);
-  // ERROR-class patterns with `dial`/`timeout`/`no_such_host`/`refused`
-  // descriptors are dependency failures — fix upstream, don't mute.
-  const desc = `${p.symbolMessage || ''} ${p.template}`.toLowerCase();
-  const isDependencyFailure =
-    isError &&
-    /\b(dial|timeout|no.such.host|refused|unreachable|deadline|connection.reset|broken.pipe)\b/.test(
-      desc,
-    );
-  if (isDependencyFailure) return 'fix';
   // Any pattern that gets a reducing lever (lossless compact/offload/tier_down
   // OR the legacy mute) is gated when a dependency reference exists, so the
   // host agent confirms before changing it. `keep` patterns are never blocked.

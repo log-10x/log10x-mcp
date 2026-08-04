@@ -2371,18 +2371,23 @@ function renderEmergenceCell(p: EnrichedPattern): string {
 /**
  * Render the Action cell. Reads the refined action (post dep-check
  * fold-in) and renders one of:
- *   - **FIX**     — ERROR-class with a dependency-failure descriptor
  *   - COMPACT     — lossless re-encode, stays searchable in the SIEM
  *   - OFFLOAD     — lossless route to customer S3, recoverable
  *   - TIER DOWN   — lossless move to the SIEM's cheaper tier
  *   - **BLOCKED** — dep-check found refs, confirm before changing
- *   - KEEP        — default for non-actionable rows
+ *   - KEEP        — default for non-actionable rows, including error-class
+ *
+ * Every value here is something the receiver config PERFORMS. The removed
+ * **FIX** was not: it told the reader to go repair a broken dependency in
+ * their own code, which we cannot do, verify or price, and which made a cost
+ * report read as a code review. Error-class rows now render KEEP like every
+ * other protected row, and the reason they are protected reaches the reader
+ * through the "Why not more" ceiling line instead.
  *
  * Every lever here is lossless, so none are bolded as destructive.
  */
 function renderActionCell(p: EnrichedPattern): string {
   const refined = p.poc.refinedAction;
-  if (refined === 'fix') return '**FIX**';
   if (refined === 'blocked') return '**BLOCKED**';
   if (refined === 'compact') return 'COMPACT';
   if (refined === 'offload') return 'OFFLOAD';

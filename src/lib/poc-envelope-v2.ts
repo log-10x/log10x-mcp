@@ -734,7 +734,7 @@ function computeFeasibility(
       // info-class rows use level-1; medium-volume sample rows degrade
       // to level-2 when level-2 exists.
       const refined = p.poc.refinedAction ?? p.recommendedAction;
-      if (refined === 'fix' || refined === 'blocked' || refined === 'keep') {
+      if (refined === 'blocked' || refined === 'keep') {
         action = 'pass';
       } else if (refined === 'mute') {
         action = level1;
@@ -1284,15 +1284,13 @@ function buildActions(
   let reason: string;
   let sampleN: number | null = null;
 
-  if (refined === 'fix' || refined === 'blocked' || refined === 'keep' || isError) {
+  if (refined === 'blocked' || refined === 'keep' || isError) {
     action = 'pass';
     reason = isError
       ? `severity=${sev || 'error-class'} kept for incident diagnosis.`
       : refined === 'blocked'
         ? 'dependency_check found references; cannot reduce safely.'
-        : refined === 'fix'
-          ? 'recommended fix at source; engine pass until commit lands.'
-          : 'low volume or non-actionable signal — pass.';
+        : 'low volume or non-actionable signal — pass.';
   } else if (refined === 'mute') {
     // Mute = lean on the destination's preferred lever.
     action = level1;
