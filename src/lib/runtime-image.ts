@@ -95,7 +95,7 @@ export class RuntimeImageOnCompilerPathError extends Error {
         '',
         'Two ways forward:',
         '  1. Leave the compiler on its own image and point only the run path at the runtime: unset LOG10X_TENX_IMAGE and set LOG10X_RUNTIME_IMAGE=native instead.',
-        '  2. Set LOG10X_COMPILER_IMAGE to a compiler-flavor image (default log10x/compiler-10x:latest).',
+        '  2. Set LOG10X_COMPILER_IMAGE to a compiler-flavor image (the default is a pinned log10x/compiler-10x tag).',
       ].join('\n'),
     );
     this.name = 'RuntimeImageOnCompilerPathError';

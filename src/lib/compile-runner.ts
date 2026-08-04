@@ -361,7 +361,26 @@ export class HelmRepoAddError extends Error {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const DEFAULT_IMAGE = 'log10x/compiler-10x:latest';
+/**
+ * The compiler image the docker path runs when nothing is set.
+ *
+ * PINNED ON PURPOSE. This used to be `log10x/compiler-10x:latest`, and a
+ * symbol library built from a mutable tag is not reproducible: the same
+ * sources compiled a week apart could go through two different engines with
+ * no record of which, because nothing in the emitted `.10x.json` units names
+ * the image that produced them. `latest` moves on every engine release (it
+ * was republished 2026-08-03 at the same digest as 1.1.39), so the drift is
+ * silent and routine rather than exceptional.
+ *
+ * BUMP THIS with each engine release the MCP is validated against. Verify the
+ * tag resolves before changing it:
+ *
+ *   docker buildx imagetools inspect log10x/compiler-10x:<version>
+ *
+ * Callers who want the moving tag back can still set
+ * `LOG10X_COMPILER_IMAGE=log10x/compiler-10x:latest`.
+ */
+const DEFAULT_IMAGE = 'log10x/compiler-10x:1.1.39';
 
 /**
  * Which image the docker compile path runs.
