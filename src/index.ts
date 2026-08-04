@@ -49,10 +49,13 @@ import {
   notConfiguredEnvelopeFromError,
   notConfiguredToolResult,
 } from './lib/not-configured.js';
-
-function notConfiguredMessageForTool(toolName: string): string {
-  return renderNotConfigured({ callingTool: toolName });
-}
+import {
+  demoPlaygroundEnabled,
+  isDemoGated,
+  isOutOfMode,
+  recordBootMode,
+  recordEnvsProvider,
+} from './lib/tool-availability.js';
 import { topPatternsSchema, executeTopPatterns } from './tools/top-patterns.js';
 import { resolveBatchSchema, executeResolveBatch } from './tools/resolve-batch.js';
 import {
@@ -186,6 +189,12 @@ async function initEnvs(): Promise<void> {
   // re-load envs on each call) sees the same enriched byNickname map.
   // See src/lib/env-alias-bridge.ts.
   envs = await loadEnvironments();
+  // Hand lib/tool-availability THIS reference, not a recipe for making
+  // another one. On a keyless boot, mode-detect injects the public demo key
+  // into process.env after this line runs, so a later loadEnvironments()
+  // reports isDemoMode: false while this object still says true. The menu
+  // must read what the gate reads.
+  recordEnvsProvider(() => envs);
 }
 
 /**
@@ -199,6 +208,10 @@ async function initEnvs(): Promise<void> {
  */
 async function initBootMode(): Promise<void> {
   bootMode = await detectMode();
+  // Publish it to lib/tool-availability so callers that cannot import this
+  // module (log10x_start's action_menu, which index.ts imports) can ask the
+  // mode gate the same question wrap() asks.
+  recordBootMode(bootMode);
 }
 
 export function getBootMode(): ModeResolution {
@@ -233,47 +246,13 @@ function getEnvs(): Environments {
  * rewrites it, so ops can see the original text when hunting root causes.
  */
 /**
- * Tools that query the metrics backend (top_patterns, whats_changing,
- * etc.). When the MCP is in pure-demo mode (no user configuration,
- * silently landed on the demo backend), these tools short-circuit
- * with a structured `not_configured` response instead of returning
- * demo data the user didn't ask for. We surface the conversation
- * starter without breaking the demo-mode walkthrough; the silent-demo
- * path will be removed in a later release.
- *
- * Tools NOT in this set bypass the gate: configure_env (the
- * onboarding tool itself), doctor (status reporting works in any
- * mode), local-only tools (resolve_batch, extract_templates,
- * dependency_check pasted input), signin_* (log10x account
- * management), discover_env (k8s discovery), poc_from_* (pre-config
- * sample reports).
+ * The demo gate and the mode gate now live in lib/tool-availability.ts, so
+ * everything that ROUTES a user to a tool can ask the same question `wrap()`
+ * asks. log10x_start's action_menu reads it to compute `applicable`; before
+ * that, the menu guessed from tier capabilities alone and offered
+ * investigate_spike → log10x_top_patterns on a keyless boot, where the demo
+ * gate refuses it.
  */
-const METRIC_REQUIRING_TOOLS = new Set([
-  'log10x_top_patterns',
-  'log10x_pattern_trend',
-  'log10x_pattern_examples',
-  'log10x_event_lookup',
-  'log10x_savings',
-  'log10x_services',
-  'log10x_overflow_contents',
-  'log10x_discover_labels',
-  'log10x_investigate',
-  'log10x_backfill_metric',
-  'log10x_metric_overlay',
-  'log10x_metrics_that_moved',
-  'log10x_rank_by_shape_similarity',
-  'log10x_discover_join',
-  'log10x_customer_metrics_query',
-  'log10x_retriever_query',
-  'log10x_retriever_series',
-]);
-
-// When set, the MCP is an intentional read-only demo playground: the metric
-// tools serve the public demo data instead of the not_configured onboarding
-// nag (see the gate in wrap()). isDemoMode stays true, so the demo banner still
-// renders — we just stop nagging. Set by the hosted deployment.
-const DEMO_PLAYGROUND = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DEMO_PLAYGROUND ?? '');
-
 type WrapResult = {
   content: Array<
     | { type: 'text'; text: string }
@@ -293,13 +272,7 @@ async function wrap(
   // instead of returning silent-demo data, UNLESS this is an intentional
   // demo playground (LOG10X_MCP_DEMO_PLAYGROUND), which wants the demo data
   // served (the gated tools are exactly the demo's headline surface).
-  if (
-    METRIC_REQUIRING_TOOLS.has(toolName) &&
-    envs &&
-    envs.isDemoMode &&
-    !envs.demoFallbackReason &&
-    !DEMO_PLAYGROUND
-  ) {
+  if (isDemoGated(toolName, envs)) {
     log.info(`tool.${toolName}.not_configured`);
     // Structured not_configured envelope (status + remediation + actions),
     // not a bare text blob; the agent branches on data.status and the MCP
@@ -312,14 +285,21 @@ async function wrap(
     const isRetrieverTool =
       toolName === 'log10x_retriever_query' || toolName === 'log10x_retriever_series';
     const ncKind = isRetrieverTool ? 'retriever' : 'metrics_backend';
+    // g8: the remediation used to end at `log10x_configure_env` unconditionally.
+    // On the keyless boot that reaches this gate, configure_env is denylisted
+    // against the shared demo account and never registered, so the agent's
+    // required-next action was a tool it could not call. Ask whether it is
+    // registered and name log10x_signin_start when it is not — the same tool
+    // the boot banner already points at.
+    const configureEnvRegistered = !isOutOfMode('log10x_configure_env');
     return notConfiguredToolResult(
       buildNotConfiguredEnvelope({
         tool: toolName,
         kind: ncKind,
         remediation: isRetrieverTool
           ? retrieverNotConfiguredMessage()
-          : notConfiguredMessageForTool(toolName),
-        actions: defaultActionsForKind(ncKind),
+          : renderNotConfigured({ callingTool: toolName, configureEnvRegistered }),
+        actions: defaultActionsForKind(ncKind, { configureEnvRegistered }),
       }),
     );
   }
@@ -2249,7 +2229,7 @@ async function main() {
     envs: loaded.all.length,
     default_env: loaded.default.nickname,
     demo_mode: loaded.isDemoMode,
-    demo_playground: DEMO_PLAYGROUND,
+    demo_playground: demoPlaygroundEnabled(),
     read_only_mode: isReadOnlyMode(),
     manifest_loaded: manifest !== null,
     boot_mode: bootMode?.mode,

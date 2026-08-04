@@ -31,6 +31,7 @@ import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
+import { toolUnavailableReason } from '../lib/tool-availability.js';
 import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
@@ -256,8 +257,43 @@ function buildCapabilities(args: {
   };
 }
 
-/** Build the action menu, gated by current capabilities. */
-function buildActionMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
+/**
+ * Build the action menu, gated by current capabilities AND by the gates the
+ * routed tool itself applies.
+ *
+ * The capability gate answers "does the user's tier support this action". It
+ * is not the same question as "will routes_to actually run", and on a keyless
+ * boot the two disagreed: the demo dataset answers the tier probes, so
+ * cost_attribution_available came back true and investigate_spike shipped with
+ * `applicable: true` — routing the agent to log10x_top_patterns, which the demo
+ * gate then refuses with a not_configured envelope. The menu was the thing that
+ * sent the agent into the refusal.
+ *
+ * So every item is re-checked against `toolUnavailableReason(routes_to)`, the
+ * same predicate wrap() uses. An item the routed tool would refuse is not
+ * applicable, whatever the tier says, and its gated_reason names a tool that IS
+ * callable in this state.
+ */
+function buildActionMenu(caps: CapabilitySummary, tier: Tier, envs?: Environments): ActionMenuItem[] {
+  return applyToolGates(buildTierMenu(caps, tier), envs);
+}
+
+/**
+ * Fold the routed tool's own gates into each item. Capability-gated items keep
+ * their existing reason: "install the Reporter first" is more actionable than
+ * "the tool would refuse", and both are true.
+ */
+function applyToolGates(menu: ActionMenuItem[], envs?: Environments): ActionMenuItem[] {
+  return menu.map((item) => {
+    if (!item.applicable) return item;
+    const reason = toolUnavailableReason(item.routes_to, envs);
+    if (!reason) return item;
+    return { ...item, applicable: false, gated_reason: reason };
+  });
+}
+
+/** The tier-capability half of the menu, before the routed tools' own gates. */
+function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
   return [
     {
       action: 'estimate_savings',
@@ -507,11 +543,15 @@ export async function executeLog10xStart(
     });
   }
 
-  // Load envs lazily so this tool is safe to call from any boot state.
+  // Load envs lazily so this tool is safe to call from any boot state. Used
+  // for the tier probes only: the menu's gate check reads the server's own
+  // envs reference through lib/tool-availability, because a fresh
+  // loadEnvironments() here would see the demo key mode-detect injected and
+  // conclude the session is configured when the gate says otherwise.
   let env: EnvConfig | undefined;
   try {
-    const envs = await loadEnvironments();
-    env = pickDefaultEnv(envs);
+    const loaded = await loadEnvironments();
+    env = pickDefaultEnv(loaded);
   } catch {
     env = undefined;
   }
@@ -611,6 +651,8 @@ export const _internals = {
   resolveTier,
   buildCapabilities,
   buildActionMenu,
+  buildTierMenu,
+  applyToolGates,
   buildJourneyPhases,
   renderVerbatim,
   buildForbiddenNextActions,

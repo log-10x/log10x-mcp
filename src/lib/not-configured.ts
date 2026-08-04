@@ -31,6 +31,15 @@ import {
 export interface NotConfiguredOptions {
   /** The tool that's reporting the not-configured state, for context. */
   callingTool: string;
+  /**
+   * Whether `log10x_configure_env` is callable in the current boot state.
+   * It is not when the MCP is attached to the shared public demo dataset:
+   * DEMO_FALLBACK_DENYLIST keeps every mutator off the shared account, so
+   * configure_env is never registered there. Telling the agent to call an
+   * unregistered tool is how the demo walkthrough dead-ended. Defaults to
+   * true, which is the state every non-demo caller is in.
+   */
+  configureEnvRegistered?: boolean;
 }
 
 /**
@@ -42,9 +51,15 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
   // In demo fallback the whole `log10x_configure_env` route below is closed:
   // the tool is denylisted and never registers. Lead with the step that IS
   // available so the agent does not try a call the server will not answer.
-  const demoPreamble = isDemoFallbackActive()
+  // opts.configureEnvRegistered, when given, states registration explicitly and
+  // wins over the process-wide check, so a caller can render this without
+  // reaching into demo state.
+  const configureEnvClosed =
+    opts.configureEnvRegistered === false ||
+    (opts.configureEnvRegistered === undefined && isDemoFallbackActive());
+  const demoPreamble = configureEnvClosed
     ? [
-        `**This session is in demo mode** (keyless boot, read-only public dataset). \`log10x_configure_env\` is NOT registered here, so calling it will fail.`,
+        `**This session is in demo mode** (keyless boot, read-only public dataset). Do not call \`log10x_configure_env\`: it is NOT registered here, so the call will fail.`,
         '',
         `**Do this first**: call \`log10x_signin_start\` to mint an API key for the user's own account, then restart the MCP. \`log10x_configure_env\` registers once a key is present, and the setup below applies from there. Setting \`LOG10X_API_KEY\` in the MCP server env is the equivalent manual route.`,
         '',
@@ -78,6 +93,45 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
     `**Credentials in config**: prefer \`\${VAR_NAME}\` references (resolved from the user's shell env) over literal values. \`log10x_configure_env\` refuses to persist obvious literal secrets.`,
     '',
     `**Tier prerequisites**: the 10x engine must already be configured to write metrics to the chosen backend (see \`config/pipelines/run/output/metric/<backend>/config.yaml\` in your config repo). The MCP only reads from the same store.`,
+  ].join('\n');
+}
+
+/**
+ * The demo-dataset variant. Reached when `log10x_configure_env` is not
+ * registered, which on a keyless boot it never is: the MCP attaches read-only
+ * to the shared public demo account and DEMO_FALLBACK_DENYLIST keeps every
+ * mutator — configure_env included — out of the tool list. The general
+ * remediation above walks the agent through eight backend kinds and ends at
+ * `log10x_configure_env`, so following it verbatim produced "no such tool"
+ * and the walkthrough stopped there.
+ *
+ * `log10x_signin_start` is the registered path and the one the boot banner
+ * already names ("Sign in (log10x_signin_start) or set LOG10X_API_KEY"), so
+ * this variant says the same thing the banner said.
+ */
+function renderDemoNotConfigured(callingTool: string): string {
+  return [
+    `# Attached to the public demo dataset — \`${callingTool}\` needs your own environment`,
+    '',
+    `This MCP booted without an API key, so it attached READ-ONLY to the public 10x demo dataset. ` +
+      `\`${callingTool}\` is gated in that state: returning demo numbers as if they were the user's own ` +
+      `is worse than saying nothing.`,
+    '',
+    `**To connect the user's own environment** — two paths, both available right now:`,
+    '',
+    `1. \`log10x_signin_start\` — the Log10x device flow. Returns a verification URL and a code for the ` +
+      `user to enter; then call \`log10x_signin_complete\`. On success the MCP reloads against their ` +
+      `account and \`${callingTool}\` works.`,
+    `2. Set \`LOG10X_API_KEY\` in the MCP server's environment (from https://console.log10x.com) and ` +
+      `restart the MCP. Use this when the user already has a key.`,
+    '',
+    `**Do not call \`log10x_configure_env\` here.** It configures a metrics backend on the account, so it ` +
+      `is denylisted against the shared demo account and is not in this session's tool list — the call ` +
+      `returns "no such tool". It becomes available once signed in.`,
+    '',
+    `**What still works on the demo dataset**: \`log10x_baseline\`, \`log10x_start\`, \`log10x_doctor\`, ` +
+      `\`log10x_cost_options\`, \`log10x_explain_mode\`, and the advisors. Use those to show the user what ` +
+      `10x does while they decide whether to sign in.`,
   ].join('\n');
 }
 
@@ -241,15 +295,31 @@ export function buildNotConfiguredEnvelope(args: {
   });
 }
 
-/** Default remediation actions per kind, so the agent has a concrete next step. */
-export function defaultActionsForKind(kind: NotConfiguredKind): Action[] {
+/**
+ * Default remediation actions per kind, so the agent has a concrete next step.
+ *
+ * `configureEnvRegistered: false` swaps the metrics_backend action for
+ * `log10x_signin_start`. An action naming a tool the session did not register
+ * is not a next step; it is a dead end the agent cannot detect until it calls
+ * and gets "no such tool".
+ */
+export function defaultActionsForKind(
+  kind: NotConfiguredKind,
+  opts?: { configureEnvRegistered?: boolean },
+): Action[] {
   switch (kind) {
     case 'metrics_backend':
       // Demo fallback denylists log10x_configure_env, so it is absent from
       // the registered tool set. Naming it there hands the agent a call it
       // cannot make. log10x_signin_start IS registered in that mode and is
       // the step that unlocks configure_env, so route there instead.
-      if (isDemoFallbackActive()) {
+      //
+      // The caller may state registration explicitly via
+      // opts.configureEnvRegistered; that wins, because it is the form a
+      // caller can test without reaching into process-wide demo state.
+      // Otherwise fall back to the live check.
+      if (opts?.configureEnvRegistered === false ||
+          (opts?.configureEnvRegistered === undefined && isDemoFallbackActive())) {
         return [
           {
             tool: 'log10x_signin_start',
