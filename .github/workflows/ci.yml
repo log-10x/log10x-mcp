@@ -1,9 +1,10 @@
 name: CI
 
-# Runs on PRs only. Direct pushes to main happen via merge of a CI-passing PR
-# (branch protection enforces this), so re-running on push:[main] would just
-# burn minutes on the same code. The actual release is gated by publish.yml,
-# not by this workflow.
+# Runs on PRs only. The intent is that every change lands through a CI-passing
+# PR, so re-running on push:[main] would just burn minutes on the same code.
+# Nothing enforces that today: main carries no branch protection and no ruleset,
+# so a direct push bypasses this workflow entirely. The actual release is gated
+# by publish.yml, not by this workflow.
 
 on:
   pull_request:
