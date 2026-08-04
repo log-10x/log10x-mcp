@@ -17,6 +17,7 @@
  */
 
 import type { Environments } from './environments.js';
+import { isDemoFallbackActive } from './demo-env.js';
 import {
   StructuredOutputSchema,
   type StructuredOutput,
@@ -38,11 +39,23 @@ export interface NotConfiguredOptions {
  */
 export function renderNotConfigured(opts: NotConfiguredOptions): string {
   const { callingTool } = opts;
+  // In demo fallback the whole `log10x_configure_env` route below is closed:
+  // the tool is denylisted and never registers. Lead with the step that IS
+  // available so the agent does not try a call the server will not answer.
+  const demoPreamble = isDemoFallbackActive()
+    ? [
+        `**This session is in demo mode** (keyless boot, read-only public dataset). \`log10x_configure_env\` is NOT registered here, so calling it will fail.`,
+        '',
+        `**Do this first**: call \`log10x_signin_start\` to mint an API key for the user's own account, then restart the MCP. \`log10x_configure_env\` registers once a key is present, and the setup below applies from there. Setting \`LOG10X_API_KEY\` in the MCP server env is the equivalent manual route.`,
+        '',
+      ]
+    : [];
   return [
     `# Metrics backend not configured`,
     '',
     `The MCP has no metrics backend configured for this session — \`${callingTool}\` cannot query metrics until one is set up.`,
     '',
+    ...demoPreamble,
     `**To set up**: ask the user where their 10x engine ships metrics, then call \`log10x_configure_env\` with the corresponding \`metricsBackend\` config. Supported backend kinds:`,
     '',
     `- \`log10x\` — the hosted Log10x metrics backend at \`prometheus.log10x.com\`. Needs: \`apiKey\`, \`envId\`. Use when the customer is comfortable with their telemetry going to the Log10x SaaS endpoint.`,
@@ -232,6 +245,21 @@ export function buildNotConfiguredEnvelope(args: {
 export function defaultActionsForKind(kind: NotConfiguredKind): Action[] {
   switch (kind) {
     case 'metrics_backend':
+      // Demo fallback denylists log10x_configure_env, so it is absent from
+      // the registered tool set. Naming it there hands the agent a call it
+      // cannot make. log10x_signin_start IS registered in that mode and is
+      // the step that unlocks configure_env, so route there instead.
+      if (isDemoFallbackActive()) {
+        return [
+          {
+            tool: 'log10x_signin_start',
+            args: {},
+            reason:
+              'demo mode: log10x_configure_env is not registered. Sign in to mint an API key, then configure a backend and re-run',
+            role: 'required-next',
+          },
+        ];
+      }
       return [
         {
           tool: 'log10x_configure_env',

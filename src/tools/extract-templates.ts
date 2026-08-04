@@ -13,7 +13,7 @@
 
 import { promises as fs } from 'fs';
 import { z } from 'zod';
-import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError } from '../lib/dev-cli.js';
+import { runDevCliStdin, runDevCliFile, DevCliNotInstalledError, DevCliRunError, DevCliConfigMissingError, describeDevCliFailure } from '../lib/dev-cli.js';
 import { parseAggregated } from '../lib/cli-output-parser.js';
 import { agentOnly } from '../lib/agent-only.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -128,7 +128,7 @@ export async function executeExtractTemplates(args: ExtractArgs): Promise<string
           error_type: 'backend_unavailable',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: `Local tenx CLI exited with code ${e.exitCode}. Check that tenx v1.0.21+ is installed and TENX_API_KEY is set if required.`,
+          hint: describeDevCliFailure(e.exitCode, e.stderr, { mode: e.tenxMode }),
         },
         contextPayload: { debug_stderr: e.stderr.slice(0, 2000) },
       });
