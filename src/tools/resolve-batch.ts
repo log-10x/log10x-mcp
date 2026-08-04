@@ -149,7 +149,7 @@ export async function executeResolveBatch(args: {
           error_type: 'backend_unavailable',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: describeDevCliFailure(e.exitCode, e.stderr),
+          hint: describeDevCliFailure(e.exitCode, e.stderr, { mode: e.tenxMode }),
         },
         contextPayload: { debug_stderr: e.stderr.slice(0, 2000) },
       });

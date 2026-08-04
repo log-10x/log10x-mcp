@@ -83,7 +83,15 @@ export class DevCliRunError extends Error {
   readonly stderr: string;
   readonly stdout: string;
   readonly configPath: string;
-  constructor(exitCode: number, stderr: string, stdout: string, configPath: string) {
+  /** Which backend produced this failure, when the caller recorded it. */
+  readonly tenxMode?: 'local' | 'docker';
+  constructor(
+    exitCode: number,
+    stderr: string,
+    stdout: string,
+    configPath: string,
+    tenxMode?: 'local' | 'docker'
+  ) {
     super(
       `Local tenx CLI exited with code ${exitCode}.\n` +
         `Config: ${configPath}\n` +
@@ -94,6 +102,87 @@ export class DevCliRunError extends Error {
     this.stderr = stderr;
     this.stdout = stdout;
     this.configPath = configPath;
+    this.tenxMode = tenxMode;
+  }
+}
+
+/**
+ * True when the engine refused a license it was handed, as opposed to
+ * refusing to start because it was handed none.
+ *
+ * Measured on engine 1.1.39, `log10x/edge-10x`, `TENX_LICENSE_KEY` set to a
+ * non-JWT string. stderr:
+ *
+ *   could not launch pipeline: 'run'
+ *   Invalid serialized unsecured/JWS/JWE object: Missing part delimiters
+ *   details:
+ *   error initializating engine environment
+ *   license verification failed: MALFORMED — license token is not a parseable JWT
+ *   LicenseException: license token is not a parseable JWT
+ *
+ * `license verification failed:` carries the state word (MALFORMED here,
+ * EXPIRED and the rest elsewhere), so it is the anchor, with
+ * `LicenseException` as the second reading.
+ *
+ * The "handed none" case reads `license required: set --licenseFile, …` and
+ * deliberately does NOT match: withholding a key we never forwarded cannot fix it.
+ */
+export function isEngineLicenseRejection(stderr: string): boolean {
+  const s = (stderr || '').toLowerCase();
+  return s.includes('license verification failed') || s.includes('licenseexception');
+}
+
+/**
+ * Bare `-e VAR` pass-through for the engine license, mirroring the compile
+ * path (compile-runner buildDockerArgs). Bare form so the value is inherited
+ * from the spawning process env and never lands in argv.
+ *
+ * The runtime docker path used to forward nothing, so a caller with
+ * TENX_LICENSE_KEY set watched the key get silently dropped.
+ */
+export function dockerLicenseArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  return env.TENX_LICENSE_KEY ? ['-e', 'TENX_LICENSE_KEY'] : [];
+}
+
+/**
+ * Run a docker attempt with the license forwarded, and retry once with it
+ * withheld if the engine rejects it.
+ *
+ * Forwarding `TENX_LICENSE_KEY` is an improvement for the caller who has a
+ * good key and a regression for everyone else: the runtime images carry their
+ * own built-in limited license, so before forwarding, a stale or malformed
+ * `TENX_LICENSE_KEY` sitting in the environment was simply ignored and the run
+ * succeeded. Measured on the same batch, engine 1.1.39: no key forwarded gives
+ * `2 events -> 1 pattern`; a non-JWT key forwarded gives exit 1 and
+ * `license verification failed: MALFORMED`. Docker mode is also not opt-in — a
+ * host with no `tenx` on PATH auto-resolves to it — so the forwarding change
+ * alone would take a working call away from a user who never asked for it.
+ *
+ * Withholding the key on a license rejection restores exactly the pre-forward
+ * behaviour, and only in the case where the forwarded key is what broke the
+ * run. A run that fails for any other reason is re-thrown untouched, and a run
+ * with no key set never makes a second attempt.
+ *
+ * The downgrade is announced on stderr rather than swallowed: a caller who
+ * meant to run under their own license should not silently end up on the
+ * image's limited one.
+ */
+export async function withDockerLicenseFallback<T>(
+  attempt: (licenseArgs: string[]) => Promise<T>,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<T> {
+  const licenseArgs = dockerLicenseArgs(env);
+  if (licenseArgs.length === 0) return attempt([]);
+  try {
+    return await attempt(licenseArgs);
+  } catch (e) {
+    const stderr = e instanceof DevCliRunError ? e.stderr : ((e as Error)?.message ?? '');
+    if (!isEngineLicenseRejection(stderr)) throw e;
+    console.error(
+      '[log10x-mcp] the engine refused the TENX_LICENSE_KEY this server forwarded to docker. ' +
+        'Retrying on the image built-in limited license. Replace or unset TENX_LICENSE_KEY to stop seeing this.'
+    );
+    return attempt([]);
   }
 }
 
@@ -105,21 +194,56 @@ export class DevCliRunError extends Error {
  * `debug_stderr`. An unlicensed `tenx` on PATH (the state every Homebrew
  * install starts in) therefore produced a message that pointed nowhere.
  *
- * Promote the engine's first stderr line into the headline, and name the
- * docker backend, which carries a built-in limited license and needs no
- * local install.
+ * Two things the first version of this got wrong:
+ *
+ *   - it appended "Set LOG10X_TENX_MODE=docker … (no license needed)" on every
+ *     failure, including the ones where the resolved mode was already docker.
+ *     That tells the reader to turn on the mode they are in, and tells them no
+ *     license is needed in the same breath as their license refusing the run.
+ *     `mode` now decides which escape is named.
+ *   - it only promoted `license required:`, so the far commoner refusal,
+ *     `license verification failed:`, stayed buried under
+ *     `could not launch pipeline: 'run'`, which is what `lines[0]` is.
  */
-export function describeDevCliFailure(exitCode: number, stderr: string): string {
+export function describeDevCliFailure(
+  exitCode: number,
+  stderr: string,
+  opts: { mode?: 'local' | 'docker'; licenseKeyForwarded?: boolean } = {}
+): string {
   const lines = stderr
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
-  const licenseLine = lines.find((l) => l.toLowerCase().startsWith('license required:'));
+  const licenseLine = lines.find(
+    (l) =>
+      l.toLowerCase().startsWith('license required:') ||
+      l.toLowerCase().startsWith('license verification failed')
+  );
   const engineLine = licenseLine ?? lines[0];
-  const escape =
-    'Set LOG10X_TENX_MODE=docker to run the engine image instead of the local binary ' +
-    '(no license needed), or point the local engine at a license with TENX_LICENSE_KEY ' +
-    'or TENX_LICENSE_FILE.';
+  const rejected = isEngineLicenseRejection(stderr);
+  const forwarded = opts.licenseKeyForwarded ?? Boolean(process.env.TENX_LICENSE_KEY);
+
+  let escape: string;
+  if (opts.mode === 'docker') {
+    escape = rejected
+      ? 'The engine ran in docker mode and refused a license. ' +
+        (forwarded
+          ? 'The TENX_LICENSE_KEY this server forwarded was already withheld on an automatic retry, so the key alone is not what is left: '
+          : 'No TENX_LICENSE_KEY was forwarded, so the refusal came from inside the image: ') +
+        'check TENX_LICENSE_FILE and any licenseKey/licenseFile entry in the bootstrap .yaml the engine reads, or pin a known-good image with LOG10X_RUNTIME_IMAGE.'
+      : 'The engine ran in docker mode (LOG10X_TENX_MODE=docker, or no tenx on PATH so docker was the fallback). ' +
+        'Set LOG10X_TENX_MODE=local with LOG10X_TENX_PATH to run a local install instead, or pin the image with LOG10X_RUNTIME_IMAGE.';
+  } else if (opts.mode === 'local') {
+    escape =
+      'The engine ran as a local binary. Set LOG10X_TENX_MODE=docker to run the engine image instead ' +
+      '(it carries a built-in limited license, so a local install without one still gets an answer), ' +
+      'or point the local engine at a license with TENX_LICENSE_KEY or TENX_LICENSE_FILE.';
+  } else {
+    escape =
+      'Point the engine at a license with TENX_LICENSE_KEY or TENX_LICENSE_FILE, ' +
+      'or run the engine image with LOG10X_TENX_MODE=docker, which carries a built-in limited license.';
+  }
+
   return [
     `Local tenx CLI exited with code ${exitCode}.`,
     engineLine ? `Engine said: ${engineLine.slice(0, 400)}` : undefined,
@@ -128,18 +252,6 @@ export function describeDevCliFailure(exitCode: number, stderr: string): string 
   ]
     .filter(Boolean)
     .join(' ');
-}
-
-/**
- * Bare `-e VAR` pass-through for the engine license, mirroring the compile
- * path (compile-runner buildDockerArgs). Bare form so the value is inherited
- * from the spawning process env and never lands in argv.
- *
- * The runtime docker path used to forward nothing, so a caller with
- * TENX_LICENSE_KEY set watched the key get silently dropped.
- */
-export function dockerLicenseArgs(): string[] {
-  return process.env.TENX_LICENSE_KEY ? ['-e', 'TENX_LICENSE_KEY'] : [];
 }
 
 /**
@@ -279,7 +391,7 @@ async function runAppsMcpFileViaLocalBinary(
     binary,
     ['@' + configPath],
     null,
-    { env, timeoutMs: 300_000, configPath },
+    { env, timeoutMs: 300_000, configPath, tenxMode: 'local' },
   );
   return { cliVersion };
 }
@@ -307,19 +419,25 @@ async function runAppsMcpFileViaDocker(
   // engine's file writes land where the caller can read them.
   // Also mount the packaged config so the container uses the resolved path,
   // not the @apps/mcp-file macro which requires TENX_HOME inside the container.
-  const args = [
-    'run', '--rm',
-    ...dockerLicenseArgs(),
-    '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
-    '-e', `LOG10X_MCP_OUTPUT_DIR=${containerOutputDir}`,
-    '-e', `LOG10X_MCP_INPUT_PATH=${containerInputFile}`,
-    '-v', `${hostOutputDir}:${containerOutputDir}`,
-    '-v', `${hostConfigPath}:${containerConfigPath}:ro`,
-    '-v', `${hostInputFile}:${containerInputFile}:ro`,
-    image,
-    '@' + containerConfigPath,
-  ];
-  await runCommandWithStdin('docker', args, null, { timeoutMs: 300_000, configPath: hostConfigPath });
+  await withDockerLicenseFallback((licenseArgs) =>
+    runCommandWithStdin(
+      'docker',
+      [
+        'run', '--rm',
+        ...licenseArgs,
+        '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
+        '-e', `LOG10X_MCP_OUTPUT_DIR=${containerOutputDir}`,
+        '-e', `LOG10X_MCP_INPUT_PATH=${containerInputFile}`,
+        '-v', `${hostOutputDir}:${containerOutputDir}`,
+        '-v', `${hostConfigPath}:${containerConfigPath}:ro`,
+        '-v', `${hostInputFile}:${containerInputFile}:ro`,
+        image,
+        '@' + containerConfigPath,
+      ],
+      null,
+      { timeoutMs: 300_000, configPath: hostConfigPath, tenxMode: 'docker' }
+    )
+  );
   // Record WHICH image ran. The default tag is mutable, so `:latest` alone
   // does not identify a build; append the local image id when docker can
   // resolve one. Best-effort: a failed inspect must not fail the run.
@@ -637,7 +755,7 @@ async function runAppsMcpViaLocalBinary(
     binary,
     ['@apps/mcp'],
     rawLogText,
-    { env, timeoutMs: 120_000, configPath: '@apps/mcp' }
+    { env, timeoutMs: 120_000, configPath: '@apps/mcp', tenxMode: 'local' }
   );
   return { stdout, cliVersion };
 }
@@ -651,18 +769,19 @@ async function runAppsMcpViaDocker(
     throw new DockerNotAvailableError((e as Error).message || String(e));
   }
   const image = resolveRuntimeImage();
-  const args = [
-    'run', '--rm', '-i',
-    ...dockerLicenseArgs(),
-    '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
-    image,
-    '@apps/mcp',
-  ];
-  const stdout = await runCommandWithStdin(
-    'docker',
-    args,
-    rawLogText,
-    { timeoutMs: 180_000, configPath: '@apps/mcp' }
+  const stdout = await withDockerLicenseFallback((licenseArgs) =>
+    runCommandWithStdin(
+      'docker',
+      [
+        'run', '--rm', '-i',
+        ...licenseArgs,
+        '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
+        image,
+        '@apps/mcp',
+      ],
+      rawLogText,
+      { timeoutMs: 180_000, configPath: '@apps/mcp', tenxMode: 'docker' }
+    )
   );
   return { stdout, cliVersion: `docker:${image}` };
 }
@@ -817,6 +936,7 @@ async function runViaLocalBinary(
       env,
       timeoutMs: opts.timeoutMs ?? 120_000,
       configPath: opts.configPath,
+      tenxMode: 'local',
     }
   );
 
@@ -890,13 +1010,13 @@ async function runViaDocker(
     containerInputPath = `${CONTAINER_INPUT_DIR}/${inName}`;
   }
 
-  args.push(...dockerLicenseArgs());
   args.push('-e', `LOG10X_MCP_OUTPUT_DIR=${CONTAINER_OUTPUT}`);
   args.push('-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`);
   if (containerInputPath) {
     args.push('-e', `LOG10X_MCP_INPUT_PATH=${containerInputPath}`);
   }
 
+  const imageIndex = args.length;
   args.push(image);
   args.push(`@${CONTAINER_CONFIG_DIR}/${configName}`);
   if (opts.extraOverlays) {
@@ -905,15 +1025,20 @@ async function runViaDocker(
     }
   }
 
-  await runCommandWithStdin(
-    'docker',
-    args,
-    opts.mode === 'stdin' ? (opts.stdinData ?? '') : null,
-    {
-      // +60s over local default absorbs first-run image pull on a cold host.
-      timeoutMs: opts.timeoutMs ?? 180_000,
-      configPath: opts.configPath,
-    }
+  // License args go last, immediately before the image ref, so the retry can
+  // rebuild the tail without disturbing the mounts assembled above.
+  await withDockerLicenseFallback((licenseArgs) =>
+    runCommandWithStdin(
+      'docker',
+      [...args.slice(0, imageIndex), ...licenseArgs, ...args.slice(imageIndex)],
+      opts.mode === 'stdin' ? (opts.stdinData ?? '') : null,
+      {
+        // +60s over local default absorbs first-run image pull on a cold host.
+        timeoutMs: opts.timeoutMs ?? 180_000,
+        configPath: opts.configPath,
+        tenxMode: 'docker',
+      }
+    )
   );
 
   // Report the ENGINE version, not just the image reference.
@@ -994,6 +1119,12 @@ interface RunOptions {
   cwd?: string;
   timeoutMs?: number;
   configPath?: string;
+  /**
+   * Which backend this spawn is. Recorded on DevCliRunError so the hint the
+   * tool renders can name the escape the caller does NOT already have, rather
+   * than telling a docker-mode caller to switch to docker mode.
+   */
+  tenxMode?: 'local' | 'docker';
 }
 
 function runCommand(cmd: string, args: string[], options: RunOptions = {}): Promise<string> {
@@ -1038,7 +1169,9 @@ function runCommandWithStdin(
       if (code === 0) {
         resolvePromise(stdout);
       } else {
-        rejectPromise(new DevCliRunError(code ?? -1, stderr, stdout, options.configPath || ''));
+        rejectPromise(
+          new DevCliRunError(code ?? -1, stderr, stdout, options.configPath || '', options.tenxMode)
+        );
       }
     });
 
