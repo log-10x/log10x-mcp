@@ -226,8 +226,18 @@ test('anchor keeps the statement subject under a shared lead-in', () => {
   const filler = Array.from({ length: 30 }, (_, i) => `svc_${i}_handler_processed_request_ok_resource_service`);
   const df = buildDfContext([...storm, ...filler]);
   const name = buildDisplayName(storm[0], { df, width: 56 }).display_name;
-  assert.match(name, /base|exporter/i,
-    `name lost its subject and rendered only discriminators: ${name}`);
+  // Asserts the MESSAGE, not the source location. The first version of this
+  // test matched /base|exporter/ — tokens from the Go file path
+  // `internal/base_exporter.go` — because the anchor then took leading tokens
+  // by position and a Go logger prints the file first. That pinned a name
+  // describing WHERE the line was emitted as evidence it described WHAT
+  // happened, and it blocked the fix that made the name say
+  // "Exporting failed Rejecting data". A test that pins the symptom is worse
+  // than no test, so this now asserts the sentence.
+  assert.match(name, /exporting|failed|rejecting/i,
+    `name did not carry the statement's message: ${name}`);
+  assert.doesNotMatch(name, /^internal\b/i,
+    `name led with the source file path rather than the message: ${name}`);
 });
 
 test('anchor skips hyphenated service names and severity words', () => {

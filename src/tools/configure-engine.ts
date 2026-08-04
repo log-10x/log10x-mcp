@@ -2550,7 +2550,7 @@ async function fetchPerPatternBytes(
   // own fallback when the container field is absent on an event).
   const containerOf = (m: Record<string, string>): string =>
     m.k8s_container || '__node__';
-  const sliceKey = (h: string, c: string): string => `${h} ${c}`;
+  const sliceKey = (h: string, c: string): string => `${h}\u0000${c}`;
 
   const eventsByKey = new Map<string, number>();
   for (const r of eventsRes.data.result) {

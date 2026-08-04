@@ -19,7 +19,7 @@ import {
   buildDisclosedDollarValue,
 } from './cost.js';
 import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtDollar, fmtGb, fmtPct } from './format.js';
-import { buildDfContext, buildDisplayName } from './pattern-df.js';
+import { buildDfContext, buildDisplayName, type DfContext } from './pattern-df.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
@@ -458,24 +458,99 @@ function buildCroppedDisplays(
  *   7. Title-case the first 4 content tokens.
  */
 /**
- * How this destination keeps every line, phrased for customer-facing prose.
+ * The lossless levers this destination actually has, in accessibility order:
+ * least accessibility given up first.
  *
- * On a no-op destination (Datadog, CloudWatch, Azure, GCP, Sumo, managed ES)
- * naming compaction is a false claim about the customer's own platform, and
- * it is the kind a prospect catches on first read. Only Splunk, self-hosted
- * ES/OS and ClickHouse get the "compacted in place" clause.
+ * Read from `getAllowedActionsForDestination`, NOT from `compactsInPlace`.
+ * The old two-way branch on that boolean modelled a three-lever fact, and it
+ * failed in BOTH directions:
+ *
+ *   - FALSE PROMISE. Every destination without compaction was assumed to have
+ *     a cheaper tier, so the else-arm offered Sumo Logic and GCP Logging
+ *     "moved to a cheaper retained tier", which neither platform has.
+ *   - CONFESSION. The recommendation-rules line told CloudWatch and Datadog
+ *     customers "<SIEM> has no in-place compaction, so that lever is not used
+ *     here", introducing a term for a capability they never knew existed and
+ *     framing the plan as an apology for it.
+ *
+ * A lever a destination lacks is ABSENT from its report, never disclaimed and
+ * never offered. `test/destination-lever-vocabulary.test.ts` renders every
+ * destination and fails if one leaks back in.
+ */
+const LEVER_ORDER = ['compact', 'tier_down', 'offload'] as const;
+type LosslessLever = (typeof LEVER_ORDER)[number];
+
+function leversFor(siem: SiemId): LosslessLever[] {
+  const allowed = new Set(getAllowedActionsForDestination(siem));
+  return LEVER_ORDER.filter((l) => allowed.has(l));
+}
+
+/** "a", "a or b", "a, b, or c". */
+function orList(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? '';
+  if (parts.length === 2) return `${parts[0]} or ${parts[1]}`;
+  return `${parts.slice(0, -1).join(', ')}, or ${parts[parts.length - 1]}`;
+}
+
+/**
+ * How this destination keeps every line, phrased for customer-facing prose.
+ * Past-participle voice ("every line is ..."), full form with platform names.
  */
 function losslessClause(siem: SiemId, siemName: string): string {
-  return compactsInPlace(siem)
-    ? `compacted in place (stays queryable in ${siemName}) or recoverable from your own S3 (offloaded)`
-    : `moved to a cheaper retained tier in ${siemName} or recoverable from your own S3 (offloaded)`;
+  const levers = leversFor(siem);
+  // Name the platform once. On Elasticsearch, which has all three levers, the
+  // compact clause already says "stays queryable in Elasticsearch", so
+  // repeating it on the tier clause reads as boilerplate.
+  const phrase: Record<LosslessLever, string> = {
+    compact: `compacted in place (stays queryable in ${siemName})`,
+    tier_down: levers.includes('compact')
+      ? 'moved to a cheaper retained tier'
+      : `moved to a cheaper retained tier in ${siemName}`,
+    offload: 'recoverable from your own S3 (offloaded)',
+  };
+  return orList(levers.map((l) => phrase[l]));
 }
 
 /** Short form of the same fact, for bullet lines. */
 function losslessClauseShort(siem: SiemId): string {
-  return compactsInPlace(siem)
-    ? 'compacted in place or recoverable from your S3'
-    : 'moved to a cheaper retained tier or recoverable from your S3';
+  const phrase: Record<LosslessLever, string> = {
+    compact: 'compacted in place',
+    tier_down: 'moved to a cheaper retained tier',
+    offload: 'recoverable from your S3',
+  };
+  return orList(leversFor(siem).map((l) => phrase[l]));
+}
+
+/**
+ * Active voice, for "Each entry ..." lines describing what the receiver config
+ * does to a pattern.
+ */
+function losslessClauseActive(siem: SiemId, siemName: string): string {
+  const levers = leversFor(siem);
+  const phrase: Record<LosslessLever, string> = {
+    compact: `compacts the line in place (stays searchable in ${siemName})`,
+    tier_down: levers.includes('compact')
+      ? 'moves it to a cheaper retained tier'
+      : `moves it to a cheaper retained tier in ${siemName}`,
+    offload: 'offloads it to your own S3 (recoverable any time)',
+  };
+  return orList(levers.map((l) => phrase[l]));
+}
+
+/**
+ * The decision rule, as an ordered fallback chain over the levers this
+ * destination has. Single-lever destinations render one clause with no
+ * "else", which is what "does not apply" should look like.
+ */
+function leverRule(siem: SiemId, siemName: string): string {
+  const phrase: Record<LosslessLever, string> = {
+    compact: 'compact in place when the line is compressible (measured ≥40% smaller)',
+    tier_down: `tier down to a cheaper retained tier in ${siemName}`,
+    offload: 'offload to your own S3 (recoverable)',
+  };
+  return leversFor(siem)
+    .map((l) => phrase[l])
+    .join(', else ');
 }
 
 function heuristicName(template: string, identity: string): string {
@@ -591,6 +666,12 @@ interface EnrichedPattern extends ExtractedPattern {
  * terminal screen.
  */
 export function renderPocSummary(input: RenderInput, topN = 5): string {
+  // Shared document-frequency basis for every name rendered in this view.
+  const summaryDf = buildDfContext(
+    (input.extraction.patterns ?? [])
+      .map((p) => p.symbolMessage || p.hash)
+      .filter((x): x is string => !!x)
+  );
   const { patterns, clusters, redundancyPairs } = enrichPatternsWithSections(input);
   const setDiff = setDifferenceLabels(patterns);
   const totalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
@@ -606,11 +687,33 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // against an unaided AI that pulled a 5,000-line sample.
   lines.push(renderScaleHeader(input, patterns));
   lines.push('');
-  const emergence = countEmergence(patterns);
-  if (emergence.hasTimestamps) {
-    lines.push(renderEmergenceSummary(emergence));
-    lines.push('');
-  }
+  // NO emergence summary. `new` / `growing` / first-seen cannot be derived
+  // from a POC pull, and the version that shipped here was not measuring
+  // novelty at all.
+  //
+  // The classifier was `firstSeenMs >= windowEnd - 24h`, where `firstSeenMs`
+  // is first-seen IN THE SAMPLE (the envelope field is literally named
+  // `first_seen_in_sample_iso`) and the pull is a stratified RANDOM sample of
+  // sub-windows. So a pattern was "new" when its earliest *sampled* event
+  // happened to land after the cutoff, which for a rare pattern is close to a
+  // coin flip: P(all n sampled events land in the back half) = 0.5^n.
+  //
+  // Measured on a real pull: of 619 shapes, 288 were labelled new; 76% of
+  // those occurred exactly ONCE, none of the "not new" ones did, and 236 of
+  // the 288 also occurred in the FIRST half of the same sample. Two runs over
+  // the identical log group reported 127 new and then 253 new.
+  //
+  // There is no better estimator to substitute. A sample cannot say when
+  // something first appeared, only when it first appeared in the sample, and
+  // the gap between those is unbounded. First-seen is an observation of
+  // CONTINUOUS time and belongs to the metrics tier, where `whats_new`,
+  // `pattern_diff`, `trend` and `baseline` already read the engine's
+  // per-pattern series over PromQL. That is a post-install capability by
+  // nature: it is an argument FOR installing, not one available before.
+  //
+  // What survives from a sample is what the sample actually contains: volume,
+  // cost, severity, service, incident co-occurrence, redundancy,
+  // compressibility.
 
   if (input.totalDailyGb && input.totalDailyGb > 0) {
     const annualCost = projectBilling(totalCost, input.windowHours, 24 * 365);
@@ -641,6 +744,9 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // before the top-N table so the agent sees co-occurring failures
   // grouped. The detector itself sits in detectors/incident-cluster.ts.
   if (clusters.length > 0) {
+    // One df over the whole visible set, shared by the incident and
+    // redundancy tables so their names are chosen on the same basis as the
+    // drivers table below rather than by string length.
     lines.push('### Same incident, multiple patterns');
     lines.push('');
     lines.push(
@@ -652,7 +758,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     for (let i = 0; i < clusters.length; i++) {
       const c = clusters[i];
       const label = truncate(c.representativeLabel, 60);
-      const ids = c.members.map((m) => `\`${shortIdentity(m.identity)}\``).join(', ');
+      const ids = c.members.map((m) => `\`${shortIdentity(m.identity, summaryDf)}\``).join(', ');
       lines.push(
         `| ${i + 1}. ${label} | ${c.service} | ${ids} | ${fmtCostDisclosed(input, c.combinedMonthlyUsd)} | ${c.joinSignal} (${(c.confidence * 100).toFixed(0)}%) |`,
       );
@@ -678,21 +784,34 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     lines.push('|---|---|---|---|');
     for (const pair of redundancyPairs.slice(0, 5)) {
       lines.push(
-        `| \`${shortIdentity(pair.identityA)}\` | \`${shortIdentity(pair.identityB)}\` | ${pair.ratio.toFixed(2)} | ${fmtCount(pair.minCount)} |`,
+        `| \`${shortIdentity(pair.identityA, summaryDf)}\` | \`${shortIdentity(pair.identityB, summaryDf)}\` | ${pair.ratio.toFixed(2)} | ${fmtCount(pair.minCount)} |`,
       );
     }
     lines.push('');
   }
 
-  // Top-N table.
+  // Top-N table, ordered by COST and deliberately including protected rows.
+  //
+  // This was briefly changed to rank by savings and drop `keep` rows, because
+  // "Top N wins" listing three rows that save $0 reads badly — the same fix
+  // that is correct in renderPocReport, where a separate full drivers table
+  // still shows everything. It is WRONG here: this is the only table in the
+  // summary view, so filtering removed the ERROR/WARN patterns and with them
+  // the ⚠ risk banner that tells a reader which patterns feed live alerts.
+  // Three tests caught it. Hiding a safety signal to tidy a heading is a bad
+  // trade, so the content stays and the heading is what changes: these are
+  // cost drivers with a recommended action, and some of those actions are
+  // deliberately to leave the pattern alone.
   const top = patterns.slice(0, topN);
   if (top.length > 0) {
-    lines.push(`### Top ${top.length} wins`);
+    lines.push(`### Top ${top.length} cost drivers`);
     lines.push('');
     // New columns: Action (refined from dep-check + severity), Slot fan-out
     // (top cardinality), Age (first-seen from engine or `(unknown)`).
-    lines.push('| # | Pattern | Service | Sev | % | Action | Slot fan-out | Age | Annual savings |');
-    lines.push('|---|---|---|---|---|---|---|---|---|');
+    // Action (refined from dep-check + severity) and Slot fan-out (top
+    // cardinality). No Age column: see the note above the emergence summary.
+    lines.push('| # | Pattern | Service | Sev | % | Action | Slot fan-out | Annual savings |');
+    lines.push('|---|---|---|---|---|---|---|---|');
     for (let i = 0; i < top.length; i++) {
       const p = top[i];
       const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
@@ -701,9 +820,8 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
       const cluster = p.poc.incidentClusterId !== null ? ` 🔗${p.poc.incidentClusterId + 1}` : '';
       const action = renderActionCell(p);
       const slot = renderSlotCell(p);
-      const age = renderEmergenceCell(p);
       lines.push(
-        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${age} | ${fmtCostDisclosed(input, annualSavings)} |`,
+        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${fmtCostDisclosed(input, annualSavings)} |`,
       );
     }
     lines.push('');
@@ -726,7 +844,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // Views CTA.
   lines.push('**Available views**, call `log10x_poc_from_siem_status` again with:');
   lines.push('- `view: "full"`: complete 9-section report');
-  lines.push('- `view: "yaml"`: receiver config for top patterns (compact / offload), paste-ready');
+  lines.push('- `view: "yaml"`: receiver config for top patterns, paste-ready');
   lines.push('- `view: "configs"`: native SIEM hard-drop configs (lossy escape hatch, not recommended)');
   lines.push('- `view: "pattern", pattern: "<identity>"`: deep dive on a specific pattern');
   lines.push('- `view: "top", top_n: 20`: expanded drivers table');
@@ -754,7 +872,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
   lines.push('```yaml');
   lines.push('# receiver config, paste into your GitOps ConfigMap');
   lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
-  lines.push('# Lossless: every entry is compacted, offloaded (recoverable), or tier-dropped. Nothing dropped.');
+  lines.push(`# Lossless: every entry is ${losslessClauseShort(input.siem)}. Nothing dropped.`);
   lines.push('# Run log10x_dependency_check on each identity before committing.');
   lines.push('');
   if (patterns.length === 0) {
@@ -1255,9 +1373,8 @@ export function renderPocReport(input: RenderInput): RenderResult {
     const cropped = buildCroppedDisplays(patterns.slice(0, topN).map((p) => p.identity));
     for (let i = 0; i < topN; i++) {
       const p = patterns[i];
-      const newFlag = p.count === 1 && input.extraction.totalEvents > 100 ? 'new?' : '';
       lines.push(
-        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} | ${newFlag} |`
+        `| ${i + 1} | ${displayNameCompact(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, cropped.get(p.identity), setDiff.get(p.identity))} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtCount(p.count)} | ${fmtPct(p.pctOfTotal * 100)} | ${fmtCostDisclosed(input, p.costPerWindow)} | ${fmtCostDisclosed(input, p.costPerWeek)} |`
       );
     }
     lines.push('');
@@ -1322,11 +1439,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push(sec('Receiver Recommendations'));
   lines.push('');
   lines.push(
-    `Per-pattern lossless lever with reasoning, projected savings, and a ready-to-paste log10x receiver config. Each entry ${
-      compactsInPlace(input.siem)
-        ? `compacts the line in place (stays searchable in ${siemName}), offloads it to your own S3 (recoverable any time), or moves it to a cheaper retained tier`
-        : `offloads the line to your own S3 (recoverable any time) or moves it to a cheaper retained tier in ${siemName}`
-    }. Nothing is sampled or dropped.`
+    `Per-pattern lossless lever with reasoning, projected savings, and a ready-to-paste log10x receiver config. Each entry ${losslessClauseActive(input.siem, siemName)}. Nothing is sampled or dropped.`
   );
   lines.push('');
   const receiverTopN = Math.min(patterns.length, 10);
@@ -1356,7 +1469,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push(sec('Native SIEM Exclusion Configs'));
   lines.push('');
   lines.push(
-    `10x keeps every line (compact or offload), so this plan has no drop candidates. If you specifically want to hard-drop a pattern (lossy, not recommended), native ${siemName} and Fluent Bit exclusion configs are available via the \`configs\` view (\`log10x_poc_from_siem_status\` with \`view: "configs"\`).`,
+    `10x keeps every line, so this plan has no drop candidates. If you specifically want to hard-drop a pattern (lossy, not recommended), native ${siemName} and Fluent Bit exclusion configs are available via the \`configs\` view (\`log10x_poc_from_siem_status\` with \`view: "configs"\`).`,
   );
   lines.push('');
 
@@ -1430,7 +1543,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
   }
   lines.push(
-    'Before changing any pattern, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. The lever is lossless, but compacting or offloading a pattern that feeds a search-time field extraction is worth confirming first.'
+    'Before changing any pattern, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. The lever is lossless, but changing how a pattern is stored is worth confirming first when it feeds a search-time field extraction.'
   );
   lines.push('');
 
@@ -1443,7 +1556,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     '1. Install the Log10x Receiver in your forwarder pipeline: https://doc.log10x.com/apps/receiver/'
   );
   lines.push(
-    '2. Commit the compact/offload config above into your GitOps repo (the receiver watches a ConfigMap).'
+    '2. Commit the receiver config above into your GitOps repo (the receiver watches a ConfigMap).'
   );
   lines.push(
     '3. Verify before you trust it: the receiver publishes exact before/after bytes per pattern, so you watch the reduction land in your own metrics before you commit. Nothing is dropped, so there is nothing to expire or roll back.'
@@ -1452,7 +1565,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Manual: native SIEM config (no log10x runtime)');
   lines.push('');
   lines.push(
-    'Without the receiver runtime there is no in-place compaction or offload (those need the engine). The native path can only hard-drop a pattern, which is lossy and not the recommended plan.',
+    'Without the receiver runtime none of the lossless levers are available (those need the engine). The native path can only hard-drop a pattern, which is lossy and not the recommended plan.',
   );
   lines.push(
     `If you specifically want to discard a pattern at ${SIEM_DISPLAY_NAMES[input.siem]} or the forwarder, the exclusion configs are in the \`configs\` view. Run \`log10x_dependency_check\` on each pattern first, then monitor ingestion volume for 24-48h to confirm the change.`,
@@ -1506,13 +1619,12 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // Describes the levers available on THIS destination, not the generic
     // rule set. The generic version hedged correctly ("compact in place when
     // the SIEM supports it") but still put the words in front of a reader
-    // whose platform cannot do it, which is how the false claim survived
-    // four rounds of review: it reads as a promise, not a conditional.
-    `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${
-      compactsInPlace(input.siem)
-        ? `compact in place when the line is compressible (measured ≥40% smaller), else offload to your own S3 (recoverable)`
-        : `tier_down to a cheaper retained tier where ${siemName} offers one, else offload to your own S3 (recoverable). ${siemName} has no in-place compaction, so that lever is not used here`
-    }. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
+    // whose platform cannot do it. The hedge was then replaced by an explicit
+    // confession ("<SIEM> has no in-place compaction, so that lever is not
+    // used here"), which is the same mistake in the opposite key: a term the
+    // reader has no context for, framed as an apology. `leverRule` renders
+    // only what the destination has, and nothing about what it does not.
+    `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${leverRule(input.siem, siemName)}. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
   );
   lines.push(
     '- **Confidence** is `high` for patterns with ≥100 events in the window (stable rate), `medium` for 10-99, `low` for <10.'
@@ -2229,7 +2341,7 @@ function renderEmergenceSummary(t: EmergenceTally): string {
   const parts: string[] = [];
   if (t.newCount > 0) parts.push(`**${t.newCount} new** (last 24h, incident signal)`);
   if (t.growingCount > 0) parts.push(`**${t.growingCount} growing** (≥2x window average, regression candidates)`);
-  if (t.stableCount > 0) parts.push(`${t.stableCount} stable (steady high-volume noise, compact/offload candidates)`);
+  if (t.stableCount > 0) parts.push(`${t.stableCount} stable (steady high-volume noise, reduction candidates)`);
   if (t.burstCount > 0) parts.push(`${t.burstCount} bursty (transient, check correlation)`);
   if (parts.length === 0) return '';
   return `Of those patterns: ${parts.join('; ')}.`;
@@ -2259,18 +2371,23 @@ function renderEmergenceCell(p: EnrichedPattern): string {
 /**
  * Render the Action cell. Reads the refined action (post dep-check
  * fold-in) and renders one of:
- *   - **FIX**     — ERROR-class with a dependency-failure descriptor
  *   - COMPACT     — lossless re-encode, stays searchable in the SIEM
  *   - OFFLOAD     — lossless route to customer S3, recoverable
  *   - TIER DOWN   — lossless move to the SIEM's cheaper tier
  *   - **BLOCKED** — dep-check found refs, confirm before changing
- *   - KEEP        — default for non-actionable rows
+ *   - KEEP        — default for non-actionable rows, including error-class
+ *
+ * Every value here is something the receiver config PERFORMS. The removed
+ * **FIX** was not: it told the reader to go repair a broken dependency in
+ * their own code, which we cannot do, verify or price, and which made a cost
+ * report read as a code review. Error-class rows now render KEEP like every
+ * other protected row, and the reason they are protected reaches the reader
+ * through the "Why not more" ceiling line instead.
  *
  * Every lever here is lossless, so none are bolded as destructive.
  */
 function renderActionCell(p: EnrichedPattern): string {
   const refined = p.poc.refinedAction;
-  if (refined === 'fix') return '**FIX**';
   if (refined === 'blocked') return '**BLOCKED**';
   if (refined === 'compact') return 'COMPACT';
   if (refined === 'offload') return 'OFFLOAD';
@@ -2303,13 +2420,23 @@ function renderAgeCell(p: EnrichedPattern): string {
 }
 
 /**
- * Display a raw identity tersely when no AI pretty name is available.
- * Caps length so a 120-char identity doesn't blow out a CLI table.
+ * Display an identity tersely in the incident / redundancy tables.
+ *
+ * This used to swap underscores for spaces and hard-cut at 46 characters,
+ * which is not a name: every pattern sharing a 46-character prefix rendered
+ * as the SAME string. On a real pull that put five identical-looking rows in
+ * one incident and printed both sides of a redundant pair as the same text,
+ * which reads as a bug even though the identities underneath differ.
+ *
+ * Route through `buildDisplayName` — the same path the drivers table uses —
+ * so a name is chosen by what distinguishes it, not by where the 46th
+ * character happens to fall. `df` is optional: without it buildDisplayName
+ * falls back to a mid-ellipsis of the whole name, which is still better than
+ * a prefix cut, and callers that have a df pass it.
  */
-function shortIdentity(identity: string): string {
-  const spaced = identity.replace(/_/g, ' ');
-  if (spaced.length <= 48) return spaced;
-  return spaced.slice(0, 46) + '…';
+function shortIdentity(identity: string, df?: DfContext): string {
+  const { display_name } = buildDisplayName(identity, { df, width: 46 });
+  return display_name || identity.replace(/_/g, ' ').slice(0, 46);
 }
 
 /**

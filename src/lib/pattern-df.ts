@@ -56,6 +56,41 @@ export const MAX_DISCRIMINATORS = 5;
 export const ANCHOR_TOKENS = 3;
 
 /**
+ * How far into a name to look for the start of the human sentence. Sized to
+ * the longest logger preamble observed in a real capture: Kafka's
+ * `INFO_UnifiedLog_partition_cluster_metadata_dir_tmp_kafka_logs_` is 12
+ * tokens before the message begins.
+ */
+const SENTENCE_SCAN_LIMIT = 14;
+
+/**
+ * Tokens that mark the end of a source-location / logger preamble. Their
+ * presence is what licenses skipping ahead to the message; without one, the
+ * name is assumed to open with its own message already.
+ *
+ * WHOLE-TOKEN match, deliberately. An earlier version matched any token
+ * ENDING in an extension, which also matched `results`, `events`, `requests`,
+ * `errors`, `limits` and `counts` as TypeScript files, plus `cargo`, `ago`,
+ * `logo`, `copy` and `entropy`. Those are among the commonest words in a log
+ * message, so the loose form would have skipped past real message text on any
+ * data that happened to contain them. It did not bite on the capture this was
+ * developed against, which is exactly why it is worth stating.
+ *
+ * `symbolMessage` tokens are already split on separators, so a path like
+ * `internal/base_exporter.go` arrives as `... base exporter go` and the
+ * extension is a token of its own. That is what makes a whole-token match
+ * both possible and sufficient.
+ */
+const PREAMBLE_MARKER = /^(?:go|py|java|rb|ts|js|cc|cpp|rs|php|v\d+|\d+)$/i;
+
+/** Carry no information once inside a name; skipped when COLLECTING the anchor. */
+const STOPWORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'this', 'that',
+  'these', 'those', 'it', 'its', 'to', 'of', 'in', 'on', 'at', 'by', 'for',
+  'and', 'or', 'as', 'with', 'from',
+]);
+
+/**
  * Anchor size scales with the column budget. A fixed constant cannot serve
  * three different widths: the report has 56 codepoints and can afford three
  * subject tokens, while the 40-44 surfaces cannot, and spending their budget
@@ -297,13 +332,61 @@ export function buildDisplayName(
   // discriminators. The anchor says what the statement is; the
   // discriminators say which variant. Head tokens (service/severity) are
   // skipped because the report already renders those in their own columns.
+  // Anchor at the MESSAGE, not at position. Taking the first few tokens
+  // anchors on whatever the logging framework prints first, which for most
+  // runtimes is the source location:
+  //
+  //   error_internal_base_exporter_go_Exporting_failed_Rejecting_data_...
+  //          ^--------------------^ Go file path      ^-- the actual message
+  //
+  // and produced "internal base exporter", which names the file the line was
+  // emitted from rather than what happened. Instead, find where the human
+  // sentence starts: the first capitalised word of >=3 chars followed by a
+  // lowercase word. That lands on "Exporting failed Rejecting data" for the
+  // example above, and on "Received chat completion request" for a Python
+  // logger that leads with `INFO in app`. Falls back to positional when a
+  // symbolMessage carries no sentence-shaped run, which is the common case
+  // for already-readable names like `cart cartstore ValkeyCartStore`.
   const anchorTokens: string[] = [];
-  for (const t of tokens) {
-    if (anchorTokens.length >= anchorBudget(width)) break;
+  const budget = anchorBudget(width);
+  const eligible = (t: string): boolean => {
     const lower = t.toLowerCase();
-    if (codepointLength(t) <= 2) continue;
-    if (heads.has(lower)) continue;
-    if (SEVERITY_WORDS.has(lower)) continue;
+    return codepointLength(t) > 2 && !heads.has(lower) && !SEVERITY_WORDS.has(lower);
+  };
+  // Only move past the lead-in when it looks like a source location or logger
+  // preamble. When the line already OPENS with its message in lowercase
+  // (`failed_to_upload_metrics_...`), scanning ahead lands on the first
+  // capitalised thing after it -- a gRPC status like `Unavailable` -- and
+  // drops the event word. Require evidence of a preamble before skipping.
+  let start = 0;
+  const preambleEnd = tokens.findIndex((t) => PREAMBLE_MARKER.test(t));
+  const scanFrom = preambleEnd >= 0 ? preambleEnd : 0;
+  for (let i = scanFrom; i < Math.min(tokens.length, SENTENCE_SCAN_LIMIT); i++) {
+    const t = tokens[i];
+    if (!eligible(t)) continue;
+    // `x !== x.toUpperCase()` is identity for digits and punctuation, so a
+    // hex fragment (`7f9c`) or a status code (`404`) passed as a sentence
+    // start. Require an actual uppercase LETTER.
+    const first = t.charAt(0);
+    if (!/\p{Lu}/u.test(first) || t.slice(1) !== t.slice(1).toLowerCase()) continue;
+    const next = tokens[i + 1] ?? '';
+    // A sentence continues into a lowercase word. Requiring one keeps the
+    // anchor off capitalised VALUES (`True`, an enum, a hostname) that happen
+    // to sit mid-name and are followed by more capitalised tokens.
+    if (next && next.charAt(0) === next.charAt(0).toLowerCase() && /[a-z]/.test(next.charAt(0))) {
+      start = i;
+      break;
+    }
+  }
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (anchorTokens.length >= budget) break;
+    if (!eligible(t)) continue;
+    // Stopwords are load-bearing for DETECTING a sentence (a capitalised word
+    // followed by `the` is how we know it is prose) but carry nothing once
+    // collected. Spending anchor budget on them just swaps one filler for
+    // another.
+    if (STOPWORDS.has(t.toLowerCase())) continue;
     if (anchorTokens.includes(t)) continue;
     anchorTokens.push(t);
   }
@@ -334,7 +417,29 @@ export function buildDisplayName(
     ordered.push(t);
   }
 
-  let name = ordered.join(' ');
+  // Overflow: shed before chopping. Anchoring unions extra tokens in, and
+  // mid-ellipsis then cuts a WORD in half -- `Sender failed` renders as
+  // `Se…ailed`, which is less readable than the un-anchored name it replaced.
+  // Drop the least-discriminating selected tokens (highest df) first, keeping
+  // the anchor, until the name fits. Only fall back to mid-ellipsis when even
+  // the anchor alone is too long.
+  let kept = [...ordered];
+  const anchorSet = new Set(anchorTokens);
+  while (codepointLength(kept.join(' ')) > width) {
+    let victim = -1;
+    let victimDf = -1;
+    for (let i = kept.length - 1; i >= 0; i--) {
+      if (anchorSet.has(kept[i])) continue;
+      const d = opts.df!.dfMap.get(kept[i]) ?? 1;
+      if (d > victimDf) {
+        victimDf = d;
+        victim = i;
+      }
+    }
+    if (victim < 0) break;
+    kept.splice(victim, 1);
+  }
+  let name = kept.join(' ');
   if (codepointLength(name) > width) name = midEllipsis(name, width);
   return { display_name: name, display_tokens };
 }
