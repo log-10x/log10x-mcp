@@ -51,9 +51,15 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
   // In demo fallback the whole `log10x_configure_env` route below is closed:
   // the tool is denylisted and never registers. Lead with the step that IS
   // available so the agent does not try a call the server will not answer.
-  const demoPreamble = isDemoFallbackActive()
+  // opts.configureEnvRegistered, when given, states registration explicitly and
+  // wins over the process-wide check, so a caller can render this without
+  // reaching into demo state.
+  const configureEnvClosed =
+    opts.configureEnvRegistered === false ||
+    (opts.configureEnvRegistered === undefined && isDemoFallbackActive());
+  const demoPreamble = configureEnvClosed
     ? [
-        `**This session is in demo mode** (keyless boot, read-only public dataset). \`log10x_configure_env\` is NOT registered here, so calling it will fail.`,
+        `**This session is in demo mode** (keyless boot, read-only public dataset). Do not call \`log10x_configure_env\`: it is NOT registered here, so the call will fail.`,
         '',
         `**Do this first**: call \`log10x_signin_start\` to mint an API key for the user's own account, then restart the MCP. \`log10x_configure_env\` registers once a key is present, and the setup below applies from there. Setting \`LOG10X_API_KEY\` in the MCP server env is the equivalent manual route.`,
         '',
@@ -307,7 +313,13 @@ export function defaultActionsForKind(
       // the registered tool set. Naming it there hands the agent a call it
       // cannot make. log10x_signin_start IS registered in that mode and is
       // the step that unlocks configure_env, so route there instead.
-      if (isDemoFallbackActive()) {
+      //
+      // The caller may state registration explicitly via
+      // opts.configureEnvRegistered; that wins, because it is the form a
+      // caller can test without reaching into process-wide demo state.
+      // Otherwise fall back to the live check.
+      if (opts?.configureEnvRegistered === false ||
+          (opts?.configureEnvRegistered === undefined && isDemoFallbackActive())) {
         return [
           {
             tool: 'log10x_signin_start',
