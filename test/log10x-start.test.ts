@@ -18,6 +18,8 @@ import {
   type CapabilitySummary,
 } from '../src/tools/log10x-start.js';
 import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-types.js';
+import { toolUnavailableReason } from '../src/lib/tool-availability.js';
+import type { Environments } from '../src/lib/environments.js';
 
 test('executeLog10xStart returns a schema-valid StructuredOutput envelope', async () => {
   const result = await executeLog10xStart({});
@@ -210,4 +212,77 @@ test('_internals.buildForbiddenNextActions returns the four routing-rule-named t
       'log10x_services',
     ].sort(),
   );
+});
+
+// ── The menu must not offer a door the gate holds shut ────────────────
+//
+// Measured before the fix: on a keyless boot the demo dataset answers the
+// tier probes, so cost_attribution_available came back true and the menu
+// shipped investigate_spike with applicable: true, routing to
+// log10x_top_patterns — which the demo gate then refuses with
+// not_configured (metrics_backend).
+
+test('applyToolGates demotes an item whose routed tool the demo gate would refuse', () => {
+  const caps: CapabilitySummary = {
+    cost_attribution_available: true,
+    compact_installable: true,
+    tier_down_available: false,
+    forensic_query_available: false,
+    offload_ready: false,
+    siem_query_available: false,
+    receiver_discrimination_uncertain: false,
+  };
+  // Pure demo state: nothing configured, silently landed on the demo backend.
+  const demoEnvs = { isDemoMode: true, demoFallbackReason: undefined } as unknown as Environments;
+
+  const ungated = _internals.buildTierMenu(caps, 'reporter');
+  const spikeBefore = ungated.find((m) => m.action === 'investigate_spike');
+  assert.ok(spikeBefore, 'investigate_spike must be in the tier menu');
+  assert.equal(spikeBefore!.applicable, true, 'tier capability alone says applicable');
+  assert.equal(spikeBefore!.routes_to, 'log10x_top_patterns');
+
+  const gated = _internals.applyToolGates(ungated, demoEnvs);
+  const spikeAfter = gated.find((m) => m.action === 'investigate_spike');
+  assert.equal(spikeAfter!.applicable, false, 'the demo gate refuses log10x_top_patterns, so the menu must not offer it');
+  assert.match(spikeAfter!.gated_reason ?? '', /log10x_signin_start/, 'gated_reason must name a tool that IS callable here');
+});
+
+test('no applicable menu item routes to a tool the same gates would refuse', () => {
+  const caps: CapabilitySummary = {
+    cost_attribution_available: true,
+    compact_installable: true,
+    tier_down_available: true,
+    forensic_query_available: true,
+    offload_ready: true,
+    siem_query_available: true,
+    receiver_discrimination_uncertain: false,
+  };
+  const demoEnvs = { isDemoMode: true, demoFallbackReason: undefined } as unknown as Environments;
+  for (const tier of ['dev', 'reporter', 'receiver', 'retriever'] as const) {
+    const menu = _internals.buildActionMenu(caps, tier, demoEnvs);
+    for (const item of menu) {
+      if (!item.applicable) continue;
+      assert.equal(
+        toolUnavailableReason(item.routes_to, demoEnvs),
+        null,
+        `tier ${tier}: menu offers ${item.action} -> ${item.routes_to}, which would refuse`,
+      );
+    }
+  }
+});
+
+test('a configured environment leaves the menu ungated', () => {
+  const caps: CapabilitySummary = {
+    cost_attribution_available: true,
+    compact_installable: true,
+    tier_down_available: false,
+    forensic_query_available: false,
+    offload_ready: false,
+    siem_query_available: false,
+    receiver_discrimination_uncertain: false,
+  };
+  const realEnvs = { isDemoMode: false, demoFallbackReason: undefined } as unknown as Environments;
+  const menu = _internals.buildActionMenu(caps, 'reporter', realEnvs);
+  const spike = menu.find((m) => m.action === 'investigate_spike');
+  assert.equal(spike!.applicable, true, 'nothing is gated when the user has their own env');
 });
