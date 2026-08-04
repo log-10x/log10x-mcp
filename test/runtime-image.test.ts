@@ -66,8 +66,17 @@ test('an empty/whitespace LOG10X_RUNTIME_IMAGE falls through rather than yieldin
 
 // ── compile path ───────────────────────────────────────────────────────────
 
-test('compile path defaults to the compiler image', () => {
-  assert.equal(resolveCompilerImage({}), 'log10x/compiler-10x:latest');
+test('compile path defaults to the compiler image, at a PINNED tag', () => {
+  const image = resolveCompilerImage({});
+  assert.equal(image, 'log10x/compiler-10x:1.1.39');
+
+  // The pin is the point, not the particular version. A symbol library built
+  // from a mutable tag is not reproducible: nothing in the emitted .10x.json
+  // units records which image produced them, so two compiles of the same
+  // sources can silently go through two different engines. Bumping the version
+  // above is expected; reverting to `:latest` is the regression this guards.
+  assert.doesNotMatch(image, /:latest$/, 'the default compiler image must not be a mutable tag');
+  assert.match(image, /^log10x\/compiler-10x:\d+\.\d+\.\d+$/);
 });
 
 test('compile path keeps the LOG10X_TENX_IMAGE fallback for non-runtime images', () => {
