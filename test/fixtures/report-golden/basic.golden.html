@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Log10x &mdash; log volume action plan</title>
+<style>
+:root{--bg:#f2f4f6;--panel:#fff;--sunk:#eaeef2;--line:#dde3e9;--line2:#c8d1da;--ink:#161c23;--dim:#5d6773;--faint:#8b95a1;--val:#8a3f76;--val-bg:#f6ecf3;--bar:#2c3540;--ok:#2e6b4f;--ok-bg:#ddefe6;--wrn:#8a5c10;--skip:#8b95a1}
+@media (prefers-color-scheme:dark){:root{--bg:#101419;--panel:#171c22;--sunk:#12161b;--line:#242b34;--line2:#333c47;--ink:#dfe5ec;--dim:#8b96a4;--faint:#6a7481;--val:#d091c0;--val-bg:#2a1e28;--bar:#9aa6b4;--ok:#79b39c;--ok-bg:#1c2b25;--wrn:#d5a445;--skip:#6a7481}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:880px;margin:0 auto;padding:0 22px 90px}
+header{padding:44px 0 28px;border-bottom:2px solid var(--line2)}
+.eyebrow{display:flex;gap:8px;align-items:center;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0 0 12px;font-weight:600;flex-wrap:wrap}
+.stack{display:inline-flex;gap:6px;margin-left:auto;letter-spacing:.02em;text-transform:none}
+.stack span{background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--dim);font-weight:600}
+h1{font-size:clamp(26px,4.2vw,36px);line-height:1.12;letter-spacing:-.022em;font-weight:680;margin:0 0 14px;text-wrap:balance}
+.lede{max-width:64ch;color:var(--dim);font-size:14.5px;margin:0 0 8px}
+.lede b{color:var(--ink);font-weight:600}
+.totals{display:flex;flex-wrap:wrap;gap:28px;margin-top:24px}
+.tot b{display:block;font-size:23px;font-weight:660;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
+.tot span{font-size:11.5px;color:var(--dim)}
+.verdict{margin:30px 0 0;padding:20px 22px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--val);border-radius:5px}
+.verdict h3{margin:0 0 8px;font-size:16.5px;font-weight:650;letter-spacing:-.01em}
+.verdict p{margin:0;color:var(--dim);font-size:14px;max-width:72ch}
+h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);font-weight:650;margin:50px 0 6px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+.sub{max-width:66ch;color:var(--dim);font-size:13.5px;margin:12px 0 4px}
+.act{padding:26px 0;border-bottom:1px solid var(--line)}
+.ahead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.anum{flex:0 0 26px;height:26px;display:inline-flex;align-items:center;justify-content:center;background:var(--bar);color:var(--bg);border-radius:50%;font-size:13px;font-weight:700;align-self:center}
+.ahead h3{margin:0;font-size:17.5px;font-weight:650;letter-spacing:-.012em}
+.impact{margin-left:auto;font-size:14px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--ok);background:var(--ok-bg);border-radius:4px;padding:3px 10px}
+.anote{max-width:70ch;color:var(--dim);font-size:13.5px;margin:10px 0 0}
+.annot{max-width:70ch;color:var(--dim);font-size:13px;font-style:italic;margin:6px 0 0}
+.alabel{font-size:10px;letter-spacing:.11em;text-transform:uppercase;color:var(--faint);font-weight:650;margin:16px 0 6px}
+.face{margin:0 0 4px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line2);border-radius:4px;padding:11px 13px;overflow-x:auto;font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.fl{display:block;white-space:pre}
+.fl.cont{padding-left:2.2em;color:var(--dim)}
+.face .v{font-style:normal;color:var(--val);background:var(--val-bg);border-radius:2px;padding:0 2.5px;font-weight:600}
+.face .tab{font-style:normal;color:var(--line2);padding:0 3px}
+.more{display:block;margin-top:4px;font-size:11px;color:var(--faint)}
+.evm{font-size:11.5px;color:var(--faint);margin:2px 0 10px;font-variant-numeric:tabular-nums}
+.evm code{font-size:11px}
+.cmd{margin:0;background:var(--sunk);border:1px solid var(--line);border-radius:4px;padding:11px 13px;overflow-x:auto;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--ink);white-space:pre}
+.cmd.rb{color:var(--dim)}
+code{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.after{display:flex;gap:0;align-items:stretch;margin-top:16px;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+.after>div{flex:1;padding:16px 18px;background:var(--panel)}
+.after>div+div{border-left:1px solid var(--line)}
+.after b{display:block;font-size:22px;font-weight:660;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.after span{font-size:11.5px;color:var(--dim)}
+.after .goal b{color:var(--ok)}
+.checks{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin-top:14px}
+.chk{display:flex;gap:9px;align-items:baseline;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:9px 12px;font-size:12.5px}
+.chk i{font-style:normal;font-weight:700}
+.chk.ok i{color:var(--ok)} .chk.warn i{color:var(--wrn)} .chk.skip i{color:var(--skip)}
+.chk span{color:var(--dim)}
+.chk.skip{opacity:.75}
+.kept{margin-top:14px;padding:14px 18px;background:var(--panel);border:1px solid var(--line);border-radius:5px;max-width:none}
+.kept p{margin:0;font-size:13.5px;color:var(--dim);max-width:72ch}
+.kept b{color:var(--ink);font-weight:600}
+footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--faint);max-width:72ch}
+footer p{margin:0 0 9px} footer b{color:var(--dim);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<p class="eyebrow">Log10x &middot; proof of concept, first run
+<span class="stack"><span>SIEM&nbsp;&middot;&nbsp;CloudWatch</span><span>forwarder&nbsp;&middot;&nbsp;fluentd</span></span></p>
+<h1>One hour of logs, 2 changes, 20% less volume</h1>
+<p class="lede">This window produced <b>9.9K events</b>. They resolve to <b>5 distinct log statements</b>; the plan below acts on <b>4 of them</b>.</p>
+<div class="totals">
+<div class="tot"><b>19.9 MB</b><span>ingested this window</span></div>
+<div class="tot"><b>3.9 MB</b><span>removable, this plan</span></div>
+<div class="tot"><b>20%</b><span>of current volume</span></div>
+<div class="tot"><b>6.0K</b><span>errors and warnings kept, all of them</span></div>
+</div>
+<div class="verdict">
+<h3>80% of this window is one repeating failure: Request failed dial tcp lookup opensearch on $ no such host exporter $</h3>
+<p>2 statements in otelcol report the same failure on every occurrence. Action 1 routes low-severity statements off the ingest path; nothing is deleted. Action 2 is the actual fix.</p>
+</div>
+</header>
+
+<h2>Action plan</h2>
+<article class="act">
+<div class="ahead"><span class="anum">1</span><h3>Route otelcol and other low-severity statements to the retrievable tier</h3><span class="impact">&minus;3.9 MB this window</span></div>
+<p class="anote">2 low-severity statements carry 3.9 MB this window. They keep landing in your own bucket, retrievable on demand; they stop landing on the ingest path. Nothing is deleted.</p>
+<p class="annot">Collector self-telemetry, confirmed with the platform team.</p>
+<div class="alabel">evidence, from your window</div>
+<pre class="face"><span class="fl">Logs exported resource logs <i class="v">$</i> log records <i class="v">$</i></span></pre><p class="evm">3.0K events &middot; 1.0K bytes each &middot; identifier <code>qkI1</code></p>
+<pre class="face"><span class="fl">cart request handled user <i class="v">$</i> latency <i class="v">$</i></span></pre><p class="evm">900 events &middot; 1.0K bytes each &middot; identifier <code>qkI2</code></p>
+<div class="alabel">the change</div>
+<pre class="cmd"># log10x-caps.csv — engine route rows, keyed by container.
+# Generated from this window; caps are scaled to the engine&#39;s 240s reset window.
+# the engine acts per container today; per-statement disposition is pending engine work, so these rows route the containers hosting the statements above
+cartservice,60000:tier_down:MCP poc_from_local soft
+otelcol,200000:tier_down:MCP poc_from_local soft</pre>
+<div class="alabel">apply</div>
+<pre class="cmd">kubectl -n demo create configmap log10x-caps --from-file=log10x-caps.csv \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n demo rollout restart daemonset tenx-fluentd</pre>
+<div class="alabel">undo</div>
+<pre class="cmd rb">kubectl -n demo delete configmap log10x-caps
+kubectl -n demo rollout restart daemonset tenx-fluentd</pre>
+</article>
+<article class="act">
+<div class="ahead"><span class="anum">2</span><h3>Fix the failure behind 80% of this window</h3><span class="impact">operational</span></div>
+<p class="anote">2 statements across 1 service report the same failure. Fixing it removes the volume at source; the re-run measures it.</p>
+<div class="alabel">evidence, from your window</div>
+<pre class="face"><span class="fl">Request failed dial tcp lookup opensearch on <i class="v">$</i> no such host exporter <i class="v">$</i></span><span class="fl cont">stack github.com/open-telemetry/opentelemetry-collector-contrib/exporter/opensearchexporter logger.go:<i class="v">$</i></span><span class="fl cont">stack github.com/opensearch-project/opensearch-go/v4/opensearchtransport transport.go:<i class="v">$</i></span><span class="more">+ 2 more lines in this statement</span></pre><p class="evm">3.0K events &middot; 2.7K bytes each &middot; identifier <code>qkE1</code></p>
+<pre class="face"><span class="fl">Exporting failed dial tcp lookup opensearch on <i class="v">$</i> no such host exporter rejecting <i class="v">$</i></span></pre><p class="evm">3.0K events &middot; 2.7K bytes each &middot; identifier <code>qkE2</code></p>
+<div class="alabel">check</div>
+<pre class="cmd">kubectl -n demo run log10x-dnscheck --rm -it --image=busybox --restart=Never -- \
+  sh -c &#39;nslookup &lt;failing-hostname&gt;&#39;</pre>
+</article>
+
+<h2>Expected result</h2>
+<div class="after">
+<div><b>19.9 MB</b><span>this window</span></div>
+<div class="goal"><b>16 MB</b><span>after the volume actions, same events</span></div>
+<div><b>0</b><span>events deleted</span></div>
+</div>
+<p class="sub">Apply, let one window pass, and run the analysis again: this report regenerates with a before and after column. That re-run, not this estimate, is the number to take to your team.</p>
+
+<h2>What was verified on this run</h2>
+<div class="checks">
+<div class="chk ok"><i>&#10003;</i><div>engine ran locally <span>&middot; tenx golden</span></div></div>
+<div class="chk ok"><i>&#10003;</i><div>9.9K events resolved to 5 statements</div></div>
+<div class="chk ok"><i>&#10003;</i><div>multi-line statements welded <span>&middot; 1 statements arrive whole</span></div></div>
+<div class="chk ok"><i>&#10003;</i><div>severity attribution sufficient <span>&middot; 100% of statements</span></div></div>
+<div class="chk skip"><i>&ndash;</i><div>retrievable tier delivery <span>&middot; not configured in this window &middot; action 1 enables it</span></div></div>
+<div class="chk skip"><i>&ndash;</i><div>environment doctor <span>&middot; run log10x_doctor for engine + delivery checks &middot; not run on this pass</span></div></div>
+</div>
+<div class="kept">
+<p><b>What this plan does not touch:</b> every ERROR and WARN event (6.0K this window) stays on the ingest path in full. Statements routed by action 1 land in your own bucket and come back on demand with their statement identifier as the query key.</p>
+</div>
+
+<footer>
+<p><b>How to read this.</b> A statement is one line of code in one of your services, recognised across every line it produced. <i class="v" style="font-style:normal;color:var(--val);background:var(--val-bg);border-radius:2px;padding:0 2.5px;font-weight:600">$</i> marks a value that varied and was removed. The identifier on each statement is stable across restarts and deployments and works as a query key.</p>
+<p><b>Scope.</b> One hour, analysed in place; no log data left the machine. Figures are this window's arithmetic, not an extrapolation. The re-run after applying is the authoritative measurement.</p>
+<p>template v1 &middot; generated 2026-08-07T01:00:00.000Z &middot; log10x-mcp 0.0.0-golden &middot; tenx golden</p>
+</footer>
+</div>
+</body>
+</html>

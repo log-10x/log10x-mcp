@@ -21,6 +21,9 @@
  * trusting the savings projection.
  */
 
+import { promises as fs } from 'fs';
+import * as nodePath from 'path';
+
 import { z } from 'zod';
 
 import {
@@ -29,12 +32,26 @@ import {
   type LocalSourceOptions,
   type LocalSourceResult,
 } from '../lib/local-source.js';
+import { sampleFromFile } from '../lib/local-file-source.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
-import { DEFAULT_ANALYZER_COST_PER_GB } from '../lib/siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
+import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
+import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/build-report-data.js';
+import { renderReportHtml } from '../lib/report/html-template-v1.js';
+import { readClientVersion } from '../lib/manifest.js';
+
+const MCP_VERSION = readClientVersion();
+
+export const REPORT_FILE_NAME = 'log10x-poc-report.html';
+
+const SIEM_IDS = [
+  'cloudwatch', 'datadog', 'sumo', 'gcp-logging', 'elasticsearch',
+  'azure-monitor', 'splunk', 'clickhouse', 'coralogix', 'elastic-serverless',
+] as const;
 
 export const pocFromLocalSchema = {
   source: z
@@ -42,9 +59,42 @@ export const pocFromLocalSchema = {
     .optional()
     .default('kubectl')
     .describe(
-      'Where to pull log lines from. `kubectl` samples pod logs; `file` samples local files/globs ' +
-        '(the path for serverless estates and hosts with no cluster — pass `paths`). ' +
+      'Where to pull log lines from. `kubectl` samples pod logs; `file` samples local logs — ' +
+        'pass `paths` (files, directories, globs) or `path` (one file; fluentd/k8s/docker-wrapped ' +
+        'JSONL is detected and normalized before the engine sees it). ' +
         '`docker` and `journald` are follow-up work.'
+    ),
+  path: z
+    .string()
+    .optional()
+    .describe(
+      'One local log file to analyse (source=`file`). Wrapped JSONL is normalized so the engine ' +
+        'patterns payloads, not wrappers. For many files or globs use `paths` instead.'
+    ),
+  siem: z
+    .enum(SIEM_IDS)
+    .optional()
+    .describe(
+      'The destination SIEM, used for the report header chip and command selection. ' +
+        'When absent the analysis assumes CloudWatch and the report labels the assumption.'
+    ),
+  forwarder: z
+    .string()
+    .optional()
+    .describe(
+      'Forwarder in the pipeline (fluentd, fluent-bit, filebeat, logstash, otel-collector, vector, hec). ' +
+        'Used to pick verified apply/undo commands. Not guessed when absent — the report says commands are unavailable.'
+    ),
+  workload: z
+    .string()
+    .optional()
+    .describe('Forwarder workload name (daemonset/deployment) for the apply commands. Not guessed when absent.'),
+  report_annotations: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      'Optional one-sentence annotations keyed by evidence statement identifier, rendered under the matching ' +
+        'action. Hard cap 140 chars each; over-cap or unknown-hash input refuses the render (nothing is truncated).'
     ),
   namespace: z
     .string()
@@ -120,6 +170,11 @@ export const pocFromLocalSchema = {
 
 export interface PocFromLocalArgs {
   source?: 'kubectl' | 'file';
+  path?: string;
+  siem?: SiemId;
+  forwarder?: string;
+  workload?: string;
+  report_annotations?: Record<string, string>;
   namespace?: string;
   paths?: string[];
   window?: string;
@@ -247,12 +302,22 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  return `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const base = `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  if (inner.report_path) {
+    return `${base} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
+  }
+  return base;
 }
 
 interface PocFromLocalInner {
   ok: boolean;
   source: 'kubectl' | 'file';
+  /** Absolute path of the written report.html deliverable. */
+  report_path?: string;
+  /** Absolute path of the caps CSV the report's apply commands reference. */
+  report_caps_path?: string;
+  /** Honest note when report generation was skipped or degraded. */
+  report_note?: string;
   /** `-` for source: file (no namespace concept). */
   namespace: string;
   window: string;
@@ -283,6 +348,12 @@ interface PocFromLocalInner {
 
 async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFromLocalInner> {
   const source = args.source ?? 'kubectl';
+  if (source !== 'kubectl' && source !== 'file') {
+    throw new Error(
+      `source "${source}" not yet supported. Only "kubectl" and "file" are implemented; "docker" and "journald" are follow-up work.`
+    );
+  }
+  const startedAtIso = new Date().toISOString();
 
   const opts: LocalSourceOptions = {
     namespace: args.namespace ?? 'default',
@@ -292,21 +363,36 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   };
 
   let sample: LocalSourceResult;
+  /** What extractPatterns consumes. The single-file lane hands over the
+   * PARSED wrapper records — the input-normalization step: the coercion
+   * layer unwraps the `log` payload for the templater while the envelope
+   * enrichment keeps container/service attribution. The glob and kubectl
+   * lanes feed raw lines, which is what those sources actually carry. */
+  let extractionInput: unknown[];
+  let rawIngestBytes: number | undefined;
   if (source === 'file') {
-    if (!args.paths || args.paths.length === 0) {
+    if (args.path) {
+      const fileSample = await sampleFromFile(args.path);
+      sample = fileSample;
+      extractionInput = fileSample.records;
+      rawIngestBytes = fileSample.normalized ? fileSample.rawBytes : undefined;
+    } else if (args.paths && args.paths.length > 0) {
+      // per_pod_limit / max_pods double as per-file / max-file caps — same
+      // budget, different source grain.
+      sample = await sampleFromFiles({
+        paths: args.paths,
+        perFileLimit: args.per_pod_limit ?? 5000,
+        maxFiles: args.max_pods ?? 20,
+      });
+      extractionInput = sample.events;
+    } else {
       throw new Error(
-        'source "file" requires paths: pass files, directories, or glob patterns to sample (e.g. ["/var/log/app/*.log"]).'
+        'source "file" requires `path` (one file, wrapper-normalized) or `paths` (files, directories, globs).'
       );
     }
-    // per_pod_limit / max_pods double as per-file / max-file caps — same
-    // budget, different source grain.
-    sample = await sampleFromFiles({
-      paths: args.paths,
-      perFileLimit: args.per_pod_limit ?? 5000,
-      maxFiles: args.max_pods ?? 20,
-    });
   } else {
     sample = await sampleFromKubectl(opts);
+    extractionInput = sample.events;
   }
 
   const srcNoun = source === 'file' ? 'file' : 'pod';
@@ -345,7 +431,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
-  const extraction = await extractPatterns(sample.events);
+  const extraction = await extractPatterns(extractionInput);
 
   // Project the sampled-window bytes to a daily figure.
   const windowHours = parseWindowHours(opts.window!);
@@ -564,9 +650,91 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
+  // ── report.html — the durable POC deliverable ──
+  // Fixed UX: report.html = render(template_v1, data). The agent's
+  // only inputs are report_annotations (validated fail-closed inside
+  // the builder). A ReportRefusal aborts the run so bad agent input
+  // is never silently rendered around; any other report failure
+  // degrades to a note — the chat envelope still ships.
+  let report_path: string | undefined;
+  let report_caps_path: string | undefined;
+  let report_note: string | undefined;
+  try {
+    const siem: SiemId = args.siem ?? 'cloudwatch';
+    const siemAssumed = args.siem === undefined;
+    const finishedAtIso = new Date().toISOString();
+    // File mode has no pull window; derive the analysed span from
+    // event timestamps when the wrapper carried them, else fall back
+    // to one hour with the fallback visible in the window label math.
+    let windowHoursForReport = source === 'file' ? 0 : windowHours;
+    let windowStartMs: number | undefined;
+    let windowEndMs: number | undefined;
+    const firstSeen = patterns.map((p) => p.firstSeenMs).filter((x): x is number => x !== undefined);
+    const lastSeen = patterns.map((p) => p.lastSeenMs).filter((x): x is number => x !== undefined);
+    if (firstSeen.length > 0 && lastSeen.length > 0) {
+      windowStartMs = Math.min(...firstSeen);
+      windowEndMs = Math.max(...lastSeen);
+      if (source === 'file') {
+        windowHoursForReport = Math.max(1 / 60, (windowEndMs - windowStartMs) / 3_600_000);
+      }
+    }
+    if (windowHoursForReport <= 0) windowHoursForReport = 1;
+
+    const renderInput: RenderInput = {
+      siem,
+      window: source === 'file' ? 'file' : opts.window!,
+      extraction,
+      targetEventCount: totalEvents,
+      pullWallTimeMs: sample.wallTimeMs,
+      templateWallTimeMs: extraction.templaterWallTimeMs,
+      reasonStopped: 'source_exhausted',
+      queryUsed: source === 'file' ? `file:${args.path}` : `kubectl -n ${opts.namespace} logs --since=${opts.window}`,
+      windowHours: windowHoursForReport,
+      analyzerCostPerGb: DEFAULT_ANALYZER_COST_PER_GB[siem],
+      snapshotId: `local-${source}`,
+      startedAt: startedAtIso,
+      finishedAt: finishedAtIso,
+      mcpVersion: MCP_VERSION,
+      rawIngestBytes,
+      windowStartMs,
+      windowEndMs,
+    };
+    const enrichment = _enrichForEnvelope(renderInput);
+    const built = buildReportData(
+      renderInput,
+      { patterns: enrichment.patterns, clusters: enrichment.clusters },
+      {
+        siem,
+        siemLabel: siemAssumed ? `${SIEM_DISPLAY_NAMES[siem]} (assumed)` : SIEM_DISPLAY_NAMES[siem],
+        forwarder: args.forwarder ?? null,
+        install: 'k8s',
+        namespace: source === 'kubectl' ? opts.namespace : undefined,
+        workload: args.workload,
+        annotations: args.report_annotations,
+        generatedAtIso: finishedAtIso,
+        mcpVersion: MCP_VERSION,
+      },
+    );
+    const html = renderReportHtml(built.data);
+    report_path = nodePath.resolve(process.cwd(), REPORT_FILE_NAME);
+    await fs.writeFile(report_path, html, 'utf8');
+    if (built.capsCsv !== null) {
+      report_caps_path = nodePath.resolve(process.cwd(), CAPS_FILE_NAME);
+      await fs.writeFile(report_caps_path, built.capsCsv, 'utf8');
+    }
+  } catch (e) {
+    if (e instanceof ReportRefusal) throw e;
+    report_path = undefined;
+    report_caps_path = undefined;
+    report_note = `report.html generation failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+
   return {
     ok: true,
     source,
+    report_path,
+    report_caps_path,
+    report_note,
     namespace: namespaceOut,
     window: opts.window!,
     pods_sampled: sample.composition.length,

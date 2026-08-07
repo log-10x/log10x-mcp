@@ -1488,6 +1488,11 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       // suite cannot catch either: it calls executePocFromLocal() directly,
       // below this boundary.
       paths: args.paths,
+      path: args.path,
+      siem: args.siem,
+      forwarder: args.forwarder,
+      workload: args.workload,
+      report_annotations: args.report_annotations,
       window: args.window ?? '1h',
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
