@@ -1,0 +1,255 @@
+{
+  "templateVersion": "v1",
+  "meta": {
+    "siemLabel": "CloudWatch",
+    "forwarderLabel": "fluentd",
+    "runKind": "first_run",
+    "generatedAtIso": "2026-08-07T01:00:00.000Z",
+    "engineBuild": "tenx golden",
+    "mcpVersion": "0.0.0-golden"
+  },
+  "window": {
+    "label": "one hour",
+    "events": 9908,
+    "statements": 5,
+    "ingestedBytes": 19905000
+  },
+  "totals": {
+    "removableBytes": 3900000,
+    "removablePct": 19.593067068575735
+  },
+  "verdict": {
+    "headline": "80% of this window is one repeating failure: Request failed dial tcp lookup opensearch on $ no such host exporter $",
+    "sentences": [
+      "2 statements in otelcol report the same failure on every occurrence.",
+      "Action 1 routes low-severity statements off the ingest path; nothing is deleted.",
+      "Action 2 is the actual fix."
+    ]
+  },
+  "actions": [
+    {
+      "kind": "tier_down",
+      "title": "Route otelcol and other low-severity statements to the retrievable tier",
+      "note": "2 low-severity statements carry 3.9 MB this window. They keep landing in your own bucket, retrievable on demand; they stop landing on the ingest path. Nothing is deleted.",
+      "impactBytes": 3900000,
+      "evidence": [
+        {
+          "hash": "qkI1",
+          "count": 2958,
+          "bytesEach": 1014,
+          "lines": [
+            {
+              "cont": false,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "Logs exported resource logs "
+                },
+                {
+                  "t": "val"
+                },
+                {
+                  "t": "text",
+                  "s": " log records "
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "hash": "qkI2",
+          "count": 900,
+          "bytesEach": 1000,
+          "lines": [
+            {
+              "cont": false,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "cart request handled user "
+                },
+                {
+                  "t": "val"
+                },
+                {
+                  "t": "text",
+                  "s": " latency "
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "change": {
+        "commentLines": [
+          "log10x-caps.csv — engine route rows, keyed by container.",
+          "Generated from this window; caps are scaled to the engine's 240s reset window."
+        ],
+        "rows": [
+          "cartservice,60000:tier_down:MCP poc_from_local soft",
+          "otelcol,200000:tier_down:MCP poc_from_local soft"
+        ],
+        "engineGapNote": "the engine acts per container today; per-statement disposition is pending engine work, so these rows route the containers hosting the statements above"
+      },
+      "apply": {
+        "commands": [
+          "kubectl -n demo create configmap log10x-caps --from-file=log10x-caps.csv \\",
+          "  --dry-run=client -o yaml | kubectl apply -f -",
+          "kubectl -n demo rollout restart daemonset tenx-fluentd"
+        ]
+      },
+      "undo": {
+        "commands": [
+          "kubectl -n demo delete configmap log10x-caps",
+          "kubectl -n demo rollout restart daemonset tenx-fluentd"
+        ]
+      },
+      "annotation": "Collector self-telemetry, confirmed with the platform team."
+    },
+    {
+      "kind": "operational",
+      "title": "Fix the failure behind 80% of this window",
+      "note": "2 statements across 1 service report the same failure. Fixing it removes the volume at source; the re-run measures it.",
+      "evidence": [
+        {
+          "hash": "qkE1",
+          "count": 3000,
+          "bytesEach": 2667,
+          "lines": [
+            {
+              "cont": false,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "Request failed dial tcp lookup opensearch on "
+                },
+                {
+                  "t": "val"
+                },
+                {
+                  "t": "text",
+                  "s": " no such host exporter "
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            },
+            {
+              "cont": true,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "stack github.com/open-telemetry/opentelemetry-collector-contrib/exporter/opensearchexporter logger.go:"
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            },
+            {
+              "cont": true,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "stack github.com/opensearch-project/opensearch-go/v4/opensearchtransport transport.go:"
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            }
+          ],
+          "elidedLineCount": 2
+        },
+        {
+          "hash": "qkE2",
+          "count": 3000,
+          "bytesEach": 2667,
+          "lines": [
+            {
+              "cont": false,
+              "segs": [
+                {
+                  "t": "text",
+                  "s": "Exporting failed dial tcp lookup opensearch on "
+                },
+                {
+                  "t": "val"
+                },
+                {
+                  "t": "text",
+                  "s": " no such host exporter rejecting "
+                },
+                {
+                  "t": "val"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "check": {
+        "commands": [
+          "kubectl -n demo run log10x-dnscheck --rm -it --image=busybox --restart=Never -- \\",
+          "  sh -c 'nslookup <failing-hostname>'"
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "beforeBytes": 19905000,
+    "afterBytes": 16005000
+  },
+  "verify": [
+    {
+      "id": "engine_ran",
+      "state": "ok",
+      "label": "engine ran locally",
+      "detail": "tenx golden"
+    },
+    {
+      "id": "resolution",
+      "state": "ok",
+      "label": "9.9K events resolved to 5 statements"
+    },
+    {
+      "id": "weld_integrity",
+      "state": "ok",
+      "label": "multi-line statements welded",
+      "detail": "1 statements arrive whole"
+    },
+    {
+      "id": "severity_attribution",
+      "state": "ok",
+      "label": "severity attribution sufficient",
+      "detail": "100% of statements"
+    },
+    {
+      "id": "tier_delivery",
+      "state": "not_configured",
+      "label": "retrievable tier delivery",
+      "detail": "not configured in this window",
+      "enabledByAction": 1
+    },
+    {
+      "id": "doctor",
+      "state": "not_run",
+      "label": "environment doctor",
+      "detail": "run log10x_doctor for engine + delivery checks"
+    }
+  ],
+  "kept": {
+    "protectedEvents": 6000,
+    "sentences": [
+      "every ERROR and WARN event (6.0K this window) stays on the ingest path in full.",
+      "Statements routed by action 1 land in your own bucket and come back on demand with their statement identifier as the query key."
+    ]
+  }
+}
