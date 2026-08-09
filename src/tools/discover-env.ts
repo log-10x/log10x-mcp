@@ -93,6 +93,11 @@ interface DiscoverEnvSummary {
   s3_buckets: string[];
   sqs_queues: string[];
   log_groups_count: number;
+  estate_shape?: 'kubernetes' | 'serverless' | 'mixed' | 'unknown';
+  lambda_functions_count?: number;
+  lambda_functions_with_otel_extension?: number;
+  log_groups_subscribed?: number;
+  log_groups_unsubscribed?: number;
   probe_log_entry_count: number;
   human_summary: string;
 }
@@ -104,13 +109,17 @@ function buildDiscoverEnvHumanSummary(d: Omit<DiscoverEnvSummary, 'human_summary
   const awsFrag = d.aws_available
     ? ` AWS: region ${d.region ?? 'unknown'}, ${d.s3_buckets.length} matching S3 bucket${d.s3_buckets.length === 1 ? '' : 's'}, ${d.sqs_queues.length} SQS queue${d.sqs_queues.length === 1 ? '' : 's'}.`
     : ' AWS probes were unavailable.';
+  const lambdaFrag =
+    (d.lambda_functions_count ?? 0) > 0
+      ? ` Lambda: ${d.lambda_functions_count} function${d.lambda_functions_count === 1 ? '' : 's'} (${d.lambda_functions_with_otel_extension ?? 0} with an OTel collector extension), estate shape ${d.estate_shape}.`
+      : '';
   let inPathFrag = '';
   if (d.installed_components.receiver && d.receiver_in_path !== undefined && d.receiver_in_path !== null) {
     inPathFrag = d.receiver_in_path ? ', receiver in-path' : ', receiver NOT in-path';
   } else if (d.installed_components.receiver && d.receiver_in_path === null) {
     inPathFrag = ', receiver in-path status unknown';
   }
-  return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}${inPathFrag}.${awsFrag}`;
+  return `Discovery snapshot ${d.snapshot_id} done in ${d.namespaces_probed.length} namespace${d.namespaces_probed.length === 1 ? '' : 's'}: forwarder=${fwd}, log10x apps installed=${installedFrag}${inPathFrag}.${awsFrag}${lambdaFrag}`;
 }
 
 export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | null): Promise<string | StructuredOutput> {
@@ -158,6 +167,11 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | nu
     s3_buckets: (snapshot.aws?.s3Buckets ?? []).map((b) => b.name),
     sqs_queues: (snapshot.aws?.sqsQueues ?? []).map((q) => q.url),
     log_groups_count: snapshot.aws?.cwLogGroups?.length ?? 0,
+    estate_shape: rec.estateShape,
+    lambda_functions_count: rec.serverless?.functionCount,
+    lambda_functions_with_otel_extension: rec.serverless?.functionsWithOtelExtension,
+    log_groups_subscribed: rec.serverless?.logGroupsSubscribed,
+    log_groups_unsubscribed: rec.serverless?.logGroupsUnsubscribed,
     probe_log_entry_count: snapshot.probeLog?.length ?? 0,
     human_summary: '',
   };
@@ -174,7 +188,8 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | nu
   const installedHeadlineFrag = installedList.length
     ? installedList.map(installedLabel).join(',')
     : 'none';
-  const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedHeadlineFrag}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}.`;
+  const estateFrag = data.estate_shape && data.estate_shape !== 'kubernetes' ? `, estate=${data.estate_shape}` : '';
+  const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedHeadlineFrag}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}${estateFrag}.`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (!data.installed_components.reporter) {
     actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed — pick the right install path' });
@@ -336,7 +351,36 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
 
     if (s.aws.cwLogGroups.length > 0) {
       lines.push(`- **CloudWatch log groups** (${s.aws.cwLogGroups.length}):`);
-      for (const g of s.aws.cwLogGroups.slice(0, 6)) lines.push(`  - \`${g.name}\``);
+      for (const g of s.aws.cwLogGroups.slice(0, 6)) {
+        const sub =
+          g.subscriptionFilters === undefined
+            ? ''
+            : g.subscriptionFilters.length > 0
+              ? ` — subscribed (${g.subscriptionFilters.map((f) => f.name).join(', ')})`
+              : ' — no subscription filter';
+        lines.push(`  - \`${g.name}\`${sub}`);
+      }
+    }
+
+    // ── Lambda / serverless ──
+    const lam = s.aws.lambda;
+    if (lam) {
+      if (!lam.available) {
+        lines.push(`- **Lambda**: probe failed — ${lam.error ?? 'unknown error'}`);
+      } else if (lam.functions.length === 0) {
+        lines.push('- **Lambda functions**: none');
+      } else {
+        lines.push(
+          `- **Lambda functions** (${lam.functions.length}${lam.truncated ? '+, truncated' : ''}), ${lam.functionsWithOtelExtension} with an OTel collector extension:`
+        );
+        for (const f of lam.functions.slice(0, 8)) {
+          const otel = f.hasOtelCollectorExtension
+            ? ` — OTel extension${f.otelExtensionLayer ? ` (\`${f.otelExtensionLayer.split(':layer:')[1] ?? f.otelExtensionLayer}\`)` : ''}`
+            : '';
+          lines.push(`  - \`${f.name}\` (${f.runtime ?? '?'}, ${f.memoryMb ?? '?'} MB, ${f.architectures.join('/')})${otel}`);
+        }
+        if (lam.functions.length > 8) lines.push(`  - … and ${lam.functions.length - 8} more`);
+      }
     }
   }
   lines.push('');

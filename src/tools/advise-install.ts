@@ -66,6 +66,8 @@ import {
   BACKEND_ENV_SPECS,
   defaultSecretNameFor,
 } from '../lib/advisor/reporter-forwarders.js';
+import { lambdaOtelExtensionRecipe } from '../lib/offload-recipes.js';
+import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
@@ -209,6 +211,16 @@ type WizardData =
   // resumes. Treating this halt as `ok: true` lets agents that gate
   // on `data.ok` show a plan that doesn't exist.
   | { mode: 'demo_airgapped_warning'; ok: false; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  | {
+      mode: 'serverless_plan';
+      ok: true;
+      snapshot_id: string;
+      estate: 'serverless';
+      function_count: number;
+      functions_with_otel_extension: number;
+      log_groups_unsubscribed: number;
+      markdown: string;
+    }
   | {
       mode: 'unknown_args';
       ok: false;
@@ -426,6 +438,8 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
       return `Install wizard requires a signed-in Log10x license before it can emit a non-demo plan. Run the device flow via log10x_signin_start, then re-invoke with the same snapshot_id.`;
     case 'demo_airgapped_warning':
       return `Install wizard refused to emit an airgapped plan against a demo license — the engine downgrades to online mode silently in this combination. ${data.is_signed_in ? 'Switch to a user-scoped license' : 'Sign in via log10x_signin_start'} or drop the airgapped flag before re-invoking.`;
+    case 'serverless_plan':
+      return `The snapshot shows a serverless estate (${data.function_count} Lambda functions, ${data.functions_with_otel_extension} with an OTel collector extension), so the wizard emitted the OTel-extension pairing plan instead of a Kubernetes helm plan. The plan covers the collector config splice, the engine's extension environment, and the CDK declarations; the engine extension layer itself is not published yet.`;
     case 'unknown_args': {
       const list = data.unknown_keys.slice(0, 3).join(', ');
       return `Install wizard received unknown arg${data.unknown_keys.length === 1 ? '' : 's'}: ${list}. Re-invoke with the canonical names (see data.valid_keys for the full list).`;
@@ -441,6 +455,95 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
  * agent what to call next with what args; warnings[] surface non-fatal
  * issues at the envelope level (plan blockers, demo-license caveats).
  */
+/**
+ * The serverless-estate plan: collector splice + engine extension environment
+ * + CDK declarations, built from the discovery facts. Replaces the k8s wizard
+ * entirely on this estate shape — there is no helm target to wizard toward.
+ */
+function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
+  const rec = snapshot.recommendations;
+  const sv = rec.serverless ?? {
+    functionCount: 0,
+    functionsWithOtelExtension: 0,
+    logGroupsSubscribed: 0,
+    logGroupsUnsubscribed: 0,
+  };
+  const region = snapshot.aws.region ?? '<region>';
+  const recipe = lambdaOtelExtensionRecipe({
+    region,
+    bucket: rec.retrieverS3Bucket,
+  });
+  const cdk = lambdaEstateCdkConstruct({ region });
+
+  const lines: string[] = [];
+  lines.push('# Install plan — serverless estate (Lambda + OTel collector extension)');
+  lines.push('');
+  lines.push(
+    `Discovery found **${sv.functionCount} Lambda function${sv.functionCount === 1 ? '' : 's'}** and no reachable ` +
+      `Kubernetes cluster. ${sv.functionsWithOtelExtension} function${sv.functionsWithOtelExtension === 1 ? '' : 's'} ` +
+      `already run an OTel collector extension — that collector is the forwarder the engine pairs with, over ` +
+      `loopback inside each execution environment. ` +
+      (sv.logGroupsUnsubscribed > 0
+        ? `${sv.logGroupsUnsubscribed} probed log group${sv.logGroupsUnsubscribed === 1 ? '' : 's'} have no subscription filter — the CloudWatch remainder below covers them.`
+        : `Probed log groups all carry subscription filters.`)
+  );
+  lines.push('');
+  lines.push('## 1. Collector config splice (merge into the existing extension config)');
+  lines.push('');
+  lines.push('```yaml');
+  lines.push(recipe.collector.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${recipe.collector.placementNote}_`);
+  lines.push('');
+  lines.push('## 2. Engine environment (extension-side)');
+  lines.push('');
+  lines.push('```');
+  lines.push(recipe.engine.body);
+  lines.push('```');
+  lines.push('');
+  lines.push('## 3. Execution-environment declaration');
+  lines.push('');
+  lines.push('```');
+  lines.push(recipe.executionEnvironment.body);
+  lines.push('```');
+  lines.push('');
+  lines.push('## 4. CDK (customer-owned repo)');
+  lines.push('');
+  lines.push('```typescript');
+  lines.push(cdk.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${cdk.note}_`);
+  lines.push('');
+  lines.push('## Prerequisites and open items');
+  lines.push('');
+  for (const pre of [
+    ...recipe.collector.prerequisites,
+    ...recipe.engine.prerequisites,
+    ...recipe.executionEnvironment.prerequisites,
+    ...cdk.prerequisites,
+  ]) {
+    lines.push(`- ${pre}`);
+  }
+  lines.push('');
+  lines.push(
+    '_The Coralogix destination side (TCO policy on `$d.routeState`) is unchanged from the proven path — ' +
+      'Terraform via `coralogixMonitoringRecipe`, or the `CoralogixTcoPolicies` construct above._'
+  );
+
+  return wizardReturn({
+    mode: 'serverless_plan',
+    ok: true,
+    snapshot_id: snapshot.snapshotId,
+    estate: 'serverless',
+    function_count: sv.functionCount,
+    functions_with_otel_extension: sv.functionsWithOtelExtension,
+    log_groups_unsubscribed: sv.logGroupsUnsubscribed,
+    markdown: lines.join('\n'),
+  });
+}
+
 function wizardEnvelopeMeta(data: WizardData): {
   headline: string;
   actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }>;
@@ -490,6 +593,17 @@ function wizardEnvelopeMeta(data: WizardData): {
         warnings: [],
       };
     }
+    case 'serverless_plan':
+      return {
+        headline:
+          `Serverless estate (${data.function_count} Lambda function${data.function_count === 1 ? '' : 's'}, ` +
+          `${data.functions_with_otel_extension} with an OTel collector extension) — emitted the OTel-extension ` +
+          `pairing plan instead of the Kubernetes wizard.`,
+        actions: [],
+        warnings: [
+          'the engine extension layer is not published yet — this plan declares the shape and configuration, not a deployable artifact',
+        ],
+      };
     case 'license_error':
       // Two alternative recovery paths the user picks between (sign in
       // OR paste a JWT). Both labelled `alternative` so agents render
@@ -679,6 +793,14 @@ export async function executeAdviseInstall(
       snapshot_id: args.snapshot_id,
       markdown: md,
     });
+  }
+
+  // Serverless estate: no cluster anywhere, Lambda functions present. The
+  // Kubernetes wizard's every question (helm release, namespace, sidecar
+  // forwarder) is meaningless here — emit the OTel-extension pairing plan
+  // instead of walking the user into a helm plan they cannot apply.
+  if (snapshot.recommendations.estateShape === 'serverless') {
+    return serverlessPlanReturn(snapshot);
   }
 
   // Merge the latest answers into the wizard session. Each call accretes;

@@ -1607,3 +1607,221 @@ export function renderOffloadSection(
 
   return lines.join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// Lambda + OTel-collector-extension estate (serverless; no cluster anywhere)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parameters for the serverless (Lambda + OTel collector extension) recipe.
+ * The destination side stays Coralogix-shaped because that is the proven
+ * estate; the collector parts are destination-agnostic.
+ */
+export interface LambdaExtensionParams {
+  /** AWS region of the estate. */
+  region: string;
+  /** Offload bucket (customer-owned S3) for the `offload` slice. Optional —
+   * without it the recipe emits the SIEM + drop routing only. */
+  bucket?: string;
+  /** Key prefix for offloaded objects. Default `app`. */
+  prefix?: string;
+  /** Coralogix ingest domain, e.g. `cx498.coralogix.com`. */
+  domain?: string;
+  /** applicationName stamped on shipped events. Default `tenx`. */
+  applicationName?: string;
+  /** ARN of the engine extension layer once published. Placeholder until then. */
+  engineLayerArn?: string;
+}
+
+/** Multi-part recipe: each part is pasteable on its own. */
+export interface ServerlessExtensionRecipe {
+  /** Additions to the customer's existing collector-extension config. */
+  collector: OffloadRecipe;
+  /** The engine's environment + invocation, extension-side. */
+  engine: OffloadRecipe;
+  /** What declares the engine into the execution environment, and the
+   * lifecycle contract the extension bootstrap must honor. */
+  executionEnvironment: OffloadRecipe;
+}
+
+/**
+ * The OTel-extension pairing for a 100%-Lambda estate: the customer's
+ * collector extension keeps its receivers and its Coralogix exporter; two
+ * loopback hops to the engine extension are spliced in between.
+ *
+ * Grounded in measurements (2026-08-08, local execution-environment lab —
+ * see SERVERLESS_TASK1_LIFECYCLE_REPORT.md in the workspace root):
+ *   - engine 1.1.57 native + otelcol paired over loopback inside one
+ *     sandbox; 5,400/5,400 records round-tripped, zero dupes, with
+ *     `tenx_hash` + `routeState` arriving as LOG-RECORD ATTRIBUTES
+ *   - a 118 s cgroup freeze mid-burst lost nothing and duplicated nothing
+ *   - the engine does NOT drain on bare SIGTERM (0/30,000 delivered when
+ *     killed mid-burst) — the extension bootstrap owns the SHUTDOWN drain
+ */
+export function lambdaOtelExtensionRecipe(p: LambdaExtensionParams): ServerlessExtensionRecipe {
+  const prefix = p.prefix ?? DEFAULT_PREFIX;
+  const app = p.applicationName ?? 'tenx';
+  const domain = p.domain ?? '<your-coralogix-domain>';
+  const layerArn = p.engineLayerArn ?? '<tenx-receive-extension-layer-arn (unpublished — see prerequisites)>';
+
+  const offloadBlock = p.bucket
+    ? `
+  # offload slice -> the customer's own S3 (same layout the Retriever indexes)
+  awss3/tenx-offload:
+    s3uploader:
+      region: ${p.region}
+      s3_bucket: ${p.bucket}
+      s3_prefix: ${prefix}
+    marshaler: body`
+    : `
+  # offload slice: supply a customer-owned bucket to enable S3 offload
+  # awss3/tenx-offload: { s3uploader: { region: ${p.region}, s3_bucket: <bucket>, s3_prefix: ${prefix} }, marshaler: body }`;
+
+  const offloadPipeline = p.bucket
+    ? `    logs/tenx-offload:   { receivers: [routing/tenx], processors: [transform/tenx-fold], exporters: [awss3/tenx-offload] }`
+    : `    # logs/tenx-offload: enable with the awss3 exporter above`;
+
+  const collector: OffloadRecipe = {
+    language: 'yaml',
+    body: `# Merge these blocks into the collector-extension config the functions
+# already run (OPENTELEMETRY_COLLECTOR_CONFIG_FILE / _URI). Existing
+# receivers, processors, and the Coralogix exporter stay untouched.
+
+receivers:
+  # Return path from the engine extension (loopback, same sandbox).
+  otlp/tenx:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:24225
+
+exporters:
+  # Hand-off to the engine extension (loopback, same sandbox).
+  otlp/tenx:
+    endpoint: 127.0.0.1:4317
+    tls:
+      insecure: true
+${offloadBlock}
+
+connectors:
+  routing/tenx:
+    default_pipelines: [logs/tenx-siem]     # pass/compact/sample fall through
+    table:
+      # context: log is REQUIRED — routeState is a LOG attribute (measured on
+      # the loopback pairing). The resource context never matches it.
+      - context: log
+        condition: attributes["routeState"] == "offload"
+        pipelines: [logs/tenx-offload]
+      - context: log
+        condition: attributes["routeState"] == "drop"
+        pipelines: [logs/tenx-drop]
+
+processors:
+  # Fold the record into a JSON-object body: {message, tenx_hash, routeState}.
+  # $d.* at Coralogix addresses BODY fields — that is the mechanism the live
+  # dpxl proof used (the Fluent Bit path ships the record as the body object).
+  # Folding makes "<v1> $d.routeState == '...'" match through the SAME proven
+  # mechanism instead of depending on how OTLP attributes map server-side.
+  transform/tenx-fold:
+    error_mode: ignore
+    log_statements:
+      - set(log.cache["message"], log.body)
+      - set(log.body, log.attributes)
+      - set(log.body["message"], log.cache["message"])
+
+exporters: {}  # (merge marker — your existing coralogix exporter is reused below)
+
+service:
+  pipelines:
+    # Splice: whatever pipeline your receivers feed today now exports to the
+    # engine instead of straight to Coralogix. Enrichment processors stay
+    # HERE so they run exactly once, before the engine sees the event.
+    logs/to-tenx:
+      receivers: [otlp]              # <- your existing receivers
+      processors: [batch]            # <- your existing enrichment + batch
+      exporters: [otlp/tenx]
+
+    # Return path: engine-processed events fan out by routeState.
+    logs/from-tenx:
+      receivers: [otlp/tenx]
+      exporters: [routing/tenx]
+
+    logs/tenx-siem:      { receivers: [routing/tenx], processors: [transform/tenx-fold], exporters: [coralogix] }  # <- your existing exporter
+${offloadPipeline}
+    logs/tenx-drop:      { receivers: [routing/tenx], exporters: [nop] }   # SUPPRESSED`,
+    placementNote:
+      'two loopback hops inside each execution environment: collector -> engine ' +
+      '(otlp/tenx exporter, :4317) and engine -> collector (otlp/tenx receiver, ' +
+      ':24225), then a routing connector fans out on the routeState LOG attribute. ' +
+      'The tier_down slice needs no collector branch on Coralogix: it ships to the ' +
+      'same exporter and the destination-side TCO policy (dpxl on $d.routeState) ' +
+      'moves it to the Monitoring tier — see coralogixMonitoringRecipe().',
+    prerequisites: [
+      `Engine pairing measured on the loopback (engine 1.1.57 native): records return with tenx_hash + routeState as log-record attributes; bodies byte-identical.`,
+      'The routing connector + transform processor require a collector build that includes them (otelcol-contrib has both; a minimal custom build may not — check `components` output).',
+      'The transform/tenx-fold step reshapes the Coralogix body into a JSON object ({message, tenx_hash, routeState}) — the same body shape the live-proven Fluent Bit path ships. The dpxl expression `<v1> $d.routeState == \'tier_down\'` then matches through the proven body-field mechanism. NOT yet verified live on the OTLP ingest path specifically: send a 2-event control (routeState pass vs tier_down, policy on, wait ~6 min) before declaring the policy working.',
+      'TCO policy changes take ~6 minutes to apply (measured live) — do not conclude failure inside a minute.',
+      `Coralogix exporter stays exactly as the customer runs it today (domain ${domain}, applicationName ${app} or their own).`,
+    ],
+  };
+
+  const engine: OffloadRecipe = {
+    language: 'text',
+    body: `# Engine invocation (inside the extension, one process per execution environment):
+tenx @run/input/forwarder/otel-collector @apps/receiver
+
+# Function environment (Lambda env vars reach every extension process):
+outputOffload=true                         # splice routeState onto every returned event (fullText path, never compacted)
+symbolMessageHashField=tenx_hash           # stable pattern identity rides alongside
+log10xMetricsEnabled=false                 # metric backend is BYO; hosted metrics stay off
+TENX_AIRGAPPED=true                        # REQUIRED: no egress from the sandbox to log10x
+TENX_LICENSE_FILE=/opt/tenx/license.jwt    # full (non-demo, non-limited) license baked into the layer
+# optional BYO metrics:
+# PROMETHEUS_REMOTE_WRITE_URL=https://<your-prometheus>/api/v1/write`,
+    placementNote:
+      'the engine listens on loopback :4317 (OTLP/gRPC in) and returns processed ' +
+      'events to :24225. receiverReadOnly defaults to false, so writeback is on ' +
+      'as soon as the forwarder module is included — no extra flag.',
+    prerequisites: [
+      'TENX_AIRGAPPED=true is mandatory, not optional: license validation is otherwise an online, fail-closed call on EVERY cold start (10 s connect timeout), and demo/limited licenses cannot run airgapped at all — a full license is a hard prerequisite for this estate. See SERVERLESS_TASK6_LICENSE_EGRESS.md.',
+      'Engine memory: ~175 MB resident (measured, 1.1.57 native, post-traffic). Size the function memory for function + collector + engine.',
+      'Cold start: engine spawn -> OTLP listener accepting measured at 1.4-1.9 s (native, 1 vCPU-equivalent, local x86 Docker). Real-Lambda numbers pending the one-shot confirmation run.',
+    ],
+  };
+
+  const executionEnvironment: OffloadRecipe = {
+    language: 'text',
+    body: `# The engine enters the execution environment as its OWN Lambda extension:
+#
+#   Layer: ${layerArn}
+#     /opt/extensions/tenx-receive        <- extension bootstrap (executable)
+#     /opt/tenx/bin/tenx                  <- engine, native linux build
+#     /opt/tenx/modules/...               <- module + config trees
+#     /opt/tenx/license.jwt               <- full license (or fetch at init)
+#
+# Bootstrap lifecycle contract (each step measured in the local lab):
+#   1. POST /2020-01-01/extension/register   {"events":["INVOKE","SHUTDOWN"]}
+#   2. spawn/host the engine; wait for loopback :4317 to accept (readiness)
+#   3. loop GET /2020-01-01/extension/event/next
+#        INVOKE   -> no action; the engine runs continuously across invocations
+#        SHUTDOWN -> drive a GRACEFUL engine stop and drain within ~2 s,
+#                    then exit. A bare SIGTERM is NOT a drain: measured, the
+#                    engine exits in <40 ms without flushing, and everything
+#                    still inside it is lost. In-process pipeline stop (the
+#                    run-lambda plumbing is generic) or a native build with
+#                    --install-exit-handlers closes that window.
+#
+# Freeze/thaw needs no handling: a 118 s cgroup freeze mid-burst delivered
+# 5,000/5,000 after thaw with zero duplicates and clean timer resumption.`,
+    placementNote:
+      'the existing engine Lambda entry (RetrieverBootstrap) speaks the RUNTIME ' +
+      'API — one pipeline run per invocation. The receive role needs the ' +
+      'EXTENSIONS API loop above instead; it is a small Java sibling of ' +
+      'RetrieverBootstrap and is the one engine-side deliverable this estate waits on.',
+    prerequisites: [
+      'The engine extension layer is NOT published yet — the bootstrap above exists as a measured prototype, not a shipped artifact. No availability claims until the layer builds in CI and the one-shot real-Lambda confirmation has run.',
+      'Architecture: build the layer for the estate architecture (x86_64 measured; arm64 needs its own native build).',
+    ],
+  };
+
+  return { collector, engine, executionEnvironment };
+}

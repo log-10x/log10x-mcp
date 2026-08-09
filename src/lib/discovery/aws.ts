@@ -16,6 +16,8 @@ import type {
   AwsProbes,
   CwLogGroup,
   EksCluster,
+  LambdaFunctionInfo,
+  LambdaProbes,
   ProbeLogEntry,
   S3Bucket,
   SqsQueue,
@@ -30,7 +32,31 @@ export interface AwsProbeOpts {
   eksClusterName?: string;
   /** Per-call timeout. Default 10_000ms. */
   timeoutMs?: number;
+  /**
+   * Probe the serverless estate (Lambda functions, OTel-extension layers,
+   * log-group subscription filters). Default true; one list-functions call
+   * when the account has no functions, up to ~22 calls when it does.
+   */
+  includeLambda?: boolean;
 }
+
+/** Layer/env markers that identify an OTel collector Lambda extension.
+ * Covers ADOT (`aws-otel-*`), upstream community layers
+ * (`opentelemetry-collector*`), and vendor distributions built on the
+ * collector (Coralogix telemetry exporter). */
+const OTEL_LAYER_RX = /otel|opentelemetry|adot|coralogix/i;
+
+/** Env vars whose VALUES are safe and useful to capture (OTel wiring). */
+const OTEL_ENV_ALLOWLIST = [
+  'AWS_LAMBDA_EXEC_WRAPPER',
+  'OPENTELEMETRY_COLLECTOR_CONFIG_FILE',
+  'OPENTELEMETRY_COLLECTOR_CONFIG_URI',
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+];
+
+/** Probe budget: functions listed, and log groups checked for filters. */
+const LAMBDA_LIST_CAP = 200;
+const SUBSCRIPTION_PROBE_CAP = 20;
 
 export async function probeAws(
   opts: AwsProbeOpts = {}
@@ -254,6 +280,13 @@ export async function probeAws(
     storedBytes: g.storedBytes,
   }));
 
+  // Step 7: serverless estate — Lambda functions, OTel-extension detection,
+  // and subscription-filter coverage of the function log groups.
+  let lambda: LambdaProbes | undefined;
+  if (opts.includeLambda !== false) {
+    lambda = await probeLambdaEstate(region, timeoutMs, record, cwLogGroups);
+  }
+
   return {
     probes: {
       available: true,
@@ -267,7 +300,142 @@ export async function probeAws(
       s3Buckets,
       sqsQueues,
       cwLogGroups,
+      lambda,
     },
     log,
+  };
+}
+
+/**
+ * Enumerate Lambda functions and their OTel wiring, then check the
+ * function log groups for existing subscription filters. Read-only, same
+ * budget discipline as the rest of the probes. Log groups found here are
+ * APPENDED to `cwLogGroups` (with `subscriptionFilters` populated) so the
+ * snapshot carries the estate's real groups, not just `/tenx*` ones.
+ */
+async function probeLambdaEstate(
+  region: string,
+  timeoutMs: number,
+  record: (r: ShellResult) => void,
+  cwLogGroups: CwLogGroup[]
+): Promise<LambdaProbes> {
+  interface RawFn {
+    FunctionName: string;
+    Runtime?: string;
+    MemorySize?: number;
+    Architectures?: string[];
+    Layers?: Array<{ Arn: string }>;
+    Environment?: { Variables?: Record<string, string> };
+  }
+  const list = await runJson<{ Functions?: RawFn[] }>(
+    'aws',
+    [
+      'lambda',
+      'list-functions',
+      '--region',
+      region,
+      '--max-items',
+      String(LAMBDA_LIST_CAP),
+      '--output',
+      'json',
+    ],
+    { timeoutMs }
+  );
+  record(list.result);
+  if (!list.parsed) {
+    return {
+      available: false,
+      error: list.result.stderr.slice(0, 400) || 'aws lambda list-functions failed',
+      functions: [],
+      truncated: false,
+      functionsWithOtelExtension: 0,
+    };
+  }
+
+  const raw = list.parsed.Functions ?? [];
+  const functions: LambdaFunctionInfo[] = raw.map((f) => {
+    const layers = (f.Layers ?? []).map((l) => l.Arn);
+    const envVars = f.Environment?.Variables ?? {};
+    const otelEnv: Record<string, string> = {};
+    for (const k of OTEL_ENV_ALLOWLIST) {
+      if (envVars[k] !== undefined) otelEnv[k] = envVars[k];
+    }
+    const otelLayer = layers.find((a) => OTEL_LAYER_RX.test(a));
+    const wrapperIsOtel = /otel/i.test(envVars['AWS_LAMBDA_EXEC_WRAPPER'] ?? '');
+    const hasCollectorConfig =
+      envVars['OPENTELEMETRY_COLLECTOR_CONFIG_FILE'] !== undefined ||
+      envVars['OPENTELEMETRY_COLLECTOR_CONFIG_URI'] !== undefined;
+    return {
+      name: f.FunctionName,
+      runtime: f.Runtime,
+      memoryMb: f.MemorySize,
+      architectures: f.Architectures ?? ['x86_64'],
+      layers,
+      envKeys: Object.keys(envVars).sort(),
+      otelEnv,
+      hasOtelCollectorExtension: Boolean(otelLayer || wrapperIsOtel || hasCollectorConfig),
+      otelExtensionLayer: otelLayer,
+    };
+  });
+
+  // Subscription-filter coverage: check the /aws/lambda/<fn> groups (capped).
+  if (functions.length > 0) {
+    const lg = await runJson<{ logGroups?: Array<{ logGroupName: string; storedBytes?: number }> }>(
+      'aws',
+      [
+        'logs',
+        'describe-log-groups',
+        '--log-group-name-prefix',
+        '/aws/lambda/',
+        '--limit',
+        '50',
+        '--region',
+        region,
+        '--output',
+        'json',
+      ],
+      { timeoutMs }
+    );
+    record(lg.result);
+    const groups = lg.parsed?.logGroups ?? [];
+    for (const g of groups.slice(0, SUBSCRIPTION_PROBE_CAP)) {
+      const sf = await runJson<{
+        subscriptionFilters?: Array<{
+          filterName: string;
+          destinationArn: string;
+          filterPattern: string;
+        }>;
+      }>(
+        'aws',
+        [
+          'logs',
+          'describe-subscription-filters',
+          '--log-group-name',
+          g.logGroupName,
+          '--region',
+          region,
+          '--output',
+          'json',
+        ],
+        { timeoutMs: 8_000 }
+      );
+      record(sf.result);
+      cwLogGroups.push({
+        name: g.logGroupName,
+        storedBytes: g.storedBytes,
+        subscriptionFilters: (sf.parsed?.subscriptionFilters ?? []).map((s) => ({
+          name: s.filterName,
+          destinationArn: s.destinationArn,
+          filterPattern: s.filterPattern,
+        })),
+      });
+    }
+  }
+
+  return {
+    available: true,
+    functions,
+    truncated: raw.length >= LAMBDA_LIST_CAP,
+    functionsWithOtelExtension: functions.filter((f) => f.hasOtelCollectorExtension).length,
   };
 }
