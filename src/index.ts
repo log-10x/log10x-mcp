@@ -1942,7 +1942,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side — the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, analyze, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
-  { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs (no SIEM credentials needed); industry-pricing matrix instead of bill prediction' },
+  { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs or files/globs (no SIEM credentials needed; file source covers serverless estates); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },

@@ -1,8 +1,8 @@
 /**
  * Local-source POC sampling: pulls log lines directly from the
- * customer's own infrastructure (Kubernetes pods today; docker
- * containers and journald in follow-up work) when no log analyzer
- * connection is available.
+ * customer's own infrastructure (Kubernetes pods, local files/globs;
+ * docker containers and journald in follow-up work) when no log
+ * analyzer connection is available.
  *
  * Use cases:
  *   - Prospect has no Datadog / Splunk / Elastic / etc. connection
@@ -22,6 +22,8 @@
  */
 
 import { spawn } from 'child_process';
+import { open, readdir, stat } from 'fs/promises';
+import { join, resolve, sep } from 'path';
 
 export interface LocalSourceOptions {
   /** Kubernetes namespace; default 'default'. Pass '*' for all namespaces. */
@@ -42,18 +44,32 @@ export interface LocalSourceOptions {
 }
 
 export interface LocalSourceResult {
-  /** Raw log lines pulled across all sampled pods. */
+  /** Raw log lines pulled across all sampled sources. */
   events: string[];
   /** Total bytes pulled (sum of line lengths). */
   totalBytes: number;
   /** Per-source breakdown for the sample-composition table. */
   composition: Array<{ source: string; bytes: number; lines: number; pct: number }>;
-  /** Pods that were considered but failed (e.g., access denied). */
-  failedPods: string[];
+  /** Sources (pods / files) that were considered but failed (e.g., access denied). */
+  failedSources: string[];
   /** Wall time spent pulling. */
   wallTimeMs: number;
   /** Notes for the report (kubectl-not-installed, no-pods-found, etc.). */
   notes: string[];
+}
+
+export interface FileSourceOptions {
+  /**
+   * Files, directories, or glob patterns (`*`, `**`, `?`). A directory is
+   * read one level deep (non-recursive); use `dir/**` for the full tree.
+   */
+  paths: string[];
+  /** Cap on number of files sampled. Default 50. */
+  maxFiles?: number;
+  /** Cap on log lines pulled per file (tail). Default 10000. */
+  perFileLimit?: number;
+  /** Read at most this many bytes from the end of each file. Default 16 MiB. */
+  maxBytesPerFile?: number;
 }
 
 /**
@@ -64,8 +80,8 @@ export interface LocalSourceResult {
  * partial data was collected):
  *   - kubectl not installed → returns empty result with note
  *   - no pods in namespace → returns empty with note
- *   - per-pod kubectl logs failure → skip pod, add to `failedPods`
- *   - per-pod timeout → skip pod, add to `failedPods`
+ *   - per-pod kubectl logs failure → skip pod, add to `failedSources`
+ *   - per-pod timeout → skip pod, add to `failedSources`
  */
 export async function sampleFromKubectl(
   opts: LocalSourceOptions = {}
@@ -79,7 +95,7 @@ export async function sampleFromKubectl(
 
   const start = Date.now();
   const notes: string[] = [];
-  const failedPods: string[] = [];
+  const failedSources: string[] = [];
   const events: string[] = [];
   const compositionMap = new Map<string, { bytes: number; lines: number }>();
 
@@ -98,7 +114,7 @@ export async function sampleFromKubectl(
       events: [],
       totalBytes: 0,
       composition: [],
-      failedPods: [],
+      failedSources: [],
       wallTimeMs: Date.now() - start,
       notes,
     };
@@ -110,7 +126,7 @@ export async function sampleFromKubectl(
       events: [],
       totalBytes: 0,
       composition: [],
-      failedPods: [],
+      failedSources: [],
       wallTimeMs: Date.now() - start,
       notes,
     };
@@ -143,7 +159,7 @@ export async function sampleFromKubectl(
       existing.lines += lines.length;
       compositionMap.set(podKey, existing);
     } catch (e) {
-      failedPods.push(`${podKey}: ${(e as Error).message.slice(0, 80)}`);
+      failedSources.push(`${podKey}: ${(e as Error).message.slice(0, 80)}`);
     }
   }
 
@@ -165,7 +181,7 @@ export async function sampleFromKubectl(
     events,
     totalBytes,
     composition,
-    failedPods,
+    failedSources,
     wallTimeMs: Date.now() - start,
     notes,
   };
@@ -256,4 +272,239 @@ function runCommand(cmd: string, args: string[], timeoutMs: number): Promise<str
       else reject(new Error(`exit ${code}: ${stderr.slice(0, 200)}`));
     });
   });
+}
+
+// ── File / glob source ──────────────────────────────────────────────────────
+
+/**
+ * Pull log lines from local files — the serverless-estate analog of
+ * `sampleFromKubectl`. A host with no cluster (100% Lambda shops, plain
+ * VMs, a laptop with a downloaded log bundle) samples from files or glob
+ * patterns instead. Reads the TAIL of each file so a multi-GB log costs
+ * at most `maxBytesPerFile` of IO.
+ *
+ * Failure modes mirror the kubectl sampler: unmatched patterns and
+ * unreadable files become notes / `failedSources`, never throws.
+ */
+export async function sampleFromFiles(opts: FileSourceOptions): Promise<LocalSourceResult> {
+  const maxFiles = opts.maxFiles ?? 50;
+  const perFileLimit = opts.perFileLimit ?? 10_000;
+  const maxBytesPerFile = opts.maxBytesPerFile ?? 16 * 1024 * 1024;
+
+  const start = Date.now();
+  const notes: string[] = [];
+  const failedSources: string[] = [];
+  const events: string[] = [];
+  const compositionMap = new Map<string, { bytes: number; lines: number }>();
+
+  const empty = () => ({
+    events: [],
+    totalBytes: 0,
+    composition: [],
+    failedSources,
+    wallTimeMs: Date.now() - start,
+    notes,
+  });
+
+  if (!opts.paths || opts.paths.length === 0) {
+    notes.push('No paths supplied — pass files, directories, or glob patterns.');
+    return empty();
+  }
+
+  // 1. Expand each requested path to concrete files.
+  const matched: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of opts.paths) {
+    let expanded: string[];
+    try {
+      expanded = await expandPathPattern(raw);
+    } catch (e) {
+      failedSources.push(`${raw}: ${(e as Error).message.slice(0, 80)}`);
+      continue;
+    }
+    if (expanded.length === 0) {
+      notes.push(`No files matched "${raw}".`);
+    }
+    for (const f of expanded) {
+      if (!seen.has(f)) {
+        seen.add(f);
+        matched.push(f);
+      }
+    }
+  }
+
+  if (matched.length === 0) {
+    notes.push('No files matched any of the supplied paths.');
+    return empty();
+  }
+
+  // 2. Random-sample down to maxFiles, same policy as the pod sampler.
+  const sampled = pickRandom(matched, maxFiles);
+  if (matched.length > maxFiles) {
+    notes.push(`${matched.length} files matched; sampled ${maxFiles} (raise maxFiles to widen).`);
+  }
+
+  // 3. Tail each file.
+  for (const file of sampled) {
+    try {
+      const lines = await readFileTail(file, perFileLimit, maxBytesPerFile);
+      let fileBytes = 0;
+      let fileLines = 0;
+      for (const line of lines) {
+        if (line.length === 0) continue;
+        events.push(line);
+        fileBytes += Buffer.byteLength(line, 'utf8');
+        fileLines++;
+      }
+      compositionMap.set(file, { bytes: fileBytes, lines: fileLines });
+    } catch (e) {
+      failedSources.push(`${file}: ${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+
+  const totalBytes = Array.from(compositionMap.values()).reduce((s, v) => s + v.bytes, 0);
+
+  const composition = Array.from(compositionMap.entries())
+    .map(([source, v]) => ({
+      source,
+      bytes: v.bytes,
+      lines: v.lines,
+      pct: totalBytes > 0 ? (v.bytes / totalBytes) * 100 : 0,
+    }))
+    .sort((a, b) => b.bytes - a.bytes);
+
+  return {
+    events,
+    totalBytes,
+    composition,
+    failedSources,
+    wallTimeMs: Date.now() - start,
+    notes,
+  };
+}
+
+/** Cap on files collected per pattern while walking (runaway-glob guard). */
+const GLOB_WALK_FILE_CAP = 2000;
+
+const GLOB_CHARS = /[*?]/;
+
+/**
+ * Expand one requested path:
+ *   - literal file → itself
+ *   - literal directory → its plain files, one level (use `dir/**` to recurse)
+ *   - glob (`*`, `?`, `**`) → walk from the longest literal prefix directory
+ */
+async function expandPathPattern(raw: string): Promise<string[]> {
+  const p = resolve(raw);
+
+  if (!GLOB_CHARS.test(p)) {
+    const st = await stat(p); // throws for missing paths → failedSources
+    if (st.isDirectory()) {
+      const entries = await readdir(p, { withFileTypes: true });
+      return entries.filter((e) => e.isFile()).map((e) => join(p, e.name));
+    }
+    return st.isFile() ? [p] : [];
+  }
+
+  const segs = p.split(sep).filter((s) => s.length > 0);
+  let literalEnd = 0;
+  while (literalEnd < segs.length && !GLOB_CHARS.test(segs[literalEnd])) literalEnd++;
+  const baseDir = sep + segs.slice(0, literalEnd).join(sep);
+  const patSegs = segs.slice(literalEnd);
+
+  const out: string[] = [];
+  const budget = { remaining: GLOB_WALK_FILE_CAP };
+  await walkCollect(baseDir, [], patSegs, out, budget);
+  return out;
+}
+
+async function walkCollect(
+  dir: string,
+  relSegs: string[],
+  patSegs: string[],
+  out: string[],
+  budget: { remaining: number }
+): Promise<void> {
+  if (budget.remaining <= 0) return;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return; // unreadable directory: skip silently, the pattern note covers zero-match
+  }
+  for (const e of entries) {
+    if (budget.remaining <= 0) return;
+    const childRel = [...relSegs, e.name];
+    if (e.isFile()) {
+      if (globSegmentsMatch(patSegs, childRel)) {
+        out.push(join(dir, e.name));
+        budget.remaining--;
+      }
+    } else if (e.isDirectory() && couldMatchPrefix(patSegs, childRel)) {
+      await walkCollect(join(dir, e.name), childRel, patSegs, out, budget);
+    }
+  }
+}
+
+/**
+ * Segment-wise glob match. `**` spans zero or more segments; `*` and `?`
+ * stay within one segment. Exported for tests.
+ */
+export function globSegmentsMatch(pat: string[], segs: string[]): boolean {
+  if (pat.length === 0) return segs.length === 0;
+  const head = pat[0];
+  const rest = pat.slice(1);
+  if (head === '**') {
+    for (let i = 0; i <= segs.length; i++) {
+      if (globSegmentsMatch(rest, segs.slice(i))) return true;
+    }
+    return false;
+  }
+  if (segs.length === 0) return false;
+  if (!segmentMatch(head, segs[0])) return false;
+  return globSegmentsMatch(rest, segs.slice(1));
+}
+
+function segmentMatch(pat: string, seg: string): boolean {
+  let rx = '';
+  for (const c of pat) {
+    if (c === '*') rx += '.*';
+    else if (c === '?') rx += '.';
+    else rx += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${rx}$`).test(seg);
+}
+
+/** Prune the walk: can `segs` still grow into a match for `pat`? */
+function couldMatchPrefix(pat: string[], segs: string[]): boolean {
+  for (let i = 0; i < segs.length; i++) {
+    if (i >= pat.length) return false;
+    if (pat[i] === '**') return true;
+    if (!segmentMatch(pat[i], segs[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * Read the last `maxBytes` of a file, drop the leading partial line when
+ * truncated, and return at most the last `maxLines` non-empty lines.
+ */
+async function readFileTail(path: string, maxLines: number, maxBytes: number): Promise<string[]> {
+  const fh = await open(path, 'r');
+  try {
+    const st = await fh.stat();
+    const readBytes = Math.min(st.size, maxBytes);
+    if (readBytes === 0) return [];
+    const buf = Buffer.alloc(readBytes);
+    await fh.read(buf, 0, readBytes, st.size - readBytes);
+    let text = buf.toString('utf8');
+    if (readBytes < st.size) {
+      const nl = text.indexOf('\n');
+      text = nl >= 0 ? text.slice(nl + 1) : text;
+    }
+    const lines = text.split('\n').filter((s) => s.length > 0);
+    return lines.length > maxLines ? lines.slice(-maxLines) : lines;
+  } finally {
+    await fh.close();
+  }
 }

@@ -157,6 +157,31 @@ function deriveRecommendations(
     if (match) existingForwarderNamespace = match.namespace;
   }
 
+  // Estate shape: what did the probes actually see? The advise path branches
+  // on this instead of assuming Kubernetes.
+  const lambdaFns = aws.lambda?.available ? aws.lambda.functions.length : 0;
+  let estateShape: Recommendations['estateShape'];
+  if (kubectl.available && lambdaFns > 0) estateShape = 'mixed';
+  else if (kubectl.available) estateShape = 'kubernetes';
+  else if (lambdaFns > 0) estateShape = 'serverless';
+  else estateShape = 'unknown';
+
+  let serverless: Recommendations['serverless'];
+  if (lambdaFns > 0) {
+    const probedGroups = aws.cwLogGroups.filter((g) => g.subscriptionFilters !== undefined);
+    serverless = {
+      functionCount: lambdaFns,
+      functionsWithOtelExtension: aws.lambda?.functionsWithOtelExtension ?? 0,
+      logGroupsSubscribed: probedGroups.filter((g) => (g.subscriptionFilters?.length ?? 0) > 0).length,
+      logGroupsUnsubscribed: probedGroups.filter((g) => (g.subscriptionFilters?.length ?? 0) === 0).length,
+    };
+    // On a pure-serverless estate with a collector extension present, the
+    // OTel collector IS the forwarder the receiver pairs with.
+    if (estateShape === 'serverless' && !existingForwarder && serverless.functionsWithOtelExtension > 0) {
+      existingForwarder = 'otel-collector';
+    }
+  }
+
   // Namespace suggestion: use the hint if given; else if forwarder exists,
   // use that namespace; else fall back to "logging".
   const suggestedNamespace =
@@ -212,6 +237,8 @@ function deriveRecommendations(
     suggestedNamespace,
     existingForwarder,
     existingForwarderNamespace,
+    estateShape,
+    serverless,
     retrieverS3Bucket: retrieverBucket,
     receiverGitopsRepo,
     receiverCompactLookupFile,

@@ -6,7 +6,7 @@
  * wire-format change — bump `SNAPSHOT_SCHEMA_VERSION` below.
  */
 
-export const SNAPSHOT_SCHEMA_VERSION = 3;
+export const SNAPSHOT_SCHEMA_VERSION = 4;
 
 /** Which forwarder the customer is running. `unknown` = detection gave up. */
 export type ForwarderKind =
@@ -139,6 +139,53 @@ export interface CwLogGroup {
   name: string;
   /** Size in bytes at probe time, if returned by DescribeLogGroups. */
   storedBytes?: number;
+  /**
+   * Subscription filters on the group (serverless discovery). Present only
+   * when the Lambda probe ran; an empty array means "probed, none found",
+   * absent means "not probed".
+   */
+  subscriptionFilters?: Array<{
+    name: string;
+    destinationArn: string;
+    filterPattern: string;
+  }>;
+}
+
+/**
+ * One Lambda function, as seen by `aws lambda list-functions`. Environment
+ * variable VALUES are captured only for a small OTel-wiring allowlist —
+ * everything else is name-only, because function env vars routinely hold
+ * secrets.
+ */
+export interface LambdaFunctionInfo {
+  name: string;
+  runtime?: string;
+  memoryMb?: number;
+  architectures: string[];
+  /** Layer ARNs attached to the function. */
+  layers: string[];
+  /** Env var NAMES present on the function (values withheld). */
+  envKeys: string[];
+  /**
+   * Values for the OTel-wiring allowlist only (AWS_LAMBDA_EXEC_WRAPPER,
+   * OPENTELEMETRY_COLLECTOR_CONFIG_FILE / _URI, OTEL_EXPORTER_OTLP_ENDPOINT).
+   */
+  otelEnv: Record<string, string>;
+  /** True when a layer or env var marks an OTel collector extension. */
+  hasOtelCollectorExtension: boolean;
+  /** The layer ARN that triggered the detection, when layer-based. */
+  otelExtensionLayer?: string;
+}
+
+/** Serverless-estate probes (Lambda + log-group subscriptions). */
+export interface LambdaProbes {
+  /** False when `aws lambda list-functions` itself failed. */
+  available: boolean;
+  error?: string;
+  functions: LambdaFunctionInfo[];
+  /** True when list-functions was truncated by the probe budget. */
+  truncated: boolean;
+  functionsWithOtelExtension: number;
 }
 
 /** EKS cluster metadata. */
@@ -198,6 +245,8 @@ export interface AwsProbes {
   s3Buckets: S3Bucket[];
   sqsQueues: SqsQueue[];
   cwLogGroups: CwLogGroup[];
+  /** Serverless probes. Absent when the Lambda probe did not run. */
+  lambda?: LambdaProbes;
 }
 
 /**
@@ -209,6 +258,24 @@ export interface Recommendations {
   suggestedNamespace: string;
   existingForwarder?: ForwarderKind;
   existingForwarderNamespace?: string;
+  /**
+   * The shape of the estate, derived from what the probes actually saw:
+   *   - `kubernetes` — a reachable cluster (with or without AWS facts)
+   *   - `serverless` — no reachable cluster, Lambda functions present
+   *   - `mixed`      — both a cluster and Lambda functions
+   *   - `unknown`    — neither probe produced a usable signal
+   * The advise path branches on this instead of assuming Kubernetes.
+   */
+  estateShape?: 'kubernetes' | 'serverless' | 'mixed' | 'unknown';
+  /** Serverless-estate hints, set when estateShape is serverless or mixed. */
+  serverless?: {
+    functionCount: number;
+    functionsWithOtelExtension: number;
+    /** Log groups that already have a subscription filter attached. */
+    logGroupsSubscribed: number;
+    /** Log groups with no subscription filter (the auto-coverage gap). */
+    logGroupsUnsubscribed: number;
+  };
   retrieverS3Bucket?: string;
   retrieverSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
   alreadyInstalled: Partial<Record<Log10xAppKind, string>>;
