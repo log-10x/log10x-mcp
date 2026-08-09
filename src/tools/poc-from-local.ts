@@ -1,14 +1,19 @@
 /**
- * Local-source POC tool: pulls log lines from kubectl and renders a
- * cost-optimization report without touching any log-analyzer API.
+ * Local-source POC tool: pulls log lines from kubectl or from local
+ * files/globs and renders a cost-optimization report without touching
+ * any log-analyzer API.
  *
  * Distinct from `log10x_poc_from_siem`:
- *   - No vendor credentials needed (uses the user's kubeconfig)
+ *   - No vendor credentials needed (kubeconfig, or plain file reads)
  *   - Cost framing is an industry-pricing matrix (Datadog list,
  *     Splunk list, CloudWatch, OpenSearch), NOT a prediction of any
- *     specific bill — we only see kubernetes pod stdout, not
+ *     specific bill — we only see the sampled slice, not
  *     CloudTrail / ALB logs / VM-hosted apps that the SIEM ingests
- *   - Synchronous (kubectl pull is fast); no snapshot lifecycle
+ *   - Synchronous (the pull is fast); no snapshot lifecycle
+ *
+ * `source: "file"` is the serverless-estate path: a host with no
+ * cluster (100% Lambda shops, VMs, a downloaded log bundle) samples
+ * from `paths` instead of pods.
  *
  * Sample-composition table forces the user to declare the sample
  * representative: "70% of bytes come from your-noisy-service" surfaces
@@ -18,7 +23,12 @@
 
 import { z } from 'zod';
 
-import { sampleFromKubectl, type LocalSourceOptions } from '../lib/local-source.js';
+import {
+  sampleFromFiles,
+  sampleFromKubectl,
+  type LocalSourceOptions,
+  type LocalSourceResult,
+} from '../lib/local-source.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
@@ -28,24 +38,37 @@ import { DEFAULT_ANALYZER_COST_PER_GB } from '../lib/siem/pricing.js';
 
 export const pocFromLocalSchema = {
   source: z
-    .enum(['kubectl'])
+    .enum(['kubectl', 'file'])
     .optional()
     .default('kubectl')
     .describe(
-      'Where to pull log lines from. Currently `kubectl` only; `docker` and `journald` are follow-up work.'
+      'Where to pull log lines from. `kubectl` samples pod logs; `file` samples local files/globs ' +
+        '(the path for serverless estates and hosts with no cluster — pass `paths`). ' +
+        '`docker` and `journald` are follow-up work.'
     ),
   namespace: z
     .string()
     .optional()
     .default('default')
     .describe(
-      'Kubernetes namespace to sample from. Pass `*` to sample across all namespaces. Default `default`.'
+      'Kubernetes namespace to sample from (`source: kubectl` only). Pass `*` to sample across all namespaces. Default `default`.'
+    ),
+  paths: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Required for `source: file`: files, directories, or glob patterns (`*`, `**`, `?`) to sample, ' +
+        'e.g. `["/var/log/app/*.log", "./bundle/**"]`. A directory is read one level deep; use `dir/**` for the tree.'
     ),
   window: z
     .string()
     .optional()
     .default('1h')
-    .describe('How far back to read per pod. Accepts `1h`, `24h`, etc. Default `1h`.'),
+    .describe(
+      'How far back to read per pod (`source: kubectl`). For `source: file` this is the time span you ' +
+        'declare the sampled file tails to cover — it drives the daily projection, so set it if you know it. ' +
+        'Accepts `1h`, `24h`, etc. Default `1h`.'
+    ),
   per_pod_limit: z
     .number()
     .min(100)
@@ -96,8 +119,9 @@ export const pocFromLocalSchema = {
 };
 
 export interface PocFromLocalArgs {
-  source?: 'kubectl';
+  source?: 'kubectl' | 'file';
   namespace?: string;
+  paths?: string[];
   window?: string;
   per_pod_limit?: number;
   max_pods?: number;
@@ -157,17 +181,28 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     inner = await executePocFromLocalInner(args);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // A kubectl/cluster failure on a host that has no cluster is NOT a
+    // transient backend outage — retrying cannot fix an estate that is not
+    // Kubernetes. Classify it as environment misconfiguration and say what
+    // to do instead (the earlier classification returned
+    // `backend_unavailable` + retryable:true, sending agents into a retry
+    // loop against a cluster that does not exist).
+    const noCluster = /kubectl|kubeconfig|cluster/i.test(msg);
     const err: PrimitiveError = {
-      error_type: /kubectl|kubeconfig|cluster/i.test(msg) ? 'backend_unavailable' : 'local_processing_failed',
-      retryable: /kubectl|cluster/i.test(msg),
+      error_type: noCluster ? 'config_missing' : 'local_processing_failed',
+      retryable: false,
       suggested_backoff_ms: null,
-      hint: msg.slice(0, 400),
+      hint: noCluster
+        ? `No Kubernetes cluster is reachable from this host (${msg.slice(0, 160)}). ` +
+          'If this estate is serverless or file-based, re-run with source:"file" and paths:[...] ' +
+          'against local log files — do not retry the kubectl path.'
+        : msg.slice(0, 400),
     };
     const human_summary = `poc_from_local failed: ${err.hint}`;
     return buildEnvelope({
       tool: 'log10x_poc_from_local',
       view: 'summary',
-      summary: { headline: `POC from kubectl failed: ${err.error_type}` },
+      summary: { headline: `POC from local source failed: ${err.error_type}` },
       data: {
         events_pulled: 0,
         ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: human_summary, error: err }),
@@ -176,13 +211,16 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     });
   }
   const hasData = inner.events_pulled > 0;
+  const srcNoun = inner.source === 'file' ? 'file' : 'pod';
   // Headline leads with percent reduction (universal, vendor-independent),
   // followed by the volume context, then a trailing "at list price" dollar
   // band so the cost framing stays explicitly list-priced — not a customer-
-  // specific quote we cannot honestly produce from a kubectl sample.
+  // specific quote we cannot honestly produce from a local sample.
   const headline = hasData
-    ? `POC from kubectl: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
-    : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
+    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
+    : inner.source === 'file'
+      ? 'POC from files: no log lines pulled. Check the paths / glob patterns.'
+      : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
   const human_summary = buildHumanSummary(inner, hasData);
   return buildEnvelope({
     tool: 'log10x_poc_from_local',
@@ -200,18 +238,22 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
 // dollar figures are allowed per the §C rate_source rule.
 function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   if (!hasData) {
-    return `POC from kubectl pulled 0 log lines across the requested window. Either no pods matched the namespace + pod filter, or kubectl is not reachable. Confirm the namespace and re-run with a wider window or pod selector.`;
+    return inner.source === 'file'
+      ? `POC from files pulled 0 log lines. Either no files matched the supplied paths, or the matched files were empty. Check the glob patterns (a directory is read one level deep; use dir/** for the tree) and re-run.`
+      : `POC from kubectl pulled 0 log lines across the requested window. Either no pods matched the namespace + pod filter, or kubectl is not reachable. Confirm the namespace and re-run with a wider window or pod selector.`;
   }
+  const srcNoun = inner.source === 'file' ? 'file' : 'pod';
   const lo = Math.round(inner.daily_pct_reduction_low ?? 0);
   const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  return `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} pod${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  return `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
 }
 
 interface PocFromLocalInner {
   ok: boolean;
-  source: 'kubectl';
+  source: 'kubectl' | 'file';
+  /** `-` for source: file (no namespace concept). */
   namespace: string;
   window: string;
   pods_sampled: number;
@@ -241,11 +283,6 @@ interface PocFromLocalInner {
 
 async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFromLocalInner> {
   const source = args.source ?? 'kubectl';
-  if (source !== 'kubectl') {
-    throw new Error(
-      `source "${source}" not yet supported. Only "kubectl" is implemented; "docker" and "journald" are follow-up work.`
-    );
-  }
 
   const opts: LocalSourceOptions = {
     namespace: args.namespace ?? 'default',
@@ -254,10 +291,29 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     maxPods: args.max_pods ?? 20,
   };
 
-  const sample = await sampleFromKubectl(opts);
+  let sample: LocalSourceResult;
+  if (source === 'file') {
+    if (!args.paths || args.paths.length === 0) {
+      throw new Error(
+        'source "file" requires paths: pass files, directories, or glob patterns to sample (e.g. ["/var/log/app/*.log"]).'
+      );
+    }
+    // per_pod_limit / max_pods double as per-file / max-file caps — same
+    // budget, different source grain.
+    sample = await sampleFromFiles({
+      paths: args.paths,
+      perFileLimit: args.per_pod_limit ?? 5000,
+      maxFiles: args.max_pods ?? 20,
+    });
+  } else {
+    sample = await sampleFromKubectl(opts);
+  }
+
+  const srcNoun = source === 'file' ? 'file' : 'pod';
+  const namespaceOut = source === 'file' ? '-' : opts.namespace!;
 
   if (sample.events.length === 0) {
-    const lines: string[] = ['## Log10x POC — local source (kubectl)', ''];
+    const lines: string[] = [`## Log10x POC — local source (${source})`, ''];
     lines.push('**No log lines were pulled.**');
     lines.push('');
     if (sample.notes.length > 0) {
@@ -265,20 +321,20 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       for (const note of sample.notes) lines.push(`- ${note}`);
       lines.push('');
     }
-    if (sample.failedPods.length > 0) {
-      lines.push('### Failed pods');
-      for (const f of sample.failedPods.slice(0, 10)) lines.push(`- ${f}`);
-      if (sample.failedPods.length > 10) {
-        lines.push(`- ... and ${sample.failedPods.length - 10} more`);
+    if (sample.failedSources.length > 0) {
+      lines.push(`### Failed ${srcNoun}s`);
+      for (const f of sample.failedSources.slice(0, 10)) lines.push(`- ${f}`);
+      if (sample.failedSources.length > 10) {
+        lines.push(`- ... and ${sample.failedSources.length - 10} more`);
       }
     }
     return {
       ok: false,
-      source: 'kubectl',
-      namespace: opts.namespace!,
+      source,
+      namespace: namespaceOut,
       window: opts.window!,
       pods_sampled: 0,
-      pods_failed: sample.failedPods.length,
+      pods_failed: sample.failedSources.length,
       events_pulled: 0,
       total_bytes: 0,
       distinct_patterns: 0,
@@ -308,10 +364,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   const droppableFraction = sample.totalBytes > 0 ? droppableBytes / sample.totalBytes : 0;
 
   const lines: string[] = [];
-  lines.push('# Log10x POC — local source (kubectl)');
+  lines.push(`# Log10x POC — local source (${source})`);
   lines.push('');
   lines.push(
-    `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} pod${sample.composition.length === 1 ? '' : 's'} in namespace \`${opts.namespace}\` over the last ${opts.window}._`
+    source === 'file'
+      ? `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} file${sample.composition.length === 1 ? '' : 's'} (tail-sampled; the \`window\` parameter does not apply to files)._`
+      : `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} pod${sample.composition.length === 1 ? '' : 's'} in namespace \`${opts.namespace}\` over the last ${opts.window}._`
   );
   lines.push('');
 
@@ -319,10 +377,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('## Sample composition');
   lines.push('');
   lines.push(
-    'These pods produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection** — if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen with `namespace: "*"` or a longer `window` if anything looks off.'
+    source === 'file'
+      ? 'These files produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection** — if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen `paths` or raise `max_pods` (the file cap) if anything looks off.'
+      : 'These pods produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection** — if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen with `namespace: "*"` or a longer `window` if anything looks off.'
   );
   lines.push('');
-  lines.push('| Pod | Bytes | Lines | % of sample |');
+  lines.push(`| ${source === 'file' ? 'File' : 'Pod'} | Bytes | Lines | % of sample |`);
   lines.push('|---|---|---|---|');
   for (const c of sample.composition.slice(0, 10)) {
     lines.push(`| \`${c.source}\` | ${fmtBytes(c.bytes)} | ${fmtCount(c.lines)} | ${fmtPct(c.pct)} |`);
@@ -349,6 +409,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     `**Projected daily ingest** (extrapolated from sample): ${fmtBytes(dailyGbProjected * 1024 ** 3)}.`
   );
   lines.push('');
+  if (source === 'file') {
+    lines.push(
+      `_File tails carry no time span of their own; the daily projection assumes the sampled bytes cover \`${opts.window}\` (the \`window\` argument). Pass the window the files actually span to make this projection honest._`
+    );
+    lines.push('');
+  }
   lines.push(
     '_These are list-price figures, not predictions of your specific bill — use them to size the order of magnitude, not to negotiate with procurement._'
   );
@@ -389,12 +455,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('');
 
   // Notes / failures.
-  if (sample.failedPods.length > 0 || sample.notes.length > 0) {
+  if (sample.failedSources.length > 0 || sample.notes.length > 0) {
     lines.push('## Notes');
     for (const note of sample.notes) lines.push(`- ${note}`);
-    if (sample.failedPods.length > 0) {
+    if (sample.failedSources.length > 0) {
       lines.push(
-        `- ${sample.failedPods.length} pod(s) failed to read (e.g., access denied, terminated). Sample-composition table reflects only successfully-read pods.`
+        `- ${sample.failedSources.length} ${srcNoun}(s) failed to read (e.g., access denied, terminated). Sample-composition table reflects only successfully-read ${srcNoun}s.`
       );
     }
   }
@@ -470,7 +536,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     artLines.push(`- **Sample bytes analyzed**: ${fmtBytes(sample.totalBytes)}`);
     artLines.push('');
     if (exceptions.length > 0) {
-      artLines.push('### Exception pods (stay in log analyzer, full retention)');
+      artLines.push(`### Exception ${srcNoun}s (stay in log analyzer, full retention)`);
       artLines.push('');
       for (const svc of exceptions) artLines.push(`- \`${svc}\``);
       artLines.push('');
@@ -500,11 +566,11 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
 
   return {
     ok: true,
-    source: 'kubectl',
-    namespace: opts.namespace!,
+    source,
+    namespace: namespaceOut,
     window: opts.window!,
     pods_sampled: sample.composition.length,
-    pods_failed: sample.failedPods.length,
+    pods_failed: sample.failedSources.length,
     events_pulled: totalEvents,
     total_bytes: sample.totalBytes,
     distinct_patterns: patterns.length,
