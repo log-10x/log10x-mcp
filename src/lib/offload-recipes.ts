@@ -1793,32 +1793,38 @@ TENX_LICENSE_FILE=/opt/tenx/license.jwt    # full (non-demo, non-limited) licens
     body: `# The engine enters the execution environment as its OWN Lambda extension:
 #
 #   Layer: ${layerArn}
-#     /opt/extensions/tenx-receive        <- extension bootstrap (executable)
-#     /opt/tenx/bin/tenx                  <- engine, native linux build
-#     /opt/tenx/modules/...               <- module + config trees
-#     /opt/tenx/license.jwt               <- full license (or fetch at init)
+#     /opt/extensions/tenx-receive        <- the run-lambda native bootstrap
+#                                            (ReceiveExtension: placement-
+#                                            dispatched, same binary as the
+#                                            runtime bootstrap)
+#     /opt/tenx/modules/...               <- modules tree
+#     /opt/tenx/config/...                <- config tree
+#     /opt/tenx/symbols/...               <- symbol library
+#     /opt/tenx/license.jwt               <- full license, placed by the
+#                                            deployer (never by the build)
+#   Built by: engine packaging/lambda-layer/build-receive-layer.sh
 #
-# Bootstrap lifecycle contract (each step measured in the local lab):
+# Lifecycle (implemented in ReceiveExtension, engine PR #120; each step
+# proven against the Extensions API emulator):
 #   1. POST /2020-01-01/extension/register   {"events":["INVOKE","SHUTDOWN"]}
-#   2. spawn/host the engine; wait for loopback :4317 to accept (readiness)
-#   3. loop GET /2020-01-01/extension/event/next
-#        INVOKE   -> no action; the engine runs continuously across invocations
-#        SHUTDOWN -> drive a GRACEFUL engine stop and drain within ~2 s,
-#                    then exit. A bare SIGTERM is NOT a drain: measured, the
-#                    engine exits in <40 ms without flushing, and everything
-#                    still inside it is lost. In-process pipeline stop (the
-#                    run-lambda plumbing is generic) or a native build with
-#                    --install-exit-handlers closes that window.
+#   2. launch the receive pipeline IN-PROCESS; hold the first event/next
+#      poll until loopback :4317 accepts, so Lambda's INIT completes only
+#      when the engine can receive
+#   3. INVOKE -> no action (the engine runs continuously)
+#      SHUTDOWN -> PipelineShutdownDrain.drainAll(deadlineMs budget), exit.
+#      Measured: a SHUTDOWN two invocations deep derived a 1,747 ms budget
+#      from its 2 s deadline and delivered 6,000/6,000.
 #
 # Freeze/thaw needs no handling: a 118 s cgroup freeze mid-burst delivered
 # 5,000/5,000 after thaw with zero duplicates and clean timer resumption.`,
     placementNote:
-      'the existing engine Lambda entry (RetrieverBootstrap) speaks the RUNTIME ' +
-      'API — one pipeline run per invocation. The receive role needs the ' +
-      'EXTENSIONS API loop above instead; it is a small Java sibling of ' +
-      'RetrieverBootstrap and is the one engine-side deliverable this estate waits on.',
+      'one binary, two contracts, dispatched by placement: started from ' +
+      '/opt/extensions/ it speaks the Extensions API loop above ' +
+      '(ReceiveExtension); started as the function runtime bootstrap it ' +
+      'long-polls the Runtime API (ROLE=receive handles CloudWatch ' +
+      'subscription envelopes there — the remainder path).',
     prerequisites: [
-      'The engine extension layer is NOT published yet — the bootstrap above exists as a measured prototype, not a shipped artifact. No availability claims until the layer builds in CI and the one-shot real-Lambda confirmation has run.',
+      'The engine extension layer is NOT published yet. The bootstrap is implemented and lifecycle-proven (engine PR #120: ReceiveExtension + the CloudWatch-remainder receive handler; layer build script in packaging/lambda-layer/) — pending merge, release, and layer publish. No availability claims until then and until the one-shot real-Lambda confirmation has run.',
       'Architecture: build the layer for the estate architecture (x86_64 measured; arm64 needs its own native build).',
     ],
   };
