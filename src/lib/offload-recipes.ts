@@ -1700,6 +1700,15 @@ exporters:
     endpoint: 127.0.0.1:4317
     tls:
       insecure: true
+    # MEASURED on real Lambda: the collector's eager first dial happens
+    # before the engine listens (~3 s into INIT), and default exponential
+    # retry intervals stretch across freeze until exports fail forever.
+    # Tight bounded intervals keep every retry inside a thaw window.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 200ms
+      max_interval: 1s
+      max_elapsed_time: 0s
 ${offloadBlock}
 
 connectors:
@@ -1743,14 +1752,20 @@ service:
     # Splice: whatever pipeline your receivers feed today now exports to the
     # engine instead of straight to Coralogix. Enrichment processors stay
     # HERE so they run exactly once, before the engine sees the event.
+    # decouple LAST in both tenx pipelines is MANDATORY on Lambda: the
+    # environment freezes the instant the handler returns, so without it
+    # batches strand inside the collector (measured: a 30 s hang on the
+    # next send, nothing exported). decouple ties forwarding to the
+    # invocation lifecycle and flushes on SHUTDOWN.
     logs/to-tenx:
       receivers: [otlp]              # <- your existing receivers
-      processors: [batch]            # <- your existing enrichment + batch
+      processors: [batch, decouple]  # <- your existing enrichment + batch
       exporters: [otlp/tenx]
 
     # Return path: engine-processed events fan out by routeState.
     logs/from-tenx:
       receivers: [otlp/tenx]
+      processors: [decouple]
       exporters: [routing/tenx]
 
     logs/tenx-siem:      { receivers: [routing/tenx], processors: [transform/tenx-fold], exporters: [coralogix] }  # <- your existing exporter
@@ -1766,7 +1781,7 @@ ${offloadPipeline}
       'moves it to the Monitoring tier — see coralogixMonitoringRecipe().',
     prerequisites: [
       `Engine pairing measured on the loopback (engine 1.1.57 native): records return with tenx_hash + routeState as log-record attributes; bodies byte-identical.`,
-      'The routing connector + transform processor require a collector build that includes them (otelcol-contrib has both; a minimal custom build may not — check `components` output).',
+      'The routing connector, transform processor, and decouple processor require a collector build that includes them (otelcol-contrib and the community Lambda collector layer have them; a minimal custom build may not — check `components` output). decouple is not optional on Lambda — see the pipeline comments.',
       'THE POLICY KEYPATH IS NESTED ON THIS PATH, and it is not the one the Fluent Bit recipe uses. Verified live on the US2 tenant with a two-record single-POST control, identical but for routeState: the Coralogix OTLP exporter wraps each record under `logRecord`, so the policy expression must be `<v1> $d.logRecord.attributes.routeState == \'tier_down\'`. A flat `$d.routeState` compiles to "keypath does not exist" and tiers nothing — both control events stayed at priorityclass=high. `$d.logRecord.body.routeState` also resolves (the fold puts it there), so either nested keypath works; the flat one never does.',
       'transform/tenx-fold is for the OFFLOAD slice, not for the policy: awss3 uses `marshaler: body`, so without it the S3 objects lose tenx_hash, which is the Retriever\'s index key. Coralogix tiering works with or without it, on the nested keypath either way.',
       'TCO policy changes take ~6 minutes to apply (measured live) — do not conclude failure inside a minute.',
@@ -1785,6 +1800,10 @@ symbolMessageHashField=tenx_hash           # stable pattern identity rides along
 log10xMetricsEnabled=false                 # metric backend is BYO; hosted metrics stay off
 TENX_AIRGAPPED=true                        # REQUIRED: no egress from the sandbox to log10x
 TENX_LICENSE_FILE=/opt/tenx/license.jwt    # full (non-demo, non-limited) license baked into the layer
+TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /tmp; a /var/log
+                                           # rollingFile failure poisons pipeline launch (measured).
+                                           # Layers built by build-receive-layer.sh >= 1.1.63
+                                           # already default this; the env var is belt-and-braces.
 # optional BYO metrics:
 # PROMETHEUS_REMOTE_WRITE_URL=https://<your-prometheus>/api/v1/write`,
     placementNote:
