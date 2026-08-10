@@ -30,9 +30,23 @@ test('lambdaOtelExtensionRecipe: three parts, loopback pairing, routeState routi
   assert.ok(r.collector.body.includes('127.0.0.1:24225'));
   assert.ok(r.collector.body.includes('attributes["routeState"] == "offload"'));
   assert.ok(r.collector.body.includes('context: log'));
-  // the Coralogix path folds the record into a body object so the proven
-  // $d.routeState dpxl mechanism applies
+  // the fold serves the OFFLOAD slice (awss3 marshaler: body needs tenx_hash
+  // in the body); the TCO policy matches the NESTED keypath — measured live,
+  // the OTLP exporter wraps records under logRecord and a flat $d.routeState
+  // compiles to "keypath does not exist" and tiers nothing
   assert.ok(r.collector.body.includes('transform/tenx-fold'));
+  assert.ok(
+    r.collector.placementNote.includes('$d.logRecord.attributes.routeState'),
+    'placement note must carry the nested keypath this path requires'
+  );
+  assert.ok(
+    r.collector.prerequisites.some((p) => p.includes('$d.logRecord.attributes.routeState')),
+    'prerequisites must state the nested policy keypath'
+  );
+  assert.ok(
+    !r.collector.prerequisites.some((p) => /dpxl[^]*?<v1> \$d\.routeState ==/.test(p)),
+    'the flat keypath must not be presented as the policy expression on this path'
+  );
   assert.ok(r.collector.body.includes('acme-offload'));
 
   // engine env: offload marker + hash + the airgapped guard
@@ -58,7 +72,15 @@ test('lambdaEstateCdkConstruct: read-modify-write TCO + CreateLogGroup rule', ()
   assert.ok(cdk.body.includes('/mgmt/openapi'));
   assert.ok(cdk.body.includes('log-policies/v1'));
   assert.ok(cdk.body.includes('replaces the ENTIRE ordered policy list'));
-  assert.ok(cdk.body.includes('.filter(p => (p.policy || p).name !== process.env.POLICY_NAME)'));
+  assert.ok(cdk.body.includes('.filter(p => p.name !== process.env.POLICY_NAME)'));
+  // The PUT contract, measured live on the v5 API: GET entries are flat and
+  // must be TRANSLATED (a verbatim re-PUT 400s on "unknown field id"), and
+  // logRules sits BESIDE policy in each item, never inside it.
+  assert.ok(cdk.body.includes('function toPutItem'));
+  assert.ok(cdk.body.includes('logRules: { dpxlExpression:'));
+  // the nested keypath — the flat $d.routeState tiers nothing on this path
+  assert.ok(cdk.body.includes('$d.logRecord.attributes.routeState'));
+  assert.ok(!cdk.body.includes('"<v1> $d.routeState'));
   // CloudWatch remainder: per-group subscription + new-group rule
   assert.ok(cdk.body.includes('SubscriptionFilter'));
   assert.ok(cdk.body.includes("eventName: ['CreateLogGroup']"));

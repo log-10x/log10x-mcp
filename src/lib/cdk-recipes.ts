@@ -226,13 +226,40 @@ export class CoralogixTcoPolicies extends Construct {
         '  if (!res.ok) throw new Error(method + " " + path + " -> HTTP " + res.status + ": " + text.slice(0, 400));' +
         '  return text ? JSON.parse(text) : {};' +
         '}' +
+        // GET entries are FLAT with server-side fields; PUT items are
+        // {policy:{...}, logRules:{...}} with logRules a SIBLING of policy.
+        // Both facts measured against the live v5 API: PUTting a GET entry
+        // back verbatim 400s on "unknown field id", and dpxlExpression inside
+        // policy 400s on "unknown field dpxlExpression". This converter is the
+        // proven translation (no-op same-list PUT returned 200 and recreated
+        // the policies).
+        'function toPutItem(p) {' +
+        '  const pol = { name: p.name, description: p.description || "",' +
+        '    priority: p.priority, disabled: !(p.enabled !== false) };' +
+        '  if (p.subsystemRule) pol.subsystemRule = p.subsystemRule;' +
+        '  if (p.applicationRule) pol.applicationRule = p.applicationRule;' +
+        '  const item = { policy: pol };' +
+        '  const lr = p.logRules || {};' +
+        '  const out = {};' +
+        '  if (lr.dpxlExpression) out.dpxlExpression = lr.dpxlExpression;' +
+        '  if (lr.severities && lr.severities.length) out.severities = lr.severities;' +
+        '  if (Object.keys(out).length) item.logRules = out;' +
+        '  return item;' +
+        '}' +
         'exports.handler = async (event) => {' +
         '  const bearer = await key();' +
         '  const current = await cx("GET", "/5/dataplans/policies/v1?source_type=SOURCE_TYPE_LOGS", bearer);' +
-        '  const list = (current.policies || []).filter(p => (p.policy || p).sourceType !== "SOURCE_TYPE_SPANS");' +
-        '  const mine = { policy: { name: process.env.POLICY_NAME, priority: "PRIORITY_TYPE_MEDIUM", disabled: false,' +
-        '    dpxlExpression: "<v1> $d.routeState == \\'" + process.env.ROUTE + "\\'" } };' +
-        '  const others = list.filter(p => (p.policy || p).name !== process.env.POLICY_NAME);' +
+        '  const others = (current.policies || [])' +
+        '    .filter(p => p.name !== process.env.POLICY_NAME)' +
+        '    .map(toPutItem);' +
+        // NESTED keypath, and not the one the Fluent Bit recipe uses. The
+        // Coralogix OTLP exporter wraps every record under logRecord, so a flat
+        // $d.routeState does not exist on this path. Measured on the live US2
+        // tenant: the flat expression tiered nothing and both control events
+        // stayed at priorityclass=high. See lambdaOtelExtensionRecipe.
+        '  const mine = { policy: { name: process.env.POLICY_NAME, description: "log10x tier_down -> Monitoring",' +
+        '      priority: "PRIORITY_TYPE_MEDIUM", disabled: false },' +
+        '    logRules: { dpxlExpression: "<v1> $d.logRecord.attributes.routeState == \\'" + process.env.ROUTE + "\\'" } };' +
         '  const merged = event.RequestType === "Delete" ? others : [mine, ...others];' +
         '  await cx("PUT", "/5/dataplans/log-policies/v1", bearer, { policies: merged });' +
         '  return { PhysicalResourceId: process.env.POLICY_NAME };' +
