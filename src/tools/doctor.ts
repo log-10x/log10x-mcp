@@ -618,7 +618,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       name: 'prometheus_gateway',
       status: 'fail',
       message: `Gateway query failed or timed out (no response within ${Math.round(QUERY_BUDGET.cheap / 1000)}s).`,
-      fix: `Verify the credentials for env ${env.nickname}: re-check the key at https://console.log10x.com → Profile → API Settings, or run \`log10x_signin_start\` to mint a fresh one via the Auth0 Device Flow with GitHub or Google (the model chains to \`log10x_signin_complete\` automatically). To paste an existing key directly, call \`log10x_signin_complete\` with \`{ api_key: "<key>" }\`. If the network is locked down, allowlist prometheus.log10x.com.`,
+      fix: `Verify the credentials for env ${env.nickname}: re-check the key at https://console.log10x.com → Profile → API Settings, or run \`log10x_signin_start\` to mint a fresh one via the Auth0 Device Flow with GitHub or Google (the model chains to \`log10x_signin_complete\` automatically). To paste an existing key directly, call \`log10x_signin_complete\` with \`{ api_key: "<key>" }\`. If the network is locked down, allowlist api.log10x.com (signin/license) and prometheus.log10x.com (hosted metrics).`,
     });
     return checks;
   }
