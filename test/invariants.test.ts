@@ -287,13 +287,12 @@ const KNOWN_VIOLATIONS: Record<string, { reason: string; ticket: string }> = {
     reason: 'investigate → metrics_that_moved action omits required `candidates` (z.array().min(1)); the action is an agent-fill template, not a runnable call',
     ticket: 'TODO(no_dead_end_actions): have investigate seed `candidates` from the co-mover set, or drop the action until it can',
   },
-  // extract_templates emits a `configure_env` next-action with empty args
-  // ({}) and the reason "configure the missing field" — but configureEnvSchema
-  // requires `nickname` + `metricsBackend`. Under-specified template action.
-  'log10x_extract_templates:no_dead_end_actions': {
-    reason: 'extract_templates → configure_env action passes empty args while configureEnvSchema requires nickname + metricsBackend; the action is an agent-fill template, not a runnable call',
-    ticket: 'TODO(no_dead_end_actions): drop the configure_env action from extract_templates or supply the required nickname/metricsBackend',
-  },
+  // (extract_templates:no_dead_end_actions removed 2026-08-10 — the dead end
+  // was the missing-LOG10X_API_KEY branch, which emitted a configure_env
+  // action nobody could run. The local engine now resolves a LICENSE instead
+  // of demanding an API key, so that branch no longer fires. The stale-guard
+  // caught the entry the moment it stopped reproducing, which is what it is
+  // for; do not re-add it without a failing case.)
 };
 
 // ── softAssert + stale-guard plumbing ─────────────────────────────────

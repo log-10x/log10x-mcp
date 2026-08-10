@@ -34,7 +34,7 @@ import {
 } from './lib/mode-detect.js';
 import { makeShapeCoercive } from './lib/input-coerce.js';
 
-import { loadEnvironments, resolveEnv, revalidateEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
+import { loadEnvironments, resolveEnv, revalidateEnvironments, offlineEnvironments, type EnvConfig, type Environments, EnvironmentValidationError } from './lib/environments.js';
 import { eventLookupSchema, executeEventLookup } from './tools/event-lookup.js';
 import { savingsSchema, executeSavings } from './tools/savings.js';
 import { trendSchema, executeTrend } from './tools/trend.js';
@@ -1718,11 +1718,23 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
     executePocFromLocal({
       source: args.source ?? 'kubectl',
       namespace: args.namespace ?? 'default',
+      // `paths` is what `source: file` REQUIRES, and this hand-written
+      // destructure used to drop it: the schema advertised it, the agent
+      // sent it, and the tool answered "source file requires paths". That
+      // made the serverless/no-cluster POC path unreachable through the MCP
+      // interface entirely — measured 2026-08-10 driving the real server
+      // over stdio in a container. The unit suite could not catch it because
+      // it calls executePocFromLocal() directly, below this boundary.
+      // pin_services / pin_patterns were dropped the same way, silently
+      // discarding an operator's explicit per-service dispositions.
+      paths: args.paths,
       window: args.window ?? '1h',
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
       target_percent_reduction: args.target_percent_reduction,
       exception_services: args.exception_services,
+      pin_services: args.pin_services,
+      pin_patterns: args.pin_patterns,
     })
   )
 );
@@ -2200,11 +2212,41 @@ async function main() {
     await initEnvs();
   } catch (e) {
     if (e instanceof EnvironmentValidationError) {
-      // eslint-disable-next-line no-console
-      console.error(`\n[log10x-mcp] Configuration error:\n${e.message}\n`);
-      process.exit(1);
+      // An unreachable gateway is an environment fact, not a misconfiguration.
+      // Exiting on it made the MCP unusable to exactly the customers the
+      // serverless/airgapped story is aimed at: measured 2026-08-10 in a
+      // no-egress container (log10x hosts blackholed, AWS reachable), the
+      // demo-boot probe failed and the process exited 1 BEFORE completing
+      // `initialize` — so an agent could not reach even the tools that never
+      // touch the gateway (poc_from_local, advise_install, the offload/CDK
+      // recipes, discovery over the customer's own AWS/kubectl).
+      //
+      // Offline boot continues with an empty env list, which is a state the
+      // tools already model: anything gateway-backed takes the designed
+      // "not configured" path, and the local-only tools work untouched. A
+      // rejected CREDENTIAL still exits — that is a real misconfiguration
+      // the user must fix, and silently degrading it would hide a typo'd key.
+      if (e.offline) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `\n[log10x-mcp] Offline mode: the log10x gateway is unreachable from this ` +
+            `network, so no environment was loaded.\n` +
+            `Local-only tools (POC from local files, install advice, offload and CDK ` +
+            `recipes, discovery via your own AWS/kubectl credentials) work normally.\n` +
+            `Tools that query a metrics backend will report "not configured" until the ` +
+            `gateway is reachable or an env is configured.\n` +
+            `Underlying failure: ${e.message.split('.')[0]}.\n`
+        );
+        envs = offlineEnvironments();
+        recordEnvsProvider(() => envs);
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(`\n[log10x-mcp] Configuration error:\n${e.message}\n`);
+        process.exit(1);
+      }
+    } else {
+      throw e;
     }
-    throw e;
   }
   // Detect operating mode (analysis | analysis_pending | poc) from
   // the TSDB-resolvability cascade. Bounded by 5s probe timeout. Sets
@@ -2227,7 +2269,8 @@ async function main() {
     built_at: BUILD_INFO.builtAt,
     tools: REGISTERED_TOOLS.length,
     envs: loaded.all.length,
-    default_env: loaded.default.nickname,
+    // Offline boot has no envs at all, so there is no default to name.
+    default_env: loaded.default?.nickname ?? '(none — offline)',
     demo_mode: loaded.isDemoMode,
     demo_playground: demoPlaygroundEnabled(),
     read_only_mode: isReadOnlyMode(),

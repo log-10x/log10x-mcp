@@ -680,6 +680,13 @@ function wizardEnvelopeMeta(data: WizardData): {
         (data.license_kind === undefined && data.notes.some((n) => /demo license/i.test(n)));
       if (isDemoLicense) {
         warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
+        // The demo license runs airgapped (engine 1.1.61+ verifies offline
+        // and never reads the license type), so an airgapped plan is emitted
+        // rather than refused. What still bites is scale and the clock, and
+        // an operator reading the plan has to see both.
+        if (data.notes.some((n) => /airgapped/i.test(n))) {
+          warnings.push('airgapped on a demo license works — the engine verifies offline (proven on a live Lambda estate) — but the license is single-node and expires in 14 days, so an isolated estate stops processing when it lapses. Mint a user license and place it before the window closes.');
+        }
       }
       const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
       // Post-install health check is universal — optional follow-up.
@@ -968,14 +975,28 @@ export async function executeAdviseInstall(
     }
   }
 
-  // Soft-warn: airgapped + demo license can't actually work — the engine
-  // refuses to run airgapped on demo / limited licenses and silently
-  // downgrades to online mode. We give the user a clear choice before
-  // emitting a plan they think is airgapped but won't be.
-  // Catches BOTH paths: not-signed-in users (fetched anonymous demo) AND
-  // signed-in-via-pasted-key users (fell back to demo because we lack
-  // Auth0 tokens to mint a user license).
-  if (session.airgapped === true && session.isDemoLicense === true) {
+  // A demo license DOES run airgapped as of engine 1.1.61+. This refusal
+  // described pre-#121 behaviour, where the engine silently downgraded
+  // demo/limited licenses to online mode. Post-#121 `resolveLicense` gates
+  // airgapped on the OFFLINE ES256 signature and expiry only — the license
+  // TYPE is never read on that path — and it was proven live on 2026-08-10:
+  // a real Lambda estate ran `TENX_AIRGAPPED=true` on a **demo** license and
+  // delivered 600/600 records.
+  //
+  // Keeping the refusal blocked the out-of-the-box case exactly: a
+  // not-signed-in prospect asking for a serverless plan (airgapped by
+  // definition, since a Lambda sandbox has no egress to log10x) was turned
+  // away for a reason that no longer existed. The wizard now emits the plan
+  // and carries the two facts that ARE still true — a demo license expires
+  // in 14 days, and it is single-node — as plan warnings rather than a wall.
+  //
+  // Set LOG10X_DEMO_AIRGAPPED_REFUSE=1 to restore the old refusal if an
+  // older engine is in play.
+  if (
+    process.env.LOG10X_DEMO_AIRGAPPED_REFUSE === '1' &&
+    session.airgapped === true &&
+    session.isDemoLicense === true
+  ) {
     // `is_signed_in` here means "had Auth0 tokens" — i.e., the device
     // flow has been completed at least once. We derive it from the
     // license-acquire reason rather than `envs.isDemoMode` because the

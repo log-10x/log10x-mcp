@@ -271,6 +271,70 @@ export class DevCliConfigMissingError extends Error {
   }
 }
 
+/**
+ * The credentials a local engine run actually needs.
+ *
+ * These are two different things and the distinction is the whole point:
+ *
+ *   - `licenseKey` is the REAL credential. The engine verifies it offline
+ *     against embedded ES256 keys (signature + expiry, nothing else — see
+ *     PipelineLauncher.resolveLicense), so once minted it works with no
+ *     egress, including airgapped. A not-signed-in user gets an anonymous
+ *     14-day demo license from `POST /api/v1/license/demo`, cached in
+ *     `~/.log10x/demo-license.json` and reused until it expires. This is the
+ *     same license the website's generated install command carries, and the
+ *     same one `advise_install` bakes into its plan — one credential, every
+ *     surface.
+ *
+ *   - `apiKey` authenticates NOTHING here. `apps/shared → run/bootstrap`
+ *     declares `apiKey` as a required commandLine argument, so an absent
+ *     `TENX_API_KEY` surfaces as a tilde-prefixed positional-arg error. It is
+ *     a validator placeholder.
+ *
+ * Requiring a real API key for both is what made the POC path unreachable for
+ * exactly the users it was built for: measured 2026-08-10 in a no-egress
+ * container, `poc_from_local` refused with "LOG10X_API_KEY is not configured"
+ * on a tool whose own contract reads "no vendor credentials needed... events
+ * never leave the machine".
+ */
+export interface EngineCredentials {
+  licenseKey: string;
+  apiKey: string;
+}
+
+/** Placeholder for bootstrap's required-arg validator. Not a credential. */
+const BOOTSTRAP_API_KEY_PLACEHOLDER = 'MCP-LOCAL';
+
+export async function resolveEngineCredentials(): Promise<EngineCredentials> {
+  const apiKey =
+    process.env.TENX_API_KEY ||
+    process.env.LOG10X_API_KEY ||
+    BOOTSTRAP_API_KEY_PLACEHOLDER;
+
+  // An explicit license always wins — a customer with a full license, or an
+  // airgapped box that was seeded with one, never needs the mint path.
+  const explicit = process.env.TENX_LICENSE_KEY?.trim();
+  if (explicit) {
+    return { licenseKey: explicit, apiKey };
+  }
+
+  try {
+    const { getOrMintDemoLicense } = await import('./license-api.js');
+    const lic = await getOrMintDemoLicense();
+    return { licenseKey: lic.jwt, apiKey };
+  } catch (e) {
+    throw new DevCliConfigMissingError(
+      'TENX_LICENSE_KEY',
+      `The local engine needs a license and none could be obtained: ${(e as Error).message}. ` +
+        `A cached demo license lives at ~/.log10x/demo-license.json and is minted automatically ` +
+        `on first use — that mint needs one call to the log10x gateway. If this host has no ` +
+        `egress, set TENX_LICENSE_KEY (or TENX_LICENSE_FILE) to a license minted elsewhere; ` +
+        `the engine verifies it offline, so it keeps working with no network. Signed-in users ` +
+        `get a longer-lived license via \`log10x_signin_start\`.`
+    );
+  }
+}
+
 // ── Public API ──
 
 /**
@@ -362,13 +426,8 @@ async function runAppsMcpFileViaLocalBinary(
   // Before injecting: check that a real API key is available. If not, throw
   // DevCliConfigMissingError so the tool boundary converts it to a
   // config_missing chassis envelope with a useful hint (FIX 68-residual).
-  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
-  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
-    throw new DevCliConfigMissingError(
-      'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
-    );
-  }
+  const engineCreds = await resolveEngineCredentials();
+  const resolvedApiKey = engineCreds.apiKey;
   // tenx-mcp-file.config.yaml is a FILE-input config: it reads from
   // LOG10X_MCP_INPUT_PATH, not from stdin. Piping the batch to stdin (as
   // this used to) left the input path unset, so the engine read nothing,
@@ -386,6 +445,7 @@ async function runAppsMcpFileViaLocalBinary(
     LOG10X_MCP_OUTPUT_DIR: outputDir,
     LOG10X_MCP_INPUT_PATH: inputFile,
     TENX_API_KEY: resolvedApiKey,
+    TENX_LICENSE_KEY: engineCreds.licenseKey,
   };
   await runCommandWithStdin(
     binary,
@@ -480,12 +540,15 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
   // can validate it (FIX 68-residual). Throw DevCliConfigMissingError so the
   // tool boundary (executeResolveBatch / executeExtractTemplates) converts it
   // to a config_missing chassis envelope.
-  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
-  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
-    throw new DevCliConfigMissingError(
-      'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
-    );
+  const engineCreds = await resolveEngineCredentials();
+  const resolvedApiKey = engineCreds.apiKey;
+  // Both backends need the license. The local path takes it through the env
+  // object it builds; the docker path forwards it with a bare `-e
+  // TENX_LICENSE_KEY` (see dockerLicenseArgs), which inherits from THIS
+  // process env — so a minted demo license has to land there or docker mode
+  // keeps running on the image's built-in limited license instead.
+  if (!process.env.TENX_LICENSE_KEY) {
+    process.env.TENX_LICENSE_KEY = engineCreds.licenseKey;
   }
 
   const mode = await resolveTenxMode();
@@ -725,13 +788,8 @@ async function runAppsMcpViaLocalBinary(
   // Guard: if LOG10X_API_KEY is absent or equals the placeholder, throw
   // DevCliConfigMissingError so the tool boundary emits a config_missing
   // envelope (FIX 68-residual). Same guard as runAppsMcpFileViaLocalBinary.
-  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
-  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
-    throw new DevCliConfigMissingError(
-      'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
-    );
-  }
+  const engineCreds = await resolveEngineCredentials();
+  const resolvedApiKey = engineCreds.apiKey;
 
   // TENX_INCLUDE_PATHS injected so the engine resolves apps/mcp without
   // requiring user-set TENX_HOME in the MCP server's environment.
@@ -749,6 +807,7 @@ async function runAppsMcpViaLocalBinary(
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
     TENX_API_KEY: resolvedApiKey,
+    TENX_LICENSE_KEY: engineCreds.licenseKey,
   };
 
   const stdout = await runCommandWithStdin(
@@ -902,19 +961,15 @@ async function runViaLocalBinary(
   // Guard: if LOG10X_API_KEY is absent or equals the placeholder, throw
   // DevCliConfigMissingError so the tool boundary emits a config_missing
   // chassis envelope (FIX 68-residual).
-  const resolvedApiKey = process.env.TENX_API_KEY ?? process.env.LOG10X_API_KEY;
-  if (!resolvedApiKey || resolvedApiKey === 'NO-API-KEY') {
-    throw new DevCliConfigMissingError(
-      'LOG10X_API_KEY',
-      'LOG10X_API_KEY is not configured. The local engine tools (resolve_batch, extract_templates) require a real API key. Set LOG10X_API_KEY in the MCP server env.'
-    );
-  }
+  const engineCreds = await resolveEngineCredentials();
+  const resolvedApiKey = engineCreds.apiKey;
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TENX_INCLUDE_PATHS: includePaths,
     LOG10X_MCP_OUTPUT_DIR: tempDir,
     LOG10X_MCP_RUNTIME_NAME: `mcp-${Date.now()}`,
     TENX_API_KEY: resolvedApiKey,
+    TENX_LICENSE_KEY: engineCreds.licenseKey,
   };
 
   if (opts.mode === 'file' && opts.inputPath) {

@@ -204,6 +204,20 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         message:
           `Running in **demo mode**, no LOG10X_API_KEY configured and no \`~/.log10x/credentials\` file. ${envs.all.length} read-only demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. All data is shared sample data, not your own. Run \`log10x_signin_start\` to sign in (the model chains to \`log10x_signin_complete\` automatically) or call \`log10x_login_status\` for upgrade steps.`,
       });
+    } else if (envs.all.length === 0) {
+      // Offline boot: the gateway was unreachable, so no env loaded. Doctor
+      // is exactly the tool a user runs to find out WHY nothing works, so it
+      // must render this state instead of dereferencing a default that the
+      // offline path deliberately leaves empty.
+      globalChecks.push({
+        name: 'environment_config',
+        status: 'warn',
+        message:
+          'No environments loaded — the MCP booted in **offline mode** because the log10x gateway was unreachable. ' +
+          'Local-only tools (POC from local files, install advice, offload/CDK recipes, discovery via your own AWS or kubectl credentials) work normally; ' +
+          'anything that queries a metrics backend will report "not configured".',
+        fix: 'If this host is meant to reach log10x, allowlist `api.log10x.com` (signin/license) and `prometheus.log10x.com` (hosted metrics), then restart the MCP. If it is deliberately air-gapped, configure a local metrics backend with `log10x_configure_env`, or stay on the local-only tools.',
+      });
     } else {
       globalChecks.push({
         name: 'environment_config',
