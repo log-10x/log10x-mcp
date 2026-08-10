@@ -1717,10 +1717,18 @@ connectors:
 
 processors:
   # Fold the record into a JSON-object body: {message, tenx_hash, routeState}.
-  # $d.* at Coralogix addresses BODY fields — that is the mechanism the live
-  # dpxl proof used (the Fluent Bit path ships the record as the body object).
-  # Folding makes "<v1> $d.routeState == '...'" match through the SAME proven
-  # mechanism instead of depending on how OTLP attributes map server-side.
+  # This is for the OFFLOAD slice: awss3 uses "marshaler: body", so without
+  # the fold the S3 objects carry the bare message and lose tenx_hash, which
+  # is the key the Retriever indexes on.
+  #
+  # It is NOT what makes the TCO policy match. MEASURED on the live US2 tenant
+  # (two records, one POST, identical but for routeState): the Coralogix OTLP
+  # exporter nests every record under "logRecord", so the addressable keypaths
+  # are $d.logRecord.attributes.* and $d.logRecord.body.*, and a flat
+  # $d.routeState does not exist — it compiles to "keypath does not exist" and
+  # the live flat-keypath policy left BOTH events at priorityclass=high,
+  # tiering nothing. The Fluent Bit path is different and its flat
+  # $d.routeState remains correct there; do not unify the two.
   transform/tenx-fold:
     error_mode: ignore
     log_statements:
@@ -1753,12 +1761,14 @@ ${offloadPipeline}
       '(otlp/tenx exporter, :4317) and engine -> collector (otlp/tenx receiver, ' +
       ':24225), then a routing connector fans out on the routeState LOG attribute. ' +
       'The tier_down slice needs no collector branch on Coralogix: it ships to the ' +
-      'same exporter and the destination-side TCO policy (dpxl on $d.routeState) ' +
+      'same exporter and the destination-side TCO policy (dpxl on ' +
+      '$d.logRecord.attributes.routeState, the NESTED keypath this path requires) ' +
       'moves it to the Monitoring tier — see coralogixMonitoringRecipe().',
     prerequisites: [
       `Engine pairing measured on the loopback (engine 1.1.57 native): records return with tenx_hash + routeState as log-record attributes; bodies byte-identical.`,
       'The routing connector + transform processor require a collector build that includes them (otelcol-contrib has both; a minimal custom build may not — check `components` output).',
-      'The transform/tenx-fold step reshapes the Coralogix body into a JSON object ({message, tenx_hash, routeState}) — the same body shape the live-proven Fluent Bit path ships. The dpxl expression `<v1> $d.routeState == \'tier_down\'` then matches through the proven body-field mechanism. NOT yet verified live on the OTLP ingest path specifically: send a 2-event control (routeState pass vs tier_down, policy on, wait ~6 min) before declaring the policy working.',
+      'THE POLICY KEYPATH IS NESTED ON THIS PATH, and it is not the one the Fluent Bit recipe uses. Verified live on the US2 tenant with a two-record single-POST control, identical but for routeState: the Coralogix OTLP exporter wraps each record under `logRecord`, so the policy expression must be `<v1> $d.logRecord.attributes.routeState == \'tier_down\'`. A flat `$d.routeState` compiles to "keypath does not exist" and tiers nothing — both control events stayed at priorityclass=high. `$d.logRecord.body.routeState` also resolves (the fold puts it there), so either nested keypath works; the flat one never does.',
+      'transform/tenx-fold is for the OFFLOAD slice, not for the policy: awss3 uses `marshaler: body`, so without it the S3 objects lose tenx_hash, which is the Retriever\'s index key. Coralogix tiering works with or without it, on the nested keypath either way.',
       'TCO policy changes take ~6 minutes to apply (measured live) — do not conclude failure inside a minute.',
       `Coralogix exporter stays exactly as the customer runs it today (domain ${domain}, applicationName ${app} or their own).`,
     ],
