@@ -17,6 +17,9 @@ import assert from 'node:assert/strict';
 
 import { lambdaOtelExtensionRecipe } from '../src/lib/offload-recipes.js';
 import { lambdaEstateCdkConstruct } from '../src/lib/cdk-recipes.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pocFromLocalSchema } from '../src/tools/poc-from-local.js';
 import { putSnapshot } from '../src/lib/discovery/snapshot-store.js';
 import { SNAPSHOT_SCHEMA_VERSION, type DiscoverySnapshot } from '../src/lib/discovery/types.js';
 import { executeAdviseInstall } from '../src/tools/advise-install.js';
@@ -154,4 +157,37 @@ test('advise_install: serverless snapshot short-circuits the k8s wizard', async 
   assert.ok(md.includes('CoralogixTcoPolicies') || md.includes('coralogixMonitoringRecipe'));
   // no helm anywhere on this path
   assert.ok(!/helm upgrade/i.test(md));
+});
+
+/**
+ * The MCP boundary itself, not the tool function below it.
+ *
+ * Measured 2026-08-10 by driving the real server over stdio in a no-egress
+ * container: `log10x_poc_from_local` advertised `paths` in its schema, the
+ * agent sent it, and the tool answered "source file requires paths" — the
+ * hand-written destructure in the registration dropped it. That made the
+ * serverless / no-cluster POC path unreachable through the MCP interface,
+ * and the unit suite could not see it because every other test calls
+ * executePocFromLocal() directly, below the boundary that lost the field.
+ *
+ * This pins the registration against its own schema: every property the
+ * tool advertises must be threaded, or a future hand-written destructure
+ * silently drops another one.
+ */
+test('poc_from_local registration threads every advertised schema key', async () => {
+  // Tests run from test-build/, so resolve the source through cwd rather
+  // than import.meta.url (which points into the build output).
+  const src = await readFile(join(process.cwd(), 'src', 'index.ts'), 'utf8');
+  const start = src.indexOf("registerLog10xTool('log10x_poc_from_local'");
+  assert.ok(start > 0, 'registration not found');
+  const block = src.slice(start, src.indexOf('registerLog10xTool(', start + 10));
+
+  const advertised = Object.keys(pocFromLocalSchema);
+  const missing = advertised.filter((key) => !new RegExp(`\\b${key}\\s*:`).test(block));
+
+  assert.deepEqual(
+    missing,
+    [],
+    `these schema keys are advertised but never passed through the registration: ${missing.join(', ')}`
+  );
 });

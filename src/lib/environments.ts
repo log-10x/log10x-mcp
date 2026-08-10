@@ -958,7 +958,8 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
           `for the Auth0 Device Flow with GitHub or Google (the model chains to ` +
           `\`log10x_signin_complete\` automatically), or call \`log10x_signin_complete\` ` +
           `directly with \`{ api_key: "<key>" }\` to paste an existing key, or set ` +
-          `\`LOG10X_API_KEY\` to a key from console.log10x.com → Profile → API Settings.`
+          `\`LOG10X_API_KEY\` to a key from console.log10x.com → Profile → API Settings.`,
+        isNetworkUnreachable(e)
       );
     }
     throw new EnvironmentValidationError(
@@ -970,7 +971,8 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
         `automatically), or call \`log10x_signin_complete\` directly with ` +
         `\`{ api_key: "<key>" }\` to paste a key. Either path auto-clears the bad ` +
         `\`LOG10X_API_KEY\` in-process. Or unset \`LOG10X_API_KEY\` entirely to fall ` +
-        `back to read-only demo mode.`
+        `back to read-only demo mode.`,
+      isNetworkUnreachable(e)
     );
   }
   if (profile.environments.length === 0) {
@@ -1063,10 +1065,63 @@ function buildEnvironments(entries: EnvConfig[]): Environments {
 }
 
 export class EnvironmentValidationError extends Error {
-  constructor(msg: string) {
+  /**
+   * True when the failure was the NETWORK being unreachable rather than
+   * anything wrong with the caller's credentials. Boot treats these two
+   * cases differently: a bad key is a configuration error the user must
+   * fix (exit), an unreachable gateway is an environment fact the MCP
+   * must survive (offline mode). Measured 2026-08-10: with log10x hosts
+   * blackholed, the demo-boot probe failed and the server exited 1
+   * before completing `initialize`, so a no-egress prospect could not
+   * run even the tools that never touch the gateway (poc_from_local,
+   * advise_install, the offload/CDK recipes).
+   */
+  readonly offline: boolean;
+
+  constructor(msg: string, offline = false) {
     super(msg);
     this.name = 'EnvironmentValidationError';
+    this.offline = offline;
   }
+}
+
+/**
+ * Is this failure the network being unreachable, as opposed to a rejected
+ * credential? Undici surfaces DNS/connect/TLS faults as a bare
+ * `TypeError: fetch failed` with the real reason on `.cause`, so both the
+ * message and the cause chain are inspected.
+ */
+export function isNetworkUnreachable(e: unknown): boolean {
+  const seen = new Set<unknown>();
+  let cur: unknown = e;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const err = cur as { message?: string; code?: string; cause?: unknown };
+    const hay = `${err.code ?? ''} ${err.message ?? ''}`.toLowerCase();
+    if (
+      /fetch failed|enotfound|econnrefused|eai_again|econnreset|etimedout|ehostunreach|enetunreach|socket hang up|network|timeout|abort/.test(
+        hay
+      )
+    ) {
+      return true;
+    }
+    cur = err.cause;
+  }
+  return false;
+}
+
+/**
+ * The env set an offline boot runs with: none. Every gateway-backed tool
+ * then takes the existing, designed "not configured" path instead of
+ * crashing, and the local-only tools work untouched.
+ */
+export function offlineEnvironments(): Environments {
+  return {
+    all: [],
+    byNickname: new Map(),
+    default: undefined as unknown as EnvConfig,
+    isDemoMode: false,
+  };
 }
 
 /**
