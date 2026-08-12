@@ -1783,6 +1783,7 @@ ${offloadPipeline}
       `Engine pairing measured on the loopback (engine 1.1.57 native): records return with tenx_hash + routeState as log-record attributes; bodies byte-identical.`,
       'The routing connector, transform processor, and decouple processor require a collector build that includes them (otelcol-contrib and the community Lambda collector layer have them; a minimal custom build may not — check `components` output). decouple is not optional on Lambda — see the pipeline comments.',
       'THE POLICY KEYPATH IS NESTED ON THIS PATH, and it is not the one the Fluent Bit recipe uses. Verified live on the US2 tenant with a two-record single-POST control, identical but for routeState: the Coralogix OTLP exporter wraps each record under `logRecord`, so the policy expression must be `<v1> $d.logRecord.attributes.routeState == \'tier_down\'`. A flat `$d.routeState` compiles to "keypath does not exist" and tiers nothing — both control events stayed at priorityclass=high. `$d.logRecord.body.routeState` also resolves (the fold puts it there), so either nested keypath works; the flat one never does.',
+      'PER-PATTERN dispositions need no engine change and are OFF by default. The receiver app offers `run/receive/rate` as an optional module and the extension reads `TENX_RECEIVE_APPS`, so adding `@run/receive/rate` to that list plus `rateReceiverFieldNames=symbolMessage` and `rateReceiverLookupFile=/opt/tenx/mutes.csv` arms a per-pattern mute/sample file (build-receive-layer.sh stages it with its 6th argument). WITHOUT that file every lever on this estate is estate-wide — outputOffload and routeState apply to the whole stream — so a plan promising per-pattern rows on a Lambda estate is over-promising unless the mute file ships. Baked in the layer the policy is static; fetch it from the offload bucket into /tmp to change dispositions without a redeploy.',
       'transform/tenx-fold is for the OFFLOAD slice, not for the policy: awss3 uses `marshaler: body`, so without it the S3 objects lose tenx_hash, which is the Retriever\'s index key. Coralogix tiering works with or without it, on the nested keypath either way.',
       'TCO policy changes take ~6 minutes to apply (measured live) — do not conclude failure inside a minute.',
       `Coralogix exporter stays exactly as the customer runs it today (domain ${domain}, applicationName ${app} or their own).`,
@@ -1804,6 +1805,27 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
                                            # rollingFile failure poisons pipeline launch (measured).
                                            # Layers built by build-receive-layer.sh >= 1.1.63
                                            # already default this; the env var is belt-and-braces.
+
+# PER-PATTERN dispositions (optional). Needs no engine change: the receiver
+# app already offers run/receive/rate as an optional module, and the module
+# arms itself the moment a lookup file is set (its settings.yaml swaps the
+# group filter to shouldRetainEventWithMute()). TENX_RECEIVE_APPS is read by
+# the extension's launchArgs(), so the whole feature is three env vars plus a
+# file staged in the layer at /opt/tenx/mutes.csv.
+#
+# WITHOUT these, every lever on this estate is estate-wide: outputOffload and
+# routeState apply to the whole stream, not to a chosen pattern.
+#
+# TENX_RECEIVE_APPS=@run/input/forwarder/otel-collector,@apps/receiver,@run/receive/rate
+# rateReceiverFieldNames=symbolMessage      # key mutes by the pattern identity
+# rateReceiverLookupFile=/opt/tenx/mutes.csv
+#
+# mutes.csv entries: <pattern>,<rate>:<untilEpochSec>:<reason>
+#   heartbeat_check_ok,0:1786400000:liveness spam OPS-4821   # 0 = full mute
+#   jwt_validated,0.25:1786400000:auth flood after deploy    # keep 25%
+# Baked into the layer the policy is STATIC — a change means republishing the
+# layer and updating each function. To change dispositions without a redeploy,
+# put the same file in the offload bucket above and fetch it to /tmp at INIT.
 # optional BYO metrics:
 # PROMETHEUS_REMOTE_WRITE_URL=https://<your-prometheus>/api/v1/write`,
     placementNote:

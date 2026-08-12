@@ -87,13 +87,24 @@ export interface TenxServerlessProps {
   subscribeLogGroups?: string[];
   /** Prefix new log groups must match for auto-subscription. */
   autoSubscribePrefix?: string;
+  /**
+   * Path to the per-pattern mute file INSIDE the layer, e.g.
+   * '/opt/tenx/mutes.csv'. Set it only if the layer was built with
+   * build-receive-layer.sh's mute argument — that build also raises the
+   * lookup retain, without which the receiver silently ignores the file.
+   * Leave unset for estate-wide levers only.
+   */
+  muteFile?: string;
 }
 
 export class TenxServerless extends Construct {
   readonly engineLayer?: lambda.ILayerVersion;
+  private readonly muteFile?: string;
 
   constructor(scope: Construct, id: string, props: TenxServerlessProps = {}) {
     super(scope, id);
+
+    this.muteFile = props.muteFile;
 
     if (props.engineLayerArn) {
       this.engineLayer = lambda.LayerVersion.fromLayerVersionArn(
@@ -168,6 +179,26 @@ export class TenxServerless extends Construct {
     fn.addEnvironment('log10xMetricsEnabled', 'false');
     fn.addEnvironment('TENX_AIRGAPPED', 'true');
     fn.addEnvironment('TENX_LICENSE_FILE', '/opt/tenx/license.jwt');
+    fn.addEnvironment('TENX_LOG_PATH', '/tmp/tenx/');
+
+    // Per-pattern dispositions, on only when the layer carries a mute file.
+    // Measured on a real function: with the pattern muted at rate 0, 0 of 300
+    // records reached the destination; the same run with the rate module off
+    // delivered 300 of 300. Without this the estate has only estate-wide
+    // levers (outputOffload, routeState), so a plan promising per-pattern
+    // rows here would be promising something the function cannot do.
+    //
+    // The layer must be built with build-receive-layer.sh's mute argument,
+    // which also raises the lookup retain — a baked file is never rewritten,
+    // and past the retain window the receiver silently ignores it.
+    if (this.muteFile) {
+      fn.addEnvironment(
+        'TENX_RECEIVE_APPS',
+        '@run/input/forwarder/otel-collector,@apps/receiver,@run/receive/rate'
+      );
+      fn.addEnvironment('rateReceiverFieldNames', 'symbolMessage');
+      fn.addEnvironment('rateReceiverLookupFile', this.muteFile);
+    }
   }
 }
 
