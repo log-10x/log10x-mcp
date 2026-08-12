@@ -191,3 +191,24 @@ test('poc_from_local registration threads every advertised schema key', async ()
     `these schema keys are advertised but never passed through the registration: ${missing.join(', ')}`
   );
 });
+
+/**
+ * Per-pattern on Lambda is a real capability and the construct has to wire it,
+ * or the plan promises rows the function cannot honour. Measured on a real
+ * function: pattern muted at rate 0 delivered 0/300 to the destination, the
+ * same run with the rate module off delivered 300/300.
+ *
+ * It is gated on muteFile because the layer must have been built with a mute
+ * file (that build also raises the lookup retain — without it the receiver
+ * silently ignores the file, which is worse than not offering the feature).
+ */
+test('lambdaEstateCdkConstruct: attach() wires per-pattern only when a mute file is given', () => {
+  const cdk = lambdaEstateCdkConstruct({ region: 'us-east-1', coralogixRegion: 'us2' });
+  assert.ok(cdk.body.includes('muteFile?: string'), 'the prop must be declarable');
+  assert.ok(cdk.body.includes('if (this.muteFile)'), 'wiring must be gated, not unconditional');
+  assert.ok(cdk.body.includes('@run/receive/rate'), 'the rate module must reach TENX_RECEIVE_APPS');
+  assert.ok(cdk.body.includes("addEnvironment('rateReceiverFieldNames', 'symbolMessage')"));
+  assert.ok(cdk.body.includes("addEnvironment('rateReceiverLookupFile', this.muteFile)"));
+  // read-only fs: without this the log4j appender kills pipeline launch
+  assert.ok(cdk.body.includes("addEnvironment('TENX_LOG_PATH', '/tmp/tenx/')"));
+});
