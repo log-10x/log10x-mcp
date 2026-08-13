@@ -45,6 +45,7 @@ import {
   type OffloadDeliveryVerdict,
 } from '../lib/offload-delivery.js';
 import { verifyConfigGeneration } from '../lib/config-generation.js';
+import { findNewestConfigMapTarget } from './commitment-report.js';
 
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
@@ -1157,17 +1158,22 @@ async function addConfigLiveCheck(
   detectedTier: 'edge' | 'cloud' | undefined,
   checks: DoctorCheck[],
 ): Promise<void> {
-  const cmName = process.env.K8S_CONFIGMAP || 'log10x-action-intent';
-  const cmNs = process.env.K8S_NAMESPACE || 'demo';
+  // Resolve the policy ConfigMap from the newest commitment record's
+  // delivery_target (the coordinates the MCP actually wrote to), falling
+  // back to env vars, then the engine defaults. The MCP process env is a
+  // weak signal — it describes this process, not the receiver pod.
+  const recorded = findNewestConfigMapTarget();
+  const cmName = recorded?.name || process.env.K8S_CONFIGMAP || 'log10x-action-intent';
+  const cmNs = recorded?.namespace || process.env.K8S_NAMESPACE || 'default';
 
-  const readCapsCsv = async (): Promise<string | null> => {
+  const readCmKey = async (key: string): Promise<string | null> => {
     try {
       const { execFile } = await import('node:child_process');
       const { promisify } = await import('node:util');
       const execFileP = promisify(execFile);
       const { stdout } = await execFileP(
         'kubectl',
-        ['get', 'configmap', cmName, '-n', cmNs, '-o', 'jsonpath={.data.caps\\.csv}'],
+        ['get', 'configmap', cmName, '-n', cmNs, '-o', `jsonpath={.data['${key.replace(/\./g, '\\.')}']}`],
         { timeout: 10_000 },
       );
       return stdout && stdout.trim() ? stdout : null;
@@ -1175,6 +1181,36 @@ async function addConfigLiveCheck(
       return null;
     }
   };
+  const readCapsCsv = (): Promise<string | null> => readCmKey('caps.csv');
+
+  // Engine boot contract: when the cap variant is armed (CAP_LOOKUP_FILE
+  // set), rateReceiverCapInput hard-loads BOTH lookup files at pipeline
+  // init. A ConfigMap that carries caps.csv without a non-empty actions.csv
+  // (the shape older MCP versions wrote — they deleted the actions.csv key)
+  // crash-loops the receiver on its next restart, and until then every
+  // over-cap event hard-drops instead of taking the configured action.
+  const capsForPairCheck = await readCapsCsv();
+  if (capsForPairCheck) {
+    const actions = await readCmKey('actions.csv');
+    const actionsHasRows =
+      !!actions && actions.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#')).length >= 2;
+    if (!actionsHasRows) {
+      checks.push({
+        name: 'policy_actions_file',
+        status: 'fail',
+        message:
+          `Policy ConfigMap ${cmNs}/${cmName} carries caps.csv but no usable actions.csv — the engine reads the per-service over-cap action ONLY from actions.csv, so every over-cap event hard-drops, and the next receiver restart fails at launch (the cap variant hard-loads both files).`,
+        fix:
+          'Re-run log10x_configure_engine (delivery="kubectl_configmap") — current versions write caps.csv + actions.csv together and merge over existing rows.',
+      });
+    } else {
+      checks.push({
+        name: 'policy_actions_file',
+        status: 'pass',
+        message: `Policy ConfigMap ${cmNs}/${cmName} carries caps.csv and actions.csv together.`,
+      });
+    }
+  }
 
   const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;
   const readRunningGenerations = async (): Promise<string[]> => {

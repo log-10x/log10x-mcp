@@ -201,6 +201,38 @@ export function getCommitment(id: string): CommitmentRecord | undefined {
   }
 }
 
+/**
+ * Newest configmap delivery target across ALL commitments. Doctor uses it
+ * to find the policy ConfigMap the MCP actually wrote to, instead of
+ * guessing from the MCP process's own env (the receiver's env, not ours).
+ */
+export function findNewestConfigMapTarget():
+  | { namespace: string; name: string }
+  | undefined {
+  try {
+    const dir = commitmentsDir();
+    const files = readdirSync(dir).filter((n) => n.endsWith('.json'));
+    let best: { target: { namespace: string; name: string }; mtime: number } | undefined;
+    for (const f of files) {
+      try {
+        const raw = readFileSync(join(dir, f), 'utf8');
+        const rec = JSON.parse(raw) as CommitmentRecord;
+        const t = rec.delivery_target;
+        if (!t || t.kind !== 'configmap') continue;
+        const mtime = statSync(join(dir, f)).mtimeMs;
+        if (!best || mtime > best.mtime) {
+          best = { target: { namespace: t.namespace, name: t.name }, mtime };
+        }
+      } catch {
+        // skip malformed
+      }
+    }
+    return best?.target;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Most-recent commitment for a service (used when commitment_id omitted). */
 export function findCommitmentByService(
   service: string,

@@ -217,6 +217,37 @@ export async function fetchCapCsvForEnv(
 }
 
 /**
+ * Fetch the engine's actions.csv (sibling of caps.csv) from the gitops
+ * repo. Best-effort, undefined on any failure — configure_engine uses it
+ * to MERGE the new per-service action rows over the repo's existing ones
+ * so services outside the current run keep their actions.
+ */
+export async function fetchActionsCsvForEnv(
+  env: EnvConfig,
+): Promise<string | undefined> {
+  const repo = env.gitops?.repo;
+  if (!repo) return undefined;
+  const capsPath =
+    env.gitops?.lookupPath ?? 'pipelines/run/receive/rate/caps.csv';
+  const actionsPath = capsPath.replace(/[^/]*$/, 'actions.csv');
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const { stdout } = await exec(
+      'gh',
+      ['api', `/repos/${repo}/contents/${actionsPath}`, '--jq', '.content'],
+      { timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    if (!stdout) return undefined;
+    const decoded = Buffer.from(stdout.trim(), 'base64').toString('utf8');
+    return decoded.length > 0 ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fetch and parse the action-intent.json from the gitops repo.
  *
  * Returns undefined on any failure. On success, returns the full

@@ -470,3 +470,81 @@ test('app=reporter uses STANDALONE_SPEC (reporter-10x chart) regardless of detec
     );
   }
 });
+
+// ── Engine-policy pull wiring ────────────────────────────────────────────
+//
+// The receiver enforces caps.csv / actions.csv only when the engine's
+// kubernetes pull lane is armed on the pod (K8S_ENABLED) and the lookup
+// files point into the pull destination (CAP_LOOKUP_FILE et al). A values
+// overlay without these vars produces a receiver that ignores every policy
+// log10x_configure_engine writes. The seed step matters equally: the
+// engine's first pull runs on the launch thread and a missing ConfigMap
+// aborts startup, and the lookup loader refuses a rows-less CSV — so the
+// pre-install manifest must exist and must carry one no-op row per file.
+
+for (const fw of wizardSupportedReceivers) {
+  test(`receiver plan for ${fw}: wires the engine-policy pull env`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'test',
+      destination: 'mock',
+    });
+    const all = findAllEmittedContent(plan);
+    for (const needle of [
+      'K8S_ENABLED',
+      'K8S_CONFIGMAP',
+      'CAP_LOOKUP_FILE',
+      'ACTION_LOOKUP_FILE',
+      'CONFIG_GENERATION_FILE',
+      'fieldPath: metadata.namespace',
+    ]) {
+      assert.ok(all.includes(needle), `${fw} receiver values must wire ${needle}`);
+    }
+    // Paths must interpolate the downward-API namespace, not hardcode one.
+    assert.ok(
+      all.includes('/tmp/tenx/kubernetes/$(K8S_NAMESPACE)/log10x-action-intent/actions.csv'),
+      `${fw}: ACTION_LOOKUP_FILE must point into the pull destination`
+    );
+  });
+
+  test(`receiver plan for ${fw}: seeds the policy ConfigMap before install`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'test',
+      destination: 'mock',
+    });
+    const seed = plan.install.find((s) => s.title === 'Seed the engine-policy ConfigMap');
+    assert.ok(seed, 'seed step present on receiver installs');
+    const cmd = (seed!.commands ?? []).join('\n');
+    // One no-op row per file — header-only and zero-byte files fail the
+    // engine's lookup loader at launch.
+    assert.match(cmd, /tenx-seed,1::/, 'caps.csv seed row');
+    assert.match(cmd, /tenx-seed,pass::/, 'actions.csv seed row');
+    // RBAC read grant scoped to the one ConfigMap.
+    assert.match(cmd, /kind: Role/);
+    assert.match(cmd, /resourceNames: \["log10x-action-intent"\]/);
+    // Seed runs before the pod (re)starts: precede the helm install/upgrade.
+    const seedIdx = plan.install.indexOf(seed!);
+    const helmIdx = plan.install.findIndex(
+      (s) => /install via helm|upgrade the existing/i.test(s.title)
+    );
+    assert.ok(helmIdx >= 0, 'helm install/upgrade step present');
+    assert.ok(seedIdx < helmIdx, 'seed step precedes the helm install/upgrade step');
+  });
+}
+
+test('reporter (standalone) plan has no policy seed step and no pull env', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    forwarder: 'fluentbit',
+    licenseJwt: 'test',
+  });
+  assert.ok(
+    !plan.install.find((s) => s.title === 'Seed the engine-policy ConfigMap'),
+    'reporter (report-mode, no regulator) needs no policy ConfigMap'
+  );
+});

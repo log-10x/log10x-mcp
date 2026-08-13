@@ -443,6 +443,115 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
  * the user's upstream chart, which interprets no Log10x-specific
  * top-level field.
  */
+/** Name of the policy ConfigMap the engine's kubernetes pull lane reads
+ * (matches the engine's $K8S_CONFIGMAP default and configure_engine's
+ * kubectl_configmap_name default). */
+export const POLICY_CONFIGMAP_NAME = 'log10x-action-intent';
+
+/**
+ * Engine-policy pull env for the receiver container: activates the engine's
+ * kubernetes ConfigMap lane (K8S_ENABLED, gated off by default engine-side)
+ * and points the regulator's three lookup files at the pull driver's stable
+ * destination `${java.io.tmpdir}/tenx/kubernetes/<ns>/<cm>/`.
+ *
+ * K8S_NAMESPACE comes from the downward API so the paths track the pod's
+ * real namespace; `$(K8S_NAMESPACE)` in the file paths is Kubernetes
+ * dependent-env interpolation (order matters: the fieldRef entry must come
+ * first). CAP_LOOKUP_FILE must be explicit — the engine ships it unset so
+ * receivers boot with no policy; setting it is what arms the cap variant
+ * once the pull lane materializes the seeded files (see
+ * renderPolicyConfigMapManifest: the pull crashes a launch on a MISSING
+ * ConfigMap, and the lookup loader refuses a rows-less CSV, so the wizard
+ * seeds both files with a no-op `tenx-seed` row).
+ *
+ * Engines older than the config release that enables the kubernetes lane
+ * ignore K8S_ENABLED entirely — these vars are inert there, and the
+ * regulator keeps running capless exactly as before.
+ *
+ * `indent` is the leading whitespace of each `- name:` line.
+ */
+export function renderPolicyPullEnvLines(indent: string): string[] {
+  const i2 = indent + '  ';
+  const base = `/tmp/tenx/kubernetes/$(K8S_NAMESPACE)/${POLICY_CONFIGMAP_NAME}`;
+  return [
+    `${indent}- name: K8S_NAMESPACE`,
+    `${i2}valueFrom:`,
+    `${i2}  fieldRef:`,
+    `${i2}    fieldPath: metadata.namespace`,
+    `${indent}- name: K8S_ENABLED`,
+    `${i2}value: "true"`,
+    `${indent}- name: K8S_CONFIGMAP`,
+    `${i2}value: ${POLICY_CONFIGMAP_NAME}`,
+    `${indent}- name: CAP_LOOKUP_FILE`,
+    `${i2}value: ${base}/caps.csv`,
+    `${indent}- name: ACTION_LOOKUP_FILE`,
+    `${i2}value: ${base}/actions.csv`,
+    `${indent}- name: CONFIG_GENERATION_FILE`,
+    `${i2}value: ${base}/config-generation.csv`,
+  ];
+}
+
+/**
+ * Seed manifest for the policy ConfigMap + the RBAC read grant, applied as
+ * a pre-install step on every Receiver install.
+ *
+ * Why a seed (both facts probed live against the engine):
+ *   - the kubernetes pull's FIRST fetch runs on the launch thread and a
+ *     missing ConfigMap aborts startup by design;
+ *   - the lookup loader refuses a zero-byte AND a header-only CSV, so each
+ *     seeded file carries one no-op `tenx-seed` row (matches no container:
+ *     cap 1 on a nonexistent key regulates nothing).
+ * configure_engine merges real policy over the seed and drops the seed row
+ * once real rows land.
+ *
+ * The Role grants `get` on this ONE ConfigMap; the binding covers every
+ * ServiceAccount in the namespace because the forwarder chart's SA name
+ * varies per chart and the grant is read-only on a single object.
+ */
+export function renderPolicyConfigMapManifest(namespace: string): string {
+  return `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${POLICY_CONFIGMAP_NAME}
+  namespace: ${namespace}
+  labels:
+    app.kubernetes.io/managed-by: log10x-mcp
+    app.kubernetes.io/component: engine-policy
+data:
+  caps.csv: |
+    container,cap
+    tenx-seed,1::install seed; replaced by log10x_configure_engine
+  actions.csv: |
+    container,action
+    tenx-seed,pass::install seed; replaced by log10x_configure_engine
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: log10x-policy-reader
+  namespace: ${namespace}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["${POLICY_CONFIGMAP_NAME}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: log10x-policy-reader
+  namespace: ${namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: log10x-policy-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:serviceaccounts:${namespace}
+`;
+}
+
 function renderLog10xSidecar(opts: {
   /** Forwarder kind used in the engine's `@run/input/forwarder/<kind>` arg. */
   forwarderKind: 'fluentbit' | 'fluentd' | 'otel-collector' | 'vector' | 'logstash';
@@ -471,6 +580,7 @@ function renderLog10xSidecar(opts: {
     envLines.push(`      - name: TENX_AIRGAPPED`);
     envLines.push(`        value: "true"`);
   }
+  envLines.push(...renderPolicyPullEnvLines('      '));
   return `extraContainers:
   - name: log10x
     image: log10x/edge-10x:latest
@@ -825,6 +935,7 @@ ${fileConfigsBlock}`;
         envLines.push(`                    - name: TENX_AIRGAPPED`);
         envLines.push(`                      value: "true"`);
       }
+      envLines.push(...renderPolicyPullEnvLines('                    '));
       return [
         {
           path: 'tenx-kustomize/kustomization.yaml',
@@ -1002,6 +1113,7 @@ bash "%~dp0post-render.sh"
         envLines.push(`    - name: TENX_AIRGAPPED`);
         envLines.push(`      value: "true"`);
       }
+      envLines.push(...renderPolicyPullEnvLines('    '));
       for (const b of nonLog10xBackends) {
         const spec = BACKEND_ENV_SPECS[b];
         if (!spec) continue;
@@ -1169,6 +1281,7 @@ ${envLines.join('\n')}
         envLines.push(`      - name: TENX_AIRGAPPED`);
         envLines.push(`        value: "true"`);
       }
+      envLines.push(...renderPolicyPullEnvLines('      '));
       const destOutput = renderLogstashDestinationOutput(destination, outputHost);
       return `# Receiver overlay for Logstash (upstream elastic/logstash chart).
 # Layer on top of your existing values:
