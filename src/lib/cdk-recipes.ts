@@ -182,21 +182,29 @@ export class TenxServerless extends Construct {
     fn.addEnvironment('TENX_LOG_PATH', '/tmp/tenx/');
 
     // Per-pattern dispositions, on only when the layer carries a mute file.
-    // Measured on a real function: with the pattern muted at rate 0, 0 of 300
-    // records reached the destination; the same run with the rate module off
-    // delivered 300 of 300. Without this the estate has only estate-wide
+    // Measured on a real function with the discriminating design (two
+    // interleaved patterns, one muted at rate 0, one with no entry): the
+    // muted pattern was drop-marked 132/150 — the other 18 are the 0.1
+    // rateReceiverMinRetentionThreshold floor — while its sibling passed
+    // 150/150 untouched. Without this the estate has only estate-wide
     // levers (outputOffload, routeState), so a plan promising per-pattern
     // rows here would be promising something the function cannot do.
     //
+    // The key field is message_pattern. symbolMessage does NOT exist in this
+    // composition — it yields an empty fieldSetKey, which retains everything,
+    // silently (the measured failure that forced the retest above).
+    //
     // The layer must be built with build-receive-layer.sh's mute argument,
     // which also raises the lookup retain — a baked file is never rewritten,
-    // and past the retain window the receiver silently ignores it.
+    // and past the retain window the receiver silently ignores it — and
+    // prepends the pattern,disposition header row the lookup consumes as
+    // line 1 (a headerless file silently loses its first disposition).
     if (this.muteFile) {
       fn.addEnvironment(
         'TENX_RECEIVE_APPS',
         '@run/input/forwarder/otel-collector,@apps/receiver,@run/receive/rate'
       );
-      fn.addEnvironment('rateReceiverFieldNames', 'symbolMessage');
+      fn.addEnvironment('rateReceiverFieldNames', 'message_pattern');
       fn.addEnvironment('rateReceiverLookupFile', this.muteFile);
     }
   }
