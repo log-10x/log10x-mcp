@@ -107,7 +107,7 @@ export async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | nul
 /**
  * Fan out `fn` over `items` with bounded concurrency and a per-leg deadline,
  * degrading any slow / failed / soft-expired leg to `null` instead of sinking
- * the whole batch. The fix for the N+1 / serial-loop query patterns (first-seen,
+ * the whole batch. Covers the N+1 / serial-loop query shapes (first-seen,
  * drift, rank-by-shape, metrics-that-moved, commitment per-week, preview-filter):
  * a bare `for (const x of xs) await query(x)` over 100 items is a multi-minute
  * hang even with a per-leg timeout; this caps both the width and each leg.

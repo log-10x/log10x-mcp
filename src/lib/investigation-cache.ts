@@ -7,8 +7,8 @@
  * pattern lists across investigations in the same session.
  *
  * Capped at 50 entries (LRU eviction) and 30 minutes per entry (TTL).
- * Long-running Claude Desktop sessions used to accumulate multi-hour-old
- * investigations forever; the TTL now expires them so a model citing
+ * Without the TTL, long-running Claude Desktop sessions accumulate
+ * multi-hour-old investigations forever; expiring them means a model citing
  * "investigation abc123 from earlier" gets a clean "expired" response
  * rather than stale data.
  *

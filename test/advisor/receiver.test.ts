@@ -440,8 +440,8 @@ test('mode=readonly with app=reporter is blocked', async () => {
 // the chart-value pattern no longer exists in the sidecar overlay model.
 
 test('app=reporter uses STANDALONE_SPEC (reporter-10x chart) regardless of detected forwarder', async () => {
-  // Production intent shift (2026-05): Reporter is no longer "sugar for
-  // Receiver + readOnly" running on the per-forwarder chart. It's a
+  // Reporter is not "sugar for Receiver + readOnly" running on the
+  // per-forwarder chart. It is a
   // dedicated DaemonSet via the log10x/reporter-10x chart, sitting
   // alongside the user's existing forwarder. The values doc is flat
   // (top-level log10xLicenseJwt), not the per-forwarder `tenx:` block.

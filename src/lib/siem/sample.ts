@@ -365,7 +365,7 @@ export async function fetchEventsByHashes(
 
     // Retry pass — CloudWatch FilterLogEvents latency is variable; under
     // parallel load a hash occasionally hits the per-hash timeout and
-    // returns empty even though events exist (measured ~1-in-5 rows).
+    // returns empty even though events exist (~1 row in 5).
     // Retry the empties once. The retry set is small (usually 0-1), and
     // a warm second attempt almost always succeeds — this is what keeps
     // the descriptor as the readable sample-mined error text instead of

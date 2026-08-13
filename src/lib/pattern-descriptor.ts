@@ -14,11 +14,10 @@
  * rollups, top_patterns incident detection). The discriminator-first
  * `display_name` (lib/pattern-df.ts `buildDisplayName`) is the richer,
  * vendor-neutral naming used on the primary surfaces (top_patterns rows,
- * pattern_detail header) where the env df-map IS available. NOTE: the
- * previous hardcoded OTel/vendor `PREFIX_SKIP` denylist was deleted — it
- * was OTel-only and silently wrong for Java/MDC, k8s, Datadog, and
- * arbitrary apps. Boilerplate is now learned from cross-pattern frequency
- * in pattern-df.ts, not from a strip-list.
+ * pattern_detail header) where the env df-map IS available. Boilerplate is
+ * learned from cross-pattern frequency in pattern-df.ts, not from a
+ * strip-list: a hardcoded OTel/vendor prefix denylist is OTel-only and
+ * silently wrong for Java/MDC, k8s, Datadog, and arbitrary apps.
  *
  * Falls back to the sample event's first chars if the tokenized pattern
  * is empty.
@@ -83,9 +82,8 @@ export function patternDescriptor(
  *    keyed on non-conventional fields like `action`/`event`/etc.)
  *
  * In both null cases the caller falls back to `patternDescriptor`
- * (engine pattern-name tail), which is the current behavior. So this
- * is strictly equal-or-better than today across all log formats —
- * never a regression.
+ * In both null cases the caller falls back to `patternDescriptor`
+ * (engine pattern-name tail).
  *
  * Where it actually adds value: OTel-collector-style structured
  * logger output where the discriminative content lives inside a

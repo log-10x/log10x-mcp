@@ -301,10 +301,10 @@ export async function extractPatterns(
   //
   //   1. Multi-line grouping folds continuation lines into one record, so a
   //      grouped template spans `1 + newlines` input lines.
-  //   2. The engine drops some lines outright. Measured on 3,000 live
-  //      CloudWatch events: 2,970 records for 3,000 inputs with ZERO grouped
-  //      templates, so span expansion does not recover it. 17 of the 30 were
-  //      events with an empty `log` field; the rest are unaccounted.
+  //   2. The engine drops some lines outright. Across 3,000 CloudWatch
+  //      events: 2,970 records for 3,000 inputs with ZERO grouped templates,
+  //      so span expansion does not recover it. 17 of the 30 were events
+  //      with an empty `log` field; the rest are unaccounted.
   //
   // Expanding by span reconciles case 1 exactly (verified at 30,000/30,000 on
   // envelope-shaped input). When the totals still disagree, position is not a
@@ -619,7 +619,7 @@ function coerceToLine(e: unknown, opts: { preserveEnvelope?: boolean } = {}): st
           return coerceObjectToLine(parsed as Record<string, unknown>, opts);
         }
       } catch {
-        // fall through — not valid JSON, treat as plain
+      // fall through — not valid JSON, treat as plain
       }
     }
     return e.replace(/\r?\n/g, ' ');
@@ -669,7 +669,7 @@ function coerceObjectToLine(obj: Record<string, unknown>, opts: { preserveEnvelo
           if (inner) return inner;
         }
       } catch {
-        // not JSON — fall through
+      // not JSON — fall through
       }
     }
     return cand.replace(/\r?\n/g, ' ');
@@ -829,7 +829,7 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
         if (nested.pod && !out.pod) out.pod = nested.pod;
         if (!out.timestampMs && nested.timestampMs) out.timestampMs = nested.timestampMs;
       } catch {
-        // not JSON — fall through to logStreamName fallback
+      // not JSON — fall through to logStreamName fallback
       }
     }
   }

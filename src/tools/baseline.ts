@@ -342,10 +342,10 @@ export async function executeBaseline(
       window: horizon,
       window_basis: 'explicit',
       candidates_count: result.top_contributors.length,
-      // Previously this filtered to .compactable only, which on cloudwatch
-      // (compact = no-op) returned 0 every time and contradicted both the
-      // headline "Baseline ready" AND the 9 top contributors shown
-      // immediately below. Any contributor is usable for SOME action
+      // Do NOT filter to .compactable only: on cloudwatch (compact = no-op)
+      // that returns 0 every time and contradicts both the headline
+      // "Baseline ready" AND the 9 top contributors shown immediately
+      // below. Any contributor is usable for SOME action
       // (drop/sample/offload/tier_down all work regardless of
       // compactability), so candidates_usable now reports the full count.
       // Compactable count is a separate downstream concern surfaced on

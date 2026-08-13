@@ -11,8 +11,7 @@
  *     through to the MCP text channel verbatim.
  *
  * Why this shape:
- *   - JSON-by-default is the architectural choice (see
- *     /Users/talweiss/.claude/plans/so-the-q-is-mutable-ladybug.md).
+ *   - JSON-by-default is the architectural choice.
  *   - `actions[]` carries the next-callable tool IDs so the agent
  *     can chain without guessing the catalog graph.
  *   - `render_hint` lets surfaces with rich rendering (chart,

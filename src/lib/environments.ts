@@ -65,9 +65,9 @@ import { DEFAULT_LABELS, type LabelNameMap } from './promql.js';
  * Grants READ-only access to the shared "Log10x Demo" env. No writes.
  * Same data every demo user sees on the console.
  *
- * Phase 7 removes the silent demo-fallback path. The constant remains
- * here as the "if you really want the demo, here's the key" reference
- * but is no longer auto-applied.
+ * There is no silent demo-fallback path. The constant remains here as the
+ * "if you really want the demo, here's the key" reference, and is never
+ * auto-applied.
  */
 const DEMO_API_KEY = '4d985100-ee4a-4b6c-b784-a416b8684868';
 
@@ -193,9 +193,8 @@ export interface Environments {
    * user knows the data is demo, not their own.
    *
    * Distinguished from "pure demo" (no key set, demoFallbackReason
-   * undefined) because the user's intent matters: a typo'd key
-   * silently downgrading to demo is a footgun; flagging it loudly is
-   * the fix.
+      * undefined) because the user's intent matters: a typo'd key silently
+      * downgrading to demo is a footgun, so it is flagged loudly.
    */
   demoFallbackReason?: string;
 }
@@ -906,7 +905,7 @@ function demoTenantFromJwt(jwt: string): string | undefined {
 export async function reloadEnvironmentsInPlace(target: Environments): Promise<void> {
   const fresh = await loadEnvironments();
   // Clear the lastUsed pointer. It referenced an EnvConfig from the
-  // old set, which is no longer in `target.byNickname`.
+  // previous set, which is absent from `target.byNickname`.
   target.lastUsed = undefined;
   target.all = fresh.all;
   target.byNickname = fresh.byNickname;
@@ -1070,11 +1069,11 @@ export class EnvironmentValidationError extends Error {
    * anything wrong with the caller's credentials. Boot treats these two
    * cases differently: a bad key is a configuration error the user must
    * fix (exit), an unreachable gateway is an environment fact the MCP
-   * must survive (offline mode). Measured 2026-08-10: with log10x hosts
-   * blackholed, the demo-boot probe failed and the server exited 1
-   * before completing `initialize`, so a no-egress prospect could not
-   * run even the tools that never touch the gateway (poc_from_local,
-   * advise_install, the offload/CDK recipes).
+      * must survive (offline mode). With log10x hosts blackholed, a demo-boot
+      * probe that treats unreachable as fatal exits 1 before completing
+      * `initialize`, so a no-egress prospect cannot run even the tools that
+      * never touch the gateway (poc_from_local, advise_install, the
+      * offload/CDK recipes).
    */
   readonly offline: boolean;
 

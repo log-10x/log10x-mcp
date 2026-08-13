@@ -23,8 +23,8 @@
  * document-frequency context (`df`) is supplied it is the discriminator-
  * first display_name (Layer 2, lib/pattern-df.ts); otherwise it is the
  * '_'->space name codepoint-safe mid-ellipsis'd to maxHintChars (Layer 1,
- * lib/text-crop.ts) — NOT the old front-slice + "..." which dropped the
- * tail discriminator and could bisect a surrogate pair. When the
+ * lib/text-crop.ts) — NOT a front-slice + "...", which drops the tail
+ * discriminator and can bisect a surrogate pair. When the
  * symbol_message is empty, the hint is dropped and we render just the
  * service-led lead.
  *

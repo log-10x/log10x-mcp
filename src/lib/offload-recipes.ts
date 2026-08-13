@@ -3,8 +3,8 @@
  *
  * Sibling to `forwarder-snippets.ts`, but a different shape. Where the
  * drop-rule snippet emits a single SIEM-side exclude, these recipes are a
- * MULTI-way fan-out keyed on the engine-stamped `routeState` marker. The
- * receiver now stamps a PER-SERVICE action (drop | offload | tier_down |
+  * MULTI-way fan-out keyed on the engine-stamped `routeState` marker. The
+  * receiver stamps a PER-SERVICE action (drop | offload | tier_down |
  * compact | sample | pass) on each service's regulator-excess slice, so the
  * forwarder branches one destination per action:
  *
@@ -26,7 +26,7 @@
  * fetches it back by stamped identity. This is lossless cost reduction, not
  * archival.
  *
- * Engine contract (verified live on run-edge 1.1.0, config repo 42e5331):
+  * Engine contract:
  *   - the receiver runs with `outputOffload true`, which resolves the output
  *     field to `fullText("tenx_hash","routeState")` and the drop filter to
  *     `isObject` (every marked event flows back to the forwarder, full text).
@@ -379,13 +379,6 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
       '`tenx.app` for the SIEM.',
     prerequisites: [
       ...basePrereqs(p),
-      // CORRECTED against a live run (see test/fixtures/coralogix-e2e).
-      // This previously said the return path MUST emit json. That is backwards
-      // and it fails silently on every destination that uses the lua branch
-      // below: under `json` the engine ships the whole rendered record as ONE
-      // msgpack string field named after the encode expression, so
-      // `rec["routeState"]` is nil, no branch matches, and offload/drop
-      // routing quietly stops while everything still returns success.
       'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`, which delivers `routeState` as its own record field. Do NOT set it to `json`: that collapses the record into a single string field, the routing lua stops matching, and the offload/drop slices silently fall through to the SIEM with no error.',
       'The lua filter (marker -> routing key) and `KEEP=true` are both mandatory in this shape: the routes are keyed off `_route`, and KEEP=false drops the re-emitted record (verified live on fluent-bit v5).',
     ],
@@ -649,8 +642,7 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
  * Ready-to-apply Terraform module for the forwarder-write IAM: a role + the
  * scoped PutObject policy + the EKS IRSA OIDC trust (assume-role bound to one
  * ServiceAccount). Non-EKS attachment is noted at the bottom. The grant is
- * additive — the Retriever's own role only reads the bucket. IRSA trust
- * pattern verified against the AWS EKS docs.
+  * additive — the Retriever's own role only reads the bucket.
  */
 export function forwarderWriteTerraform(): string {
   return `# Forwarder-write IAM for the offload loop. The forwarder PutObjects the
@@ -905,21 +897,19 @@ az monitor log-analytics workspace table create \\
 //  1. `routeState` must NOT be stripped. Every other recipe in this file drops
 //     the marker once it has routed (see the module docstring). On Coralogix the
 //     marker IS the signal the destination reads, so stripping it removes the
-//     only thing a `dpxl_expression` policy can match. VERIFIED live on a US2
-//     tenant: it arrives as a first-class body field, `filter $d.routeState ==
-//     'tier_down'` and `groupby $d.routeState` both work server-side, and a
-//     bogus keypath returns `keypath does not exist` while this one does not.
+//     only thing a `dpxl_expression` policy can match. It arrives as a
+//     first-class body field: `filter $d.routeState == 'tier_down'` and
+//     `groupby $d.routeState` both resolve server-side, where a keypath that
+//     does not exist returns `keypath does not exist`.
 //
-//  2. The decision cannot be derived at the destination AT ALL, whatever the
-//     pipeline order. Do NOT justify this with "TCO evaluates before
-//     enrichment" — that is false: Coralogix's own Pipeline Analyzer doc
-//     orders it parsing rules, then enrichments, then TCO pipelines.
-//     The order-independent argument is the real one, and it is stronger:
-//     whether a pattern has passed its byte budget for the window is a fact
-//     about a STREAM, counted in the sidecar across many events. A
-//     destination-side rule reads one event at a time and cannot derive it no
-//     matter when it runs. So the routing decision has to arrive stamped on
-//     the event, and the shipper is the only thing that can stamp it.
+//  2. The decision cannot be derived at the destination at all, whatever the
+//     pipeline order. Whether a pattern has passed its byte budget for the
+//     window is a fact about a STREAM, counted in the sidecar across many
+//     events. A destination-side rule reads one event at a time and cannot
+//     derive it no matter when it runs. So the routing decision has to arrive
+//     stamped on the event, and the shipper is the only thing that can stamp
+//     it. (Ordering is not the argument: Coralogix's Pipeline Analyzer doc
+//     puts parsing rules, then enrichments, then TCO pipelines.)
 //
 // The lua ALSO mirrors routeState onto `subsystemName`. That is belt-and-braces,
 // not redundancy: `dpxl_expression` (body-field match) needs Terraform provider
@@ -1037,14 +1027,6 @@ export function fluentBitCoralogixRecipe(
       'are mutually exclusive in one policy.',
     prerequisites: [
       ...basePrereqs(p),
-      // CORRECTED AGAINST A LIVE RUN. The generic fluent-bit recipe carries the
-      // opposite instruction ("must emit JSON"), and following it here breaks
-      // this recipe SILENTLY: under `json` the engine ships the whole rendered
-      // record as ONE msgpack string field named after the encode expression
-      // (`fullText_of_tenx_hash_and_routeState`), so `rec["routeState"]` in the
-      // lua is nil, every event is labelled with the pass subsystem, and
-      // nothing is ever tiered. Observed: 160/160 events landed in subsystem
-      // `app` with HTTP 200 throughout and no error anywhere.
       'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`. Do NOT set it to `json` on this path — `json` collapses the record into a single string field and the lua can no longer read `routeState`, which mislabels every event with no error. (The lua below carries a substring fallback for this case, but delimited is the supported shape.)',
       'Set `CORALOGIX_SEND_KEY` in the forwarder environment to a Send-Your-Data key for the target team (NOT a user/management key).',
       'TCO policy changes are NOT instant despite the docs saying "changes take effect immediately". Measured on a live tenant: a freshly enabled policy did not affect routing ~60s after enabling, and did ~6min after. Allow several minutes before concluding a policy does not work.',

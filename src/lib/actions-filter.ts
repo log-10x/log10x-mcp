@@ -10,19 +10,13 @@
  *
  * discover_env (and other tools that build actions[] inline) do not
  * have access to the boot-time mode at envelope construction time.
- * Without filtering, an analysis-mode session sees nudges like
+ * Without filtering, a session can be handed a breadcrumb like
  *   { tool: 'log10x_advise_retriever', ... }
- * inside the actions[] of discover_env — but (before FIX 47) that
- * tool was gated to poc+analysis_pending only, so calling it would
- * return an out-of-mode error. The agent chain breadcrumb was lying.
- *
- * The fix has two layers:
- *   FIX 47 — add 'analysis' to advise_install + advise_retriever TOOL_MODES
- *             entries so they actually are registered in analysis mode.
- *   FIX 48 — this file: filter actions[] at envelope construction time
- *             so any future mis-gating produces a warning in warnings[]
- *             rather than a confusing "tool not found" error when the
- *             agent faithfully follows the breadcrumb.
+ * for a tool that is not registered in its mode, so following the
+ * breadcrumb returns an out-of-mode error. Filtering at envelope
+ * construction turns any such mis-gating into a warning in warnings[]
+ * rather than a confusing "tool not found" for an agent that faithfully
+ * followed the chain.
  *
  * RULE
  *
@@ -36,8 +30,8 @@
  *     mis-gated tool; let the caller surface the real error.
  *
  *   - tool name not in TOOL_MODES (unknown tool): shouldRegisterTool
- *     already registers unknown tools in analysis + analysis_pending
- *     as a safety net. We honour that behaviour here.
+ *     registers unknown tools in analysis + analysis_pending as a safety
+ *     net, and this filter honours that behaviour.
  */
 
 import { shouldRegisterTool, type Mode } from './mode-detect.js';

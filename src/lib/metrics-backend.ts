@@ -2,7 +2,7 @@
  * MetricsBackend — interface + factory for the log10x engine's metrics store.
  *
  * The MCP queries this for every metric tool (top_patterns, whats_changing,
- * pattern_trend, event_lookup, etc.). Today's hardcoded path to
+ * pattern_trend, event_lookup, etc.). Instead of a hardcoded path to
  * `prometheus.log10x.com` is replaced by a per-env discriminated union:
  * log10x hosted, customer's self-hosted Prometheus / Mimir / Cortex,
  * AMP, Datadog (Prom-compat), Grafana Cloud Prom, or GCP Managed Prom.

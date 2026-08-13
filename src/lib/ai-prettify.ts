@@ -5,7 +5,7 @@
  * The MCP sampling API (`server.createMessage`) asks the host — the same
  * chat app the user is already in (Claude Desktop, Cursor, etc.) — to
  * run the prompt through *its* LLM using the user's existing
- * credentials. No Log10x-side endpoint, no egress to our infrastructure,
+ * credentials. No Log10x-side endpoint, no egress to Log10x,
  * no extra API key. The user's host does whatever privacy + compliance
  * enforcement they already trust.
  *
@@ -13,9 +13,8 @@
  * `createMessage` call throws), fail-soft back to raw identities plus a
  * one-line appendix note. The report still renders — just less pretty.
  *
- * Design note: we send pattern identities (variable values already
- * stripped by the 10x engine) along with severity + service.
- * No raw log content.
+ * What is sent: pattern identities (variable values already stripped by
+ * the 10x engine) along with severity + service. No raw log content.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -39,7 +38,7 @@ const PROMPT_HEADER = [
 const LINE_RE = /^(\d+)\s*\|\s*(.+)$/;
 
 export interface PrettifyInput {
-  identity: string; // snake_case identity — the key we return against
+  identity: string; // snake_case identity — the key results are returned against
   service?: string;
   severity?: string;
   count: number;
@@ -114,7 +113,7 @@ export async function prettifyPatterns(
           },
         ],
         maxTokens,
-        // Request a small / fast model if the host lets us pick.
+        // Request a small / fast model when the host allows a preference.
         modelPreferences: {
           hints: [{ name: 'claude-3-5-haiku' }, { name: 'haiku' }],
           speedPriority: 0.7,

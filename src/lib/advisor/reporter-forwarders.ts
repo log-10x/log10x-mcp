@@ -16,10 +16,10 @@
  *      uses `logstashConfig` + `logstashPipeline`, Fluentd needs a
  *      kustomize post-renderer that emits a sidecar-patch).
  *
- *      Filebeat is NOT supported in the Receiver wizard — the upstream
- *      `elastic/filebeat` chart doesn't expose extraContainers/extraVolumes
- *      hooks. Detection still reports it; the wizard surfaces a "not
- *      yet" message and falls back to the Reporter.
+ *      Filebeat is the exception: the upstream `elastic/filebeat` chart
+ *      exposes no extraContainers/extraVolumes hooks, so it runs the
+ *      engine as a child process inside the `filebeat` container via an
+ *      image swap to `log10x/filebeat-10x` instead of a sidecar.
  *
  *   2. REPORTER (`STANDALONE_SPEC`) — Log10x's own `log10x/reporter-10x`
  *      chart bundles a fluent-bit + tenx-edge that tail
@@ -170,13 +170,14 @@ export interface ForwarderSpec {
      * How the helm command lands. Per-forwarder renderers branch on
      * this to emit either a full chart values file (fresh-release —
      * Reporter or Receiver with no existing release detected) or a
-     * minimal overlay containing ONLY the keys we need to add/replace
-     * on top of the user's existing chart values (upgrade-existing —
-     * canonical Receiver path; the helm command uses --reuse-values to
-     * keep the user's existing config intact under our overlay).
+     * minimal overlay containing ONLY the keys the receiver adds or
+     * replaces on top of the user's existing chart values
+     * (upgrade-existing — canonical Receiver path; the helm command uses
+     * --reuse-values to keep the user's existing config intact beneath
+     * the overlay).
      *
      * Most receiver overlays (fluentbit, otel, vector, logstash) are
-     * already minimal — they only declare extraContainers, extraVolumes,
+     * minimal already — they only declare extraContainers, extraVolumes,
      * and the config block. They render the same shape regardless of
      * mode. Only fluentd needs branched output (the kustomize-post-
      * renderer chart's values vary substantially between fresh-deploy
@@ -245,8 +246,8 @@ const MOCK_OUTPUT_NOTE =
 
 /**
  * Render `tenx.optimize` / `tenx.readOnly` lines as nested YAML under
- * the existing `tenx:` block. Every chart now accepts these flags
- * directly (fluent-bit, fluentd, otel-collector, filebeat, logstash);
+ * the existing `tenx:` block. Every chart accepts these flags directly
+ * (fluent-bit, fluentd, otel-collector, filebeat, logstash);
  * the chart's `tenx-validate.yaml` template fails install if both are
  * true at once, so the advisor enforces the same invariant upstream.
  * Emits one line per truthy flag at 2-space indent; emits nothing when
@@ -297,9 +298,9 @@ export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpe
   },
 
   // elastic — `config/pipelines/run/output/metric/elastic/config.yaml`
-  // reads ELASTICSEARCH_HOST + ELASTIC_API_KEY (API-key auth — see Q3:
-  // we default to API key, the engine config also has a basic-auth
-  // path via ELASTIC_USERNAME/PASSWORD that we don't surface).
+  // reads ELASTICSEARCH_HOST + ELASTIC_API_KEY. The engine config also
+  // accepts basic auth via ELASTIC_USERNAME/PASSWORD; the wizard surfaces
+  // the API-key path only.
   elastic: {
     secret: [{ envVar: 'ELASTIC_API_KEY', secretKey: 'api-key' }],
     plain: [
@@ -308,9 +309,8 @@ export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpe
   },
 
   // cloudwatch — engine config reads AWS_ACCESS_KEY_ID +
-  // AWS_SECRET_ACCESS_KEY + CW_NAMESPACE. IRSA isn't wired in the
-  // engine module today (Q4: keep static-creds-only until the engine
-  // adds IRSA support).
+  // AWS_SECRET_ACCESS_KEY + CW_NAMESPACE. The engine module has no IRSA
+  // path, so credentials are static-only.
   cloudwatch: {
     secret: [
       { envVar: 'AWS_ACCESS_KEY_ID', secretKey: 'access-key-id' },
@@ -332,8 +332,8 @@ export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpe
     ],
   },
 
-  // log10x intentionally not listed — the SaaS path uses the license
-  // JWT + the chart default; no extra env vars needed.
+// log10x intentionally not listed — the SaaS path uses the license
+// JWT + the chart default; no extra env vars needed.
 };
 
 /** Default Secret name for a given backend when the wizard doesn't override. */
@@ -350,9 +350,9 @@ export function defaultSecretNameFor(kind: MetricsBackendKind): string {
  * not airgapped). Always emits 2-space-indented YAML to nest under
  * `tenx:`.
  *
- * `log10x` is the chart default — we don't emit `@run/output/metric/log10x`
- * because the chart already wires that pipeline. Only NON-log10x backends
- * get an extraArg.
+ * `log10x` is the chart default and the chart already wires that
+ * pipeline, so `@run/output/metric/log10x` is never emitted. Only
+ * NON-log10x backends get an extraArg.
  *
  * Sensitive env vars are rendered as `valueFrom.secretKeyRef` referencing
  * the user-supplied (or default `<backend>-credentials`) Secret. The user
@@ -439,9 +439,9 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
  * License delivery: always via the Secret-mounted file pattern
  * (`TENX_LICENSE_FILE=/etc/tenx/license/license.jwt`). For demo licenses
  * the caller's pre-install step still has to create the Secret — there
- * is no "inline JWT" path for the Receiver. (The chart values are
- * user-managed; we don't get to add a top-level field that the chart
- * would interpret.)
+ * is no "inline JWT" path for the Receiver. The chart values belong to
+ * the user's upstream chart, which interprets no Log10x-specific
+ * top-level field.
  */
 function renderLog10xSidecar(opts: {
   /** Forwarder kind used in the engine's `@run/input/forwarder/<kind>` arg. */
@@ -988,8 +988,8 @@ bash "%~dp0post-render.sh"
       // Build the daemonset.extraEnvs block. Always emits
       // TENX_LICENSE_FILE + TENX_RUN_ARGS; appends TENX_AIRGAPPED and
       // per-backend env vars (secret + plain) when applicable. The
-      // backend env-var contract is identical to the sidecar path —
-      // we reuse BACKEND_ENV_SPECS so DD_API_KEY/ELASTIC_API_KEY/etc.
+      // backend env-var contract is identical to the sidecar path: the
+      // same BACKEND_ENV_SPECS entries, so DD_API_KEY/ELASTIC_API_KEY/etc.
       // come from the same Kubernetes Secret the user creates
       // out-of-band.
       const envLines: string[] = [
@@ -1144,9 +1144,10 @@ ${envLines.join('\n')}
     selectorLabel: (r) => k8sRecommendedSelector(r),
     renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
       // Logstash chart quirks (vs the other receiver overlays):
-      //   - `extraContainers` is a YAML pipe-string, not a list. We inline
-      //     the log10x container block here rather than using the shared
-      //     renderLog10xSidecar helper (which emits a top-level list).
+      //   - `extraContainers` is a YAML pipe-string, not a list, so the
+      //     log10x container block is inlined here rather than taken from
+      //     the shared renderLog10xSidecar helper (which emits a
+      //     top-level list).
       //   - License is mounted via the chart's `secretMounts` field, not
       //     `extraVolumes`. The chart's `secretMounts[].subPath` projects a
       //     single key from the Secret to a file path on disk.
@@ -1306,10 +1307,8 @@ ${indent(destOutput, 6)}
 
   // Vector — upstream `vector/vector` chart with a values overlay (per
   // mksite/docs/apps/receiver/deploy.md). No log10x-repackaged Vector
-  // chart exists; the integration is done via overlay on top of the
-  // upstream chart. The exact `tenx:` overlay schema is not yet
-  // finalized; the values structure follows the canonical Vector sidecar
-  // config once it is published.
+  // chart exists; the integration is an overlay on top of the upstream
+  // chart.
   vector: {
     label: 'Vector',
     integrationMode:
@@ -1464,9 +1463,9 @@ ${indent(destSink, 4)}
         licenseSecretKey: licenseSecretKey ?? 'license-jwt',
       });
       // OTel destination exporter declaration + the exporter name(s) the
-      // from-tenx pipeline references. For mock we use the chart's built-in
-      // `debug` exporter (no extra config needed); for real destinations
-      // we declare a typed exporter block.
+      // from-tenx pipeline references. `mock` uses the chart's built-in
+      // `debug` exporter (no extra config needed); real destinations get
+      // a typed exporter block.
       const { exporterName, exporterBlock } = renderOtelDestinationExporter(destination, outputHost);
       return `# Receiver overlay for OTel Collector (upstream open-telemetry/opentelemetry-collector chart).
 # Layer on top of your existing values:
@@ -1577,12 +1576,12 @@ ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
 // zero-touch: no values to patch on the user's prod pipeline, no pods to
 // restart on their critical path.
 //
-// Kept as a separate export rather than a 6th entry in
-// RECEIVER_FORWARDER_SPECS because the spec map is keyed by "which user
-// forwarder kind do we replace" — and standalone replaces none. It runs
-// alongside whatever the user has (or nothing). Callers select standalone
-// via `shape: 'standalone'` in ReporterAdviseArgs; `forwarder` stays in
-// the plan as detected context only.
+// A separate export rather than a 6th entry in
+// RECEIVER_FORWARDER_SPECS because that map is keyed by which user
+// forwarder kind the receiver rewires — and standalone rewires none. It
+// runs alongside whatever the user has (or nothing). Callers select
+// standalone via `shape: 'standalone'` in ReporterAdviseArgs;
+// `forwarder` stays in the plan as detected context only.
 //
 // Only supports app=reporter (kind=report). The reporter-10x chart has no
 // path to hook into the user's forwarder's output to filter / compact
@@ -1616,12 +1615,11 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     // out-of-band. The chart's `licenseSecret.create=false` mode skips
     // the auto-Secret generation and mounts the user's existing one.
     //
-    // We intentionally DO NOT emit `gitToken` or `config.git` defaults
-    // — both match chart defaults and the chart's secret-template only
+    // `gitToken` and `config.git` defaults are deliberately not emitted:
+    // both match chart defaults, and the chart's secret-template only
     // creates the git-token Secret when `config.git.enabled` OR
-    // `symbols.git.enabled` is true (neither is by default), so the
-    // chart works fine without them. The engine reads config from a
-    // baked-in image path in default deployments.
+    // `symbols.git.enabled` is true (neither is by default). The engine
+    // reads config from a baked-in image path in default deployments.
     //
     // Airgapped is the chart's TOP-LEVEL `airgapped:` value (NOT a tenx
     // env var as in the Receiver overlays); the chart secret-templates
@@ -1676,13 +1674,13 @@ runtimeName: "${releaseName}"${airgappedLine}${tenxBlock}`;
 };
 
 // ── Destination-specific sub-renderers ──
-// Pulled out so the destination logic lives in one place per forwarder.
+// One place per forwarder for destination logic.
 
 // Exclude all known log-forwarder container logs from the tail input.
 // Without this, every forwarder on a node tails every OTHER forwarder's
 // output, producing runaway recursion where each event contains all the
-// prior forwarded events escaped inside. Verified: 40KB+ events crash
-// the tenx aggregator with ArrayIndexOutOfBoundsException / OOM.
+// prior forwarded events escaped inside. The resulting 40KB+ events
+// crash the tenx aggregator with ArrayIndexOutOfBoundsException / OOM.
 const FORWARDER_EXCLUDE_GLOBS =
   '/var/log/containers/*fluent-bit*.log,/var/log/containers/*fluentd*.log,/var/log/containers/*filebeat*.log,/var/log/containers/*logstash*.log,/var/log/containers/*otel-collector*.log,/var/log/containers/*opentelemetry-collector*.log';
 
@@ -1910,28 +1908,25 @@ function renderFluentdOutputConfig(
 function renderFilebeatOutput(destination: OutputDestination, outputHost?: string): string {
   if (destination === 'mock') {
     // CRITICAL: the chart's default filebeat.yml includes a
-    // \`processors: script\` step that runs tenx-report.js — which
-    // marks each event with "tenx":true and writes it to stdout so
-    // the tenx-edge process (reading filebeat's stdout via
-    // \`filebeat ... 2>&1 | tenx-edge run ...\` in docker-entrypoint)
-    // can ingest it. Replacing filebeat.yml without that script
-    // processor means tenx sees zero events.
-    //
-    // Include the script processor here, per-forwarder-kind, so tenx
-    // actually processes the data. The chart exposes the script
-    // paths as \`tenx.processors.<kind>\` — but since we're fully
-    // overriding filebeatConfig, we hardcode the path to tenx-report.js
-    // which is baked at a known location in every log10x/filebeat-10x
-    // image.
+    // `processors: script` step that runs tenx-report.js, which marks
+    // each event with "tenx":true and writes it to stdout so the
+    // tenx-edge process (reading filebeat's stdout via
+    // `filebeat ... 2>&1 | tenx-edge run ...` in docker-entrypoint) can
+    // ingest it. Replacing filebeat.yml without that script processor
+    // means tenx sees zero events, so the processor is emitted here
+    // per-forwarder-kind. The chart exposes the script paths as
+    // `tenx.processors.<kind>`, but a full filebeatConfig override
+    // bypasses them — hence the hardcoded tenx-report.js path, which is
+    // baked at a known location in every log10x/filebeat-10x image.
     //
     // CRITICAL: filebeat + log10x is INCOMPATIBLE with
-    // \`output.console\`. The tenx subprocess reads from filebeat's
-    // stdout — the same channel \`output.console\` writes to — so a
+    // `output.console`. The tenx subprocess reads from filebeat's
+    // stdout — the same channel `output.console` writes to — so a
     // console output corrupts the tenx input stream. Use output.file
     // (below) for mock verification, or any non-stdout output in prod
-    // (elasticsearch, splunk, logstash, kafka, etc.). The log10x/
-    // filebeat-10x Dockerfile hardcodes this pipe assumption, so it's
-    // not overridable at the chart level.
+    // (elasticsearch, splunk, logstash, kafka, etc.). The
+    // log10x/filebeat-10x Dockerfile hardcodes this pipe assumption, so
+    // it is not overridable at the chart level.
     //
     // output.file writes the regular event stream to /tmp/tenx-mock-*
     // for "is the forwarder working" verification. The script-processor

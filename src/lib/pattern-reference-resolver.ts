@@ -5,7 +5,7 @@
  *
  * WHY THIS EXISTS
  *
- * Note 19 from the arc-rendering review: real user behavior when the
+ * Real user behavior when the
  * agent surfaces a top_patterns / whats_new / whats_changing list is:
  *
  *   - A rank number — "1", "the first one", "pattern 1", "top one"
@@ -50,8 +50,7 @@
  *     '4Kjc7PHLWqY'})". That requires the cache to be populated AND a
  *     rendering-side contract change, both larger than this PR.
  *
- *   These pieces are intentionally NOT in this PR. Note 19 calls them
- *   out as a separate workstream.
+ *   These pieces are a separate workstream.
  */
 
 import { PATTERN_HASH_REGEX } from './anchor-promql.js';
@@ -67,8 +66,8 @@ export { PATTERN_HASH_REGEX };
  * Accepts both `number` and `string` inputs because tool args come in
  * as JSON-deserialized values and the user might pass `1` or `"1"`.
  *
- * The 50 cap is a heuristic: top_patterns currently defaults to 10 and
- * can go to 25/50 via "more" continuations (Note 4). A rank above 50
+ * The 50 cap is a heuristic: top_patterns defaults to 10 and can go to
+ * 25/50 via "more" continuations. A rank above 50
  * is more likely a typo (or someone passing a pattern hash whose first
  * 2 chars happen to be digits) than a legitimate rank reference, so
  * we conservatively reject it and let the executor surface an

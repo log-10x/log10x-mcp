@@ -146,8 +146,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   //   - reporter → standalone dedicated fluent-bit DaemonSet (zero-touch,
   //     production intent)
   //   - receiver → inline sidecar inside the user's existing forwarder
-  // The `shape` arg is no longer accepted; it's derived. Keeping it as a
-  // local for downstream code that reads it.
+  // `shape` is derived rather than accepted as an arg; kept as a local
+  // for downstream code that reads it.
   const shape: DeploymentShape = app === 'reporter' ? 'standalone' : 'inline';
   const effectiveReadOnly = app === 'reporter' ? true : (args.readOnly ?? false);
   const effectiveOptimize = args.optimize ?? false;
@@ -162,10 +162,10 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // into the user's existing forwarder Helm release — NOT to deploy a
   // second copy. Default the release name to the detected release and
   // emit `helm upgrade --reuse-values <existing-release>` so the user's
-  // existing chart values stay intact; our overlay layers on top.
+  // existing chart values stay intact under the overlay.
   //
-  // Reporter (standalone) keeps the old "fresh release" behavior — it's
-  // a parallel DaemonSet that runs alongside the user's forwarder, not
+  // Reporter (standalone) deploys a fresh release instead — it is a
+  // parallel DaemonSet that runs alongside the user's forwarder, not
   // into it.
   const detectedExisting: { releaseName: string; namespace: string } | undefined =
     app === 'receiver'
@@ -209,14 +209,12 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only. Pick one: optimize=true OR mode=readonly.'
     );
   }
-  // logstash receiver path is now supported via the upstream
-  // elastic/logstash chart + sidecar overlay (extraContainers as a
-  // pipe-string, secretMounts for the license, logstashConfig +
-  // logstashPipeline for the two-pipeline driver). The old log10x-elastic
-  // chart that ran tenx as a stdin-fed container was the broken path;
-  // it's gone. No blocker.
+  // logstash receiver path is supported via the upstream elastic/logstash
+  // chart + sidecar overlay (extraContainers as a pipe-string, secretMounts
+  // for the license, logstashConfig + logstashPipeline for the two-pipeline
+  // driver). No blocker.
 
-  // fluentd receiver path is now supported via the upstream fluent/fluentd
+  // fluentd receiver path is supported via the upstream fluent/fluentd
   // chart + a kustomize post-renderer overlay (the upstream chart has no
   // extraContainers hook, so the sidecar is patched onto the rendered
   // Deployment via Strategic Merge Patch). The wizard emits values.yaml
@@ -317,7 +315,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     teardown.push(...buildTeardownSteps(releaseName, namespace, selectorLabel));
   }
 
-  // Derive the typed licenseKind from the inputs we know. Surfaces on
+  // Derive the typed licenseKind from the known inputs. Surfaces on
   // AdvisePlanSummary.license_kind so agents don't grep `notes` for
   // "demo license".
   //
@@ -329,7 +327,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   //     (the wizard sets this explicitly when acquireLicenseForWizard
   //     returned a `signed-in-user` / `refreshed-then-user` reason)
   //   - isDemoLicense undefined + licenseJwt set   → 'user-pasted'
-  //     (caller supplied a JWT but didn't tell us its kind; treat as
+  //     (caller supplied a JWT without declaring its kind; treated as
   //     opaque)
   const licenseKind: AdvisePlan['licenseKind'] = !args.licenseJwt
     ? 'placeholder'
@@ -375,9 +373,9 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  *     which is what this section is for.
  *
  * When `optimize=true`, MCP-managed per-pattern decisions are still useful
- * (to OPT OUT specific audit/compliance patterns), but the customer can
- * also skip GitOps entirely. We surface that trade-off in `whenToSkip`.
- */
+// When `optimize=true`, MCP-managed per-pattern decisions are still useful
+// (to OPT OUT specific audit/compliance patterns), but the customer can
+// also skip GitOps entirely. `whenToSkip` carries that trade-off.
 /**
  * Find the user's existing Helm release for a given forwarder kind in
  * the snapshot. Used by the Receiver path to default `releaseName` to
@@ -393,8 +391,9 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
  *   2. Cross-check the candidate against `snapshot.kubectl.helmReleases`
  *      in the same namespace. If no matching release object is found,
  *      treat as "detected workload but not helm-managed" and return
- *      undefined — `helm upgrade --reuse-values` would fail with a
- *      no-release error, so we fall back to a fresh release.
+ //      treat as "detected workload but not helm-managed" and return
+ //      undefined — `helm upgrade --reuse-values` would fail with a
+ //      no-release error, so the plan falls back to a fresh release.
  *
  * Returns the release name + namespace, or undefined when no existing
  * helm-managed release matches.
@@ -520,8 +519,8 @@ async function runPreflight(
   //   - fresh-release   → release name MUST NOT already exist (would
   //     either fail the install or accidentally upgrade something
   //     unrelated). Existing release = FAIL.
-  //   - upgrade-existing → release name MUST already exist (we're
-  //     `helm upgrade`-ing into it). Existing release = OK, expected.
+  //   - upgrade-existing → release name MUST already exist (the plan runs
+  //     `helm upgrade` into it). Existing release = OK, expected.
   //     Missing release = FAIL (helm upgrade would error).
   const releaseExists = snapshot.kubectl.helmReleases.some(
     (h) => h.name === releaseName && h.namespace === namespace
@@ -545,12 +544,12 @@ async function runPreflight(
   }
 
   // 5. Filebeat-specific: output.console is forbidden because the image
-  // swap pipes filebeat stdout into the in-container engine. If the
-  // user's existing filebeat values use output.console (we can't tell
-  // from the discovery snapshot — `kubectl get values` isn't probed),
-  // applying our overlay produces a broken pod. Surface this as a WARN
-  // the user has to acknowledge by inspecting their existing values
-  // before they apply the plan.
+  // swap pipes filebeat stdout into the in-container engine. An existing
+  // filebeat values file using output.console produces a broken pod once
+  // the overlay is applied, and the discovery snapshot cannot detect it
+  // (`kubectl get values` isn't probed). Surface this as a WARN the user
+  // has to acknowledge by inspecting their existing values before they
+  // apply the plan.
   if (forwarder === 'filebeat' && app === 'receiver') {
     checks.push({
       name: 'filebeat output.console check',
@@ -560,18 +559,18 @@ async function runPreflight(
     });
   }
 
-  // Chart availability used to LIVE-probe `helm search repo` here. It
-  // was removed because the chart refs it checked are static constants
-  // in our own source (reporter-forwarders.ts):
-  //   - reporter-10x / retriever-10x are charts WE publish under names
-  //     we control.
+  // Chart availability is NOT live-probed with `helm search repo`. The
+  // chart refs it would check are static constants in this source tree
+  // (reporter-forwarders.ts):
+  //   - reporter-10x / retriever-10x are Log10x-published charts under
+  //     names Log10x controls.
   //   - The receiver forwarder charts (fluent/fluent-bit, vector/vector,
   //     open-telemetry/opentelemetry-collector, elastic/logstash) are
   //     well-known upstream identifiers that don't change.
-  // The probe added the user's local helm repo entries on every plan
-  // emit, blocked the wizard for up to 30s when helm was offline, and
-  // checked constants we'd already shipped. If a future chart ref
-  // drifts, helm install will surface it meaningfully on its own.
+  // A probe adds the user's local helm repo entries on every plan emit and
+  // blocks the wizard for up to 30s when helm is offline, to check
+  // constants that already shipped. If a chart ref drifts, helm install
+  // surfaces it meaningfully on its own.
 
   // License JWT hint.
   checks.push({
@@ -653,7 +652,7 @@ function buildInstallSteps(opts: {
     });
   }
   // installMode='upgrade-existing': skip the namespace step — the user's
-  // existing release is already in a real namespace; we just upgrade in place.
+  // existing release is already in a real namespace, upgraded in place.
 
   // Real (user) licenses are kept out of values.yaml — the chart reads them
   // from an out-of-band Secret the user creates here. Demo licenses skip
@@ -725,9 +724,9 @@ function buildInstallSteps(opts: {
     ? ' \\\n  ' + extraHelmFlags.join(' \\\n  ')
     : '';
   // The receiver path upgrades the user's existing helm release with
-  // `--reuse-values` so their chart values stay intact; our overlay
-  // layers on top. The reporter path (or receiver fallback when no
-  // existing release was detected) deploys a fresh release.
+  // `--reuse-values` so their chart values stay intact under the overlay.
+  // The reporter path (or receiver fallback when no existing release was
+  // detected) deploys a fresh release.
   if (installMode === 'upgrade-existing') {
     steps.push({
       title: `Upgrade the existing ${spec.label} release in-place`,

@@ -45,8 +45,8 @@ import { readDemoLicense, writeDemoLicense, isDemoLicenseExpired } from './demo-
 // signin, whoami) are the PERMANENT tenants of the SaaS gateway; the
 // prometheus.log10x.com name belongs to its legacy metric-ingest routes and
 // dies with hosted metrics (metrics backend is BYO). Both names map to the
-// same API Gateway today — api.log10x.com verified live 2026-08-10 — so this
-// is a rename, not a migration. Metric-plane clients (metrics-backend.ts,
+// same API Gateway, so this is a rename, not a migration. Metric-plane
+// clients (metrics-backend.ts,
 // self-telemetry.ts) deliberately stay on the prometheus name.
 const DEFAULT_BASE = 'https://api.log10x.com';
 

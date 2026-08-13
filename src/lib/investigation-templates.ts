@@ -13,7 +13,7 @@ import type { DriftResult } from './drift.js';
 import { PATTERN_HASH_REGEX } from './anchor-promql.js';
 
 /**
- * Per Note 18: pattern_hash never appears in user-facing prose. When the
+ * pattern_hash never appears in user-facing prose. When the
  * caller's `startingPoint` is an 11-char base64url hash, render the H2
  * heading using the resolved anchor name (optionally suffixed with the
  * service for disambiguation). Falls back to "(unnamed pattern)" only when

@@ -7,9 +7,9 @@
  *   - top_patterns and top_volume surface an "N incident cluster(s)
  *     detected" callout when consecutive high-cost patterns share an
  *     incident root. They import `detectIncidents` from this module.
- *   - the standalone `log10x_find_incident_cluster` TOOL was removed
- *     pre-launch (the agent couldn't act on its output), but the
- *     library is retained for the in-tool callout described above.
+ *   - there is no standalone `log10x_find_incident_cluster` tool (the
+ *     agent could not act on its output); the library exists for the
+ *     in-tool callout described above.
  *
  * Algorithm summary:
  *   Two patterns join into a cluster when they SHARE A SERVICE and meet
@@ -88,8 +88,8 @@ export function detectIncidents(inputs: IncidentInput[]): IncidentCluster[] {
   if (n < 2) return [];
 
   const tokens = inputs.map((r) => incidentTokens(r.descriptor));
-  // Track which signal fired per joined pair so we can carry the
-  // strongest signal forward into the cluster output.
+  // Track which signal fired per joined pair, to carry the strongest
+  // signal forward into the cluster output.
   const parent = Array.from({ length: n }, (_, i) => i);
   const pairSignal = new Map<number, { signal: IncidentCluster['joinSignal']; confidence: number }>();
 

@@ -12,22 +12,24 @@
  * which uses a boolean per-pattern format, use `compact-csv-parser.ts`.
  *
  * Row format (set by configure-engine.ts):
- *   container,cap                              ← header
- *   payment-service,2048::MCP default          ← container default
- *   pat:abc123def,4096::keep audit floor       ← per-pattern override
- *   pat:def456abc,128::tier_down dataset
+ *   container,cap                               ← header
+ *   payment-service,2048:compact:MCP default    ← container default
+ *   pat:abc123def,4096:pass:keep audit floor    ← per-pattern override
+ *   pat:def456abc,128:tier_down:cold dataset
  *
- * Value grammar: `<bytes>::<reason>`
+ * Value grammar: `<bytes>:<action>:<reason>` — the action is folded into
+ * the cap entry. `<bytes>` alone is valid.
  *   - bytes  — integer cap_bytes_per_window (>=0)
+ *   - action — one of the six engine actions; surfaced on the row as
+ *              `legacy_action_suffix`
  *   - reason — free-text label (commas already replaced with `;` upstream)
  *
- * NOTE: The `:action` suffix that earlier versions of configure_engine
- * appended to this file has been REMOVED. Action intent is now stored
- * separately in `data/action-intent.json` (see action-intent-writer.ts
- * and action-intent-parser.ts). Callers that need a pattern→action
- * lookup must read action-intent.json, not this file. Legacy rows that
- * still carry a `:action` suffix are parsed tolerantly — the suffix is
- * ignored and `legacy_action_suffix` is set on the row for diagnostics.
+ * The two-file grammar `<bytes>::<reason>[:<action>]`, where action intent
+ * lives in `data/action-intent.json` (action-intent-writer.ts /
+ * action-intent-parser.ts) and the trailing suffix is vestigial, is also
+ * parsed so those CSVs round-trip. Either way a recognized action token is
+ * stripped from the reason and surfaced on `legacy_action_suffix`.
+ *
  *
  * Two row shapes:
  *   - `pat:<hash>` rows — per-pattern overrides; the `key` field of
@@ -38,8 +40,8 @@
 
 import type { Action } from './cost.js';
 
-// Legacy action values recognised when stripping an old-format suffix.
-// Used only to detect and discard the suffix — NOT for action routing.
+// Action tokens recognised in the value column. Used to split the action
+// off the reason text — not to route events.
 const LEGACY_ACTIONS: ReadonlySet<string> = new Set<string>([
   'pass',
   'sample',
@@ -62,13 +64,11 @@ export interface CapCsvRow {
   /** Free-text reason label (commas already substituted to `;` upstream). */
   reason: string;
   /**
-   * When a legacy `:action` suffix was present on this row (written by an
-   * older version of configure_engine), the stripped suffix value is
-   * preserved here for diagnostics. NOT used for action routing — see
-   * `data/action-intent.json` for the canonical action plan.
-   *
-   * @deprecated Action routing has moved to action-intent.json.
-   */
+     * The action token parsed out of the row's value, under either grammar.
+     * Held for diagnostics and attribution; the engine reads the action from
+     * the cap row itself. For the action-intent.json path, the canonical plan
+     * is in `data/action-intent.json`.
+     */
   legacy_action_suffix?: Action;
 }
 
@@ -80,9 +80,9 @@ export interface ParseCapCsvResult {
    * per-pattern → bytes_cap mapping with container fallback should use
    * `by_container` together with the pattern's container label.
    *
-   * NOTE: This lookup no longer provides action attribution. For
-   * pattern → action, read `data/action-intent.json` via
-   * `fetchAndParseActionIntent` in `action-intent-parser.ts`.
+   * NOTE: for the action-intent.json path, read `data/action-intent.json`
+   * via `fetchAndParseActionIntent` in `action-intent-parser.ts` rather
+   * than taking action attribution from this lookup.
    */
   by_pattern: Map<string, CapCsvRow>;
   /**
@@ -102,7 +102,7 @@ export interface ParseCapCsvResult {
  * Parse a cap-CSV string into rows + lookups.
  *
  * Tolerates:
- *  - missing/extra header lines (we only require the `<key>,<value>` shape)
+ *  - missing/extra header lines (only the `<key>,<value>` shape is required)
  *  - missing `::` separator (treats whole value as bytes, action='drop',
  *    suffix_missing=true) — surfaced to callers via the per-row flag
  *  - blank lines and CRLF endings
@@ -123,9 +123,9 @@ export function parseCapCsv(content?: string | null): ParseCapCsvResult {
   // `# ...` comment lines ahead of the first data row carry refresh-mode
   // commitment metadata (target_percent, baseline_monthly_bytes) written
   // by configure_engine. They must not be treated as malformed rows. The
-  // header (`container,cap`) is also skipped — we look for it as the
-  // first non-blank non-comment line rather than at a fixed index, since
-  // preamble lines push it down.
+  // header (`container,cap`) is also skipped — it is located as the first
+  // non-blank non-comment line rather than at a fixed index, since preamble
+  // lines push it down.
   let headerSeen = false;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
@@ -185,26 +185,24 @@ interface ParsedValue {
   bytes_cap: number;
   reason: string;
   /**
-   * When the row was written by a legacy version of configure_engine that
-   * appended `:<action>` to the reason field, this holds the stripped
-   * action value. Undefined for new-format rows. NOT used for routing —
-   * action intent lives in `data/action-intent.json`.
-   */
+     * The action token parsed out of the value column, under either grammar
+     * (`<bytes>:<action>:<reason>` or the trailing-suffix form). Undefined
+     * when the row carries no recognized action token.
+     */
   legacy_action_suffix?: Action;
 }
 
 /**
  * Parse the value column of a cap-CSV row.
  *
- * New format: `<bytes>::<reason>`
- * Legacy format (old configure_engine): `<bytes>::<reason>:<action>`
+ * Grammar: `<bytes>:<action>:<reason>` (action folded into the cap entry).
+ * Also accepted: `<bytes>::<reason>[:<action>]` (action last, or absent).
  *
  * Returns null when `bytes` does not parse — that signals a malformed
  * row to the caller.
  *
- * When a legacy `:action` suffix is detected (the last colon-segment is
- * a known Action value), it is stripped from the reason and preserved in
- * `legacy_action_suffix` for diagnostics only.
+ * A recognized action token — in either position — is stripped from the
+ * reason and preserved in `legacy_action_suffix`.
  */
 function parseCapValue(value: string): ParsedValue | null {
   // Grammar (single-file design): `<bytes>:<action>:<reason>` — the action
@@ -259,15 +257,12 @@ function parseCapValue(value: string): ParsedValue | null {
 /**
  * Build a pattern_hash → Action lookup with container-default fallback.
  *
- * @deprecated Action attribution has moved to `data/action-intent.json`.
- *   Use `fetchAndParseActionIntent` from `action-intent-parser.ts` to get
- *   the canonical pattern → action map. This function is retained for
- *   backward compatibility with legacy rows that still carry a
- *   `legacy_action_suffix` field, and for callers that have not yet
- *   migrated to the action-intent path.
+ * Reads the action token off the cap rows themselves. Callers on the
+ * action-intent.json path should use `fetchAndParseActionIntent` from
+ * `action-intent-parser.ts` for the canonical pattern → action map
+ * instead.
  *
- * Resolution order (legacy):
- *   1. `pat:<hash>` row in the CSV that has `legacy_action_suffix` → that value
+ * Resolution order:
  *   2. The pattern's container default row `legacy_action_suffix` → that value
  *   3. Absent from the map — callers treat absence as "unattributed"
  *
@@ -291,8 +286,8 @@ export function buildPatternActionLookup(
       out.set(hash, containerRow.legacy_action_suffix);
       continue;
     }
-    // No legacy suffix — leave the hash out of the map; callers treat
-    // the absence as "unattributed" rather than defaulting to drop.
+  // No legacy suffix — leave the hash out of the map; callers treat
+  // the absence as "unattributed" rather than defaulting to drop.
   }
   return out;
 }

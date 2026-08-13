@@ -2,18 +2,18 @@
  * Severity policy — the one definition of which severities are protected
  * (kept verbatim) and which may take a lossless lever.
  *
- * Two surfaces used to carry private copies of this rule and drifted apart:
- * the POC report renderer, which tells a prospect what will happen, and
- * `configure_engine`'s solver, which decides what actually happens. On
- * 2026-07-30 they disagreed. The report promised "ERROR/CRIT/FATAL and
- * low-volume patterns are kept verbatim. Nothing is sampled or dropped."
- * while the solver assigned `sample` to every error/warn/warning pattern, and
- * the two also classified WARN opposite ways. Even inside the renderer the
- * rule was inconsistent: the risk-review paths treated WARN as error-class
- * and the action selector did not.
+ * Two surfaces would otherwise carry private copies of this rule and drift
+ * apart: the POC report renderer, which tells a prospect what will happen,
+ * and `configure_engine`'s solver, which decides what actually happens. A
+ * report promising "ERROR/CRIT/FATAL and low-volume patterns are kept
+ * verbatim. Nothing is sampled or dropped." while the solver assigns
+ * `sample` to every error/warn/warning pattern is the failure this
+ * prevents, along with the two classifying WARN opposite ways and the
+ * renderer disagreeing with itself (risk-review paths treating WARN as
+ * error-class where the action selector does not).
  *
- * Everything now resolves through here, and `test/severity-policy-drift.test.ts`
- * fails if the rendered promise and the solver default diverge again.
+ * Everything resolves through here, and `test/severity-policy-drift.test.ts`
+ * fails if the rendered promise and the solver default diverge.
  *
  * WARN is PROTECTED. `configure_engine`'s `inferTier` puts warn/warning in the
  * same tier as error, and the customer-facing text has to match the solver
@@ -60,9 +60,9 @@ export function isReducibleSeverity(severity?: string | null): boolean {
  * single unlabelled INFO line should not block a recommendation) but it fails
  * OPEN in aggregate: when severity extraction returns nothing at all, every
  * pattern reads as reducible and the "ERROR/WARN/CRIT/FATAL kept verbatim"
- * promise silently cannot fire. That is what happened on the 2026-08-02 POC
- * dry run, where the engine config omitted its aggregator, coverage was 0%,
- * and three ERROR patterns were queued for reduction.
+ * promise silently cannot fire. An engine config that omits its aggregator
+ * produces exactly that: 0% coverage, and ERROR patterns queued for
+ * reduction.
  *
  * A gate has to fail on the known-broken input, so below this floor the
  * recommender refuses rather than guesses.

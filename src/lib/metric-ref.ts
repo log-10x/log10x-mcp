@@ -1,7 +1,7 @@
 /**
  * Canonical metric_ref string for cross-pillar primitives.
  *
- * Today's pain (surfaced by the AI-as-user consult, 2026-05-28): a
+ * Without a canonical shape, a
  * candidate metric flows through the three primitives in different
  * shapes — the raw PromQL string in input, a label dict or a different
  * normalized form in output, sometimes inconsistent across the tools.

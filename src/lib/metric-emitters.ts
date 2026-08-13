@@ -76,8 +76,8 @@ async function emitDatadog(points: MetricPoint[], options: EmitOptions): Promise
     );
   }
   // Accept DD_SITE and DATADOG_SITE interchangeably, matching Datadog's
-  // own CLI / SDK behavior. Previously only DATADOG_SITE was read, which
-  // produced a silent wrong-region bug when a user had only DD_SITE set.
+  // own CLI / SDK behavior. Reading only DATADOG_SITE produces a silent
+  // wrong-region bug for a user who has only DD_SITE set.
   const site = process.env.DD_SITE || process.env.DATADOG_SITE || 'datadoghq.com';
   const endpoint = `https://api.${site}/api/v2/series`;
 
@@ -172,8 +172,8 @@ async function emitPrometheus(points: MetricPoint[], options: EmitOptions): Prom
         urlSource = `derived from ${resolution.backend!.backendType} read endpoint`;
       }
     } catch {
-      // Backend resolution errors (malformed explicit config) shouldn't
-      // mask the primary "no remote-write URL" error. Fall through.
+    // Backend resolution errors (malformed explicit config) shouldn't
+    // mask the primary "no remote-write URL" error. Fall through.
     }
   }
   if (!url) {

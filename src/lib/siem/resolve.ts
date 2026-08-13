@@ -2,8 +2,8 @@
  * Shared SIEM-vendor resolution.
  *
  * Every vendor-taking tool (poc_from_siem_submit, dependency_check,
- * pattern_mitigate, advise_*) used to roll its own "is the user explicit
- * or should we sniff env vars?" logic. This module centralizes that, so
+ * pattern_mitigate, advise_*) otherwise rolls its own "is the user explicit
+ * or should this sniff env vars?" logic. This module centralizes that, so
  * the same priority + ambiguity rules apply everywhere:
  *
  *   1. Explicit id wins, no probing.

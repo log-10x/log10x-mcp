@@ -2,19 +2,15 @@
  * Drift guard: does the report claim in-place compaction only where the
  * destination actually compacts in place?
  *
- * On the 2026-08-02 POC dry run a CloudWatch report opened with "Every line
- * stays queryable in Amazon CloudWatch Logs (compacted in place)" and
- * repeated the claim in three more places, each interpolating the SIEM's own
- * name so the false statement read as destination-specific. `compact` is a
- * no-op on CloudWatch (cost.ts: `compact_mode: 'no-op'`, ratio 1.0). The
- * section that would have shown a measured compact ratio is conditional and
- * was skipped on that run, so the report asserted compaction in its opening
- * paragraph and numbered its sections 1,2,3,4,5,7,8,9 around the hole where
- * the evidence should have been.
- *
- * The codebase already knew: the methodology line hedged correctly with
- * "compact in place when the SIEM supports it". Three rival notions of the
- * same fact coexisted (unconditional prose, a hardcoded destination triple,
+  * `compact` is a no-op on CloudWatch (cost.ts: `compact_mode: 'no-op'`,
+  * ratio 1.0), yet an unguarded report opens with "Every line stays
+  * queryable in Amazon CloudWatch Logs (compacted in place)" and repeats
+  * the claim in three more places, each interpolating the SIEM's own name
+  * so the false statement reads as destination-specific. The section that
+  * would show a measured compact ratio is conditional, so it is skipped on
+  * exactly those runs and the sections number 1,2,3,4,5,7,8,9 around the
+  * hole where the evidence should be. The methodology line hedges correctly
+  * with "compact in place when the SIEM supports it"; rival notions of the
  * an allowed-actions lookup). These tests read the RENDERED markdown and
  * assert it agrees with cost.ts's `compact_mode`, which is the one source of
  * truth. A fourth notion fails here.

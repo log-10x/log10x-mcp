@@ -57,7 +57,7 @@ export interface PlanStep {
   expectDurationSec?: number;
 }
 
-/** One verify probe — a specific fact we're checking is true after install. */
+/** One verify probe — a specific fact that must hold after install. */
 export interface VerifyProbe {
   name: string;
   /** One-line question being answered ("Are Reporter pods ready?"). */

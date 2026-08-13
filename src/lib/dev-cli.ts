@@ -110,8 +110,7 @@ export class DevCliRunError extends Error {
  * True when the engine refused a license it was handed, as opposed to
  * refusing to start because it was handed none.
  *
- * Measured on engine 1.1.39, `log10x/edge-10x`, `TENX_LICENSE_KEY` set to a
- * non-JWT string. stderr:
+ * An engine handed a non-JWT `TENX_LICENSE_KEY` prints:
  *
  *   could not launch pipeline: 'run'
  *   Invalid serialized unsecured/JWS/JWE object: Missing part delimiters
@@ -125,7 +124,8 @@ export class DevCliRunError extends Error {
  * `LicenseException` as the second reading.
  *
  * The "handed none" case reads `license required: set --licenseFile, …` and
- * deliberately does NOT match: withholding a key we never forwarded cannot fix it.
+ * deliberately does NOT match: withholding a key that was never forwarded
+ * cannot fix it.
  */
 export function isEngineLicenseRejection(stderr: string): boolean {
   const s = (stderr || '').toLowerCase();
@@ -189,20 +189,19 @@ export async function withDockerLicenseFallback<T>(
 /**
  * Turn a non-zero local-engine exit into a hint the caller can act on.
  *
- * The old hint named `TENX_API_KEY` and stopped there. That variable is not
- * what the engine refused on, and the engine's own diagnosis sat unread in
- * `debug_stderr`. An unlicensed `tenx` on PATH (the state every Homebrew
- * install starts in) therefore produced a message that pointed nowhere.
+ * The hint must name what the engine actually refused on. `TENX_API_KEY` is
+ * not it, and the engine's own diagnosis sits in `debug_stderr`; an
+ * unlicensed `tenx` on PATH (the state every Homebrew install starts in)
+ * otherwise produces a message that points nowhere.
  *
- * Two things the first version of this got wrong:
+ * Two traps:
  *
- *   - it appended "Set LOG10X_TENX_MODE=docker … (no license needed)" on every
- *     failure, including the ones where the resolved mode was already docker.
- *     That tells the reader to turn on the mode they are in, and tells them no
- *     license is needed in the same breath as their license refusing the run.
- *     `mode` now decides which escape is named.
- *   - it only promoted `license required:`, so the far commoner refusal,
- *     `license verification failed:`, stayed buried under
+ *   - Appending "Set LOG10X_TENX_MODE=docker … (no license needed)" on every
+ *     failure tells a reader already in docker mode to turn on the mode they
+ *     are in, and tells them no license is needed in the same breath as their
+ *     license refusing the run. `mode` decides which escape is named.
+ *   - Promoting only `license required:` leaves the far commoner refusal,
+ *     `license verification failed:`, buried under
  *     `could not launch pipeline: 'run'`, which is what `lines[0]` is.
  */
 export function describeDevCliFailure(
@@ -509,7 +508,7 @@ async function runAppsMcpFileViaDocker(
     const digest = id.trim().split('\n')[0]?.trim();
     if (digest) ref = `docker ${image} (${digest.slice(0, 19)})`;
   } catch {
-    // leave the bare image ref
+  // leave the bare image ref
   }
   return { cliVersion: ref };
 }
@@ -573,7 +572,7 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
   //
   // (The leading `~` on the encoded payload still exists but now sits
   // after the `encoded=` anchor, so first-byte tests no longer work for
-  // routing — we match prefixes by string.)
+  // routing — match prefixes by string.
   const encodedLines: string[] = [];
   const templateLines: string[] = [];
   const summaryLines: string[] = [];
@@ -588,7 +587,7 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
     } else if (line.startsWith('summary=')) {
       summaryLines.push(line.slice('summary='.length).replace(/^,/, ''));
     }
-    // Otherwise: engine info line (emoji-prefixed) or JS console output — skip.
+  // Otherwise: engine info line (emoji-prefixed) or JS console output — skip.
   }
 
   // Synthesize a header for the aggregated rows so parseAggregated()
@@ -850,7 +849,7 @@ async function runAppsMcpViaDocker(
 /**
  * Locate the user's tenx install (modules + config). Mirrors the engine's
  * own resolver (https://doc.log10x.com/install/paths/), skipping
- * TENX_INCLUDE_PATHS (we're setting that ourselves) and the working-dir
+ // own resolver (https://doc.log10x.com/install/paths/), skipping
  * step (not meaningful when spawned from the MCP).
  *
  * Precedence:
@@ -942,9 +941,9 @@ async function runViaLocalBinary(
 
   const cliVersion = await tryGetVersion(binary);
 
-  // Enumerate the install's modules+config so we can put tempDir FIRST
-  // in TENX_INCLUDE_PATHS for the shadow to win resolution. Setting
-  // TENX_INCLUDE_PATHS replaces the engine's own path resolver, so we
+  // Enumerate the install's modules+config to put tempDir FIRST in
+  // TENX_INCLUDE_PATHS so the shadow wins resolution. Setting
+  // TENX_INCLUDE_PATHS replaces the engine's own path resolver, so it must
   // have to spell out everything the engine would otherwise have found.
   const { config: tenxConfig, modules: tenxModules } = resolveInstallPaths();
   const includePaths = [
@@ -1054,7 +1053,7 @@ async function runViaDocker(
 
   let containerInputPath: string | undefined;
   if (opts.mode === 'file' && opts.inputPath) {
-    // TODO: glob paths aren't supported here — we mount the parent of the
+    // TODO: glob paths aren't supported here — the parent of the exact
     // exact path. Resolving a glob to its minimal enclosing directory and
     // rewriting the pattern is possible but left for a follow-up. Absolute
     // file paths are the 95% case.

@@ -119,9 +119,9 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
     : '';
 
   // ── Phase A — topk rate-change query ──
-  // We compute the current rate over `window` and divide by the baseline
-  // (same window, shifted by baselineOffsetSeconds). We rank by magnitude
-  // of rate change, anchored by the anchor direction.
+  // The current rate over `window`, divided by the baseline (same window,
+  // shifted by baselineOffsetSeconds). Ranked by magnitude of rate change,
+  // anchored by the anchor direction.
   //
   // The BASELINE side is guarded by a meaningful absolute floor (10× the
   // per-series noise floor). Without this, a baseline sum of ~1 sample
@@ -134,8 +134,8 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   // a moderate rate is a real, catchable incident. The tension: a bursty
   // crashloop (like the accounting pod's Kerberos dlopen failure, 22
   // restarts, ~8 events/hour averaged) has a real but low absolute rate,
-  // and we want investigate() to catch it. Guarding the current side
-  // would eliminate it as a false negative.
+  // restarts, ~8 events/hour averaged) has a real but low absolute rate that
+  // investigate() must catch. Guarding the current side
   //
   // Net effect: relative-change amplification from near-zero baselines
   // is suppressed (G6 noise gone), but genuine low-volume incidents
@@ -215,7 +215,7 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
     }
   } catch (e) {
     // Non-fatal: anchor direction defaults to "up"; record so the caller
-    // can see we couldn't reference the anchor's direction.
+    // can see the anchor's direction was not referenced.
     partialFailures.push(wrapBackendError(e));
   }
 
@@ -273,7 +273,7 @@ export async function runAcuteSpikeCorrelation(opts: CorrelationOptions): Promis
   }
 
   // PromQL `offset` is always evaluated relative to "now". To anchor each lag
-  // probe's window-end at (inflection - lagOffset) we add the now-to-inflection
+  // probe's window-end at (inflection - lagOffset), add the now-to-inflection
   // shift. Clamp negatives in case the inflection is at or after now.
   const nowSec = Math.floor(Date.now() / 1000);
   const inflectionShift = Math.max(0, nowSec - opts.inflectionTimestamp);

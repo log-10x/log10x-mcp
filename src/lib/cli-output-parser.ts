@@ -8,8 +8,8 @@
  *   - decoded.log      losslessly reconstructed events (ignored)
  *
  * This module parses those strings into in-memory structures the rest of
- * the tool can use. Defensive on format: some CLI versions emit slightly
- * different column names, so we look up by header name rather than index.
+ * Defensive on format: some CLI versions emit slightly different column
+ * names, so lookup is by header name rather than index.
  */
 
 export interface Template {
@@ -114,7 +114,7 @@ export function parseTemplates(text: string): Map<string, Template> {
 
       map.set(hash, template);
     } catch {
-      // Skip malformed lines — paste Lambda sometimes emits trailing commentary.
+    // Skip malformed lines — paste Lambda sometimes emits trailing commentary.
     }
   }
   return map;
@@ -277,7 +277,7 @@ function normalizeHash(hash: string): string {
  *          ~<templateHash>,<val1>,<val2>,…,pattern=,<message_pattern>,patternHash=,<tenx_hash>
  *
  *      The `pattern=` and `patternHash=` literals act as section
- *      anchors, giving us the engine-emitted Reporter-tier name and
+ *      anchors, carrying the engine-emitted Reporter-tier name and
  *      the matching xxHash64 per event.
  *
  *   2. **Legacy** — older engines / configs without the anchors:
@@ -288,7 +288,7 @@ function normalizeHash(hash: string): string {
  *
  * Commas inside variable values are escaped as `\,`. Leading `~` on the
  * hash is the templater's marker; templates.json stores the hash without
- * it, so we normalize.
+  * it, so the leading `~` is normalized away here.
  */
 export function parseEncoded(text: string): EncodedEvent[] {
   const events: EncodedEvent[] = [];
@@ -328,8 +328,8 @@ export function parseEncoded(text: string): EncodedEvent[] {
     }
 
     // Compaction byte cost = UTF-8 bytes of the (full) line as written,
-    // plus the newline that frames it on the wire. We measure the
-    // input line, NOT the anchor-stripped form, so it matches what a
+    // plus the newline that frames it on the wire. The measurement is of
+    // the input line, NOT the anchor-stripped form, so it matches what a
     // SIEM ingesting compact format would actually receive.
     const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
     events.push({ templateHash, values, lineBytes, symbolMessage, tenxHash });

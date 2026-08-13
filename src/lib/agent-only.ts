@@ -16,7 +16,7 @@
  * agent ("call log10x_X", "do not Y"). Agents miss them when they
  * dump raw output to users.
  *
- * Our convention:
+ * The convention:
  *   - Visible markdown is for the user.
  *   - Anything that says "do not X" / "call log10x_Y" / "for growth use Z"
  *     is wrapped in `<!-- agent-only: ... -->` HTML comments via
@@ -54,7 +54,7 @@ const CLOSE = '-->';
 export function agentOnly(content: string): string {
   // Normalize whitespace to keep it on one line (a multi-line HTML
   // comment is valid but agents-parsing-by-regex can stumble).
-  // Escape any embedded `-->` so we don't truncate the comment.
+  // Escape any embedded `-->` so the comment is not truncated.
   const safe = content.replace(/\s+/g, ' ').replace(/-->/g, '--&gt;').trim();
   return `${OPEN} ${safe} ${CLOSE}`;
 }

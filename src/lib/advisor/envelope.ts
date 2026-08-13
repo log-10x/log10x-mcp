@@ -19,15 +19,12 @@ import { buildEnvelope, type StructuredOutput } from '../output-types.js';
  * field so agents don't have to grep `notes[]` to know whether the
  * install will run with a demo or a real user-scoped license — the
  * difference is structurally meaningful (demo can't run airgapped,
- * expires in 14 days, has rate limits).
- *
- *   - 'user-scoped' — minted from /api/v1/license with Auth0 tokens.
- *     Production-grade. Can run airgapped. No expiry from us.
- *   - 'demo'        — anonymous /api/v1/license/demo. 14-day, no
- *     airgapped, reduced limits.
- *   - 'user-pasted' — the user supplied the JWT via license_jwt_paste;
- *     we don't introspect it.
- *   - 'placeholder' — no real JWT (skipInstall=true, or license fetch
+  *   - 'user-scoped' — minted from /api/v1/license with Auth0 tokens.
+  *     Production-grade. Can run airgapped. Log10x sets no expiry.
+  *   - 'demo'        — anonymous /api/v1/license/demo. 14-day, no
+  *     airgapped, reduced limits.
+  *   - 'user-pasted' — the user supplied the JWT via license_jwt_paste;
+  *     it is not introspected.
  *     failed and the plan was emitted with REPLACE_WITH_LICENSE_JWT).
  */
 export type PlanLicenseKind = 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';

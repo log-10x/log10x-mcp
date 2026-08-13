@@ -1,8 +1,8 @@
 /**
  * configure_engine cap CSV emit: key-binding regression test.
  *
- * Bug shape (proven live on workflow wzwe4to8v): the cap CSV writer
- * previously emitted two row shapes:
+  * The cap CSV writer must emit exactly one row shape. Two shapes are
+  * possible and only one works:
  *   - <container>,<cap>::<reason>   (works — engine keys caps.csv by
  *                                    rateReceiverContainerField value,
  *                                    default k8s_container)
@@ -14,7 +14,7 @@
  * (`<container>,<bytes>:<action>:<reason>`); there is no separate
  * action-intent.json side-file. Per-PATTERN detail stays out of the CSV.
  *
- * This test locks in the fix:
+  * This test pins:
  *   1. No `pat:` prefix rows in the emitted CSV.
  *   2. One container-keyed row per service container being configured.
  *   3. Service-name == container-name fallback (no snapshot) still

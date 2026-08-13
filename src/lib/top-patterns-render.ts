@@ -247,8 +247,8 @@ export function renderTopPatterns(
   // numbered list with two lines per row: identity first (bold), then
   // stats (cost / volume / events / badge / first-seen). Wraps
   // gracefully in VS Code chat where a code-fenced table would crop.
-  // The trajectory badge replaces what the sparkline used to do;
-  // the volume-trend chart in the card body covers shape.
+  // The trajectory badge carries what a sparkline would show; the
+  // volume-trend chart in the card body covers shape.
   out.push(renderList(rows, descriptors));
   out.push('');
 
@@ -663,9 +663,9 @@ function renderCard(
   // values across the sample, and 2–3 actual sample values so the
   // Reader can tell at a glance whether "17 distinct" is meaningful
   // counts (`100, 250, 500`) or opaque IDs (`a8f3-…, 9d2e-…`). The
-  // "drill candidate" flag previously here was jargon-on-first-use —
-  // it implied an action without defining it. Sample values + the
-  // verdict footer carry that load now.
+  // counts (`100, 250, 500`) or opaque IDs (`a8f3-…, 9d2e-…`). No "drill
+  // candidate" flag: it is jargon on first use, implying an action without
+  // defining it. Sample values + the verdict footer carry that load.
   if (r.fieldVar && r.fieldVar.totalEvents > 0) {
     lines.push(
       `**What varies across these events** *(${r.fieldVar.totalEvents} sampled, all sharing \`${hashField}="${r.hash}"\`)*`

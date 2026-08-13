@@ -1,6 +1,5 @@
 /**
- * Unified envelope helpers for the low-woowoo data tools (envelope-
- * consistency pass, 2026-05-28).
+ * Unified envelope helpers for the low-woowoo data tools.
  *
  * Low-woowoo tools are those that return data, not calibrated
  * judgments — top_patterns, event_lookup, pattern_examples, etc.

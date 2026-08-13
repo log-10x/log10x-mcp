@@ -4,8 +4,8 @@
  * fetchCapCsvForEnv — pulls the rate cap CSV (engine safety floor):
  *   `pipelines/run/receive/rate/caps.csv`
  *   Used by commitment_report verify, services, and overflow_contents to
- *   supply per-container byte caps for context. The cap CSV no longer
- *   carries `:action` suffixes — action intent is in action-intent.json.
+ *   supply per-container byte caps for context. Cap rows may carry the
+ *   action folded into the value; see cap-csv-parser.ts for the grammar.
  *
  * fetchActionIntentForEnv — pulls the canonical per-pattern action plan:
  *   `data/action-intent.json`

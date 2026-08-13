@@ -24,15 +24,15 @@
  * The run-path default stays `log10x/pipeline-10x:latest` — changing a default
  * image silently changes what every existing install downloads. Opting into the
  * native runtime is an explicit env var, `LOG10X_RUNTIME_IMAGE`, which accepts
- * either a full image ref or the alias `native` (measured on 1.1.38: 391 MB vs
- * 926 MB, identical `@apps/mcp` output).
+ * either a full image ref or the alias `native` (391 MB vs 926 MB on 1.1.38,
+ * identical `@apps/mcp` output).
  *
  * `LOG10X_RUNTIME_IMAGE` exists as a knob SEPARATE from `LOG10X_TENX_IMAGE`
  * because `LOG10X_TENX_IMAGE` is shared: `log10x_compile` falls back to it when
  * `LOG10X_COMPILER_IMAGE` is unset. Pointing the shared var at a runtime image
  * to get the native run path therefore also aims the compiler at it, and that
  * fails four seconds into the container with a Jackson mapping error naming a
- * missing `discoverSources` factory — measured, not hypothesised. See
+ * missing `discoverSources` factory. See
  * `assertNotRuntimeImage`, which turns that into an immediate, readable refusal.
  */
 

@@ -363,8 +363,8 @@ export async function verifyOffloadDelivery(
 async function defaultListObjects(bucket: string, prefix: string): Promise<S3ObjectMeta[]> {
   try {
     // `aws s3api list-objects-v2` AUTO-PAGINATES (the CLI follows
-    // NextContinuationToken internally and merges all pages — verified live at
-    // 54k+ keys on a single call). Do NOT add a manual token loop. The ceiling
+    // NextContinuationToken internally and merges all pages, tested past 54k
+    // keys on a single call). Do NOT add a manual token loop. The ceiling
     // is maxBuffer (~150 bytes/key JSON → 32 MB covers ~200k keys).
     const { stdout } = await execFileP(
       'aws',

@@ -175,7 +175,7 @@ function commitmentsDir(): string {
   try {
     mkdirSync(dir, { recursive: true });
   } catch {
-    // ignore; commitments dir creation failure → load returns undefined
+  // ignore; commitments dir creation failure → load returns undefined
   }
   return dir;
 }
@@ -186,7 +186,7 @@ export function putCommitment(rec: CommitmentRecord): void {
     const dir = commitmentsDir();
     writeFileSync(join(dir, `${rec.id}.json`), JSON.stringify(rec));
   } catch {
-    // disk write failure is non-fatal in dev; callers may re-create on next merge
+  // disk write failure is non-fatal in dev; callers may re-create on next merge
   }
 }
 
@@ -219,7 +219,7 @@ export function findCommitmentByService(
         const mtime = statSync(join(dir, f)).mtimeMs;
         if (!best || mtime > best.mtime) best = { rec, mtime };
       } catch {
-        // skip malformed
+      // skip malformed
       }
     }
     return best?.rec;
@@ -990,7 +990,7 @@ async function executeWeeklyDigest(
       intentContent = readFileSync(candidate, 'utf8');
       break;
     } catch {
-      // try next
+    // try next
     }
   }
 
@@ -1040,7 +1040,7 @@ async function executeWeeklyDigest(
           );
         }
       } catch {
-        // best-effort; leave descriptors undefined
+      // best-effort; leave descriptors undefined
       }
     }
   }
@@ -1724,7 +1724,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   // Per-action dollar fractions track byte fractions when delivered_bytes>0;
   // when rate_source==='unset' the column is omitted entirely. Wrap each
   // share in a DisclosedDollarValue so the disclosure tail rides every cell
-  // (the rate_source / list-price caveat is no longer inlined per row).
+  // (the rate_source / list-price caveat is not inlined per row).
   const siemLabel = SIEM_DISPLAY_NAMES[env.commitment.destination] ?? null;
   // DISCLOSURE LABEL ONLY (not the dollar source). The dollar math
   // (env.delivered_dollars) is produced upstream by runEstimateVerify, which
@@ -1741,7 +1741,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
     const value = env.delivered_dollars * (bytes / env.delivered_bytes);
     return buildDisclosedDollarValue(value, env.rate_source, siemLabel, listRatePerGb);
   };
-  // This table previously hardcoded
+  // This table must not hardcode
   // {Drop, Compact, Offload, Tier-down} as the four rows. When the engine's
   // actual policy applies via sample (the error-tier default) or when
   // bytes_saved gets attributed to pass via the intent_observation drift
@@ -2104,8 +2104,8 @@ export async function executeCommitmentReport(
   };
 
   // 5d. Reconciliation gap. The bucket map and delivered_pct are
-  // computed from independent code paths; previously a wide gap between
-  // them would render a self-contradicting envelope ("delivered 3.8% /
+  // computed from independent code paths, and a wide gap between them
+  // renders a self-contradicting envelope ("delivered 3.8% /
   // attributed 0%"). The gap is computed here and surfaced as a
   // structured caveat in section 8 below when it exceeds 1pp (matches
   // the schema docstring's "±1pp rounding" claim).
@@ -2229,7 +2229,7 @@ export async function executeCommitmentReport(
   // actual observed dropped bytes over the post-window. When the cluster's
   // ingest drifts substantially from apply-time baseline (e.g. lower
   // traffic, throttle, or pre-policy ramp), the dollar ratio
-  // delivered_dollars/promised_dollars no longer tracks the byte ratio
+  // delivered_dollars/promised_dollars stops tracking the byte ratio
   // delivered_pct/promised_pct. A CFO comparing "$0.12 delivered vs $70
   // promised" then sees 0.17% achievement when the actual byte delivery
   // is 3.7% / 30% = 12.3% — a 70x apparent discrepancy that is
@@ -2307,7 +2307,7 @@ export async function executeCommitmentReport(
         offloadPrefix = activeOffload?.prefix;
       }
     } catch {
-      // resolution failure: fall through to env-var fallback / skip.
+    // resolution failure: fall through to env-var fallback / skip.
     }
     if (!offloadBucket) {
       offloadBucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET || undefined;
@@ -2357,8 +2357,8 @@ export async function executeCommitmentReport(
       }
     }
   } catch {
-    // Delivery verification is best-effort; a failure must never block the
-    // commitment report.
+  // Delivery verification is best-effort; a failure must never block the
+  // commitment report.
   }
 
   // Hold a backend handle reference so unused-import linters stay quiet

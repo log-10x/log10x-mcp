@@ -50,7 +50,7 @@ export interface Credentials {
   auth0AccessToken?: string;
   /**
    * Auth0 refresh token. The device flow asks for the `offline_access`
-   * scope so we get one. Used to refresh the access token when it
+      * scope, so one is always issued. Used to refresh the access token when it
    * expires (typically 24h) without forcing the user to re-sign in.
    */
   auth0RefreshToken?: string;

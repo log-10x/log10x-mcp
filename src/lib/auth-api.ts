@@ -17,8 +17,8 @@ import './auth-model.js';
 // signin, whoami) are the PERMANENT tenants of the SaaS gateway; the
 // prometheus.log10x.com name belongs to its legacy metric-ingest routes and
 // dies with hosted metrics (metrics backend is BYO). Both names map to the
-// same API Gateway today — api.log10x.com verified live 2026-08-10 — so this
-// is a rename, not a migration. Metric-plane clients (metrics-backend.ts,
+// same API Gateway, so this is a rename, not a migration. Metric-plane
+// clients (metrics-backend.ts,
 // self-telemetry.ts) deliberately stay on the prometheus name.
 const DEFAULT_BASE = 'https://api.log10x.com';
 
@@ -43,8 +43,8 @@ export interface SigninResponse {
  * record via the Management API and returns the long-lived api_key
  * stored in `app_metadata.api_key`.
  *
- * The Auth0 access_token is single-use from the MCP's perspective:
- * we don't keep it after this exchange. The api_key is what
+ * The Auth0 access_token is single-use from the MCP's perspective: it is
+ * not retained after this exchange. The api_key is what
  * authenticates every subsequent log10x call.
  */
 export async function exchangeAuth0TokenForApiKey(auth0AccessToken: string): Promise<SigninResponse> {

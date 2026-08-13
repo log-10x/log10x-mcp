@@ -4,7 +4,7 @@
  * Used by `log10x_signin_start` (step 1: requestDeviceCode) and
  * `log10x_signin_complete` (step 2: pollForAccessToken). The flow:
  *
- *   1. POST `{AUTH0_DOMAIN}/oauth/device/code` with our public client_id
+ *   1. POST `{AUTH0_DOMAIN}/oauth/device/code` with the public client_id
  *      → get back `device_code`, `user_code`, `verification_uri`,
  *        `verification_uri_complete`, `interval`, `expires_in`.
  *   2. The MCP shows the user the verification URL (Auth0 already
@@ -12,7 +12,7 @@
  *      launches their browser to it.
  *   3. The user lands on Auth0's universal login page where they pick
  *      GitHub, Google, or any other social/db connection enabled on
- *      our `mcp_backend` Auth0 client. They complete the chosen IdP's
+ *      the `mcp_backend` Auth0 client. They complete the chosen IdP's
  *      OAuth, Auth0 mints a session, then prompts them to confirm the
  *      device authorization.
  *   4. Poll `{AUTH0_DOMAIN}/oauth/token` every `interval` seconds with
@@ -45,10 +45,11 @@ export const LOG10X_AUTH0_CLIENT_ID =
  *    backend's /userinfo lookup returns a real email + name.
  *  - `offline_access` requests a refresh_token so the user could
  *    re-issue access tokens later without going through Device Flow
- *    again. The MCP itself doesn't currently use it (we exchange the
- *    access_token for a long-lived api_key and then forget the Auth0
- *    session), but it's cheap to ask for and lets future flows refresh
- *    without a fresh login. */
+ *    again. The MCP does not use it (the access_token is exchanged for a
+ *    long-lived api_key and the Auth0 session is then forgotten), but it
+ *    is cheap to ask for and lets other flows refresh without a fresh
+ *    login.
+ */
 export const REQUESTED_SCOPES = 'openid profile email offline_access';
 
 export interface DeviceCodeResponse {
@@ -116,13 +117,13 @@ export interface PollOptions {
 }
 
 /**
- * Step 2/3: poll until Auth0 gives us an access token, the user
- * declines, or the device_code expires. Honors the `slow_down`
- * back-pressure signal by adding 5s to the interval each time.
+ * Step 2/3: poll until Auth0 returns an access token, the user declines,
+ * or the device_code expires. Honors the `slow_down` back-pressure signal
+ * by adding 5s to the interval each time.
  *
  * Auth0 returns these errors as HTTP 403 with a JSON body of
- * `{error: ..., error_description: ...}`. We don't surface the 403
- * itself as an error; we read the body and decide based on `error`.
+ * `{error: ..., error_description: ...}`. The 403 itself is not surfaced
+ * as an error; the decision comes from the body's `error` field.
  */
 export async function pollForAccessToken(opts: PollOptions): Promise<AccessTokenResponse> {
   const clientId = opts.clientId || LOG10X_AUTH0_CLIENT_ID;
@@ -173,7 +174,7 @@ export async function pollForAccessToken(opts: PollOptions): Promise<AccessToken
         // User has not confirmed yet. Keep polling.
         continue;
       case 'slow_down':
-        // Auth0 asks us to back off. Add 5s per RFC 8628.
+        // Auth0 signalled back-pressure. Add 5s per RFC 8628.
         interval += 5;
         continue;
       case 'expired_token':
@@ -200,7 +201,7 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Refresh an expired Auth0 access token using a stored refresh token.
- * The device flow asks for `offline_access` so we always get a refresh
+ * The device flow asks for `offline_access`, so signin always yields a
  * token at signin time. Refresh tokens are long-lived by default in
  * Auth0; access tokens typically last 24h.
  *

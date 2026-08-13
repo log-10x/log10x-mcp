@@ -106,9 +106,9 @@ test('analyzer sniffing puts serverless BEFORE the bare elastic match', async ()
 });
 
 // ---------------------------------------------------------------------------
-// Frozen tier. Proven live 2026-07-31 on Elastic Cloud Hosted: the marked slice
-// mounted as partial-<index> on the frozen node at store=0b, and a term query
-// on tenx_hash returned 400/400 with routeState still aggregatable.
+// Frozen tier. On Elastic Cloud Hosted the marked slice mounts as
+// partial-<index> on the frozen node at store=0b, and a term query on
+// tenx_hash returns every event with routeState still aggregatable.
 // ---------------------------------------------------------------------------
 
 test('elasticsearch offers tier_down with a genuinely cheaper target', () => {
@@ -140,8 +140,8 @@ test('the frozen recipe emits the artifacts the live run actually used', async (
   // from "everything moved".
   assert.match(r.body, /_ilm\/policy\/tenx-tier-down/);
   assert.match(r.body, /_ilm\/policy\/tenx-keep/);
-  // Bootstrap indices: omitting is_write_index is the usual reason ILM sits in
-  // check-rollover-ready forever. This bit me in the live run.
+  // Bootstrap indices: omitting is_write_index is the usual reason ILM sits
+  // in check-rollover-ready forever.
   assert.match(r.body, /"is_write_index": true/, 'rollover needs a bootstrapped write index');
   // Identity must be mapped as keyword or the post-transition query cannot work.
   assert.match(r.body, /"tenx_hash":\s*\{ "type": "keyword" \}/);

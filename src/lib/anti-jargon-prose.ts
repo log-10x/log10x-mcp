@@ -10,11 +10,9 @@
  *      refs, `phase_gap`, `n_anchor_buckets`, etc.
  *   2. The user (reads what the agent surfaces) — needs plain English.
  *
- * Today the chassis fields meant for the user (`headline`,
- * `human_summary`, `must_render_verbatim`) routinely leak agent-internal
- * vocabulary verbatim. The arc-rendering review (notes 9-13, 16-18)
- * catalogued the banned phrases and called out raw PromQL bleeding into
- * markdown the user reads.
+ * The chassis fields meant for the user (`headline`, `human_summary`,
+ * `must_render_verbatim`) otherwise leak agent-internal vocabulary
+ * verbatim, including raw PromQL in markdown the user reads.
  *
  * This module gives every chassis-emitting tool a pure
  * `sanitizeUserProse()` it can run on a string before serialization.
@@ -24,7 +22,7 @@
  *
  * RULES ENFORCED
  *
- *   - CLAUDE.md anti-data-science rule (BURNED in memory):
+ *   - CLAUDE.md anti-data-science rule:
  *       ban "candidate", "anchor", "co-mover", "phase_gap",
  *       "noise floor", "clean-chain threshold", "Pearson", "@lag",
  *       "unvalidated_default" (as user-facing string),
@@ -88,7 +86,7 @@ const BANNED_PHRASE_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bdispatched\b/gi, 'ran'],
 
   // Lone agent-vocabulary nouns. Use word boundaries
-  // so we don't rewrite "anchored" / "candidates_failed".
+  // so "anchored" / "candidates_failed" are left alone.
   [/\bco-movers?\b/gi, 'related metrics'],
   [/\bcandidates?\b/gi, 'metrics'],
   [/\banchor\b/gi, 'what we looked at'],
@@ -99,15 +97,15 @@ const BANNED_PHRASE_REWRITES: ReadonlyArray<readonly [RegExp, string]> = [
 
 /**
  * Heuristic: does this string contain a raw PromQL expression a user
- * would not understand? Matches the common shapes from Notes 11 and 12:
+ * would not understand? Matches the common shapes:
  *
  *   - `sum(rate(...))` aggregations
  *   - `{tenx_hash="..."}` label selectors
  *   - `{...[Ns]}` rate windows
  *   - `histogram_quantile(...)`
  *
- * Conservative — we only flag fragments that look unambiguously like
- * PromQL. A user-prose string mentioning "rate of change" should NOT
+ * Conservative — only fragments that look unambiguously like PromQL are
+ * flagged. A user-prose string mentioning "rate of change" should NOT
  * trigger.
  */
 const PROMQL_FRAGMENTS: ReadonlyArray<RegExp> = [
@@ -124,9 +122,9 @@ const PROMQL_FRAGMENTS: ReadonlyArray<RegExp> = [
 /**
  * If a fenced or backtick-quoted PromQL fragment is detected anywhere in
  * the string, rewrite the WHOLE backtick-bounded fragment to a
- * descriptor placeholder. We don't try to extract structure from
- * the PromQL — the user just needs to know "we measured the volume of
- * this pattern" instead of seeing the raw query.
+ * descriptor placeholder. No structure is extracted from the PromQL —
+ * the user needs to know "we measured the volume of this pattern"
+ * rather than see the raw query.
  *
  * Strategy:
  *   1. Replace any inline-code or fenced-code block that contains
@@ -144,8 +142,8 @@ function replaceRawPromQL(text: string): string {
     return match;
   });
 
-  // Second pass: bare PromQL fragments not wrapped in backticks. We use
-  // a relatively narrow regex so we only strip what is clearly PromQL.
+  // Second pass: bare PromQL fragments not wrapped in backticks. The regex
+  // is narrow so that only what is clearly PromQL gets stripped.
   // `sum(rate(...))` or a `{tenx_hash="..."}` selector with brackets.
   out = out.replace(
     /\b(?:sum|avg|max)\(rate\([^)]*\)[^)]*\)/gi,
@@ -202,7 +200,7 @@ export function sanitizeUserProse(text: string): string {
 
 /**
  * Strip 11-char base64url tokens (pattern hashes) from a user-visible
- * string. Mirrors Note 18 and the BURNED memory rule:
+ * string. The rule:
  *   "Never put pattern_hash in user-facing headlines — hashes confuse
  *    users; lead with pattern name + service + state."
  *
@@ -213,7 +211,7 @@ export function sanitizeUserProse(text: string): string {
  *
  * Strategy:
  *   - Inline-code wrapped (`abc12345678`) hashes → removed including the
- *     backticks (otherwise we'd leave empty `` `` `` artefacts).
+ *     backticks, which would otherwise leave empty `` `` `` artefacts.
  *   - Bare 11-char tokens flanked by word boundaries → removed.
  *   - Trailing whitespace and punctuation orphans from the removal are
  *     normalized in a final pass.
@@ -231,9 +229,9 @@ export function stripHashFromVisible(
 ): string {
   if (!text) return text;
 
-  // Build a /g variant of the supplied regex without anchors so we can
-  // find tokens anywhere in the string. We unwrap leading `^` / trailing
-  // `$` if present so the pattern body matches at any position.
+  // Build a /g variant of the supplied regex without anchors, so tokens are
+  // found anywhere in the string. Leading `^` / trailing `$` are unwrapped
+  // if present so the pattern body matches at any position.
   const body = hashRegex.source.replace(/^\^/, '').replace(/\$$/, '');
   const flags = hashRegex.flags.includes('g') ? hashRegex.flags : hashRegex.flags + 'g';
 

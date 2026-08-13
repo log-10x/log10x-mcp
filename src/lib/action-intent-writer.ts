@@ -2,10 +2,8 @@
  * Action-intent writer — serialises the MCP's per-pattern action plan to
  * `data/action-intent.json` in the customer gitops repo.
  *
- * The cap CSV is now the engine-only safety-floor file (format:
- * `container,bytes:untilEpoch:reason` — no `:action` suffix). The
- * INTENT of what the engine should do with each pattern lives HERE,
- * separate from the numeric floor that the rate receiver enforces.
+  * The INTENT of what the engine should do with each pattern lives HERE,
+  * separate from the numeric floor the rate receiver enforces.
  *
  * File shape:
  *   {
@@ -138,7 +136,7 @@ export function writeActionIntent(
  * a service's patterns split evenly across two or more actions. "Aggressive"
  * = how hard the lever cuts cost: `drop` removes the slice entirely, `offload`
  * relocates it off the SIEM, `tier_down` cheapens its tier, `compact` shrinks
- * it, `sample` thins it, `pass` leaves it. On a tie we pick the more
+  * it, `sample` thins it, `pass` leaves it. A tie takes the more
  * cost-aggressive action so a mixed service never silently defaults to the
  * weaker lever.
  */
@@ -165,7 +163,7 @@ function actionRank(a: Action): number {
  * The engine's receiver reads this file keyed by k8s container (== the
  * service) and stamps `route(<action>)` on that service's regulator-excess
  * slice. ONE row per service. A service absent from the file defaults to
- * `drop` engine-side, so we only emit services we actually have entries for.
+  * `drop` engine-side, so only services with entries are emitted.
  *
  * File shape:
  *   container,action          ← header
