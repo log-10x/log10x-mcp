@@ -288,7 +288,7 @@ export function parsePolicyYaml(text: string): Policy {
   const repo = typeof cp?.['repo'] === 'string' ? cp['repo'].trim() : '';
   if (!repo) {
     throw new PolicyLoadError(
-      'policy.yaml is missing config_plane.repo — the tick needs a gitops repo to write CSVs'
+      'policy.yaml is missing config_plane.repo — the tick needs a gitops repo or s3:// prefix to write CSVs'
     );
   }
   const env_id =

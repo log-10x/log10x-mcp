@@ -14,10 +14,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   resolveCronExpression,
+  toAwsCronExpression,
+  parseS3ConfigPlane,
   emitPolicyYaml,
   emitK8sCronJob,
   emitGitHubActions,
   emitCrontab,
+  emitEventBridge,
   yamlString,
   type PolicyOptions,
 } from '../src/lib/scheduler-manifest-emitter.js';
@@ -312,4 +315,80 @@ test('yamlString: numeric-looking string is quoted', () => {
 
 test('yamlString: already-quoted string is returned as-is', () => {
   assert.equal(yamlString('"already"'), '"already"');
+});
+
+// ─── AWS cron conversion ──────────────────────────────────────────────────────
+
+test('toAwsCronExpression: wildcard day fields — day-of-week becomes ?', () => {
+  assert.equal(toAwsCronExpression('0 3 * * *'), 'cron(0 3 * * ? *)');
+  assert.equal(toAwsCronExpression('0 */6 * * *'), 'cron(0 */6 * * ? *)');
+});
+
+test('toAwsCronExpression: explicit day-of-week — day-of-month becomes ?', () => {
+  assert.equal(toAwsCronExpression('0 5 * * 1'), 'cron(0 5 ? * 1 *)');
+});
+
+// ─── S3 config plane parsing ──────────────────────────────────────────────────
+
+test('parseS3ConfigPlane: bucket + prefix', () => {
+  assert.deepEqual(parseS3ConfigPlane('s3://acme-logs/log10x-config'), {
+    bucket: 'acme-logs',
+    prefix: 'log10x-config',
+  });
+});
+
+test('parseS3ConfigPlane: trailing slash is stripped, bare bucket allowed', () => {
+  assert.deepEqual(parseS3ConfigPlane('s3://acme-logs/cfg/'), { bucket: 'acme-logs', prefix: 'cfg' });
+  assert.deepEqual(parseS3ConfigPlane('s3://acme-logs'), { bucket: 'acme-logs', prefix: '' });
+});
+
+test('parseS3ConfigPlane: non-S3 and empty inputs are null', () => {
+  assert.equal(parseS3ConfigPlane('https://github.com/acme/cfg'), null);
+  assert.equal(parseS3ConfigPlane('s3://'), null);
+});
+
+// ─── EventBridge emitter ──────────────────────────────────────────────────────
+
+const EB_OPTS: PolicyOptions = {
+  ...BASE_OPTS,
+  scheduler: 'eventbridge',
+  config_plane: 's3://acme-logs/log10x-config',
+};
+
+test('emitEventBridge: Scheduler schedule with the converted cron expression', () => {
+  const cfn = emitEventBridge(EB_OPTS);
+  assert.ok(cfn.includes('AWS::Scheduler::Schedule'));
+  assert.ok(cfn.includes('cron(0 3 * * ? *)'), 'schedule must use the 6-field AWS form');
+  assert.ok(cfn.includes('ScheduleExpressionTimezone: UTC'));
+});
+
+test('emitEventBridge: CodeBuild project runs tenx-recur against the S3 plane', () => {
+  const cfn = emitEventBridge(EB_OPTS);
+  assert.ok(cfn.includes('AWS::CodeBuild::Project'));
+  assert.ok(cfn.includes('npx --yes --package=log10x-mcp@latest tenx-recur --policy policy.yaml'));
+  assert.ok(cfn.includes('s3://acme-logs/log10x-config'), 'CONFIG_PLANE env must carry the plane URI');
+});
+
+test('emitEventBridge: IAM is scoped to the parsed bucket/prefix and the secret', () => {
+  const cfn = emitEventBridge(EB_OPTS);
+  assert.ok(cfn.includes('arn:aws:s3:::acme-logs/log10x-config/*'));
+  assert.ok(cfn.includes('arn:aws:s3:::acme-logs'));
+  assert.ok(cfn.includes('codebuild:StartBuild'));
+  assert.ok(cfn.includes('secretsmanager:GetSecretValue'));
+});
+
+// ─── tick command regression ──────────────────────────────────────────────────
+
+test('no manifest invokes the MCP server binary as the tick', () => {
+  // `log10x-mcp --tick` is not a flag the binary knows — it falls through and
+  // starts the MCP server on stdio, hanging the scheduler forever. The tick
+  // is the tenx-recur bin.
+  const k8s = emitK8sCronJob(BASE_OPTS);
+  const gha = emitGitHubActions(BASE_OPTS);
+  const { wrapper_script } = emitCrontab(BASE_OPTS);
+  const eb = emitEventBridge(EB_OPTS);
+  for (const [name, body] of [['k8s', k8s], ['gha', gha], ['crontab', wrapper_script], ['eventbridge', eb]] as const) {
+    assert.ok(!body.includes('--tick'), `${name} manifest must not use the --tick flag`);
+    assert.ok(body.includes('tenx-recur'), `${name} manifest must run the tenx-recur bin`);
+  }
 });
