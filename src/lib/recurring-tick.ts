@@ -671,6 +671,10 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   // clone path under /tmp/log10x-recur-repo.
   const repoPath = resolveRepoPath(policy.config_plane.repo);
 
+  if (isS3ConfigPlane(policy.config_plane.repo)) {
+    await pullStateFromS3(policy.config_plane.repo, repoPath, verbose);
+  }
+
   const priorIntent = readCurrentActionIntent(repoPath);
   const priorSavingsPct = readCurrentSavingsPct(repoPath, totalBytes);
 
@@ -725,9 +729,13 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   // Write output files.
   writeOutputFiles(repoPath, decisions, verbose);
 
-  // Commit to the config plane.
+  // Commit to the config plane — git for a repo plane, object puts for S3.
   try {
-    await commitToConfigPlane(repoPath, policy, decisions, projectedSavingsPct, opts);
+    if (isS3ConfigPlane(policy.config_plane.repo)) {
+      await pushStateToS3(policy.config_plane.repo, repoPath);
+    } else {
+      await commitToConfigPlane(repoPath, policy, decisions, projectedSavingsPct, opts);
+    }
   } catch (err) {
     const result: TickResult = {
       status: 'error',
@@ -771,6 +779,12 @@ function resolveRepoPath(repo: string): string {
   if (process.env.LOG10X_GITOPS_REPO_PATH) {
     return process.env.LOG10X_GITOPS_REPO_PATH;
   }
+  // S3 config plane — stage under a stable temp path; state is pulled from
+  // and pushed to the prefix around the tick.
+  if (isS3ConfigPlane(repo)) {
+    const slug = repo.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(-40);
+    return pathJoin(tmpdir(), 'log10x-recur-s3', slug);
+  }
   // Local path?
   if (!repo.startsWith('http://') && !repo.startsWith('https://') && !repo.startsWith('git@')) {
     return repo;
@@ -778,4 +792,58 @@ function resolveRepoPath(repo: string): string {
   // URL — derive stable temp path.
   const slug = repo.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(-40);
   return pathJoin(tmpdir(), 'log10x-recur-repo', slug);
+}
+
+// ─── S3 config plane ───────────────────────────────────────────────────────
+
+/**
+ * An S3 prefix can serve as the config plane instead of a git repo — the
+ * AWS-native path for estates with no cluster and no GitHub (the Lambda
+ * engine polls `TENX_RECEIVE_MUTE_S3_URI` from the same prefix). Requires
+ * the aws CLI on PATH; state moves with `aws s3 cp` so no SDK dependency
+ * is added.
+ */
+export function isS3ConfigPlane(repo: string): boolean {
+  return repo.startsWith('s3://');
+}
+
+/** The state files a tick reads back to compute the delta gate. */
+const S3_STATE_FILES = [
+  'data/action-intent.json',
+  'pipelines/run/receive/compact/compact-cap.csv',
+  'pipelines/run/receive/rate/caps.csv',
+];
+
+/**
+ * Pull prior state from the S3 prefix into the staging dir. Each object is
+ * fetched independently and a miss is ignored — a first tick has no prior
+ * state, and the delta gate treats absent files as "nothing applied yet".
+ */
+async function pullStateFromS3(repo: string, repoPath: string, verbose: boolean): Promise<void> {
+  const base = repo.replace(/\/+$/, '');
+  for (const rel of S3_STATE_FILES) {
+    const dest = pathJoin(repoPath, ...rel.split('/'));
+    mkdirSync(pathJoin(repoPath, ...rel.split('/').slice(0, -1)), { recursive: true });
+    try {
+      await execFileP('aws', ['s3', 'cp', `${base}/${rel}`, dest], { timeout: 30_000 });
+    } catch {
+      if (verbose) {
+        process.stderr.write(`[tenx-recur] no prior ${rel} at the config plane (first tick?)\n`);
+      }
+    }
+  }
+}
+
+/**
+ * Upload the tick's output files to the S3 prefix. Any failure throws so the
+ * caller reports an error status — a partially applied plane is surfaced,
+ * never silent.
+ */
+async function pushStateToS3(repo: string, repoPath: string): Promise<void> {
+  const base = repo.replace(/\/+$/, '');
+  for (const rel of S3_STATE_FILES) {
+    const src = pathJoin(repoPath, ...rel.split('/'));
+    if (!existsSync(src)) continue;
+    await execFileP('aws', ['s3', 'cp', src, `${base}/${rel}`], { timeout: 30_000 });
+  }
 }

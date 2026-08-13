@@ -516,6 +516,16 @@ function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
   lines.push('');
   lines.push(`_${cdk.note}_`);
   lines.push('');
+  lines.push('## 5. Recurring loop (optional, AWS-native)');
+  lines.push('');
+  lines.push(
+    '`log10x_setup_recurring` with `scheduler: "eventbridge"` emits an EventBridge Scheduler + ' +
+      'CodeBuild tick that recomputes per-pattern dispositions and writes them to an S3 config ' +
+      'plane — no cluster and no GitHub. Functions poll the mute file through ' +
+      '`TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+) and converge within the refresh window ' +
+      '(default 5 minutes), no redeploy.'
+  );
+  lines.push('');
   lines.push('## Prerequisites and open items');
   lines.push('');
   for (const pre of [

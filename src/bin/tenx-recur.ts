@@ -22,6 +22,10 @@
  *   LOG10X_CUSTOMER_METRICS_AUTH — auth credential
  *   LOG10X_GITOPS_REPO_PATH    — local path to the cloned gitops repo
  *   LOG10X_RETRY_BASE_MS       — retry base delay in ms (default 250)
+ *
+ * The policy's config_plane.repo may also be an S3 prefix (s3://bucket/prefix)
+ * instead of a git repo — state is pulled from and pushed to the prefix with
+ * the aws CLI (must be on PATH), and no git commit happens.
  */
 
 import { readFileSync } from 'node:fs';

@@ -21,13 +21,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 
 import { parsePolicyYaml } from '../src/lib/policy-loader.js';
 import {
   runTick,
   PromUnreachableError,
+  isS3ConfigPlane,
   _setBackendLoader,
   _resetBackendLoader,
 } from '../src/lib/recurring-tick.js';
@@ -376,4 +377,68 @@ test('applied_changes always includes all queried patterns', async () => {
   const result = await withMockBackend(rows, () => runTick(policy, { dryRun: true }));
 
   assert.equal(result.applied_changes.length, rows.length, 'all rows must appear in applied_changes');
+});
+
+// ─── S3 config plane ──────────────────────────────────────────────────────────
+
+test('isS3ConfigPlane: s3 URIs only', () => {
+  assert.ok(isS3ConfigPlane('s3://bucket/prefix'));
+  assert.ok(!isS3ConfigPlane('https://github.com/acme/cfg'));
+  assert.ok(!isS3ConfigPlane('/local/path'));
+});
+
+test('s3 plane: applied tick uploads state with the aws CLI instead of git', async () => {
+  // A fake `aws` on PATH records every invocation: downloads (s3:// source)
+  // fail as "no prior state", uploads succeed and are logged.
+  const fakeBin = pathJoin(tmpdir(), `log10x-fake-aws-${Date.now()}`);
+  mkdirSync(fakeBin, { recursive: true });
+  const callLog = pathJoin(fakeBin, 'calls.log');
+  writeFileSync(
+    pathJoin(fakeBin, 'aws'),
+    [
+      '#!/bin/sh',
+      `echo "$@" >> "${callLog}"`,
+      'case "$3" in',
+      '  s3://*) exit 1 ;;',   // download: no prior state
+      '  *) exit 0 ;;',        // upload: accepted
+      'esac',
+    ].join('\n')
+  );
+  chmodSync(pathJoin(fakeBin, 'aws'), 0o755);
+
+  const prevPath = process.env.PATH;
+  const prevRepo = process.env.LOG10X_GITOPS_REPO_PATH;
+  delete process.env.LOG10X_GITOPS_REPO_PATH;
+  process.env.PATH = `${fakeBin}:${prevPath}`;
+  process.env.LOG10X_ENV_ID = 'test-env';
+
+  try {
+    const policy = makePolicy({
+      target_percent: 95,
+      min_delta_pp: 0,
+      config_plane: { repo: 's3://test-bucket/log10x-config', commit_strategy: 'direct_push' },
+    });
+    // makePolicy sets LOG10X_GITOPS_REPO_PATH — clear it so the s3 staging
+    // path is exercised end to end.
+    delete process.env.LOG10X_GITOPS_REPO_PATH;
+
+    const result = await withMockBackend(
+      [{ pattern: 'noisy_pattern', service: 'worker', severity: 'DEBUG', bytes: 1 * GB }],
+      () => runTick(policy, { dryRun: false })
+    );
+
+    assert.equal(result.status, 'applied', `expected applied; got ${result.status}: ${result.message}`);
+    const calls = readFileSync(callLog, 'utf8');
+    assert.ok(
+      calls.includes('s3://test-bucket/log10x-config/pipelines/run/receive/rate/caps.csv'),
+      'the mute caps.csv must be uploaded to the plane'
+    );
+    assert.ok(
+      calls.includes('s3://test-bucket/log10x-config/data/action-intent.json'),
+      'action-intent.json must be uploaded to the plane'
+    );
+  } finally {
+    process.env.PATH = prevPath;
+    if (prevRepo !== undefined) process.env.LOG10X_GITOPS_REPO_PATH = prevRepo;
+  }
 });

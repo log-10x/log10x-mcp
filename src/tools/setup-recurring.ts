@@ -28,6 +28,7 @@ import {
   emitK8sCronJob,
   emitGitHubActions,
   emitCrontab,
+  emitEventBridge,
   resolveCronExpression,
   type PolicyOptions,
   type SchedulePreset,
@@ -46,7 +47,7 @@ const SCHEDULE_PRESETS = [
   'every-24h-localtz',
 ] as const;
 
-const SCHEDULER_KINDS = ['k8s_cron', 'github_actions', 'crontab'] as const;
+const SCHEDULER_KINDS = ['k8s_cron', 'github_actions', 'crontab', 'eventbridge'] as const;
 
 // ─── schema ───────────────────────────────────────────────────────────────────
 
@@ -108,7 +109,7 @@ export const setupRecurringSchema = {
     .enum(SCHEDULER_KINDS)
     .optional()
     .describe(
-      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script.'
+      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script, eventbridge = AWS-native (EventBridge Scheduler + CodeBuild, S3 config plane — no cluster, no GitHub; the fit for serverless estates).'
     ),
 
   /**
@@ -120,7 +121,7 @@ export const setupRecurringSchema = {
     .min(1)
     .optional()
     .describe(
-      'Gitops repo URL (e.g. https://github.com/acme/log10x-config) or local path where the recurring CLI reads policy.yaml and writes updated cap CSVs.'
+      'Where the recurring CLI reads policy.yaml and writes updated cap CSVs: a gitops repo URL (e.g. https://github.com/acme/log10x-config), a local path, or — required when scheduler=eventbridge — an S3 prefix (e.g. s3://acme-logs/log10x-config).'
     ),
 
   /**
@@ -327,6 +328,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           '**k8s_cron**: Kubernetes CronJob (recommended when `kubectl` is available)',
           '**github_actions**: GitHub Actions scheduled workflow',
           '**crontab**: crontab entry + wrapper script (simple, any Linux host)',
+          '**eventbridge**: AWS-native — EventBridge Scheduler + CodeBuild against an S3 config plane (no cluster, no GitHub; the fit for serverless estates)',
           'Example: `scheduler: "k8s_cron"`',
         ],
         'scheduler',
@@ -335,6 +337,23 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
     };
   }
   if (session.config_plane === undefined) {
+    if (session.scheduler === 'eventbridge') {
+      return {
+        kind: 'ask',
+        question_id: 'config_plane',
+        markdown: buildQuestion(
+          'Q5',
+          'Which S3 prefix is the config plane?',
+          [
+            'The eventbridge scheduler is git-free: the tick reads `policy.yaml` from this prefix and writes updated cap CSVs back to it.',
+            'The engine-facing mute file lands at `<prefix>/pipelines/run/receive/rate/caps.csv` — Lambda functions poll it via `TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+).',
+            'Example: `config_plane: "s3://acme-logs/log10x-config"`',
+          ],
+          'config_plane',
+          session
+        ),
+      };
+    }
     return {
       kind: 'ask',
       question_id: 'config_plane',
@@ -345,6 +364,23 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'The recurring CLI reads `policy.yaml` from here and commits updated cap CSVs.',
           'Pass a GitHub URL or a local path.',
           'Example: `config_plane: "https://github.com/acme/log10x-config"`',
+        ],
+        'config_plane',
+        session
+      ),
+    };
+  }
+  if (session.scheduler === 'eventbridge' && !session.config_plane.startsWith('s3://')) {
+    return {
+      kind: 'ask',
+      question_id: 'config_plane',
+      markdown: buildQuestion(
+        'Q5',
+        'The eventbridge scheduler needs an S3 config plane',
+        [
+          `\`${session.config_plane}\` is not an S3 prefix. The eventbridge tick runs with no git checkout — it reads and writes its state as S3 objects.`,
+          'Pass an `s3://bucket/prefix` value, or switch `scheduler` to `github_actions` / `crontab` to keep a git config plane.',
+          'Example: `config_plane: "s3://acme-logs/log10x-config"`',
         ],
         'config_plane',
         session
@@ -499,6 +535,34 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `4. Set \`LOG10X_API_KEY\` in the system environment or hard-code it in the wrapper script.`,
         `5. Test: \`/usr/local/bin/log10x-tick.sh\``,
       ].join('\n');
+
+    case 'eventbridge':
+      return [
+        `### Apply instructions: EventBridge Scheduler + CodeBuild (AWS-native)`,
+        ``,
+        `1. **Upload \`policy.yaml\`** to the config plane:`,
+        `   \`\`\`bash`,
+        `   aws s3 cp policy.yaml ${opts.config_plane}/policy.yaml`,
+        `   \`\`\``,
+        `2. **Store the API key** in Secrets Manager:`,
+        `   \`\`\`bash`,
+        `   aws secretsmanager create-secret --name log10x-api-key --secret-string "<LOG10X_API_KEY>"`,
+        `   \`\`\``,
+        `3. **Deploy the stack:**`,
+        `   \`\`\`bash`,
+        `   aws cloudformation deploy --template-file log10x-recurring-cfn.yaml \\`,
+        `     --stack-name log10x-recurring --capabilities CAPABILITY_IAM \\`,
+        `     --parameter-overrides Log10xApiKeySecretArn=<secret-arn-from-step-2>`,
+        `   \`\`\``,
+        `4. The schedule fires \`${cronExpr}\` (UTC); each tick writes updated dispositions to`,
+        `   \`${opts.config_plane}/pipelines/run/receive/rate/caps.csv\`. Point each function's`,
+        `   \`TENX_RECEIVE_MUTE_S3_URI\` at that key (engine 1.1.66+) — running functions pick`,
+        `   changes up within the refresh window (default 5 minutes), no redeploy.`,
+        `5. Trigger a manual test tick:`,
+        `   \`\`\`bash`,
+        `   aws codebuild start-build --project-name log10x-recurring-tick`,
+        `   \`\`\``,
+      ].join('\n');
   }
 }
 
@@ -527,6 +591,10 @@ function emitArtifacts(session: RecurringWizardSession): EmitResult {
       crontab_wrapper_script = wrapper_script;
       break;
     }
+    case 'eventbridge':
+      scheduler_manifest = emitEventBridge(opts);
+      scheduler_manifest_filename = 'log10x-recurring-cfn.yaml';
+      break;
   }
 
   const apply_instructions = buildApplyInstructions(session, opts);

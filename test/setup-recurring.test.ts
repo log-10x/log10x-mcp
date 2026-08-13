@@ -257,3 +257,49 @@ test('unknown session_id starts a fresh session', async () => {
   // The returned session_id must be a new one.
   assert.notEqual(data.session_id, 'does-not-exist', 'fresh session must mint a new session_id');
 });
+
+// ─── eventbridge path ─────────────────────────────────────────────────────────
+
+test('eventbridge: Q5 asks for an S3 prefix and a git URL is re-asked', async () => {
+  let result = await executeSetupRecurring({ target_services: [] });
+  const session_id = getData(result).session_id as string;
+  await executeSetupRecurring({ session_id, target_percent: 30 });
+  await executeSetupRecurring({ session_id, schedule: 'daily-03utc' });
+
+  result = await executeSetupRecurring({ session_id, scheduler: 'eventbridge' as any });
+  let data = getData(result);
+  assert.equal(data.question_id, 'config_plane');
+  assert.ok(String(data.markdown).includes('s3://'), 'eventbridge Q5 must ask for an S3 prefix');
+
+  // A git URL is not a valid eventbridge plane — the wizard re-asks.
+  result = await executeSetupRecurring({ session_id, config_plane: 'https://github.com/acme/cfg' });
+  data = getData(result);
+  assert.equal(data.mode, 'next_question');
+  assert.equal(data.question_id, 'config_plane', 'non-S3 plane must re-ask Q5');
+
+  // An S3 prefix advances to confirm.
+  result = await executeSetupRecurring({ session_id, config_plane: 's3://acme-logs/log10x-config' });
+  data = getData(result);
+  assert.equal(data.question_id, 'confirm');
+});
+
+test('eventbridge: emit returns the CloudFormation manifest and S3-aware instructions', async () => {
+  let result = await executeSetupRecurring({ target_services: ['checkout'] });
+  const session_id = getData(result).session_id as string;
+  await executeSetupRecurring({ session_id, target_percent: 25 });
+  await executeSetupRecurring({ session_id, schedule: 'every-6h' });
+  await executeSetupRecurring({ session_id, scheduler: 'eventbridge' as any });
+  await executeSetupRecurring({ session_id, config_plane: 's3://acme-logs/log10x-config' });
+  result = await executeSetupRecurring({ session_id, confirm: true });
+
+  const data = getData(result);
+  assert.equal(data.mode, 'emit');
+  assert.equal(data.scheduler_manifest_filename, 'log10x-recurring-cfn.yaml');
+  const manifest = String(data.scheduler_manifest);
+  assert.ok(manifest.includes('AWS::Scheduler::Schedule'));
+  assert.ok(manifest.includes('tenx-recur'));
+  const instructions = String(data.apply_instructions);
+  assert.ok(instructions.includes('cloudformation deploy'));
+  assert.ok(instructions.includes('TENX_RECEIVE_MUTE_S3_URI'), 'instructions must point the engine at the caps.csv key');
+  assert.ok(instructions.includes('s3://acme-logs/log10x-config/pipelines/run/receive/rate/caps.csv'));
+});
