@@ -1,10 +1,12 @@
 /**
  * log10x_configure_engine
  *
- * Converts a `target_percent` (or `budget_usd`) commitment into a per-pattern
- * cap CSV and a `gh` PR command against the customer gitops repo. The engine
- * hot-reloads the CSV on the next gitops poll; no pipeline restart, no event
- * drops.
+ * Converts a `target_percent` (or `budget_usd`) commitment into the engine's
+ * policy files — caps.csv (per-container byte caps) + actions.csv (per-service
+ * over-cap disposition) — plus the MCP-side data/action-intent.json, delivered
+ * as a `gh` PR against the customer gitops repo or a kubectl ConfigMap write.
+ * The engine hot-reloads the files on the next poll; no pipeline restart, no
+ * event drops.
  *
  * Solver: greedy v1, ordered by (current_bytes_30d * severity_weight) DESC,
  * where severity_weight = audit:1.0, error:0.8, standard:0.5, debug:0.2,
@@ -75,6 +77,8 @@ import {
 } from '../lib/customer-metrics.js';
 import { loadEnvironments } from '../lib/environments.js';
 import { computeGeneration, renderGenerationCsv } from '../lib/config-generation.js';
+import { writeActionIntent, type ActionIntentEntry } from '../lib/action-intent-writer.js';
+import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { LABELS, compressibilityPerContainer } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
@@ -198,7 +202,7 @@ export const configureEngineSchema = {
     .enum(['gitops', 'kubectl_configmap', 'stdout_only'])
     .default('gitops')
     .describe(
-      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes the cap-CSV + action-intent.json directly to a k8s ConfigMap on the active cluster (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
+      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes caps.csv + actions.csv + config-generation.csv + action-intent.json directly to a k8s ConfigMap on the active cluster (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
     ),
   kubectl_namespace: z
     .string()
@@ -210,7 +214,7 @@ export const configureEngineSchema = {
     .string()
     .optional()
     .describe(
-      'k8s ConfigMap name when delivery="kubectl_configmap". Defaults to `log10x-action-intent` (matching the engine\'s default $K8S_CONFIGMAP env var). The ConfigMap holds two keys: `caps.csv` (engine\'s safety floor) and `action-intent.json` (per-pattern action mapping).'
+      'k8s ConfigMap name when delivery="kubectl_configmap". Defaults to `log10x-action-intent` (matching the engine\'s default $K8S_CONFIGMAP env var). The ConfigMap holds `caps.csv` (engine per-container byte caps), `actions.csv` (engine per-service action for the over-cap slice), `config-generation.csv` (policy-generation stamp), and `action-intent.json` (per-pattern intent read back by commitment_report / estimate_savings; the engine ignores it).'
     ),
   tolerance_pct: z
     .number()
@@ -1532,15 +1536,26 @@ export async function executeConfigureEngine(
     { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
 
-  // The cap CSV is the single engine-fed file: each cap row carries the
-  // action folded into the value (`container,<bytes>:<action>`), so the
-  // gitops PR and the kubectl ConfigMap both deliver only caps.csv. No
-  // action-intent.json / actions.csv side-file is written.
+  // Engine delivery is TWO container-keyed files: caps.csv (byte caps,
+  // rateReceiverCapLookupFile) and actions.csv (per-service disposition of
+  // the over-cap slice, rateReceiverActionLookupFile). The engine reads the
+  // action ONLY from actions.csv — a caps.csv shipped without it turns every
+  // non-drop policy into hard drops, and fails the receiver launch outright
+  // when the cap variant is active. data/action-intent.json rides along as
+  // MCP-side per-pattern state for commitment_report / estimate_savings.
+  const actionsCsv = renderActionsCsv(
+    args.containers,
+    new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const)),
+    effectiveStandardAction,
+    undefined,
+    args.reduction ?? 'hard'
+  );
+  const intentJson = mergeIntentJson(undefined, buildIntentEntriesFromRows(rows));
 
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff);
+      : renderPrCommand(args, target.resolved, csvDiff, { actionsCsv, intentJson });
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -1558,7 +1573,7 @@ export async function executeConfigureEngine(
     !targetMetByCurrent;
   if (shouldApply && args.delivery === 'kubectl_configmap') {
     requireWriteAccess(
-      'writes the cap-CSV + action-intent.json to a k8s ConfigMap (kubectl apply); engine\'s ConfigMap pull driver picks it up on next poll'
+      'writes caps.csv + actions.csv + action-intent.json to a k8s ConfigMap (kubectl apply); engine\'s ConfigMap pull driver picks it up on next poll'
     );
     const newCsv = reconstructAfterCsv(csvDiff, args.current_csv);
     const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
@@ -1567,7 +1582,7 @@ export async function executeConfigureEngine(
     // context picks the cluster. Operator supplies namespace when not
     // 'default' (otel-demo uses 'demo' for its receiver DS).
     const ns = args.kubectl_namespace ?? 'default';
-    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns);
+    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns, { actionsCsv, intentJson });
     applied = { ...result, delivery: 'kubectl_configmap' };
     if (result.ok) {
       commitmentId = persistCommitmentOnApply({
@@ -2056,8 +2071,10 @@ async function tryConsumePocSnapshot(
   if (!snap || snap.status !== 'complete' || !snap.renderInput) return undefined;
   if (snap.targetPercentReduction === undefined) return undefined;
 
-  // Rebuild the envelope so cap_csv reflects current action mapping.
+  // Rebuild the envelope so cap_csv + actions_csv reflect current action
+  // mapping.
   let capCsv: string | undefined;
+  let actionsCsv: string | undefined;
   let feasibility: { feasible: boolean; max_achievable_percent: number; target_percent_reduction: number } | undefined;
   try {
     const { patterns, clusters, redundancyPairs } = enrichForPocEnvelope(snap.renderInput);
@@ -2073,6 +2090,7 @@ async function tryConsumePocSnapshot(
       },
     );
     capCsv = envelope.output.cap_csv;
+    actionsCsv = envelope.output.actions_csv;
     feasibility = envelope.output.feasibility;
   } catch {
     return undefined;
@@ -2084,10 +2102,10 @@ async function tryConsumePocSnapshot(
   const baselineCsv = args.current_csv ?? '';
   const diff = renderUnifiedDiff(baselineCsv, capCsv);
 
-  // The PR script writes the cap CSV only (action is folded into each cap
-  // row); no sibling action-intent.json / actions.csv.
+  // The PR ships caps.csv + the sibling actions.csv — the engine reads the
+  // per-service action for the over-cap slice ONLY from actions.csv.
   const prCommand = feasibility && feasibility.feasible
-    ? renderPrCommand(args, resolved, diff)
+    ? renderPrCommand(args, resolved, diff, { actionsCsv })
     : null;
 
   let applied: ConfigureEngineData['applied'];
@@ -2098,12 +2116,12 @@ async function tryConsumePocSnapshot(
     feasibility?.feasible === true;
   if (shouldApply && args.delivery === 'kubectl_configmap') {
     requireWriteAccess(
-      'writes the cap-CSV to a k8s ConfigMap (kubectl apply) from the POC snapshot; engine\'s ConfigMap pull driver picks it up on next poll'
+      'writes caps.csv + actions.csv to a k8s ConfigMap (kubectl apply) from the POC snapshot; engine\'s ConfigMap pull driver picks it up on next poll'
     );
     const newCsv = reconstructAfterCsv(diff, args.current_csv);
     const cmName = args.kubectl_configmap_name ?? 'log10x-action-intent';
     const ns = args.kubectl_namespace ?? 'default';
-    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns);
+    const result = await applyViaKubectlConfigMap(newCsv, cmName, ns, { actionsCsv });
     applied = { ...result, delivery: 'kubectl_configmap' };
   // POC path: commitment persistence skipped here. The POC's renderInput
   // doesn't carry baseline_monthly_bytes/_usd in the format the
@@ -2919,11 +2937,14 @@ export function renderCsvDiff(
 ): string {
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
-  // ONE entry per service: `<bytes>:<action>:<reason>`. The cap (bytes) is the
-  // trigger; the action (folded in) is the disposition of the over-budget
-  // slice. The engine reads BOTH from this single file — there is no sibling
-  // actions.csv / action-intent.json to desync, to go missing (the receiver
-  // fails at init without it), or to lag (silently defaulting to drop).
+  // ENGINE GRAMMAR (rate-object-cap.js / rate-object-lookup-cap.js):
+  //   <container>,<bytes>[:<untilEpochSec>][:<reason>]
+  // The second field is an EXPIRY EPOCH, not an action. The per-service
+  // action lives in the sibling actions.csv (see renderActionsCsv) — the
+  // engine's `rateReceiverActionLookupFile` — and NEVER in this file. A
+  // value shaped `<bytes>:<action>:<reason>` parses as bytes + a garbage
+  // epoch: the engine ignores the action and every over-cap event falls to
+  // the default `drop`.
   //
   // KEY BINDING: The engine's rate module reads caps.csv keyed by the
   // value of `rateReceiverContainerField` (defaults to `k8s_container`).
@@ -2935,9 +2956,12 @@ export function renderCsvDiff(
   // service-name==container-name, both are identical). Anything else is
   // a dead row that the engine cannot match against any event.
   //
-  // Cap semantics: offload/drop act on the WHOLE service (cap 0 = everything
-  // overflows). compact/sample/tier_down/pass act on the slice past the
-  // budget-derived cap.
+  // Cap semantics: cap 0 is a per-container OPT-OUT — the engine falls back
+  // to the fleet absoluteCap (usually unset) and regulates nothing. Every
+  // configured container therefore gets a cap of AT LEAST 1. offload/drop
+  // act on the whole service, so their cap is the 1-byte minimum (everything
+  // past floors/baseline is over-cap); compact/sample/tier_down/pass act on
+  // the slice past the budget-derived cap.
   // Per-container cap = the SUM of that container's OWN per-pattern caps
   // (each from computeCapBytesPerWindow under its pattern's action), NOT a
   // mean across every container's patterns. A mean matches no real budget:
@@ -2955,16 +2979,16 @@ export function renderCsvDiff(
   for (const c of containers) {
     // Each container gets ITS OWN resolved standard-tier action (the Phase-2
     // per-service advisory), falling back to defaultAction only when a
-    // container has no decision. offload/drop keep cap 0 (the whole container
-    // overflows); every other action gets the container's own budget sum.
+    // container has no decision.
     const action = actionByContainer.get(c) ?? defaultAction;
     const cap =
       action === 'offload' || action === 'drop'
-        ? 0
-        : Math.round(capSumByContainer.get(c) ?? 0);
+        ? 1
+        : Math.max(1, Math.round(capSumByContainer.get(c) ?? 0));
     // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
-    // never break the `<bytes>:<action>:<reason>` parse.
-    const value = `${cap}:${action}:${reason.replace(/[,:]/g, ';')}`;
+    // never break the `<bytes>::<reason>` parse. The empty second field is
+    // the engine's "no expiry" slot.
+    const value = `${cap}::${reason.replace(/[,:]/g, ';')}`;
     merged.set(c, value);
   }
   // Preserve any existing preamble from the baseline (so refresh PRs
@@ -2992,6 +3016,82 @@ function renderPreambleFromParsed(p: PreambleData): string[] {
   return renderPreamble(p.target_percent, p.baseline_monthly_bytes ?? 0);
 }
 
+/**
+ * Render the engine's per-service action file (`actions.csv`) — the sibling
+ * of caps.csv that `rateReceiverActionLookupFile` points at.
+ *
+ * ENGINE GRAMMAR (rate-object-cap.js):
+ *   <container>,<action>[:<untilEpochSec>][:<reason>]
+ * A service with no row (or no file) defaults to `drop` for its over-cap
+ * slice, so this file must ship WITH every caps.csv delivery: caps without
+ * actions silently turns compact/offload/tier_down/sample/pass policies
+ * into hard drops.
+ *
+ * BOOT CONTRACT: when the cap variant is active the engine hard-resolves
+ * this file at pipeline init (`rateReceiverCapInput` loads both tables) —
+ * a missing OR EMPTY actions.csv fails the receiver launch. Always emit
+ * the header plus at least one row, and never deliver caps.csv without it.
+ *
+ * Merge semantics mirror the caps merge: rows for other services in the
+ * existing file survive; the configured containers' rows are replaced.
+ */
+export function renderActionsCsv(
+  containers: string[],
+  actionByContainer: ReadonlyMap<string, Action>,
+  defaultAction: Action,
+  existingActionsCsv: string | undefined,
+  reduction: 'soft' | 'hard'
+): string {
+  const merged = new Map(parseCsv(existingActionsCsv).rows);
+  const reason = `MCP configure_engine (${reduction})`.replace(/[,:]/g, ';');
+  for (const c of containers) {
+    const action = actionByContainer.get(c) ?? defaultAction;
+    merged.set(c, `${action}::${reason}`);
+  }
+  const out: string[] = ['container,action'];
+  for (const [k, v] of [...merged.entries()].sort()) out.push(`${k},${v}`);
+  return out.join('\n') + '\n';
+}
+
+/**
+ * Build the per-pattern action-intent entries for `data/action-intent.json`.
+ * The ENGINE never reads this file — it is MCP-side state: commitment_report
+ * and estimate_savings read it back (from the gitops repo or the ConfigMap
+ * key, depending on delivery channel) to attribute realized savings per
+ * pattern. Per-pattern detail lives here precisely because caps.csv and
+ * actions.csv are container-keyed.
+ */
+function buildIntentEntriesFromRows(rows: PerPatternRow[]): ActionIntentEntry[] {
+  const nowIso = new Date().toISOString();
+  return rows
+    .filter((r) => r.pattern_hash)
+    .map((r) => ({
+      pattern_hash: r.pattern_hash,
+      service: r.container ?? '',
+      action: r.action,
+      reason: r.floor_reason ?? r.reason ?? '',
+      set_at_iso: nowIso,
+      until_epoch_sec: 0,
+    }));
+}
+
+/**
+ * Merge new intent entries over an existing action-intent.json body,
+ * keyed by (service, pattern_hash) — same survival rule as the CSV
+ * merges: entries for other services/patterns stay.
+ */
+function mergeIntentJson(existingJson: string | undefined, entries: ActionIntentEntry[]): string {
+  const merged = new Map<string, ActionIntentEntry>();
+  if (existingJson) {
+    const parsed = parseActionIntent(existingJson);
+    if (!parsed.json_parse_error) {
+      for (const e of parsed.entries) merged.set(`${e.service} ${e.pattern_hash}`, e);
+    }
+  }
+  for (const e of entries) merged.set(`${e.service} ${e.pattern_hash}`, e);
+  return writeActionIntent([...merged.values()], { updated_at_iso: new Date().toISOString() });
+}
+
 function renderUnifiedDiff(before: string, after: string): string {
   // Minimal line-level unified diff. No need for a diff library — the agent
   // consumes this as a human-readable hint, not a patch.
@@ -3013,7 +3113,8 @@ function renderUnifiedDiff(before: string, after: string): string {
 export function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
-  csvDiff: string
+  csvDiff: string,
+  siblings?: { actionsCsv?: string; intentJson?: string }
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
@@ -3030,6 +3131,13 @@ export function renderPrCommand(
   // verifyConfigGeneration stays perpetually "stale".
   const genCsv = renderGenerationCsv(computeGeneration(newCsv));
   const genPath = lookupPath.replace(/[^/]*$/, 'config-generation.csv');
+  // Sibling files: actions.csv is the ENGINE's per-service action source
+  // (rateReceiverActionLookupFile) — caps.csv without it turns every
+  // non-drop policy into hard drops and fails the receiver launch when the
+  // cap variant is active. data/action-intent.json is MCP-side per-pattern
+  // state that commitment_report / estimate_savings read back.
+  const actionsPath = lookupPath.replace(/[^/]*$/, 'actions.csv');
+  const intentPath = 'data/action-intent.json';
 
   const out: string[] = [];
   out.push('```bash');
@@ -3038,6 +3146,8 @@ export function renderPrCommand(
   out.push(`BASE=${shellQuote(branch)}`);
   out.push(`LOOKUP_PATH=${shellQuote(lookupPath)}`);
   out.push(`GEN_PATH=${shellQuote(genPath)}`);
+  if (siblings?.actionsCsv) out.push(`ACTIONS_PATH=${shellQuote(actionsPath)}`);
+  if (siblings?.intentJson) out.push(`INTENT_PATH=${shellQuote(intentPath)}`);
   out.push(`BRANCH=${shellQuote(prBranch)}`);
   out.push(`PR_TITLE=${shellQuote(prTitle)}`);
   out.push('');
@@ -3051,6 +3161,20 @@ export function renderPrCommand(
   out.push(genCsv.trimEnd());
   out.push('GEN_EOF');
   out.push('');
+  if (siblings?.actionsCsv) {
+    out.push('ACTIONSFILE=$(mktemp)');
+    out.push("cat > \"$ACTIONSFILE\" <<'ACTIONS_EOF'");
+    out.push(siblings.actionsCsv.trimEnd());
+    out.push('ACTIONS_EOF');
+    out.push('');
+  }
+  if (siblings?.intentJson) {
+    out.push('INTENTFILE=$(mktemp)');
+    out.push("cat > \"$INTENTFILE\" <<'INTENT_EOF'");
+    out.push(siblings.intentJson.trimEnd());
+    out.push('INTENT_EOF');
+    out.push('');
+  }
 
   out.push('# Resolve current file SHA (empty if the file does not exist yet).');
   out.push(
@@ -3086,6 +3210,33 @@ export function renderPrCommand(
   out.push('[ -n "$GEN_CUR_SHA" ] && GEN_PUT_ARGS+=( -f sha="$GEN_CUR_SHA" )');
   out.push('gh api "${GEN_PUT_ARGS[@]}"');
   out.push('');
+  if (siblings?.actionsCsv) {
+    out.push('# Commit actions.csv (sibling of caps.csv) — the engine reads the');
+    out.push('# per-service action for the over-cap slice from THIS file; without');
+    out.push('# it every over-cap event is hard-dropped.');
+    out.push('ACTIONS_CUR_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
+    out.push('ACTIONS_CONTENT_B64=$(base64 < "$ACTIONSFILE" | tr -d "\\n")');
+    out.push('ACTIONS_PUT_ARGS=( -X PUT "/repos/$REPO/contents/$ACTIONS_PATH"');
+    out.push('  -f branch="$BRANCH"');
+    out.push('  -f message="$PR_TITLE (actions)"');
+    out.push('  -f content="$ACTIONS_CONTENT_B64" )');
+    out.push('[ -n "$ACTIONS_CUR_SHA" ] && ACTIONS_PUT_ARGS+=( -f sha="$ACTIONS_CUR_SHA" )');
+    out.push('gh api "${ACTIONS_PUT_ARGS[@]}"');
+    out.push('');
+  }
+  if (siblings?.intentJson) {
+    out.push('# Commit data/action-intent.json — per-pattern intent that');
+    out.push('# commitment_report / estimate_savings read back for attribution.');
+    out.push('INTENT_CUR_SHA=$(gh api "/repos/$REPO/contents/$INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
+    out.push('INTENT_CONTENT_B64=$(base64 < "$INTENTFILE" | tr -d "\\n")');
+    out.push('INTENT_PUT_ARGS=( -X PUT "/repos/$REPO/contents/$INTENT_PATH"');
+    out.push('  -f branch="$BRANCH"');
+    out.push('  -f message="$PR_TITLE (action-intent)"');
+    out.push('  -f content="$INTENT_CONTENT_B64" )');
+    out.push('[ -n "$INTENT_CUR_SHA" ] && INTENT_PUT_ARGS+=( -f sha="$INTENT_CUR_SHA" )');
+    out.push('gh api "${INTENT_PUT_ARGS[@]}"');
+    out.push('');
+  }
   out.push('# Open PR.');
   out.push('gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \\');
   out.push('  --title "$PR_TITLE" \\');
@@ -3347,19 +3498,26 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  * script does not get mangled by the shell.
  */
 /**
- * Apply via kubectl_configmap: write the cap-CSV + action-intent.json
- * directly to a k8s ConfigMap. The engine's ConfigMap pull driver
- * (configured via $K8S_CONFIGMAP env var on the receiver pod, default
- * `log10x-action-intent`) reads from this ConfigMap and hot-reloads the
+ * Apply via kubectl_configmap: write the engine policy files directly to a
+ * k8s ConfigMap. The engine's ConfigMap pull driver (configured via
+ * $K8S_CONFIGMAP env var on the receiver pod, default `log10x-action-intent`)
+ * materializes every key as a sibling file under
+ * `${tmpdir}/tenx/kubernetes/<ns>/<cm>/` and the regulator hot-reloads the
  * policy without a pipeline restart.
  *
- * The ConfigMap carries THREE keys the engine expects:
- *   - `caps.csv` (engine's safety floor — per-container + per-pattern caps)
- *   - `action-intent.json` (canonical per-pattern action mapping)
- *   - `actions.csv` (per-SERVICE action routing — the receiver reads this
- *     keyed by k8s container == the service and stamps `route(<action>)` on
- *     that service's regulator-excess slice; a service with no row defaults
- *     to `drop`)
+ * The ConfigMap carries FOUR keys:
+ *   - `caps.csv` — engine byte caps, `<container>,<bytes>[:<epoch>][:<reason>]`
+ *     (rateReceiverCapLookupFile)
+ *   - `actions.csv` — engine per-SERVICE action routing,
+ *     `<container>,<action>[:<epoch>][:<reason>]` (rateReceiverActionLookupFile).
+ *     The receiver stamps `route(<action>)` on that service's regulator-excess
+ *     slice; a service with no row defaults to `drop`, and when the cap
+ *     variant is active a missing/empty file FAILS the receiver launch —
+ *     caps.csv must never ship without it.
+ *   - `config-generation.csv` — policy-generation stamp for the closed loop.
+ *   - `action-intent.json` — per-pattern intent; the ENGINE ignores it, but
+ *     commitment_report / estimate_savings read it back for attribution
+ *     (fetchActionIntentFromConfigMap).
  *
  * Uses `kubectl apply -f -` so existing ConfigMaps are updated in place
  * (server-side apply semantics) and new ones are created. The actual
@@ -3369,25 +3527,31 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
 async function applyViaKubectlConfigMap(
   capCsv: string,
   configMapName: string,
-  namespace: string
+  namespace: string,
+  siblings?: { actionsCsv?: string; intentJson?: string }
 ): Promise<{
   ok: boolean;
   configmap_location?: { namespace: string; name: string; keys: string[] };
   error?: string;
 }> {
   // MERGE, don't replace. Read the existing ConfigMap so other services' cap
-  // rows AND any unrelated keys survive. Single-file design: the action is
-  // folded into caps.csv, so drop any legacy actions.csv / action-intent.json
-  // keys (the engine no longer reads them).
+  // and action rows AND any unrelated keys survive.
   const existingData = await readConfigMapData(configMapName, namespace);
   const data: Record<string, string> = { ...existingData };
-  delete data['actions.csv'];
-  delete data['action-intent.json'];
   data['caps.csv'] = mergeCapsRows(existingData['caps.csv'], capCsv);
+  if (siblings?.actionsCsv) {
+    data['actions.csv'] = mergeActionRows(existingData['actions.csv'], siblings.actionsCsv);
+  }
+  if (siblings?.intentJson) {
+    data['action-intent.json'] = siblings.intentJson;
+  }
   // Stamp the policy generation alongside it: a hash of the merged caps that the
   // engine reads + advertises as the tenx_config_version label, so the MCP can
   // later verify the running engine is executing THIS policy (config-generation
-  // closed loop), not just that the ConfigMap was written.
+  // closed loop), not just that the ConfigMap was written. The hash input stays
+  // caps.csv alone — verifyConfigGeneration recomputes from the read-back
+  // caps.csv, and actions ship in the same write, so a caps change always moves
+  // the generation.
   data['config-generation.csv'] = renderGenerationCsv(computeGeneration(data['caps.csv']));
   const cm = {
     apiVersion: 'v1',
@@ -3508,6 +3672,19 @@ function mergeCapsRows(existingCsv: string | undefined, newCsv: string): string 
   const merged = new Map(parseCsv(existingCsv).rows);
   for (const [k, v] of parseCsv(newCsv).rows) merged.set(k, v);
   return renderCsv(merged, renderPreambleFromParsed(parsePreamble(newCsv)));
+}
+
+/**
+ * Merge a freshly-rendered actions.csv over the ConfigMap's existing one:
+ * rows for other services survive, configured containers' rows win. Same
+ * survival rule as mergeCapsRows; `container,action` header.
+ */
+export function mergeActionRows(existingCsv: string | undefined, newCsv: string): string {
+  const merged = new Map(parseCsv(existingCsv).rows);
+  for (const [k, v] of parseCsv(newCsv).rows) merged.set(k, v);
+  const out: string[] = ['container,action'];
+  for (const [k, v] of [...merged.entries()].sort()) out.push(`${k},${v}`);
+  return out.join('\n') + '\n';
 }
 
 /**

@@ -1,33 +1,40 @@
 /**
- * configure_engine cap CSV emit: key-binding regression test.
+ * configure_engine engine-file emit: grammar + key-binding contract tests.
  *
-  * The cap CSV writer must emit exactly one row shape. Two shapes are
-  * possible and only one works:
- *   - <container>,<cap>::<reason>   (works — engine keys caps.csv by
- *                                    rateReceiverContainerField value,
- *                                    default k8s_container)
- *   - pat:<hash>,<cap>::<reason>    (dead bytes — no event has
- *                                    k8s_container=pat:<hash>, so the
- *                                    engine never matches these rows)
+ * ENGINE CONTRACT (rate-object-cap.js / rate-object-lookup-cap.js, verified
+ * live against the shipped regulator — see test/fixtures/coralogix-e2e):
  *
- * The per-container action is folded into the single cap value
- * (`<container>,<bytes>:<action>:<reason>`); there is no separate
- * action-intent.json side-file. Per-PATTERN detail stays out of the CSV.
+ *   caps.csv     <container>,<bytes>[:<untilEpochSec>][:<reason>]
+ *                — keyed by rateReceiverContainerField (k8s_container).
+ *                  The second field is an EXPIRY EPOCH, never an action.
+ *                  A cap of 0 is a per-container regulator OPT-OUT (the
+ *                  engine falls back to the fleet absoluteCap and regulates
+ *                  nothing), so every written row carries a cap >= 1.
+ *   actions.csv  <container>,<action>[:<untilEpochSec>][:<reason>]
+ *                — the ONLY place the engine reads the over-cap action.
+ *                  A service with no row defaults to hard `drop`, and a
+ *                  missing/empty file fails the receiver launch when the
+ *                  cap variant is active.
  *
-  * This test pins:
- *   1. No `pat:` prefix rows in the emitted CSV.
- *   2. One container-keyed row per service container being configured.
+ * This test pins:
+ *   1. No `pat:` prefix rows in caps.csv (dead bytes — no event has
+ *      k8s_container=pat:<hash>).
+ *   2. One container-keyed row per configured container, in both files.
  *   3. Service-name == container-name fallback (no snapshot) still
  *      produces a working container-keyed row.
- *   4. Per-pattern overrides (floor / non-default action) do NOT leak
- *      into caps.csv — they belong in action-intent.json (covered by
- *      action-intent-writer.test.ts; here we just assert their absence
- *      from the CSV).
+ *   4. Cap values are `<bytes>::<reason>` — no action token in the epoch
+ *      slot, no zero caps.
+ *   5. actions.csv carries the per-service action, merges over existing
+ *      rows, and is never empty.
+ *   6. Per-pattern overrides (floor / non-default action) do NOT leak
+ *      into caps.csv — they belong in action-intent.json.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   renderCsvDiff,
+  renderActionsCsv,
+  mergeActionRows,
   type PerPatternRow,
 } from '../src/tools/configure-engine.js';
 
@@ -167,12 +174,83 @@ test('renderCsvDiff: service-name==container-name fallback (no snapshot)', () =>
     paymentRow,
     `expected fallback container-keyed row for "payment-service"; got: ${additions.join(' | ')}`
   );
-  // Sanity: the single-file row carries the cap AND the folded-in action.
+  // Engine grammar: bytes, EMPTY epoch slot, reason. An action token in the
+  // second field would land in the engine's untilEpochSec parse and the
+  // action itself would silently never ship.
   assert.match(
     paymentRow!,
-    /^payment-service,\d+:compact:/,
-    `expected "<container>,<bytes>:<action>:<reason>" shape; got: ${paymentRow}`
+    /^payment-service,\d+::/,
+    `expected "<container>,<bytes>::<reason>" engine shape; got: ${paymentRow}`
   );
+});
+
+test('renderCsvDiff: engine grammar — no action token in the epoch slot, no zero caps', () => {
+  const rows: PerPatternRow[] = [
+    makeRow({ pattern_hash: 'aaa', action: 'compact', container: 'svc-compact' }),
+    makeRow({ pattern_hash: 'bbb', action: 'offload', container: 'svc-offload', cap_bytes_per_window: 0 }),
+    makeRow({ pattern_hash: 'ccc', action: 'drop', container: 'svc-drop', cap_bytes_per_window: 0 }),
+  ];
+  const actionByContainer = new Map<string, PerPatternRow['action']>([
+    ['svc-compact', 'compact'],
+    ['svc-offload', 'offload'],
+    ['svc-drop', 'drop'],
+  ]);
+  const diff = renderCsvDiff(
+    ['svc-compact', 'svc-offload', 'svc-drop'],
+    undefined,
+    rows,
+    'compact',
+    actionByContainer,
+    'hard',
+    { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
+  );
+  const dataRows = additionsFromDiff(diff).filter(
+    (l) => l.length > 0 && !l.startsWith('#') && l !== 'container,cap'
+  );
+  const ACTIONS = ['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'];
+  for (const r of dataRows) {
+    const m = r.match(/^([^,]+),(\d+):([^:]*):/);
+    assert.ok(m, `row must parse as <container>,<bytes>:<epoch>:<reason>; got: ${r}`);
+    assert.ok(Number(m![2]) >= 1, `cap must be >= 1 (0 is an engine opt-out); got: ${r}`);
+    assert.ok(
+      !ACTIONS.includes(m![3]),
+      `epoch slot must never carry an action token; got: ${r}`
+    );
+    assert.equal(m![3], '', `epoch slot must be empty (no expiry); got: ${r}`);
+  }
+  // offload/drop containers get the 1-byte minimum, not 0.
+  assert.match(dataRows.find((r) => r.startsWith('svc-offload,'))!, /^svc-offload,1::/);
+  assert.match(dataRows.find((r) => r.startsWith('svc-drop,'))!, /^svc-drop,1::/);
+});
+
+test('renderActionsCsv: per-service actions in engine grammar, merged, never empty', () => {
+  const actionByContainer = new Map<string, PerPatternRow['action']>([
+    ['svc-a', 'compact'],
+    ['svc-b', 'offload'],
+  ]);
+  const existing = 'container,action\nsvc-other,tier_down::operator pin\n';
+  const csv = renderActionsCsv(['svc-a', 'svc-b'], actionByContainer, 'compact', existing, 'hard');
+
+  assert.match(csv, /^container,action\n/, 'header row present');
+  assert.match(csv, /^svc-a,compact::/m, 'svc-a action row');
+  assert.match(csv, /^svc-b,offload::/m, 'svc-b action row');
+  // Rows for services outside this run SURVIVE the merge.
+  assert.match(csv, /^svc-other,tier_down::/m, 'existing row survives');
+  // A configured container with no per-service decision takes the default.
+  const withDefault = renderActionsCsv(['svc-c'], new Map(), 'tier_down', undefined, 'soft');
+  assert.match(withDefault, /^svc-c,tier_down::/m, 'default action row');
+  // Never empty: header + at least one row (an empty actions.csv fails the
+  // receiver launch when the cap variant is active).
+  assert.ok(withDefault.trim().split('\n').length >= 2, 'never header-only');
+});
+
+test('mergeActionRows: configured rows win, others survive', () => {
+  const existing = 'container,action\nsvc-a,drop::old\nsvc-keep,pass::pin\n';
+  const fresh = 'container,action\nsvc-a,compact::new\n';
+  const merged = mergeActionRows(existing, fresh);
+  assert.match(merged, /^svc-a,compact::new$/m, 'new row wins');
+  assert.match(merged, /^svc-keep,pass::pin$/m, 'unrelated row survives');
+  assert.doesNotMatch(merged, /svc-a,drop/, 'stale row replaced');
 });
 
 test('renderCsvDiff: floor patterns do not leak into caps.csv', () => {
@@ -253,10 +331,24 @@ test('renderCsvDiff: each container gets its own action + cap = sum of its row c
     })
   );
 
-  // cap = sum of that container's per-pattern caps (100+50 / 300); offload -> 0.
-  assert.equal(byKey['cartservice'], '150:compact:MCP configure_engine (hard)');
-  assert.equal(byKey['frontend'], '300:pass:MCP configure_engine (hard)');
-  assert.equal(byKey['noisy-svc'], '0:offload:MCP configure_engine (hard)');
+  // cap = sum of that container's per-pattern caps (100+50 / 300). The
+  // action ships in actions.csv, never in the cap value; offload gets the
+  // 1-byte minimum, not 0 (0 is an engine opt-out).
+  assert.equal(byKey['cartservice'], '150::MCP configure_engine (hard)');
+  assert.equal(byKey['frontend'], '300::MCP configure_engine (hard)');
+  assert.equal(byKey['noisy-svc'], '1::MCP configure_engine (hard)');
+
+  // The per-service actions land in the sibling actions.csv.
+  const actionsCsv = renderActionsCsv(
+    ['cartservice', 'frontend', 'noisy-svc'],
+    actionByContainer,
+    'compact',
+    undefined,
+    'hard'
+  );
+  assert.match(actionsCsv, /^cartservice,compact::/m);
+  assert.match(actionsCsv, /^frontend,pass::/m);
+  assert.match(actionsCsv, /^noisy-svc,offload::/m);
 });
 
 test('renderCsvDiff: undecided container falls back to defaultAction with its own cap sum', () => {
@@ -274,5 +366,8 @@ test('renderCsvDiff: undecided container falls back to defaultAction with its ow
     { targetPercent: 30, baselineMonthlyBytes: 100_000_000 }
   );
   const row = additionsFromDiff(diff).find((l) => l.startsWith('svc-x,'));
-  assert.equal(row, 'svc-x,100:sample:MCP configure_engine (hard)');
+  assert.equal(row, 'svc-x,100::MCP configure_engine (hard)');
+  // The fallback action reaches actions.csv via defaultAction.
+  const actionsCsv = renderActionsCsv(['svc-x'], new Map(), 'sample', undefined, 'hard');
+  assert.match(actionsCsv, /^svc-x,sample::/m);
 });
