@@ -11,8 +11,8 @@
  * with `anchor_not_found`.
  *
  * The detection is shape-only: 11 chars, base64url alphabet (RFC 4648,
- * matching `tenxHash()` output in `pattern-hash.ts`). When it matches
- * we select on `LABELS.hash`; otherwise we select on `LABELS.pattern`.
+ * matching `tenxHash()` output in `pattern-hash.ts`). A match selects on
+ * `LABELS.hash`; anything else selects on `LABELS.pattern`.
  */
 
 import { LABELS } from './promql.js';

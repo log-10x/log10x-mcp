@@ -2,19 +2,19 @@
  * Forwarding TENX_LICENSE_KEY to the docker run path is only safe if a bad key
  * cannot take away a call that worked without it.
  *
- * THE REGRESSION THESE PIN. The runtime images carry a built-in limited
- * license, so before the forward a stale `TENX_LICENSE_KEY` sitting in the
- * environment was ignored and the run succeeded. Measured on the packed
- * tarball, engine 1.1.39, `log10x/edge-10x`, the same two events:
+  * The runtime images carry a built-in limited license, so an unforwarded
+  * stale `TENX_LICENSE_KEY` sitting in the environment is ignored and the
+  * run succeeds. On engine 1.1.39, `log10x/edge-10x`, the same two events:
+  *
+  *   no forward                -> STATUS success, "2 events → 2 patterns"
+  *   forward, no fallback      -> STATUS error, backend_unavailable,
+  *                                "license verification failed: MALFORMED"
+  *
+  * Docker mode is not opt-in either: a host with no `tenx` on PATH resolves
+  * to it on its own, so nobody has to ask for the forward to be hit by it.
+  *
  *
- *   1.27.1 (no forward)       -> STATUS success, "2 events → 2 patterns"
- *   1.27.2 (forward, no fallback) -> STATUS error, backend_unavailable,
- *                                "license verification failed: MALFORMED"
- *
- * Docker mode is not opt-in either: a host with no `tenx` on PATH resolves to
- * it on its own, so nobody had to ask for the forward to be hit by it.
- *
- * The second regression pinned here is the hint that told a docker-mode caller
+  * Also pinned: the hint must not tell a docker-mode caller
  * to "Set LOG10X_TENX_MODE=docker … (no license needed)" — the mode they were
  * already in, and a license claim made in the same breath as their license
  * refusing the run.

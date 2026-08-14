@@ -2,19 +2,19 @@
  * backend-fetch — shared retry+timeout primitive for every PromQL-compatible
  * backend the MCP talks to.
  *
- * Replaces the per-backend bespoke `fetch(...)` blocks that previously lived
- * inside metrics-backend.ts and customer-metrics.ts. The contract:
+ * The single retry+timeout contract for metrics-backend.ts and
+ * customer-metrics.ts, in place of per-backend bespoke `fetch(...)` blocks:
  *
  *   - Default 3 attempts (`LOG10X_RETRY_ATTEMPTS` override).
  *   - 250ms base backoff, exponential with jitter (`LOG10X_RETRY_BASE_MS`).
  *   - 30s per-attempt timeout via AbortController (`LOG10X_REQUEST_TIMEOUT_MS`).
  *   - Retry classes: network exception, HTTP 5xx, HTTP 429.
  *   - Timeout (AbortError) is NOT retried by default: re-issuing an identical
- *     query with an identical budget almost always times out again, so a single
- *     slow read used to cost up to attempts×timeout (~90s) of wall-clock before
- *     failing. Set `LOG10X_RETRY_TIMEOUTS=true` (or opts.retryTimeouts) to
- *     restore the legacy retry-on-timeout — an escape hatch for cold-warmup
- *     self-hosted stores (e.g. Mimir/Cortex store-gateway lazy load).
+ *     query with an identical budget almost always times out again, so
+ *     retrying a single slow read costs up to attempts×timeout (~90s) of
+ *     wall-clock before failing. Set `LOG10X_RETRY_TIMEOUTS=true` (or
+ *     opts.retryTimeouts) for retry-on-timeout — an escape hatch for
+ *     cold-warmup self-hosted stores (e.g. Mimir/Cortex store-gateway lazy load).
  *   - Non-retryable: any other 4xx — surfaced immediately with kind-labelled body.
  *   - AMP path: `reSignPerAttempt` callback rebuilds the signed init each
  *     attempt so SigV4 timestamps stay fresh.
@@ -25,8 +25,8 @@
  *   `${kindLabel}: fetch failed after ${attempts} attempts`
  *
  * Consumed by promJsonFetch (metrics-backend.ts) and all six customer-metrics
- * backends. tool-errors.ts widens its transient-failure regex to match the
- * new error tails (FIX C).
+ * backends. tool-errors.ts widens its transient-failure regex to match these
+ * error tails.
  */
 
 const DEFAULT_ATTEMPTS = parseInt(process.env.LOG10X_RETRY_ATTEMPTS || '3', 10) || 3;

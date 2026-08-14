@@ -5,7 +5,7 @@
  * license (`POST /api/v1/license/demo`). That same license is the credential
  * that lets the MCP read the data the engine writes — via the `/api/v1/demo/*`
  * routes with `Authorization: Bearer`. To read back what the engine wrote, the
- * MCP must use the SAME license (same demo tenant), so we persist the minted
+  * MCP must use the SAME license (same demo tenant), so the minted JWT is
  * JWT here and reuse it for both the install plan and the query path.
  *
  * Stored separately from `~/.log10x/credentials` because that file requires an

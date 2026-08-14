@@ -3,7 +3,7 @@
  *
  * Canonical token: '24h' for the one-day window (explicit, unambiguous).
  * Legacy alias:    '1d'  — normalized to '24h' at the tool handler level
- *                          for tools that previously declared '1d'.
+ *                          for tools that declare '1d'.
  */
 
 import { z } from 'zod';

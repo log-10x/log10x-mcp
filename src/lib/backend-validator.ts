@@ -58,7 +58,7 @@ export async function validateBackend(
 
   // ── 1. Reachable + 2. Authenticated ────────────────────────────────
   // Collapsed into one probe: the `up` PromQL is a no-op that any
-  // healthy Prom-compatible backend answers; failure flavor tells us
+  // healthy Prom-compatible backend answers; the failure flavor identifies
   // which of (reachable / authenticated) is broken.
   try {
     const res = await backend.queryInstant('up');

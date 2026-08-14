@@ -31,7 +31,7 @@
  * truncated / next_cursor / warnings / images) stays unchanged.
  *
  * What changes is what goes INSIDE `data`. Class A tools historically
- * put an ad-hoc object there. From now on they put a ChassisData object.
+ * put an ad-hoc object there; a chassis tool puts a ChassisData object.
  * `buildChassisEnvelope()` produces a complete StructuredOutput where
  * `data` is a validated ChassisData.
  *
@@ -447,8 +447,8 @@ export const ChassisDataSchema = z.object({
 
   /**
    * Structured question the agent MUST surface before routing anywhere.
-   * Replaces the HTML-comment pattern used in the legacy next-actions
-   * protocol, which agents routinely skip.
+   * A structured field rather than the HTML-comment form of the
+   * next-actions protocol, which agents routinely skip.
    */
   must_ask_user: MustAskUserSchema,
 
@@ -487,7 +487,7 @@ export type ChassisData = z.infer<typeof ChassisDataSchema>;
  * the existing envelope fields.
  *
  * This is a structural interface rather than a Zod schema because
- * StructuredOutput already has a Zod schema; we overlay the chassis
+ * StructuredOutput already has a Zod schema, and the chassis extension
  * extension fields on top.
  */
 export interface ChassisEnvelope extends StructuredOutput {
@@ -726,10 +726,9 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
       : {}),
     ...(input.error != null ? { error: input.error } : {}),
     // view:'markdown' envelopes MUST carry data.markdown (the MCP wrapper
-    // surfaces it verbatim and errors without it). Map it from the pre-rendered
-    // must_render_verbatim so every markdown-view tool works by setting just
-    // that one field. Previously NO chassis tool populated data.markdown, so
-    // every view:'markdown' call hard-errored "data.markdown is not a string".
+    // surfaces it verbatim and errors without it — "data.markdown is not a
+    // string"). Map it from the pre-rendered must_render_verbatim so every
+    // markdown-view tool works by setting just that one field.
     ...(input.view === 'markdown' && input.must_render_verbatim != null
       ? { markdown: input.must_render_verbatim }
       : {}),
@@ -737,7 +736,7 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
 
   // Back-compat mode: spread legacy flat fields alongside chassis fields.
   // The chassis fields win on collision — intentional, they are the
-  // source of truth going forward.
+  // source of truth.
   if (input.legacyCompat && input.legacyExtraFields) {
     for (const [k, v] of Object.entries(input.legacyExtraFields)) {
       if (!(k in chassisData)) {
@@ -921,8 +920,8 @@ export function buildChassisErrorEnvelope(opts: {
  *   data.error.hint: full remediation string from DemoReadOnlyError
  *   summary.headline: 'Demo read-only mode: <would_have>'
  *
- * `data.status` is one of the ChassisStatus enum values; we use 'error'
- * since the call did not produce a payload. The `demo_read_only`
+ * `data.status` is one of the ChassisStatus enum values; this path uses
+ * 'error' because the call did not produce a payload. The `demo_read_only`
  * discriminant lives on `data.error.error_type`, which is what agents
  * branch on. Headline + hint surface the per-tool would_have phrase so
  * a human reader knows exactly what side effect was blocked.

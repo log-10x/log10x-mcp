@@ -341,17 +341,17 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 0.3,
     compact_ratio_high: 0.4,
     small_event_floor_bytes: 100,
-    // Frozen tier via searchable snapshots. VERIFIED on a live Elastic Cloud
-    // Hosted deployment 2026-07-31: the marked slice routed to its own index,
-    // ILM mounted it as partial-<index> on the data_frozen node, and the index
-    // dropped to store=0b local while the hot control stayed at 19.2kb.
-    // Critically, identity SURVIVED the transition -- a term query on
+    // Frozen tier via searchable snapshots. On Elastic Cloud Hosted the
+    // marked slice routes to its own index, ILM mounts it as
+    // partial-<index> on the data_frozen node, and the index drops to
+    // store=0b local while a hot control stays at 19.2kb. Critically,
+    // identity SURVIVES the transition -- a term query on
     // tenx_hash returned 400/400 and routeState stayed aggregatable -- so the
     // down-tiered slice is still retrievable, not merely cheap.
     //
     // RATE DERIVATION, stated because it is weaker than the mechanism. Elastic
-    // publishes frozen at roughly one fifth to one tenth of hot. We apply the
-    // CONSERVATIVE end (1/5) to our blended $1/GB, giving $0.20. That blend is
+    // publishes frozen at roughly one fifth to one tenth of hot. This model
+    // takes the CONSERVATIVE end (1/5) of a blended $1/GB, giving $0.20. That blend is
     // a vendors.json infrastructure figure, not a list price, so treat the
     // ratio as sound and the absolute as an estimate; override with
     // analyzer_cost_per_gb for a known deployment.
@@ -555,7 +555,7 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   splunk: ['offload', 'compact'],
   splunk_cloud: ['offload', 'compact'],
   // Self-hosted ES/OS can run the 10x plugin; managed offerings cannot.
-  // tier_down proven live 2026-07-31 (frozen searchable snapshot, identity
+  // tier_down works via a frozen searchable snapshot (identity
   // survives). Needs an Enterprise licence self-managed, or Gold+ on Elastic
   // Cloud Hosted; the recipe states that as a prerequisite.
   elasticsearch: ['tier_down', 'offload', 'compact'],
@@ -622,14 +622,14 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  * statement about the customer's own platform.
  *
  * Every surface that renders or gates compaction language routes through
- * this. Before it existed the renderer carried three rival notions of the
- * same fact: unconditional prose in four places, a hardcoded
+ * this. Without it the renderer carries rival notions of the same fact:
+ * unconditional prose in four places, a hardcoded
  * `splunk || elasticsearch || clickhouse` gating the measured-ratio
- * section, and an allowed-actions lookup in the action selector. A
- * CloudWatch report asserted in-place compaction in its opening paragraph
- * while the section that would have proven it was skipped, so the section
- * numbering jumped 5 to 7. `test/compaction-claim-drift.test.ts` fails if
- * a fourth notion appears.
+ * section, and an allowed-actions lookup in the action selector — which
+ * lets a CloudWatch report assert in-place compaction in its opening
+ * paragraph while the section demonstrating it is skipped, so the section
+ * numbering jumps 5 to 7. `test/compaction-claim-drift.test.ts` fails if
+ * a rival notion appears.
  */
 export function compactsInPlace(destination: string): boolean {
   const model = COST_MODEL_BY_DESTINATION[destination as SiemId];
@@ -817,7 +817,7 @@ function projectActionWithRatio(
       // Bytes leaving the forwarder are unchanged (events still reach the
       // SIEM; only the storage/ingest tier changes). Savings come from the
       // rate delta between standard and the cheaper destination tier.
-      // When tier_down_target_tier is defined in the cost model we compute
+      // When tier_down_target_tier is defined in the cost model, the
       // the dollar delta below by substituting the tier rates. bytes_out is
       // still set to bytes_in so the byte-reduction fields reflect 0 — the
       // savings are entirely in the rate axis, not the byte axis.
@@ -836,7 +836,7 @@ function projectActionWithRatio(
       // Destination sees nothing (full byte saving), but the bytes do not
       // vanish: they land in the customer's own object store. The S3 storage
       // cost is netted into total_dollars below (savings = SIEM cost - S3
-      // cost), so offload is no longer modeled as a free win. The explanatory
+      // cost), so offload is not modeled as a free win. The explanatory
       // note is pushed after the S3 dollar is computed.
       bytes_out = 0;
       break;
@@ -853,7 +853,7 @@ function projectActionWithRatio(
         // Measured per-service ratio on an envelope destination (Splunk):
         // the on-wire encoded size IS the billed size, so use the real
         // measurement directly. It already reflects small-event overhead,
-        // so we do NOT re-degrade. The low/expected/high band collapses to
+        // so it is NOT re-degraded. The low/expected/high band collapses to
         // this single value across all three legs (no modeled uncertainty).
         bytes_out = args.bytes_in * args.compact_ratio_override;
         notes.push(
@@ -905,7 +905,7 @@ function projectActionWithRatio(
   let ingest_dollars: number | null;
   let ingestSource: 'list' | 'customer_supplied' | 'unset';
   if (ingestOverride != null) {
-    // For tier_down with a customer override we scale the override by the
+    // For tier_down with a customer override, the override scales by the
     // same ratio as the tier discount so customer-rate savings are proportional.
     const tierScaleFactor =
       isTierDown && tierTarget && model.ingest_per_gb > 0
@@ -922,7 +922,7 @@ function projectActionWithRatio(
   }
 
   // Storage axis: same precedence. storage_per_gb_month == 0 is a legitimate
-  // "vendor includes storage" signal (e.g. Datadog), so we emit 0 + 'list'
+  // "vendor includes storage" signal (e.g. Datadog), so it emits 0 + 'list'
   // there rather than null.
   const storageOverride = args.customer_rate?.storage_per_gb_month_override;
   let storage_dollars: number | null;
@@ -1150,7 +1150,7 @@ export function projectSavings(
     const anyCustomer =
       rs.ingest === 'customer_supplied' || rs.storage === 'customer_supplied';
     if (anyList) {
-      // For the list-rate view we re-project without the override so callers
+      // The list-rate view re-projects without the override so callers
       // see the unblended list-only total.
       const listOnly = projectActionRange({
         ...args,

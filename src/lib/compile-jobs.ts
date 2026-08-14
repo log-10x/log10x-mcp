@@ -191,7 +191,7 @@ export async function readJobLog(record: CompileJobRecord): Promise<string> {
       });
       text = `${stdout}\n${stderr}`;
     } catch {
-      // container removed / docker gone, nothing to recover
+    // container removed / docker gone, nothing to recover
     }
   }
   return redactSecrets(text);
@@ -271,7 +271,7 @@ export interface CompileResultsDoc {
 /**
  * Pull the engine's `printResults` JSON out of the captured log. The console
  * appender prints it as one pretty-printed object (keys inputPathsSet /
- * outputPathsSet / success / phases). We brace-match the LAST balanced object
+  * outputPathsSet / success / phases). Brace-match the LAST balanced object
  * that parses and carries a `phases` key, so a console log-line prefix or
  * trailing progress lines don't defeat it. Returns null until the run has
  * printed results (i.e. reached the report phase).
@@ -295,7 +295,7 @@ export function parseCompileResults(logText: string): CompileResultsDoc | null {
       const parsed = JSON.parse(candidate) as CompileResultsDoc;
       if (Array.isArray(parsed.phases)) result = parsed;
     } catch {
-      // Not the object we want (the chosen '{' wasn't the document root).
+    // Not the object we want (the chosen '{' wasn't the document root).
     }
   }
   return result;

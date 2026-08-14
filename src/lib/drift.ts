@@ -71,11 +71,11 @@ export async function classifyTrajectory(
   const envLabel = `${LABELS.env}="${metricsEnv}"`;
 
   // Compare current rate to the user's baseline_offset (default 7d for backward
-  // compat with callers that don't pass it). Previously this was hardcoded to
-  // 7d, which meant a service-mode investigate with window=5m baseline=1h would
-  // still classify "flat" against a 7d-ago bucket, ignoring the user's actual
-  // comparison intent. Downstream: `shape === 'flat'` → tool returns "no
-  // significant movement", so getting this wrong silences real signals.
+  // compat with callers that don't pass it). A hardcoded 7d here means a
+  // service-mode investigate with window=5m baseline=1h still classifies
+  // "flat" against a 7d-ago bucket, ignoring the user's actual comparison
+  // intent. Downstream: `shape === 'flat'` → tool returns "no significant
+  // movement", so getting this wrong silences real signals.
   const currentVsBaseline =
     `sum(rate(${metric}{${envLabel},${LABELS.pattern}="${escape(anchor)}"}[${window}])) ` +
     `/ ` +
@@ -102,7 +102,7 @@ export async function classifyTrajectory(
       rateChangeRatio = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
-    // non-fatal
+  // non-fatal
   }
   try {
     const res = await iQueryInstant(env, slopeQuery, QUERY_BUDGET.cheap);
@@ -110,7 +110,7 @@ export async function classifyTrajectory(
       slopePerWeek = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
-    // non-fatal
+  // non-fatal
   }
 
   const rateChange = rateChangeRatio - 1;
@@ -128,9 +128,8 @@ export async function classifyTrajectory(
   //      decline, service-mode reported "no significant movement". Customers
   //      reading both got whiplash.
   // 0.5 matches the `retrieverEscalationThreshold` philosophy (50% confidence
-  // floor) and is halfway between env-mode's 15% surface and the old 100%
-  // threshold, preserving back-compat for most tests while fixing the
-  // stopped-firing and consistency cases.
+  // floor) and sits halfway between env-mode's 15% surface and a 100%
+  // threshold, covering the stopped-firing and consistency cases.
   if (Math.abs(rateChange) >= 0.5) {
     return { shape: 'acute', slopePerWeek, rateChange };
   }
@@ -163,7 +162,7 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
       anchorSlopePerWeek = parsePrometheusValue(res.data.result[0]);
     }
   } catch {
-    // fall through
+  // fall through
   }
 
   // Find co-drifters: compute per-pattern FRACTIONAL slope, rank by closeness
@@ -229,7 +228,7 @@ export async function runDriftCorrelation(opts: DriftOptions): Promise<DriftResu
       }
     }
   } catch (e) {
-    // fall through
+  // fall through
   }
 
   cohort.sort((a, b) => b.slopeSimilarity - a.slopeSimilarity);

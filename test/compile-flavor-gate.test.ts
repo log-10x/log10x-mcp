@@ -18,12 +18,12 @@ import {
   ALLOW_UNVERIFIED_FLAVOR_ENV,
 } from '../src/lib/compile-runner.js';
 
-// The gate the Compiler app runs before it will spawn a local `tenx`. It used to
-// read `if (flavor && flavor !== 'cloud') throw`, so every case where the flavor
-// could not be READ — a banner in an unknown format, a binary that will not
-// execute — skipped the check and the run proceeded as though a compiler build
-// had been confirmed. It then required the token to be exactly `cloud`, which
-// hard-refuses the renamed compiler binary that reports `compiler`.
+// The gate the Compiler app runs before it will spawn a local `tenx`. A gate
+// written as `if (flavor && flavor !== 'cloud') throw` skips every case where
+// the flavor cannot be READ — a banner in an unknown format, a binary that
+// will not execute — and the run proceeds as though a compiler build had been
+// confirmed. Requiring the token to be exactly `cloud` also hard-refuses the
+// renamed compiler binary that reports `compiler`.
 //
 // These tests pin every outcome against real spawned binaries, not against a
 // mock of the probe: both accepted spellings, both rejected runtime spellings,
@@ -229,8 +229,8 @@ test('the gate is case-insensitive on the token, both spellings', async () => {
   }
 });
 
-// THE REGRESSION. Before the fix both of these resolved, and the Compiler app
-// went on to spawn the binary.
+// An unreadable banner must refuse: resolving it lets the Compiler app go
+// on to spawn the binary.
 test('assertCompilerFlavor refuses a binary whose banner carries no flavor token', async () => {
   const bin = await fakeTenx('gate-noflavor', '#!/bin/sh\necho "10x engine v1.1.32"\n');
   await assert.rejects(() => assertCompilerFlavor(bin), (e: Error) => {

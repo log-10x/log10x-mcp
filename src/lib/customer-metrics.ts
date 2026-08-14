@@ -407,8 +407,8 @@ function readGrafanaCliConfig(): GrafanaCliConfig | undefined {
     const path = joinPath(homedir(), '.grafana', 'grafana-cli-config.yaml');
     if (!existsSync(path)) return undefined;
     const text = readFileSync(path, 'utf8');
-    // Minimal YAML subset — grafana-cli uses a flat key/value file. We grep
-    // the prometheus_url / prometheus_user keys rather than pull in a full
+    // Minimal YAML subset — grafana-cli uses a flat key/value file. Greps
+    // the prometheus_url / prometheus_user keys rather than pulling in a full
     // YAML parser for a single file.
     const urlMatch = text.match(/^\s*prometheus_url\s*:\s*(.+?)\s*$/m);
     const userMatch = text.match(/^\s*prometheus_user\s*:\s*(.+?)\s*$/m);
@@ -678,7 +678,7 @@ export class GenericPromBackend implements CustomerMetricsBackend {
   remoteWriteUrl(): string | undefined {
     // Standard Prometheus remote_write path when --web.enable-remote-write-receiver
     // is configured server-side. Caller gets a clear HTTP error if the server
-    // doesn't accept the path; we can't distinguish that from here.
+    // doesn't accept the path; that is indistinguishable from here.
     return `${this.endpoint}/api/v1/write`;
   }
 

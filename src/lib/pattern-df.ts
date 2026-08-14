@@ -6,8 +6,8 @@
  * tokens the engine picked, joined by '_'. On real environments many names
  * share a long common boilerplate PREFIX (e.g. the OTel-collector resource
  * envelope) and differ only at the END, so a front-crop renders rows 1/2/6
- * identically. The old fix was a hardcoded OTel denylist (`PREFIX_SKIP`),
- * which is vendor-specific and silently wrong for Java/MDC, k8s, Datadog,
+ * identically. A hardcoded OTel denylist (`PREFIX_SKIP`) does not fix it:
+ * that is vendor-specific and silently wrong for Java/MDC, k8s, Datadog,
  * or arbitrary apps.
  *
  * THE GENERAL FIX: boilerplate is whatever is COMMON across the env's
@@ -68,8 +68,8 @@ const SENTENCE_SCAN_LIMIT = 14;
  * presence is what licenses skipping ahead to the message; without one, the
  * name is assumed to open with its own message already.
  *
- * WHOLE-TOKEN match, deliberately. An earlier version matched any token
- * ENDING in an extension, which also matched `results`, `events`, `requests`,
+ * WHOLE-TOKEN match, deliberately. Matching any token ENDING in an
+ * extension also matches `results`, `events`, `requests`,
  * `errors`, `limits` and `counts` as TypeScript files, plus `cargo`, `ago`,
  * `logo`, `copy` and `entropy`. Those are among the commonest words in a log
  * message, so the loose form would have skipped past real message text on any
@@ -95,8 +95,8 @@ const STOPWORDS = new Set([
  * three different widths: the report has 56 codepoints and can afford three
  * subject tokens, while the 40-44 surfaces cannot, and spending their budget
  * on an anchor pushes discriminators past the ellipsis and mints collisions
- * that did not exist. Measured on 164 real patterns: at width 40 an anchor of
- * 3 produces a four-row collision, an anchor of 2 does not.
+ * that did not exist. Across 164 real patterns, at width 40 an anchor of
+ * 3 produces a four-row collision and an anchor of 2 does not.
  */
 function anchorBudget(width: number): number {
   return width >= 56 ? ANCHOR_TOKENS : 2;

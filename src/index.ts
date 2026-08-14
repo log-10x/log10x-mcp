@@ -201,7 +201,7 @@ async function initEnvs(): Promise<void> {
  * Detect the operating mode (analysis | analysis_pending | poc) for
  * this MCP boot. Runs once after envs are loaded; result is fixed for
  * the lifetime of the process. Tool handlers consult `bootMode.mode`
- * via `getBootMode()` to gate themselves; agents see all 44 tools in
+  * via `getBootMode()` to gate themselves; agents see every tool in
  * `tools/list` and the client's tool-search ranks per query, but a
  * tool called in the wrong mode returns a clear "not available" reply
  * instead of 5xx'ing on a missing backend.
@@ -246,12 +246,12 @@ function getEnvs(): Environments {
  * rewrites it, so ops can see the original text when hunting root causes.
  */
 /**
- * The demo gate and the mode gate now live in lib/tool-availability.ts, so
- * everything that ROUTES a user to a tool can ask the same question `wrap()`
- * asks. log10x_start's action_menu reads it to compute `applicable`; before
- * that, the menu guessed from tier capabilities alone and offered
- * investigate_spike → log10x_top_patterns on a keyless boot, where the demo
- * gate refuses it.
+ * The demo gate and the mode gate live in lib/tool-availability.ts, so
+ * everything that ROUTES a user to a tool asks the same question `wrap()`
+ * asks. log10x_start's action_menu reads it to compute `applicable`;
+ * guessing from tier capabilities alone offers, for example,
+ * investigate_spike → log10x_top_patterns on a keyless boot, where the
+ * demo gate refuses it.
  */
 type WrapResult = {
   content: Array<
@@ -278,17 +278,17 @@ async function wrap(
     // not a bare text blob; the agent branches on data.status and the MCP
     // SDK requires structuredContent for tools that declare an outputSchema
     // (a text-only return here is rejected as "no structured content").
-    // rq-1: retriever_query / retriever_series read the offload bucket (the
+    // retriever_query / retriever_series read the offload bucket (the
     // held-back cohort), not the metrics backend. This wrap gate pre-empts their
     // own correct kind:'retriever' gate, so branch the remediation here: a
     // metrics-backend nag points the agent at the wrong subsystem entirely.
     const isRetrieverTool =
       toolName === 'log10x_retriever_query' || toolName === 'log10x_retriever_series';
     const ncKind = isRetrieverTool ? 'retriever' : 'metrics_backend';
-    // g8: the remediation used to end at `log10x_configure_env` unconditionally.
+    // The remediation must not end at `log10x_configure_env` unconditionally.
     // On the keyless boot that reaches this gate, configure_env is denylisted
-    // against the shared demo account and never registered, so the agent's
-    // required-next action was a tool it could not call. Ask whether it is
+    // against the shared demo account and never registered, so naming it hands
+    // the agent a required-next action it cannot call. Ask whether it is
     // registered and name log10x_signin_start when it is not — the same tool
     // the boot banner already points at.
     const configureEnvRegistered = !isOutOfMode('log10x_configure_env');
@@ -369,14 +369,14 @@ async function wrap(
     // JSON) alongside the text channel. Hosts that honor it (Claude Desktop,
     // ChatGPT Desktop, Cursor's structured-output path) skip the JSON.parse on
     // the agent side and read fields directly; legacy hosts still see the
-    // text fallback. We populate BOTH on every successful call.
+    // text fallback. Both are populated on every successful call.
     const enriched: StructuredOutput = {
       ...validated,
       warnings: maybeAddDemoBannerWarning(validated.warnings),
     };
     const structuredContent = enriched as unknown as Record<string, unknown>;
     // G6: image attachments. Tools that produced inline charts populate
-    // envelope.images; we surface each as an MCP `image` content block.
+    // envelope.images; each becomes an MCP `image` content block.
     // Hosts that render images (Claude Desktop, ChatGPT Desktop) show the
     // chart; hosts that don't ignore the block.
     const imageBlocks: Array<{ type: 'image'; data: string; mimeType: string }> = [];
@@ -483,7 +483,7 @@ async function wrap(
  * cache had not yet cleared), the MCP falls back to the public demo
  * key and every account-scoped tool keeps using that demo key for the
  * lifetime of the process, even after the real key starts working.
- * Restarting the MCP host was the only recovery path until now.
+  * Without recovery, restarting the MCP host is the only way out.
  *
  * This wrapper makes recovery automatic: any account-scoped tool that
  * gets 401/403 while in demo-fallback triggers a single revalidation
@@ -567,7 +567,7 @@ function maybeAddDemoBannerWarning(warnings: string[]): string[] {
  * Format a clear "this tool is not available in the current boot mode"
  * reply. The agent calls a tool that mode-detect determined is
  * irrelevant (analysis tool in POC mode, POC tool in analysis mode);
- * we tell it why and what would change the mode.
+ * the reply names why, and what would change the mode.
  */
 function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string {
   const lines = [
@@ -656,11 +656,10 @@ const SERVER_OPTIONS = {
     // Declare the `logging` capability so calls to extra.sendNotification
     // ('notifications/message', ...) inside tool handlers don't throw
     // synchronously from the SDK's assertNotificationCapability guard.
-    // We don't currently rely on mid-tool push for the sign-in flow
-    // (the two-tool log10x_signin_start / log10x_signin_complete split
-    // sidesteps Cursor's lack of mid-tool rendering), but declaring the
-    // capability is correct hygiene and unblocks any other tool that
-    // wants to use the channel on hosts that do support it.
+    // The sign-in flow does not rely on mid-tool push (the two-tool
+    // log10x_signin_start / log10x_signin_complete split sidesteps Cursor's
+    // lack of mid-tool rendering), but declaring the capability unblocks any
+    // other tool that wants the channel on hosts that do support it.
     capabilities: { logging: {} },
     instructions: `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question. ANTI-LOOP: call log10x_start at most ONCE per session, on the first message only. After it returns the menu, treat the user's next message as their ANSWER: match it to the corresponding action_menu item and call that item's routes_to tool. Do NOT call log10x_start again or re-render the menu, even when the answer contains cost, savings, drop, compact, offload, or tier_down, because those words are in the menu labels themselves (e.g. "Explore the Receiver: compact, offload, tier down (keep everything), or sample/drop") and a menu selection is not a new fresh-session request.
 
@@ -948,7 +947,7 @@ function registerLog10xTool(
  * after initBootMode() resolves the operating mode.
  */
 /**
- * G5: operator-side category gates. Three env vars at boot:
+  * Operator-side category gates. Three env vars at boot:
  *
  *   LOG10X_MCP_ENABLED_CATEGORIES=cost,identify,investigate
  *     Allowlist. When set, ONLY tools whose category is in the list register.
@@ -972,7 +971,7 @@ interface OperatorGate {
   disableWrite: boolean;
 }
 /**
- * G11: build the `_meta` block that ships on each tool definition. Carries
+  * Build the `_meta` block that ships on each tool definition. Carries
  * operational metadata that doesn't fit in the description (which is for
  * the agent's prompt) but that ranking-aware hosts can read.
  *
@@ -980,10 +979,8 @@ interface OperatorGate {
  *   - category: same as the operator-gate category (cost / identify / ...).
  *     Lets a host group tools by category in its UI without parsing the
  *     description prose.
- *   - tier: which Log10x component the tool needs deployed at the customer
- *     side. Derived from category as a coarse default; per-tool overrides
- *     could live in the manifest later but the category mapping is right
- *     90+% of the time.
+  *   - tier: which Log10x component the tool needs deployed at the customer
+  *     side. Derived from category as a coarse default.
  *       cost/identify/investigate/drop  → 'reporter'
  *       retrieve                        → 'retriever'
  *       detect                          → 'cli'  (paste-mode runs locally)
@@ -1034,7 +1031,7 @@ function applyToolRegistrations(
   // Every tool publishes the envelope's shape as its `outputSchema`. The
   // per-tool `data` field is `z.unknown()` at the envelope layer — its real
   // shape lives in each tool's TypeScript interface and in the rendered docs.
-  // We declare it uniformly here so MCP hosts that honor `outputSchema`
+  // Declared uniformly here so MCP hosts that honor `outputSchema`
   // (Claude Desktop, ChatGPT Desktop) get a contract; hosts that don't,
   // ignore it. Pair with `structuredContent` on every result in wrap().
   //
@@ -1046,8 +1043,8 @@ function applyToolRegistrations(
   // Cursor) that lists tools then validates a tool result Ajv-rejects those
   // lifted fields with "data must NOT have additional properties", breaking the
   // tool. The full schema advertises `additionalProperties: true`, so the
-  // lifted fields validate. (Server-side Zod stripped them and never noticed;
-  // only the client-side advertised-schema validation catches it.)
+  // lifted fields validate. Server-side Zod strips them silently; only the
+  // client-side advertised-schema validation surfaces the mismatch.
   const envelopeOutputSchema = StructuredOutputSchema;
   for (const t of pendingTools) {
     const allowed = mode ? shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback }) : true;
@@ -1079,7 +1076,7 @@ function applyToolRegistrations(
       skipped.push(t.name);
       continue;
     }
-    // G3: wrap every input field with a coercive preprocess so the SDK's
+    // Wrap every input field with a coercive preprocess so the SDK's
     // strict Zod validation accepts the type-loose inputs LLM hosts
     // routinely emit (e.g., `"limit": "5"` instead of `"limit": 5`, or
     // `"events": "one event"` instead of `"events": ["one event"]`). The
@@ -1118,8 +1115,7 @@ registerLog10xTool('log10x_event_lookup', eventLookupSchema, (args) =>
 // Orchestration primitive for fetching live SIEM events for one pattern
 // with template-extracted slot values. Designed for `log10x_investigate`
 // (or another orchestrator) to call autonomously when the chain needs
-// event evidence. See memory/project_pattern_examples_design.md for the
-// full design contract — read before changing this tool's shape.
+// event evidence.
 
 registerLog10xTool('log10x_pattern_examples', patternExamplesSchema, (args) =>
   wrap('log10x_pattern_examples', async () => {
@@ -1277,9 +1273,8 @@ registerLog10xTool('log10x_pattern_diff', patternDiffSchema, (args) =>
 
 // ── Tool: log10x_whats_changing ──
 //
-// Patterns ranked by delta vs a baseline window (not current cost). Restores
-// the removed cost-drivers ranking
-// using the modern StructuredOutput envelope. Brand-new patterns (no
+// Patterns ranked by delta vs a baseline window (not current cost).
+// Brand-new patterns (no
 // baseline) are excluded; they go to log10x_whats_new.
 
 registerLog10xTool('log10x_whats_changing', whatsChangingSchema, (args) =>
@@ -1628,11 +1623,6 @@ registerLog10xTool('log10x_discover_join', discoverJoinSchema, (args) =>
 // Three deterministic primitives that compose to a cross-pillar flow:
 // filter movers → rank by shape → overlay top-K. The agent composes them;
 // the tools return raw arithmetic, no tier and no causal framing.
-//
-// Validated against a 58-candidate chaos test where the composition filtered
-// to 5 real signals (zero confounders, zero noise) and let an LLM judge
-// build a coherent SRE cascade narrative (DNS → retry → dep latency →
-// heap → GC → anchor).
 
 registerLog10xTool('log10x_metrics_that_moved', metricsThatMovedSchema, (args) =>
   wrap('log10x_metrics_that_moved', async () => {
@@ -1718,15 +1708,13 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
     executePocFromLocal({
       source: args.source ?? 'kubectl',
       namespace: args.namespace ?? 'default',
-      // `paths` is what `source: file` REQUIRES, and this hand-written
-      // destructure used to drop it: the schema advertised it, the agent
-      // sent it, and the tool answered "source file requires paths". That
-      // made the serverless/no-cluster POC path unreachable through the MCP
-      // interface entirely — measured 2026-08-10 driving the real server
-      // over stdio in a container. The unit suite could not catch it because
-      // it calls executePocFromLocal() directly, below this boundary.
-      // pin_services / pin_patterns were dropped the same way, silently
-      // discarding an operator's explicit per-service dispositions.
+      // Every arg the schema advertises must be threaded here. `source: file`
+      // REQUIRES `paths`; dropping it makes the serverless/no-cluster POC path
+      // unreachable over MCP (the tool answers "source file requires paths" for
+      // a call that supplied them), and dropping pin_services / pin_patterns
+      // silently discards an operator's per-service dispositions. The unit
+      // suite cannot catch either: it calls executePocFromLocal() directly,
+      // below this boundary.
       paths: args.paths,
       window: args.window ?? '1h',
       per_pod_limit: args.per_pod_limit ?? 5000,
@@ -1802,13 +1790,15 @@ registerLog10xTool('log10x_baseline', baselineSchema, (args) =>
 // commitment's age (baseline_offset below) so it measures PRE-policy data
 // instead of trailing to "now" over the same range as the post window. That
 // removes the degenerate-windowing wash (delivered_pct forced to 0) for the
-// commitment path. The $ view was always correct (post-window dropped bytes).
+// removes the degenerate-windowing wash (delivered_pct forced to 0) for the
+// commitment path. The $ view reads post-window dropped bytes and is
+// unaffected.
 //
-// Remaining limitation: the POST query still trails to "now", so each weekly
-// cursor measures the same recent snapshot rather than its own absolute
-// [week_start, week_end] window. Per-week absolute anchoring (a post-side
-// `@ <week_end>` modifier) is the next refinement; today the aggregate
-// delivered_pct is sound but the per-week series is not yet time-sliced.
+// Limitation: the POST query trails to "now", so each weekly cursor
+// measures the same recent snapshot rather than its own absolute
+// [week_start, week_end] window. The aggregate delivered_pct is sound;
+// the per-week series is not time-sliced. Per-week absolute anchoring
+// needs a post-side `@ <week_end>` modifier.
 
 _setVerifyRunner(async ({ commitment, week_start, week_end }) => {
   const env = resolveEnv(getEnvs(), commitment.env);

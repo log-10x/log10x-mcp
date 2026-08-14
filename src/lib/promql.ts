@@ -150,16 +150,16 @@ const ROUTE_STATE_ACTIONS: ReadonlySet<string> = new Set<RouteStateAction>([
  * ACTED = everything the receiver did something to, so everything the
  * destination did NOT receive: offload, compact, tier_down, drop, sample.
  *
- * Previously `kept` was `routeState!="drop"` and `dropped` was
- * `routeState="drop"`. Both were wrong, in opposite directions, because a
+ * Do NOT define `kept` as `routeState!="drop"` and `dropped` as
+ * `routeState="drop"`. Both are wrong, in opposite directions, because a
  * cohort is a SET of states and `!=`/`=` can only name one:
  *
- *   - `kept` counted offloaded and compacted bytes as delivered. A pattern
- *     100% routed to S3 reported `kept_share_pct: 100`.
- *   - `dropped` saw only the literal `drop` action, so the offload cohort was
- *     invisible to every tool that used it.
+ *   - `kept` then counts offloaded and compacted bytes as delivered. A
+ *     pattern 100% routed to S3 reports `kept_share_pct: 100`.
+ *   - `dropped` then sees only the literal `drop` action, so the offload
+ *     cohort is invisible to every tool that uses it.
  *
- * Measured on the demo env: `services` reported cart 88% offloaded
+ * On the demo env that split had `services` reporting cart 88% offloaded
  * (260.95 GB offload / 34.90 GB passed) while `event_lookup`, `top_patterns`
  * and `pattern_trend` all reported cart 0% reduced, 100% kept — an 8x
  * disagreement on the single largest offload claim in the environment. The
@@ -244,7 +244,7 @@ export function formatPromOffset(offsetDays?: number): string {
  * series carries ~12–30 buckets — enough resolution to see shape, not
  * so many that the renderer chokes or the agent loses signal in noise.
  *
- * Decision table (from /tmp/arc-prose-notes.md Note 5):
+ * Decision table:
  *   - `15m`  → `1m`   (15 buckets)
  *   - `1h`   → `5m`   (12 buckets)
  *   - `6h`   → `15m`  (24 buckets)

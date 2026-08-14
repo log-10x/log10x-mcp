@@ -4,8 +4,7 @@
  * This file is the canonical reference for which credential goes where.
  * Read it before touching anything that sends a header to the gateway,
  * persists a credential to disk, or wires a credential into a helm
- * chart. The model has stayed stable since 2026-05 by design, and the
- * doc is here so accidental drift is easy to spot in review.
+ * chart.
  *
  * The gateway has TWO concurrent auth surfaces. They serve different
  * purposes and the authorizers reject the wrong credential, so mixing
@@ -133,8 +132,8 @@
  *
  *   - Am I calling on behalf of an ENGINE (writing metrics from a pod,
  *     identifying as a runtime)? → Use license JWT, `Authorization:
- *     Bearer` header. These belong to the engine pods we instruct users
- *     to deploy. The ONE exception where the MCP sends a license JWT on
+ *     Bearer` header. These belong to the engine pods the MCP instructs
+ *     users to deploy. The ONE exception where the MCP sends a license JWT on
  *     its own request is the demo-read path (`/api/v1/demo/*` with an
  *     anonymous demo license, for not-signed-in users) — see Surface B.
  *

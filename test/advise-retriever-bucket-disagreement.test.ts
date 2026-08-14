@@ -1,18 +1,13 @@
 /**
- * advise-retriever — F4 bug fix: env-config bucket precedence vs user input.
+ * advise-retriever — env-config bucket precedence vs user input.
  *
- * BUG: The wizard's nextQuestion() consulted only session.inputBucket and
- * the snapshot. The env-config doc was loaded ONLY at plan-emission time,
- * and the precedence chain there let envCfgActiveOffload.bucket WIN over
- * session.inputBucket SILENTLY — the user's typed answer was discarded
- * without a warning.
- *
- * FIX: env-config is resolved BEFORE nextQuestion. When an active offload
- * bucket exists, it becomes the resolved input bucket (no question asked).
- * When the user separately supplied a different bucket, env-config still
- * wins (it's the cluster's declared source of truth), and a warning is
- * surfaced on the envelope: "User-supplied bucket X differs from env-config
- * bucket Y; using Y per env-config precedence."
+ * env-config is resolved BEFORE nextQuestion. When an active offload
+ * bucket exists it becomes the resolved input bucket and no question is
+ * asked. When the user separately supplied a different bucket, env-config
+ * still wins (it is the cluster's declared source of truth) and a warning
+ * is surfaced on the envelope: "User-supplied bucket X differs from
+ * env-config bucket Y; using Y per env-config precedence." Resolving only
+ * at plan-emission time discards the user's typed answer silently.
  *
  * Cases:
  *   (a) env-config has active offload bucket; user did NOT supply one

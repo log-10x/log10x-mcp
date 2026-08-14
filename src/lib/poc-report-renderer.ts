@@ -698,9 +698,9 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
   // happened to land after the cutoff, which for a rare pattern is close to a
   // coin flip: P(all n sampled events land in the back half) = 0.5^n.
   //
-  // Measured on a real pull: of 619 shapes, 288 were labelled new; 76% of
-  // those occurred exactly ONCE, none of the "not new" ones did, and 236 of
-  // the 288 also occurred in the FIRST half of the same sample. Two runs over
+  // On one real pull, of 619 shapes 288 were labelled new; 76% of those
+  // occurred exactly ONCE, none of the "not new" ones did, and 236 of the
+  // 288 also occurred in the FIRST half of the same sample. Two runs over
   // the identical log group reported 127 new and then 253 new.
   //
   // There is no better estimator to substitute. A sample cannot say when
@@ -1767,8 +1767,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     const siemName = SIEM_DISPLAY_NAMES[input.siem];
     // Both predicates come from lib/severity-policy so this selector, the
     // risk-review paths below, poc-envelope-v2 and configure_engine's solver
-    // cannot drift apart again. WARN is error-class here (it was reducible
-    // until 2026-07-30), matching the tier the solver puts it in.
+    // cannot drift apart again. WARN is error-class here, matching the tier
+    // the solver puts it in.
     const isErrorClass = isProtectedSeverity(severity);
     // Reducible severities: DEBUG / INFO / TRACE / no-severity.
     const isReducibleSev = isReducibleSeverity(severity);
@@ -2422,10 +2422,11 @@ function renderAgeCell(p: EnrichedPattern): string {
 /**
  * Display an identity tersely in the incident / redundancy tables.
  *
- * This used to swap underscores for spaces and hard-cut at 46 characters,
- * which is not a name: every pattern sharing a 46-character prefix rendered
- * as the SAME string. On a real pull that put five identical-looking rows in
- * one incident and printed both sides of a redundant pair as the same text,
+ * Do NOT swap underscores for spaces and hard-cut at 46 characters: that
+ * is not a name, because every pattern sharing a 46-character prefix
+ * renders as the SAME string. On a real pull that put five
+ * identical-looking rows in one incident and printed both sides of a
+ * redundant pair as the same text,
  * which reads as a bug even though the identities underneath differ.
  *
  * Route through `buildDisplayName` — the same path the drivers table uses —

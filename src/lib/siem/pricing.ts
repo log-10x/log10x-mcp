@@ -1,11 +1,11 @@
 /**
  * Per-SIEM default analyzer cost ($/GB indexed).
  *
- * SYNCED FROM: /Users/talweiss/git/l1x-co/backend/terraform/console/ui/src/vendors.json
+ * SYNCED FROM: the console UI's `src/vendors.json`.
  * DO NOT HARDCODE elsewhere — update this file if vendors.json changes.
  *
- * Values the handoff prescribed are kept as-is; values present in
- * vendors.json override defaults. Values not in vendors.json (clickhouse
+ * Values present in vendors.json override the defaults here. Values absent
+ * from it (clickhouse self-hosted) use a conservative public-price estimate.
  * self-hosted) use a conservative public-price estimate.
  */
 
@@ -43,8 +43,7 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // analyzer_cost_per_gb arg on the submit tool if using ClickHouse Cloud.
   clickhouse: 0.15,
   // Coralogix Frequent Search (the default priority every event lands in when
-  // no TCO policy matches — verified live on a US2 tenant: zero policies =>
-  // priorityclass "high").
+  // no TCO policy matches — zero policies means priorityclass "high").
   //
   // DIVERGENCE FROM PRICING.md, stated so nobody silently "fixes" it:
   // PRICING.md's vendor table lists Coralogix at $0.50, which is the MONITORING
@@ -53,7 +52,7 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // modeled below as tier_down_target_tier. Reconcile PRICING.md separately —
   // it feeds the marketing surfaces, not this model.
   coralogix: 1.15,
-  // Elastic Cloud Serverless, Logs Essentials. Verified 2026-07-31 on
+  // Elastic Cloud Serverless, Logs Essentials. Per
   // elastic.co/pricing/serverless-observability: "As low as $0.07" per GB
   // ingested, "As low as $0.017" per GB retained per month. The Complete plan
   // is $0.09 / $0.019.

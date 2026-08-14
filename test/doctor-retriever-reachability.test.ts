@@ -1,10 +1,10 @@
 /**
  * Doctor retriever-reachability classifier.
  *
- * Regression for the false-PASS bug: the helm_release_probe fallback resolves
- * the in-cluster Service DNS name (*.svc.cluster.local), which doctor used to
- * report as a healthy endpoint even though it is unreachable from an MCP host
- * outside the cluster. isClusterInternalUrl is the gate.
+  * The helm_release_probe fallback resolves the in-cluster Service DNS name
+  * (*.svc.cluster.local), which is unreachable from an MCP host outside the
+  * cluster and must not be reported as a healthy endpoint.
+  * isClusterInternalUrl is the gate.
  */
 
 import { test } from 'node:test';

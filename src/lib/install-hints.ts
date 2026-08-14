@@ -64,10 +64,9 @@ export interface InstallHint {
  *             default ever moves.
  *   - Windows `runtime-jvm`. NO native Windows runtime is built, the release
  *             carries no `tenx-*-windows-*-native` asset, so the JVM package
- *             is the runtime on Windows. This hint used to fall through to
- *             `install.ps1` with no flavor set, which installs the COMPILER: a
- *             whole JVM compiler toolchain handed to a user who asked for a
- *             runtime.
+ *             is the runtime on Windows. Falling through to `install.ps1`
+ *             with no flavor set installs the COMPILER: a whole JVM
+ *             compiler toolchain handed to a user who asked for a runtime.
  */
 export function installHintForPlatform(): InstallHint {
   if (process.platform === 'darwin') {

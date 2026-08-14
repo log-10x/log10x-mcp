@@ -187,7 +187,7 @@ function diskDir(): string {
   try {
     mkdirSync(dir, { recursive: true });
   } catch {
-    // ignore
+  // ignore
   }
   return dir;
 }
@@ -237,7 +237,7 @@ function updateRetrieverSession(
   try {
     writeFileSync(retrieverSessionPath(snapshotId), JSON.stringify(merged));
   } catch {
-    // disk write failure is non-fatal
+  // disk write failure is non-fatal
   }
   return merged;
 }
@@ -1465,9 +1465,9 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // (b) surface a precedence-mismatch warning at plan-emission time when
   //     the user-supplied session.inputBucket disagrees with env-config.
   //
-  // Previously this resolution happened ONLY at plan-emission time, so
-  // nextQuestion couldn't see env-config and would ask the user even when
-  // the answer was already on file; THEN env-config silently overrode the
+  // Resolution happens here, not only at plan-emission time: otherwise
+  // nextQuestion cannot see env-config and asks the user even when the
+  // answer is already on file, and env-config then silently overrides the
   // user's typed answer without surfacing the discard.
   const envConfigWarnings: string[] = [];
   const envCfgResolved = await _resolveClusterConfig().catch(() => undefined);

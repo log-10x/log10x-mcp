@@ -891,8 +891,8 @@ export async function executeAdviseInstall(
           shape: next.shape,
         });
       }
-      // No question left to ask — every answer was captured before the
-      // dismissal — so fall through to license + plan emission below.
+    // No question left to ask — every answer was captured before the
+    // dismissal — so fall through to license + plan emission below.
     }
   } else {
     // Markdown-fallback path: ask one question, return markdown, wait
@@ -985,23 +985,21 @@ export async function executeAdviseInstall(
     }
   }
 
-  // A demo license DOES run airgapped as of engine 1.1.61+. This refusal
-  // described pre-#121 behaviour, where the engine silently downgraded
-  // demo/limited licenses to online mode. Post-#121 `resolveLicense` gates
-  // airgapped on the OFFLINE ES256 signature and expiry only — the license
-  // TYPE is never read on that path — and it was proven live on 2026-08-10:
-  // a real Lambda estate ran `TENX_AIRGAPPED=true` on a **demo** license and
-  // delivered 600/600 records.
+  // A demo license DOES run airgapped as of engine 1.1.61+. `resolveLicense`
+  // gates airgapped on the OFFLINE ES256 signature and expiry only — the
+  // license TYPE is never read on that path — so a real Lambda estate runs
+  // `TENX_AIRGAPPED=true` on a demo license and delivers every record.
   //
-  // Keeping the refusal blocked the out-of-the-box case exactly: a
-  // not-signed-in prospect asking for a serverless plan (airgapped by
-  // definition, since a Lambda sandbox has no egress to log10x) was turned
-  // away for a reason that no longer existed. The wizard now emits the plan
-  // and carries the two facts that ARE still true — a demo license expires
-  // in 14 days, and it is single-node — as plan warnings rather than a wall.
+  // Refusing here blocks the out-of-the-box case exactly: a not-signed-in
+  // prospect asking for a serverless plan (airgapped by definition, since a
+  // Lambda sandbox has no egress to log10x) is turned away for a reason that
+  // does not hold. The wizard emits the plan and carries the two facts that
+  // ARE true — a demo license expires in 14 days, and it is single-node — as
+  // plan warnings rather than a wall.
   //
-  // Set LOG10X_DEMO_AIRGAPPED_REFUSE=1 to restore the old refusal if an
-  // older engine is in play.
+  // Set LOG10X_DEMO_AIRGAPPED_REFUSE=1 to reinstate the refusal for an
+  // engine older than 1.1.61, which silently downgraded demo/limited
+  // licenses to online mode.
   if (
     process.env.LOG10X_DEMO_AIRGAPPED_REFUSE === '1' &&
     session.airgapped === true &&
@@ -1785,7 +1783,7 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
   return lines.join('\n');
 }
 
-// askLicenseSource() removed — the wizard no longer surfaces the
+// There is no askLicenseSource(): the wizard does not surface the
 // license-source choice as a question. Sign-in is the implicit default
 // (see signin_required mode); demo / paste remain accessible via the
 // explicit `license_source` arg on advise_install.
@@ -1853,8 +1851,8 @@ function hasAuth0TokensForReason(
 /**
  * Per-reason markdown line for `signin_required` mode. Maps each demo-
  * fallback reason to a concrete next step the user can act on, instead
- * of the one-size-fits-all "you signed in via pasted API key" message
- * the wizard used to emit for every fallback.
+  * of the one-size-fits-all "you signed in via pasted API key" message,
+  * which is wrong for most fallback reasons.
  */
 function signinRequiredReasonMessage(
   reason: AcquireLicenseResult['reason']
@@ -1928,7 +1926,7 @@ function introForReason(
     case undefined:
       // Reason absent (or, defensively, a "user license minted" reason
       // that shouldn't appear in this branch). Use the boolean to pick
-      // the previously-shipped phrasing.
+      // the phrasing.
       return isSignedInFallback
         ? `You're signed in, but the wizard fell back to an anonymous demo license — usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
         : `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;

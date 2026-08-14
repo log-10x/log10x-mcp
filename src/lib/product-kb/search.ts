@@ -17,7 +17,7 @@
  *     ONE chunk that answers their question, not an average over
  *     unrelated sections.
  *
- *   - Boosts (post 2026-06-06 ranking-weakness fix):
+ *   - Boosts:
  *       slug-token superset (every query token is a slug segment) → +50
  *       slug-token tail subpath (>=2 contiguous trailing tokens)  → +25
  *       per matched slug token                                    → +10
@@ -252,7 +252,7 @@ const DEFAULT_MIN_SCORE = 0.5;
  * Returns the top-N SearchResult[] ordered by score descending. Each
  * result carries only its top-K matched_chunks to keep responses small.
  *
- * Scoring overview (after the 2026-06-06 ranking-weakness fix pass):
+ * Scoring overview:
  *
  *   1. Per-chunk TF-IDF + heading-focus boost (see `scoreChunk`).
  *   2. Per-page score = sum of top-K chunk scores, then divided by

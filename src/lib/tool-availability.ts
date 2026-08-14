@@ -1,8 +1,8 @@
 /**
  * One answer to "will this tool actually run right now?".
  *
- * Two gates decide that, and both used to live where only `wrap()` in
- * index.ts could see them: the demo gate (a metric-requiring tool called
+ * Two gates decide that, and neither may live where only `wrap()` in
+ * index.ts can see them: the demo gate (a metric-requiring tool called
  * while the MCP is attached read-only to the public demo dataset) and the
  * mode gate (a tool the boot-time mode-detect did not register). Anything
  * that ROUTES a user to a tool — log10x_start's action_menu, a remediation

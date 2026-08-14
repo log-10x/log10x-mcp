@@ -335,10 +335,10 @@ function buildModes(
 
   // Receiver / Retriever tier — full 6-mode menu.
   // Gate on effectiveDestination (caller-supplied destination wins over the
-  // env-auto-detected SIEM), NOT siemDetected. Previously these gates keyed off
-  // siemDetected, so passing destination=splunk still gated compact/tier_down by
-  // the detected cloudwatch — e.g. compact came back "no-op on cloudwatch" while
-  // routes_to correctly carried splunk. The applicability verdict and the routing
+  // env-auto-detected SIEM), NOT siemDetected. Keying these gates off
+  // siemDetected means passing destination=splunk still gates compact/tier_down
+  // by the detected cloudwatch — e.g. compact comes back "no-op on cloudwatch"
+  // while routes_to correctly carries splunk. The applicability verdict and the routing
   // target must describe the SAME destination.
   const compactApplicable =
     caps.compact_installable && siemSupportsCompact(effectiveDestination);
@@ -648,10 +648,10 @@ export async function executeCostOptions(args: {
     must_render_verbatim: verbatim,
     must_ask_user: mustAskUser,
     forbidden_next_actions: forbidden,
-    // Previously this list included log10x_estimate_savings as
-    // recommended-next, which directly contradicted forbidden_next_actions
+    // This list must NOT include log10x_estimate_savings as
+    // recommended-next: it directly contradicts forbidden_next_actions
     // (which lists the same tool as FORBIDDEN until the user picks a mode).
-    // Agents reading both lists received mutually exclusive instructions for
+    // Agents reading both lists receive mutually exclusive instructions for
     // the same tool. The actual next-step path is per-mode via
     // modes[].routes_to (the user picks first, THEN we route to
     // estimate_savings with the picked action). Removing the top-level

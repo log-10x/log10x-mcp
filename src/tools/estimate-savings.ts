@@ -1036,8 +1036,8 @@ export async function runEstimateForecast(
   // Resolve the $/GB ONCE via the shared chain (caller arg → envs.json
   // analyzerCost → LOG10X_ANALYZER_COST → destination list) and use it for BOTH
   // the per-pattern dollar math (below) and the rate_source / rate_disclosure
-  // label (further down). Resolving in two places previously let the label and
-  // the math disagree.
+  // label (further down). Resolving in two places lets the label and the
+  // math disagree.
   const forecastRateResolved = resolveRate(
     { effective_ingest_per_gb: args.effective_ingest_per_gb },
     env,
@@ -1425,8 +1425,8 @@ export interface RunVerifyArgs {
    * Optional cap-CSV content (verbatim string from the customer gitops
    * repo at `lookup_path`). When present alongside `action_intent_content`,
    * the verify run can also supply per-pattern byte-cap context for the
-   * attribution rows. The cap CSV no longer carries action tokens — see
-   * `action_intent_content` for action routing.
+      * attribution rows. For action routing on the action-intent path, see
+      * `action_intent_content`.
    *
    * Legacy rows that still contain a `:<action>` suffix are silently
    * stripped; the suffix is stored in `legacy_action_suffix` on each row

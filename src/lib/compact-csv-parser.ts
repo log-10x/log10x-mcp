@@ -115,8 +115,8 @@ interface ParsedCompactValue {
  * Grammar: `<true|false>[:<untilEpoch>[:<reason>]]`
  *   - First token (before first `:`) must be `true` or `false`.
  *   - Second token is the epoch (may be empty → no expiry).
- *   - Remainder is the reason (may contain colons; we split on the FIRST
- *     two colons only, treating the rest as the reason body).
+ *   - Remainder is the reason (may contain colons; the split takes the
+ *     FIRST two colons only, treating the rest as the reason body).
  *
  * Returns null when the boolean token is unrecognised.
  */

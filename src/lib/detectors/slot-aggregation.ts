@@ -32,14 +32,14 @@
  * `aggregationReason`. Honest signaling beats silent mis-merging.
  *
  * When the input has no templates (e.g., the engine didn't emit
- * Template records or we only have aggregated ExtractedPattern data),
- * we fall back to slot-NAME alignment: ExtractedPattern stores
+  * Template records, or only aggregated ExtractedPattern data is
+  * available), it falls back to slot-NAME alignment: ExtractedPattern stores
  * variables under the engine's inferred slot name (e.g. `userId`,
  * `tenant`, or positional `slot_N`). Positional names (`slot_N`) are
  * never aligned across templates because position is unreliable.
  * Semantic names that match across templates DO align, with
  * `aggregationStatus: 'merged'`. This is the path the detectors take
- * in env mode (where we don't always have raw EncodedEvents+Templates).
+  * in env mode (where raw EncodedEvents+Templates are not always present).
  */
 
 import type { ExtractedPattern } from '../pattern-extraction.js';
@@ -135,14 +135,14 @@ export function aggregateSlotsBySymbolMessage(
     // Collect per-slot value frequencies. The variables Record<string,
     // string[]> in ExtractedPattern captures the captured distinct
     // values per slot (capped at 20 by extractPatterns), keyed by slot
-    // name. We approximate counts by treating "first appearance in the
+    // name. Counts are approximated by treating "first appearance in the
     // captured set" as a single occurrence. This UNDERCOUNTS true
     // counts but the cardinality / distinct-count / dominant-value
     // ratios are preserved because they are over the same captured
     // set across all members.
     //
-    // When templates are present we prefer to align by precedingToken
-    // (Option B exact path). When not, we fall back to slotName.
+    // When templates are present, alignment is by precedingToken
+    // (Option B exact path). When not, it falls back to slotName.
     const slotAggregator = templates
       ? alignByPrecedingToken(members, templates)
       : alignBySlotName(members);
@@ -222,7 +222,7 @@ function alignByPrecedingToken(
       const captured = member.variables[slotName];
       if (!captured || captured.length === 0) continue;
       // Approximation: each value contributes its count to the
-      // aggregator; we use the captured set's length as the per-value
+      // aggregator; the captured set's length is the per-value
       // count contribution because ExtractedPattern caps captured
       // distinct values at 20 per slot. The dominant-pct ratio is
       // preserved across members because the same cap applies to all.
@@ -300,7 +300,7 @@ function alignBySlotName(members: ExtractedPattern[]): SlotAggregator[] {
 
 /**
  * Convert a captured-distinct-values array into a Map<value, count>.
- * `eventCount` is the total events for this pattern. We distribute it
+  * `eventCount` is the total events for this pattern, distributed
  * proportionally over distinct values, treating the captured set as
  * a uniform sample. This is an approximation: the true counts are
  * lost when extractPatterns caps `variables` at 20 distinct per slot.

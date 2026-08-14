@@ -216,9 +216,9 @@ export async function fetchActiveLabelValues(
   // this returns empty, which causes join-discovery to fall back naturally.
   const promql = `group by (${labelName}) (increase(all_events_summaryBytes_total{tenx_env=~"edge|cloud"}[${range}]) > 0)`;
   // Route through the env's metrics backend (the customer's own Prometheus for
-  // self-hosted envs), NOT getBase()/log10x. Previously this hardwired
-  // prometheus.log10x.com, so cross-pillar label discovery phoned the log10x
-  // API home even when the customer's metrics lived in their own store.
+  // self-hosted envs), NOT getBase()/log10x. Hardwiring prometheus.log10x.com
+  // here makes cross-pillar label discovery phone the log10x API home even
+  // when the customer's metrics live in their own store.
   let resp: PrometheusResponse;
   try {
     resp = await env.metricsBackend.queryInstant(promql);
@@ -233,9 +233,9 @@ export async function fetchActiveLabelValues(
   return Array.from(out);
 }
 
-// fetchAnalyzerCost (GET /api/v1/user → metadata.analyzer_cost) was removed:
+// There is no fetchAnalyzerCost (GET /api/v1/user → metadata.analyzer_cost):
 // the cost tools must not phone the log10x account API to learn the customer's
-// $/GB. The rate now resolves locally and uniformly via resolveRate (caller arg
+// $/GB. The rate resolves locally and uniformly via resolveRate (caller arg
 // → envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price),
 // with list price as the honest, disclosed default.
 

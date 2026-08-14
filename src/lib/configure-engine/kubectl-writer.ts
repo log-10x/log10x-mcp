@@ -21,13 +21,13 @@
  * Safety model (layered):
  *   1. Caller flag (auto_apply=false / read_only=true on the tool) short-
  *      circuits to dry-run; the rendered YAML is returned in-envelope.
- *   2. Even when auto-applying, we ALWAYS do a `--dry-run=server` pass
+  *   2. Even when auto-applying, a `--dry-run=server` pass ALWAYS runs
  *      first to catch RBAC/quota/admission errors without writing.
  *   3. All user-controlled strings reach `kubectl` via process args
  *      (spawnSync's argv array) — NEVER via shell interpolation. The YAML
  *      body itself is piped through stdin, not constructed in argv.
  *   4. ConfigMap-size guard: k8s rejects objects > 1 MiB at the apiserver.
- *      We pre-flight on the SUM of value sizes and return a structured
+  *      Pre-flight is on the SUM of value sizes, returning a structured
  *      `request_entity_too_large` error before kubectl is invoked.
  *
  * Failure-classification: stderr from kubectl is regex-matched against
@@ -39,8 +39,8 @@
  * Why server-side dry-run by default: client-side dry-run only checks
  * schema; server-side runs the admission chain (RBAC, ResourceQuota,
  * webhooks). The latter is what the operator actually needs to know
- * about. If the cluster doesn't support server-side dry-run we fall
- * back to client-side and warn.
+  * about. A cluster with no server-side dry-run support falls back to
+  * client-side, with a warning.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -50,7 +50,7 @@ import type { PrimitiveError, PrimitiveErrorType } from '../primitive-errors.js'
 
 /**
  * The k8s ConfigMap size limit is 1 MiB (apiserver enforcement). Allow
- * a small headroom so the metadata block doesn't push us over.
+  * a small headroom so the metadata block doesn't push it over.
  */
 export const CONFIGMAP_MAX_BYTES = 1024 * 1024;
 const CONFIGMAP_HEADROOM_BYTES = 4 * 1024;
@@ -73,7 +73,7 @@ export interface KubectlWriterArgs {
   /**
    * When true, skip the real apply and only run `--dry-run=server`. The
    * returned `dry_run_diff` carries kubectl's stdout describing what
-   * WOULD change. When false, we still run server-side dry-run first as
+      * WOULD change. When false, server-side dry-run still runs first as
    * a pre-flight, then do the real apply if the dry-run succeeded.
    */
   dryRun: boolean;
@@ -362,18 +362,18 @@ export function renderConfigMapYaml(input: RenderInput): string {
 }
 
 /**
- * Single-quoted YAML scalar. We escape `'` by doubling it. This is the
+ * Single-quoted YAML scalar. `'` is escaped by doubling it. This is the
  * safe encoding for arbitrary ASCII; multi-line / large values use the
  * block-literal encoding below.
  */
 function yamlScalar(s: string): string {
-  // Quote always so we don't trip YAML 1.1's surprise booleans
-  // (yes/no/on/off) or numeric coercions.
+  // Quote always, so YAML 1.1's surprise booleans (yes/no/on/off) or numeric
+  // coercions never fire.
   return `'${s.replace(/'/g, "''")}'`;
 }
 
 /**
- * YAML key in scalar form. We quote keys that contain non-identifier
+  * YAML key in scalar form. Keys containing non-identifier
  * characters (dots, slashes — common in k8s annotation keys).
  */
 function yamlScalarKey(k: string): string {
@@ -444,8 +444,8 @@ function validateDns1123Subdomain(value: string, what: string): PrimitiveError |
 }
 
 /**
- * Pre-flight the ConfigMap size against the apiserver's 1 MiB cap. We
- * sum the byte length of all values plus a generous fudge factor for
+  * Pre-flight the ConfigMap size against the apiserver's 1 MiB cap: the
+  * sum of the byte length of all values plus a generous fudge factor for
  * key names + YAML overhead.
  */
 function preflightSize(content: { [key: string]: string }): PrimitiveError | undefined {

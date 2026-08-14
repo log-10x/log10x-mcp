@@ -2,7 +2,7 @@
  * Anchor-suggestion helper for cross-pillar primitives that refuse on
  * flat-anchor (`anchor_no_phase_separation`).
  *
- * Per Note 30 in the post-composite arc review: when
+ * When
  * `metrics_that_moved` or `rank_by_shape_similarity` refuse because the
  * caller's anchor has no busy/quiet split, telling the user "re-anchor"
  * without suggestions is dead-end UX. This helper scans the env's

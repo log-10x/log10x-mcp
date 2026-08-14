@@ -153,19 +153,18 @@ export async function fetchReporterPatternStats(
   bytesPerEvent?: number;
   note?: string;
 }> {
-  // NOTE: everything past this guard is now UNREACHABLE, and that is a fix rather
-  // than a regression, because it is built on two fabrications:
+  // NOTE: everything past this guard is UNREACHABLE. It is built on two
+  // things that do not exist:
   //
-  //   - the label `tenx_user_pattern`, which does not exist. The live backend
-  //     reports 22 labels and it is not among them. The real pattern identity is
-  //     `message_pattern`, whose hash is `tenx_hash`.
-  //   - the metrics `log10x_event_count_total` / `log10x_event_bytes_total`, which
-  //     appear in this file and nowhere else. The real per-pattern bytes metric is
-  //     `all_events_summaryBytes_total`, used in 29 files.
+  //   - the label `tenx_user_pattern`. The live backend reports 22 labels and
+  //     it is not among them. The real pattern identity is `message_pattern`,
+  //     whose hash is `tenx_hash`.
+  //   - the metrics `log10x_event_count_total` / `log10x_event_bytes_total`,
+  //     which appear in this file and nowhere else. The real per-pattern
+  //     bytes metric is `all_events_summaryBytes_total`, used in 29 files.
   //
-  // The comment below rationalises the absence as "earlier Reporter builds emitted
-  // bytes_total but not count_total". They were never emitted at all.
-  //
+  // The comment below rationalises the absence as "earlier Reporter builds
+  // emitted bytes_total but not count_total". No Reporter build emits them.
   // extractPatternName looks for a `tenx_user_pattern == "..."` equality in the
   // search expression, and nothing generates that any more (buildPatternSearch
   // refuses a name outright, buildArchiveHashSearch emits a text-token match), so
@@ -195,8 +194,8 @@ export async function fetchReporterPatternStats(
     const v = scalarValue(resp);
     if (v !== undefined && v >= 0) rateEventsPerMinute = v;
   } catch {
-    // Reporter unavailable or query failed — leave undefined; caller falls
-    // back to window-length heuristic.
+  // Reporter unavailable or query failed — leave undefined; caller falls
+  // back to window-length heuristic.
   }
 
   try {
@@ -206,7 +205,7 @@ export async function fetchReporterPatternStats(
       bytesPerEvent = num / den;
     }
   } catch {
-    // Same — leave undefined.
+  // Same — leave undefined.
   }
 
   return {

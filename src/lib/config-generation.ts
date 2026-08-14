@@ -12,7 +12,7 @@
  * `configGeneration.file` (or the `CONFIG_GENERATION_FILE` env) at the file,
  * which the receiver's config-generation object then loads and stamps on every
  * event as `tenx_config_version=<generation>`, riding the summary metrics as a
- * Prometheus label (proven live on the demo). So the running engine advertises
+ * Prometheus label. So the running engine advertises
  * which policy generation it loaded. The option is OPT-IN and decoupled from
  * caps: a receiver pointed at no file (e.g. GitOps-managed caps without this
  * MCP) emits no label and never depends on the file existing. See

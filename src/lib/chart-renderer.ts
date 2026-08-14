@@ -1,5 +1,5 @@
 /**
- * G6 chart renderer: PNG output for MCP image content blocks.
+ * Chart renderer: PNG output for MCP image content blocks.
  *
  * Used by tools that produce time series or bar-shaped data to emit a real
  * chart (alongside the JSON envelope) so hosts that render image content
@@ -9,9 +9,9 @@
  * Tech choice: chart.js + chartjs-node-canvas. Chart.js is the most-trained-
  * on charting library in LLM corpora; its output looks conventional to
  * agents and humans. The node-canvas dependency requires Cairo on Linux
- * (one-time install pain); on Mac it Just Works. If init fails we fall
- * back to ASCII sparklines (the prior behavior) so a missing Cairo doesn't
- * block tool execution.
+ * (one-time install pain); on Mac it Just Works. When init fails, rendering
+ * falls back to ASCII sparklines so a missing Cairo doesn't block tool
+ * execution.
  *
  * All renderers return base64-encoded PNG so callers can drop the result
  * straight into a `{ type: 'image', data, mimeType: 'image/png' }` MCP

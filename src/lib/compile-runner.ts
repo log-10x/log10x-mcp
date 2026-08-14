@@ -24,11 +24,10 @@
  * (@apps/mcp / @apps/mcp-file) are stdin-in / templates-out over a
  * `/mcp/{config,input,output}` contract. The compiler is shaped
  * differently, it scans SOURCE folders and writes SYMBOL libraries to
- * disk, configured by the bundled `@apps/compiler` config. We reuse
- * dev-cli's mode/install/binary resolution so that logic stays
+ * disk, configured by the bundled `@apps/compiler` config. dev-cli's
+ * mode/install/binary resolution is reused so that logic stays
  * single-sourced, but the compile invocation, mounts, and output handling
  * live here.
- *
  * Extensibility:
  *   The `CompileConfig` descriptor + the two per-mode appliers
  *   (`runDockerCompile` / `runLocalCompile`) are the seam for source axes.
@@ -44,8 +43,8 @@
  *   scanning are written once and don't change as axes are added.
  *
  * GitHub pull: the engine's github scanner uses the GitHub REST API (no git
- * binary involved), configured by `pull/github/config.yaml`. We replace that
- * file wholesale, bind-mount over it in docker mode, shadow it via
+ * binary involved), configured by `pull/github/config.yaml`. That file is
+ * replaced wholesale: bind-mounted over in docker mode, shadowed via
  * TENX_INCLUDE_PATHS in local mode, listing the requested repos/branch/
  * folders. The token stays an `$=TenXEnv.get("GH_TOKEN")` reference in the
  * rendered YAML (never written to disk); the value travels as process env.
@@ -193,8 +192,8 @@ export interface CompileConfig {
    * link-only run (no source `inputs`, output folder pointed at a pre-compiled
    * units tree) scans 0 files, so without this the merge sees an empty
    * scan-state and writes an EMPTY library. The bundled compiler config never
-   * sets the option (it defaults `$?mergeExistingUnits=false`), so we pass it as
-   * a literal CLI option arg, see `compileAppArgs`. Leave unset/false for a
+   * sets the option (it defaults `$?mergeExistingUnits=false`), so it is
+   * passed as a literal CLI option arg, see `compileAppArgs`. Leave
    * normal source compile (only this run's freshly-scanned units are merged).
    */
   mergeExistingUnits?: boolean;
@@ -228,7 +227,7 @@ export interface CompileRunResult {
   image?: string;
   /** Detected flavor token from the local binary banner (local mode only). */
   flavor?: string | null;
-  /** True when we positively confirmed the compiler flavor before running. */
+  /** True when the compiler flavor was positively confirmed before running. */
   flavorVerified: boolean;
   exitCode: number;
   timedOut: boolean;
@@ -311,12 +310,10 @@ export class NotCompilerFlavorError extends Error {
 /**
  * Thrown when a local `tenx` is present but its flavor could NOT be determined.
  *
- * This used to be the fall-through case: `if (flavor && flavor !== 'cloud')`
- * skipped the gate whenever the probe came back null, so an unreadable banner
- * was treated as a confirmed compiler install. A flavor that cannot be read is
- * not evidence of the right flavor, and the runtime binary carries no `generate`
- * pipeline-unit factory, so proceeding buys a failure minutes later inside a
- * detached job instead of one here.
+ * A flavor that cannot be read is not evidence of the right flavor, and the
+ * runtime binary carries no `generate` pipeline-unit factory. Proceeding on an
+ * unreadable banner buys a failure minutes later inside a detached job instead
+ * of one here.
  */
 export class FlavorUndetectedError extends Error {
   readonly outcome: 'unreadable' | 'unrunnable';
@@ -364,13 +361,12 @@ export class HelmRepoAddError extends Error {
 /**
  * The compiler image the docker path runs when nothing is set.
  *
- * PINNED ON PURPOSE. This used to be `log10x/compiler-10x:latest`, and a
- * symbol library built from a mutable tag is not reproducible: the same
- * sources compiled a week apart could go through two different engines with
- * no record of which, because nothing in the emitted `.10x.json` units names
- * the image that produced them. `latest` moves on every engine release (it
- * was republished 2026-08-03 at the same digest as 1.1.39), so the drift is
- * silent and routine rather than exceptional.
+ * PINNED ON PURPOSE. A symbol library built from a mutable tag is not
+ * reproducible: the same sources compiled a week apart can go through two
+ * different engines with no record of which, because nothing in the emitted
+ * `.10x.json` units names the image that produced them. `latest` moves on
+ * every engine release, so the drift is silent and routine rather than
+ * exceptional.
  *
  * BUMP THIS with each engine release the MCP is validated against. Verify the
  * tag resolves before changing it:
@@ -385,15 +381,15 @@ const DEFAULT_IMAGE = 'log10x/compiler-10x:1.1.39';
 /**
  * Which image the docker compile path runs.
  *
- * Precedence is unchanged (LOG10X_COMPILER_IMAGE → LOG10X_TENX_IMAGE →
- * DEFAULT_IMAGE); what is new is the refusal. Docker mode deliberately skips
- * the flavor probe that local mode runs, so before this a runtime image here
- * failed ~4s into the container with `could not find pipeline unit factory
- * for: discoverSources` and a Jackson mapping chain — measured on
- * log10x/edge-10x:latest (1.1.38), exit code 1, zero units, no library. The
- * likely way to arrive there is setting the SHARED LOG10X_TENX_IMAGE to a
- * runtime image in order to change the run path, which drags the compiler
- * along with it; `LOG10X_RUNTIME_IMAGE` exists so that is no longer necessary.
+ * Precedence: LOG10X_COMPILER_IMAGE → LOG10X_TENX_IMAGE → DEFAULT_IMAGE.
+ * A runtime image here is refused. Docker mode deliberately skips the flavor
+ * probe that local mode runs, and an unrefused runtime image fails ~4s into
+ * the container with `could not find pipeline unit factory for:
+ * discoverSources` and a Jackson mapping chain: exit code 1, zero units, no
+ * library. The likely way to arrive there is setting the SHARED
+ * LOG10X_TENX_IMAGE to a runtime image in order to change the run path,
+ * which drags the compiler along with it; `LOG10X_RUNTIME_IMAGE` exists so
+ * that is not necessary.
  */
 export function resolveCompilerImage(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = (env.LOG10X_COMPILER_IMAGE || '').trim();
@@ -410,27 +406,27 @@ export function resolveCompilerImage(env: NodeJS.ProcessEnv = process.env): stri
 }
 /** The bundled @apps/compiler config's default inputPaths location inside the image. */
 const CONTAINER_SOURCES_PATH = '/etc/tenx/config/data/compile/sources';
-/** Where we mount the host output folder inside the container. */
+/** Where the host output folder is mounted inside the container. */
 const CONTAINER_OUTPUT_PATH = '/work/symbols';
-/** The baked github pull config our rendered overlay replaces (docker mode). */
+/** The baked github pull config the rendered overlay replaces (docker mode). */
 const CONTAINER_GITHUB_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/github/config.yaml';
 /** The github pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const GITHUB_PULL_CONFIG_REL = ['compile', 'pull', 'github', 'config.yaml'];
-/** The baked docker pull config our rendered overlay replaces (docker mode). */
+/** The baked docker pull config the rendered overlay replaces (docker mode). */
 const CONTAINER_DOCKER_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/docker/config.yaml';
 /** The docker pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const DOCKER_PULL_CONFIG_REL = ['compile', 'pull', 'docker', 'config.yaml'];
 /** compiler-10x's podman, symlinked at the docker default path. */
 const IN_IMAGE_DOCKER_COMMAND = '/usr/local/bin/docker';
-/** The baked helm pull config our rendered overlay replaces (docker mode). */
+/** The baked helm pull config the rendered overlay replaces (docker mode). */
 const CONTAINER_HELM_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/helm/config.yaml';
 /** The helm pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const HELM_PULL_CONFIG_REL = ['compile', 'pull', 'helm', 'config.yaml'];
-/** The baked artifactory pull config our rendered overlay replaces (docker mode). */
+/** The baked artifactory pull config the rendered overlay replaces (docker mode). */
 const CONTAINER_ARTIFACTORY_PULL_CONFIG = '/etc/tenx/config/pipelines/compile/pull/artifactory/config.yaml';
 /** The artifactory pull config's path relative to a TENX_INCLUDE_PATHS root (local mode). */
 const ARTIFACTORY_PULL_CONFIG_REL = ['compile', 'pull', 'artifactory', 'config.yaml'];
-/** Where we mount the shared helm home (repositories.yaml + index cache). */
+/** Where the shared helm home is mounted (repositories.yaml + index cache). */
 const CONTAINER_HELM_HOME = '/helm-home';
 
 // ── Public entrypoint ──────────────────────────────────────────────────────
@@ -683,9 +679,9 @@ async function writeLocalOverlays(cfg: CompileConfig, overlayDir: string): Promi
   if (helm) {
     await mkdir(join(overlayDir, ...HELM_PULL_CONFIG_REL.slice(0, -1)), { recursive: true });
     await writeFile(join(overlayDir, ...HELM_PULL_CONFIG_REL), renderHelmPullOverlay(helm), 'utf8');
-    // Local mode uses the host's own helm config, `helm_repos` are NOT
-    // auto-added here, so a bare `repo/chart` only resolves if the user has
-    // already `helm repo add`-ed it (OCI / URL chart refs always resolve).
+  // Local mode uses the host's own helm config, `helm_repos` are NOT
+  // auto-added here, so a bare `repo/chart` only resolves if the user has
+  // already `helm repo add`-ed it (OCI / URL chart refs always resolve).
   }
 
   const artifactory = cfg.inputs.find(
@@ -765,8 +761,8 @@ async function runDockerCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     return {
       mode: 'docker',
       image,
-      // The compiler image is compiler-flavor by contract, we don't pay a
-      // second container start to probe it. A LOG10X_TENX_IMAGE override that
+      // The compiler image is compiler-flavor by contract, so it does not pay
+      // a second container start to probe it. A LOG10X_TENX_IMAGE override that
       // points somewhere else is the operator's responsibility; @apps/compiler
       // will fail loudly there.
       flavor: undefined,
@@ -973,7 +969,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
 
   // Compiler-flavor gate. A positively-detected non-compiler flavor is a hard
   // refusal, and so is a flavor that cannot be read at all — see
-  // assertCompilerFlavor for why the old "proceed on null" branch was wrong.
+  // assertCompilerFlavor.
   const probe = await assertCompilerFlavor(binary);
 
   // Local mode can't bind-mount, so config injection rides a temp overlay
@@ -1028,7 +1024,7 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
 /**
  * Render the shadow `compile/scanners/config.yaml`. Because the shadow
  * REPLACES the shipped file (first match on the include path wins), it must
- * re-declare `outputSymbolFolder` too, we keep the shipped env-hook
+ * re-declare `outputSymbolFolder` too, keeping the shipped env-hook
  * expression verbatim so TENX_OUTPUT_SYMBOL_FOLDER still drives the output.
  * Source paths are single-quoted so Windows backslashes stay literal and the
  * engine doesn't treat them as `$=` expressions.
@@ -1206,8 +1202,8 @@ export function buildLocalIncludePaths(
 // ── Flavor detection ───────────────────────────────────────────────────────
 
 /**
- * How the flavor probe ended. `unrunnable` and `unreadable` are both "we do not
- * know", but they need different remediation, so they stay distinct rather than
+  * How the flavor probe ended. `unrunnable` and `unreadable` both mean the
+  * flavor is unknown, but they need different remediation, so they stay distinct rather than
  * collapsing into one null.
  */
 export type FlavorProbe =
@@ -1243,7 +1239,7 @@ export async function detectFlavor(binary: string): Promise<FlavorProbe> {
       const flavor = parseFlavor(r.stdout) ?? parseFlavor(r.stderr);
       if (flavor) return { outcome: 'parsed', flavor, raw: r.stdout || r.stderr };
     } catch {
-      // spawn failed for this flag; try the next one
+    // spawn failed for this flag; try the next one
     }
   }
 
@@ -1472,7 +1468,7 @@ export async function scanSymbolOutputs(
         if (st.size > 0) unitCount++;
         else emptyUnitCount++;
       } catch {
-        // race / vanished file, skip
+      // race / vanished file, skip
       }
     } else if (rel.endsWith('.10x.tar')) {
       const full = join(dir, rel);
@@ -1480,7 +1476,7 @@ export async function scanSymbolOutputs(
         const st = await stat(full);
         if (st.isFile()) libraries.push({ path: full, bytes: st.size });
       } catch {
-        // race / vanished file, skip
+      // race / vanished file, skip
       }
     }
   }

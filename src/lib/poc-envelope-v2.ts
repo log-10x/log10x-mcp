@@ -1273,7 +1273,7 @@ function buildActions(
 
   const sev = (p.severity || '').toUpperCase();
   // Shared with the report renderer and configure_engine's error tier via
-  // lib/severity-policy. WARN is error-class (was reducible until 2026-07-30).
+  // lib/severity-policy. WARN is error-class.
   const isError = isProtectedSeverity(sev);
   const isHotLoop = p.pctOfTotal >= 0.02;
   const isFrequent = p.pctOfTotal >= 0.01;

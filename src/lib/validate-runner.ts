@@ -105,17 +105,15 @@ export interface ValidateRunOptions {
 // Resolution order: explicit LOG10X_* override, then whatever install the host
 // actually has, via the shared resolver in dev-cli.
 //
-// These used to default to '/Users/talweiss/git/l1x-co/{config,modules}'. That is
-// one developer's home directory, and this package publishes to npm, so on every
-// other machine the default pointed at nothing. dev-cli already solves this
-// properly for the paste tools: TENX_MODULES+TENX_CONFIG, then TENX_HOME, then
-// per-OS install locations, then a clear error naming what to set. Reusing it
-// keeps one definition of "where is the engine installed" instead of two that
-// disagree.
+// The roots must NOT default to a developer's home-directory checkout:
+// this package publishes to npm, so such a default points at nothing on
+// every other machine. dev-cli already solves this for the paste tools:
+// TENX_MODULES+TENX_CONFIG, then TENX_HOME, then per-OS install locations,
+// then a clear error naming what to set. Reusing it keeps one definition
+// of "where is the engine installed" instead of two that disagree.
 //
-// The LOG10X_*_ROOT overrides are kept: pointing at a working checkout rather
-// than an install is a legitimate dev workflow, and it is what the old defaults
-// were really encoding.
+// The LOG10X_*_ROOT overrides exist because pointing at a working checkout
+// rather than an install is a legitimate dev workflow.
 function configRoot(): string {
   return process.env.LOG10X_TENX_CONFIG_ROOT || resolveInstallPaths().config;
 }
@@ -134,14 +132,13 @@ function symbolsPath(): string {
   //                                to <prefix>/etc/tenx/symbols)
   //   3. <config>/data/shared/symbols  the layout shipped in the config tree
   //
-  // This defaulted to '/Users/talweiss/eclipse-workspace/...', which is a
-  // developer's home directory in a package published to npm. Worse, the comment
-  // above configRoot in this same file states that the eclipse copies "should
-  // NOT be referenced by default from a tool that publishes structured
-  // diagnostics" — the file contradicted its own rule.
+  // The default must NOT be a developer's home-directory checkout in a
+  // package published to npm, and the comment above configRoot in this same
+  // file already states that the eclipse copies "should NOT be referenced by
+  // default from a tool that publishes structured diagnostics".
   //
-  // Deferring to TENX_SYMBOLS_PATH means a stock install is self-consistent for
-  // free: the engine and this tool read the same symbols.
+  // Deferring to TENX_SYMBOLS_PATH means a stock install is self-consistent
+  // for free: the engine and this tool read the same symbols.
   return (
     process.env.LOG10X_TENX_SYMBOLS_PATH ||
     process.env.TENX_SYMBOLS_PATH ||
@@ -244,7 +241,7 @@ async function cleanupMounted(paths: string[]): Promise<void> {
     try {
       await unlink(p);
     } catch {
-      // File may have been deleted already; ignore.
+    // File may have been deleted already; ignore.
     }
   }
 }
@@ -287,7 +284,7 @@ function parseStdout(stdout: string): Pick<ValidateRunResult, 'events' | 'templa
           continue;
         }
       } catch {
-        // fall through to consoleLines
+      // fall through to consoleLines
       }
     }
     consoleLines.push(line);

@@ -482,7 +482,7 @@ async function formatResults(
   // failure / timeout the field stays absent — gates downstream render.
   // The resolved hash is also promoted to the summary's top-level
   // `pattern_hash` so the catalog-identity-handoff carries through on
-  // the raw-line / name-input path (which previously dropped the hash).
+  // the raw-line / name-input path, which otherwise drops the hash.
   let offloadStatus: EventLookupSummary['offload_status'];
   let summaryPatternHash: string = resolvedFromHash ?? '';
   try {
@@ -685,7 +685,7 @@ async function formatResults(
       }
     }
   } catch {
-    // AI analysis is optional — skip silently
+  // AI analysis is optional — skip silently
   }
   }
 

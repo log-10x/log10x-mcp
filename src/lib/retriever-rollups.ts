@@ -85,8 +85,8 @@ export function computeSummaryRollups(summaries: readonly RetrieverSummary[]): S
 
     const rec = row as unknown as Record<string, unknown>;
     // The engine emits enrichment dimensions as ARRAYS in the qrs/ rows
-    // (e.g. severity_level:["DEBUG"], tenx_user_service:[]) — verified live
-    // on the otel-demo. Coverage = the deployment REGISTERED the dimension
+    // (e.g. severity_level:["DEBUG"], tenx_user_service:[]).
+    // Coverage = the deployment REGISTERED the dimension
     // (the key is present on the row), independent of whether this group's
     // value is empty; an empty value buckets as 'unknown', exactly as the
     // event-derived path does, so the two bases stay consistent.

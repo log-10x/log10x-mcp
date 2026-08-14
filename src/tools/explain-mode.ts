@@ -367,7 +367,7 @@ export async function executeExplainMode(args: {
         destinationResolutionSource = 'auto_detected';
       }
     } catch {
-      // auto-detect best-effort; fall through to env.analyzer
+    // auto-detect best-effort; fall through to env.analyzer
     }
   }
 
@@ -401,8 +401,8 @@ export async function executeExplainMode(args: {
     destination,
   );
   // Validate destination is a known SIEM id for the unused-import shake — the
-  // typed lookup is no longer load-bearing for ratePerGb itself, but we keep
-  // the assertion so a typo in args.destination still surfaces.
+  // typed lookup is not load-bearing for ratePerGb itself, but the assertion
+  // keeps a typo in args.destination surfacing.
   if (destination) {
     void (destination.toLowerCase() as SiemId);
     void COST_MODEL_BY_DESTINATION;

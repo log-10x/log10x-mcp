@@ -287,16 +287,16 @@ export const UNRESOLVABLE_PATTERN_PREFIX = 'Pattern name not resolvable against 
  * A Reporter-named pattern CANNOT be matched against the offload archive, and
  * every previous attempt to do so failed silently.
  *
- * This function used to emit `tenx_user_pattern == "<name>"`. **That field does
- * not exist.** It appears zero times across the engine, the modules tree and
+ * Do NOT emit `tenx_user_pattern == "<name>"`. **That field does not
+ * exist.** It appears zero times across the engine, the modules tree and
  * pipeline-extensions. It is a plausible-looking member of a real family
  * (`tenx_user_service`, `tenx_user_process` do exist) that the product never
- * stamps, so every name-scoped archive query returned BLOOM_REJECTED_ALL with
- * 0 of 40 blobs matched, i.e. a confident empty answer.
+ * stamps, so a name-scoped archive query built on it returns
+ * BLOOM_REJECTED_ALL with 0 of 40 blobs matched — a confident empty answer.
  *
  * Nor is there a working field to substitute. The Bloom index is built over
- * tokens literally present in the archived bytes, plus template hashes.
- * Measured against the demo environment, same window:
+ * tokens literally present in the archived bytes, plus template hashes. On
+ * the demo environment, one window:
  *
  *   includes(text, "FU1__vh8hbY")                      ->  608   in the text
  *   tenx_hash == "KJrTvZAaIhI"                         -> 1025   a template hash
@@ -350,8 +350,8 @@ export function buildPatternSearch(pattern: string): string {
  * read from the stored envelope (initialize/message/message-template.js stamps it
  * from the group's symbolSequence). Multi-line grouping collapses many
  * receiver-stamped lines into ONE read-time identity, so the field value differs
- * from the per-line hash the Reporter published. Measured against the demo
- * environment, same window, same archive:
+ * from the per-line hash the Reporter published. On the demo environment,
+ * one window, one archive:
  *
  *   metrics (top_patterns): FU1__vh8hbY 57.8%   NiDD7PpZw48 28.6%   +2 more
  *   archive (read-time):    KJrTvZAaIhI  <- ALL 1,025 events carry this one value
@@ -871,7 +871,7 @@ function authHeaders(env: EnvConfig): Record<string, string> {
  * preserved verbatim (they require server-side evaluation).
  *
  * Filed upstream as a retriever engine bug. The client-side conversion below
- * is the workaround, not the fix.
+ * is a workaround.
  */
 export function normalizeTimeExpression(expr: string): string {
   const trimmed = expr.trim();
@@ -879,8 +879,8 @@ export function normalizeTimeExpression(expr: string): string {
 
   // The engine expects runtime-evaluated JS expressions prefixed with `$=`
   // (the template-language marker). Without the prefix, the engine treats
-  // the string as a literal and fails to parse. Verified live on the
-  // otel-demo env: CronJob-dispatched query bodies use `$=now("-5m")` /
+  // the string as a literal and fails to parse. On the otel-demo env,
+  // CronJob-dispatched query bodies use `$=now("-5m")` /
   // `$=now()` and run correctly; the same bodies without the prefix get
   // silently dropped (client-side root cause).
   if (trimmed === 'now') return '$=now()';
@@ -1051,8 +1051,8 @@ interface S3ListEntry {
 
 // NOTE on pagination: `aws s3api list-objects-v2` AUTO-PAGINATES by default —
 // the CLI follows NextContinuationToken internally and merges all pages into
-// one Contents array (verified live: 54,597 keys returned on a single call vs
-// 1,000 with --no-paginate). Do NOT add manual token loops here. The real
+// one Contents array (54,597 keys returned on a single call vs 1,000 with
+// --no-paginate). Do NOT add manual token loops here. The real
 // ceiling is maxBuffer: ~150 bytes/key JSON means 32 MB covers ~200k keys.
 async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
   try {
@@ -1273,8 +1273,8 @@ function parseJsonl(content: string): RetrieverEvent[] {
       if (!hasRealEventShape) continue;
       events.push(parsed as RetrieverEvent);
     } catch {
-      // Skip unparseable lines — the worker may have written a partial
-      // record on the way down; the next poll will pick up the retry.
+    // Skip unparseable lines — the worker may have written a partial
+    // record on the way down; the next poll will pick up the retry.
     }
   }
   return events;
@@ -1289,7 +1289,7 @@ function parseJsonl(content: string): RetrieverEvent[] {
  * depending on the input adapter. Magnitude-based detection is the only
  * portable approach.
  *
- * Ranges (today's epoch ≈ 1.77 × 10^X):
+ * Ranges (a present-day epoch ≈ 1.77 × 10^X):
  *   - seconds: ~1.77e9   (10 digits)
  *   - millis:  ~1.77e12  (13 digits)
  *   - micros:  ~1.77e15  (16 digits)
@@ -1297,7 +1297,7 @@ function parseJsonl(content: string): RetrieverEvent[] {
  *
  * Boundaries are placed at 10^10, 10^13, 10^16 — one decade below the
  * current epoch in each unit so 13-digit millis values like 1776851170107
- * (2026-04-22) are correctly classified as millis instead of falsely
+ * are correctly classified as millis instead of falsely
  * matching the looser `>1e12` micros boundary and dividing by 1000 to
  * land in 1970. Without the decade-below boundary, the entire bucket
  * histogram aliases to 1970 because 13-digit millis falsely match the
@@ -1367,12 +1367,12 @@ async function waitForDoneMarker(
         try {
           return JSON.parse(body) as DoneMarkerBody;
         } catch {
-          // Partial read; retry next poll.
+        // Partial read; retry next poll.
         }
       }
 
     } catch {
-      // NoSuchKey until the marker lands.
+    // NoSuchKey until the marker lands.
     }
 
     await sleep(pollMs);
@@ -1430,16 +1430,15 @@ async function waitForMarkerStability(
   // gap, or we declare completion mid-flight and silently return a partial
   // result set.
   //
-  // Measured on the demo Lambda retriever (20-way fan-out, reserved
-  // concurrency 10, 6144 MB): markers for a single query land over an 8-10 s
-  // span with inter-marker gaps of 0-5 s. The previous heuristic — two
-  // consecutive identical polls at the 1500 ms default, i.e. a ~3 s quiet
-  // window — is SHORTER than the observed 5 s worst-case gap, so it returned
-  // early and non-deterministically: four runs of the same query recovered
-  // 4, 9, 10 and 10 of 10 result blobs (42-100% recall) while all four
-  // reported partial_results: false.
+  // On the demo Lambda retriever (20-way fan-out, reserved concurrency 10,
+  // 6144 MB) markers for a single query land over an 8-10 s span with
+  // inter-marker gaps of 0-5 s. A heuristic of two consecutive identical
+  // polls at the 1500 ms default — a ~3 s quiet window — is SHORTER than
+  // that 5 s worst-case gap, so it returns early and non-deterministically:
+  // four runs of one query recovered 4, 9, 10 and 10 of 10 result blobs
+  // (42-100% recall) while all four reported partial_results: false.
   //
-  // 12 s gives >2x headroom over the measured worst case. Override with
+  // 12 s gives >2x headroom over the worst-case gap. Override with
   // LOG10X_RETRIEVER_QUIET_MS when a deployment's fan-out is wider or slower.
   const quietMs = Math.max(
     pollMs * 2,
@@ -1549,11 +1548,11 @@ export async function runRetrieverQuery(
     options?.timeoutMs ?? parseInt(process.env.LOG10X_RETRIEVER_TIMEOUT_MS || '180000', 10);
 
   // Minimal body format that matches the shape the engine's query-handler
-  // actually expects. Previously the MCP sent `target`, `readContainer`,
-  // `indexContainer`, `objectStorageName`, `processingTime`, `resultSize`
-  // fields which the engine silently ignored, but the missing `name` field
-  // caused the query-handler to drop the request without any log trace. The
-  // `name` field becomes `queryName` in the engine override chain and is used
+  // actually expects. Sending `target`, `readContainer`, `indexContainer`,
+  // `objectStorageName`, `processingTime`, `resultSize` is harmless (the
+  // engine ignores them), but omitting `name` makes the query-handler drop
+  // the request without any log trace. The `name` field becomes `queryName`
+  // in the engine override chain and is used
   // as the input stream handle inside the pipeline.
   //
   // Fields that belong in the body:

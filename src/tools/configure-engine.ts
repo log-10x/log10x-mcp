@@ -30,17 +30,14 @@
  * Tier defaults are the other half of that contract, and they are caller-
  * configurable via `action_defaults`:
  *   - audit  → always `pass` (not configurable)
- *   - error  → `pass` by default. Severity error/warn/warning is kept
- *              verbatim unless the caller sets `action_defaults.error`,
- *              which is what the POC report's recommendation rules promise
- *              (lib/poc-report-renderer.ts). Until 2026-07-30 this branch
- *              hardcoded `sample`, which contradicted that promise and
- *              credited the plan with a ~90% shed on error-tier bytes that
- *              no emitted artifact performs — see the note on cap semantics
- *              in renderCsvDiff for why the per-pattern action never
- *              reaches the engine.
- *   - debug / synthetic → `drop` by default. These two ARE lossy defaults;
- *              a caller who needs them lossless sets `action_defaults`.
+  *   - error  → `pass` by default. Severity error/warn/warning is kept
+  *              verbatim unless the caller sets `action_defaults.error`,
+  *              which is the contract the POC report's recommendation
+  *              rules render (lib/poc-report-renderer.ts). See the note on
+  *              cap semantics in renderCsvDiff for why the per-pattern
+  *              action never reaches the engine.
+  *   - debug / synthetic → `drop` by default. These two ARE lossy defaults;
+  *              a caller who needs them lossless sets `action_defaults`.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
@@ -59,11 +56,9 @@
  * tenx_hash, severity_level). The PR machinery is the same `gh` pattern
  * configure_regulator already uses.
  *
- * NOTE on graceful not-configured: this branch does not yet have the
- * `NotConfiguredError` framework from `feat/graceful-not-configured`. We
- * keep the existing pattern (CustomerMetricsNotConfiguredError + structured
- * envelopes mirroring configure-regulator); the wrapper rebases trivially
- * onto the framework once it lands.
+  * Not-configured states return structured envelopes
+  * (CustomerMetricsNotConfiguredError + the shapes configure_regulator
+  * uses) rather than throwing.
  */
 
 import { spawn } from 'node:child_process';
@@ -366,7 +361,7 @@ export const configureEngineSchema = {
   // ── auto-apply (industry-standard MCP write tool surface) ──
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
   // MCPs converged on auto-execute as the default for write-capable servers.
-  // We follow that convention with two opt-outs:
+  // This server follows that convention with two opt-outs:
   //   (1) `auto_apply: false` per-call (e.g. for evaluation customers, dry-run
   //       audits, or running outside an approval-capable MCP client).
   //   (2) `read_only: true` per-call (or the server's --read-only flag, which
@@ -523,10 +518,10 @@ interface ConfigureEngineData {
   destination?: SiemId;
   target_percent?: number;
   /**
-   * When phase='resolution_prompt' the tool now discovers candidate
-   * containers from the metrics backend and surfaces them here so the
-   * agent can re-call without an external label-discovery hop.
-   */
+     * When phase='resolution_prompt' the tool discovers candidate
+     * containers from the metrics backend and surfaces them here so the
+     * agent can re-call without an external label-discovery hop.
+     */
   container_candidates?: Array<{
     k8s_container: string;
     bytes_in_window: number;
@@ -690,11 +685,9 @@ export async function executeConfigureEngine(
 ): Promise<string | StructuredOutput> {
   // ── Aggregated preflight ──
   // Surface ALL missing required-for-this-mode args in one envelope
-  // instead of bouncing the caller back per-arg (the prior behavior cost
-  // 3-4 round-trips before the first useful response). The detailed
-  // single-arg messages stay in place below as a safety net for partial
-  // calls; the preflight just shortcuts the common "first attempt with
-  // no scoping" case.
+  // instead of bouncing the caller back per-arg. The detailed single-arg
+  // messages stay in place below as a safety net for partial calls; the
+  // preflight shortcuts the common "first attempt with no scoping" case.
   if (args.mode !== 'refresh') {
     const missing: string[] = [];
     if (args.target_percent === undefined && args.budget_usd === undefined) {
@@ -764,8 +757,8 @@ export async function executeConfigureEngine(
   const target = await resolveTarget(args);
   if ('error' in target) {
     // Strip any `# configure_engine — ` heading prefix that renderError()
-    // may have prepended before we attach "configure_engine refused: ".
-    // Without this, the hint bleeds a markdown H1 into the chassis headline.
+    // may have prepended ahead of "configure_engine refused: ". Without this,
+    // the hint bleeds a markdown H1 into the chassis headline.
     const targetErrHint = sanitizeHeadline(firstLine(target.error));
     // Nudge log10x_set_gitops_repo when the hint signals a missing gitops
     // repo. log10x_set_gitops_repo writes gitops.repo to envs.json;
@@ -779,9 +772,7 @@ export async function executeConfigureEngine(
               // delivery="stdout_only" — returns the proposed per-pattern plan
               // inline, no gitops repo and no write required. Carries the
               // caller's full original intent (budget_usd, action_defaults, …)
-              // forward via the args spread. Previously the only offered action
-              // was set_gitops_repo with empty args, a dead-end for anyone who
-              // just wanted to see the plan.
+              // forward via the args spread.
               tool: 'log10x_configure_engine',
               args: { ...args, delivery: 'stdout_only' },
               reason:
@@ -825,9 +816,9 @@ export async function executeConfigureEngine(
   if (args.from_poc_id) {
     const pocConsumed = await tryConsumePocSnapshot(args, target.resolved);
     if (pocConsumed) return pocConsumed;
-    // Fall through to live-derivation if the snapshot is absent /
-    // expired / has no cap_csv — surfaced as a warning in the envelope
-    // returned by the live path below.
+  // Fall through to live-derivation if the snapshot is absent /
+  // expired / has no cap_csv — surfaced as a warning in the envelope
+  // returned by the live path below.
   }
 
   // configure_engine queries the LOG10X metrics backend (where the engine's
@@ -835,10 +826,9 @@ export async function executeConfigureEngine(
   // metrics backend. fetchPerPatternBytes uses `queryInstant(env, ...)` from
   // src/lib/api.ts which routes to env.metricsBackend (Log10xBackend or the
   // configured equivalent). The customer backend (LOG10X_CUSTOMER_METRICS_URL)
-  // is for cross-pillar tools that join log patterns to infrastructure metrics
-  // — not relevant here. Prior version mistakenly resolved the customer
-  // backend and queried `all_events_summaryBytes_total` against it, which
-  // returned empty (metric doesn't exist there) or timed out (URL unreachable).
+  // serves cross-pillar tools that join log patterns to infrastructure
+  // metrics; `all_events_summaryBytes_total` does not exist there, so a query
+  // against it returns empty or times out.
   if (!env) {
     return buildChassisErrorEnvelope({
       tool: 'log10x_configure_engine',
@@ -855,12 +845,11 @@ export async function executeConfigureEngine(
 
   // Phase 1: container resolution.
   if (!args.containers || args.containers.length === 0) {
-    // Prior code returned containers:[] + actions:[], a dead-end
-    // envelope that told the agent "pick containers" but gave it
-    // nothing to pick from.
     // Discover the candidate containers from the metrics backend so
     // the agent can re-call with a concrete list (or, when the env
     // has a single container, suggest it directly in the headline).
+    // An empty containers:[] + actions:[] envelope is a dead end: it
+    // tells the agent to pick containers without offering any.
     const observationDays = args.observationDays ?? 7;
     const metricsEnv = await resolveMetricsEnv(env);
     const envClause = metricsEnv ? `${LABELS.env}="${promEscape(metricsEnv)}",` : '';
@@ -913,13 +902,12 @@ export async function executeConfigureEngine(
             // Propagate the caller's FULL original intent, overriding only the
             // two fields this resolution step actually resolves: destination
             // (to the resolved value) and containers (to the discovered set).
-            // The prior allow-list (service/destination/containers/target_percent/
-            // auto_apply/delivery) silently DROPPED budget_usd, action_defaults,
-            // es_pruned, signal_floor, read_only, reduction, tier_overrides, etc.
-            // So an agent that re-called with this action verbatim lost the cost
-            // model entirely — e.g. budget_usd=3000 gone, hitting the
-            // cross-validation refusal "specify target_percent or budget_usd".
-            // Spreading args preserves every caller-supplied knob.
+            // An allow-list here silently drops budget_usd, action_defaults,
+            // es_pruned, signal_floor, read_only, reduction, tier_overrides and
+            // the rest, so an agent re-calling with the action verbatim loses
+            // the cost model and hits the cross-validation refusal "specify
+            // target_percent or budget_usd". Spreading args preserves every
+            // caller-supplied knob.
             args: {
               ...args,
               destination: target.resolved.destination,
@@ -988,8 +976,7 @@ export async function executeConfigureEngine(
   // $/GB, not the destination list price. Resolve the ingest rate locally via
   // the shared chain (caller arg → envs.json analyzerCost → LOG10X_ANALYZER_COST
   // → destination list); NO log10x account-API call. Storage stays at list (no
-  // per-customer storage rate), matching baseline. When no customer rate is
-  // configured this is identical to the prior model.ingest_per_gb behavior.
+  // per-customer storage rate), matching baseline.
   const resolvedIngest = resolveRate({}, env, destination);
   const ingestPerGb =
     resolvedIngest.source === 'customer_supplied'
@@ -999,7 +986,6 @@ export async function executeConfigureEngine(
   // projections match current_monthly_usd (which uses ingestPerGb). Without it,
   // projections fall back to destination LIST price while current uses the
   // customer rate, so dollars% and bytes% diverge (a 56-point gap on the demo).
-  // estimate_savings already does this; configure_engine did not.
   const customerRate =
     resolvedIngest.source === 'customer_supplied'
       ? { ingest_per_gb_override: resolvedIngest.rate_per_gb as number }
@@ -1099,15 +1085,15 @@ export async function executeConfigureEngine(
 
   // If destination is no-op for compact and standard default is compact, fall
   // back to the destination's preferred level-1 action (per
-  // DEFAULT_ACTION_BY_DESTINATION) rather than the historical `drop`. This
-  // gives Datadog → tier_down, Splunk-no-app → offload, etc. Drop is only
-  // chosen when the destination table explicitly lists it (none currently
-  // do — drop remains an explicit user override).
+  // DEFAULT_ACTION_BY_DESTINATION) rather than to `drop`. This gives
+  // Datadog → tier_down, Splunk-no-app → offload, etc. Drop is only chosen
+  // when the destination table explicitly lists it (none currently do — drop
+  // remains an explicit user override).
   //
-  // Bug A: the "fell back to X" warning is NOT pushed here — at this point
-  // we only know the mapping was proposed, not that any row survived the
-  // greedy target-met downgrade carrying that action. The warning is
-  // pushed after the solver loop, gated on standardFallbackSurvivors > 0.
+  // The "fell back to X" warning is NOT pushed here: at this point only the
+  // proposed mapping is known, not whether any row survived the greedy
+  // target-met downgrade carrying that action. The warning is pushed after
+  // the solver loop, gated on standardFallbackSurvivors > 0.
   let effectiveStandardAction: Action = standardAction;
   const standardCompactNoOpFallbackFired =
     standardAction === 'compact' && model.compact_mode === 'no-op';
@@ -1144,10 +1130,9 @@ export async function executeConfigureEngine(
   // Run the greedy solver.
   const rows: PerPatternRow[] = [];
   const actionsUsed: Partial<Record<Action, number>> = {};
-  // Track per-tier classification counts so we can diagnose unused
-  // `action_defaults` after the loop. A caller-supplied default that
-  // maps onto a tier with zero patterns silently no-ops unless we
-  // surface it.
+  // Per-tier classification counts, for diagnosing unused `action_defaults`
+  // after the loop. A caller-supplied default that maps onto a tier with
+  // zero patterns silently no-ops unless it is surfaced.
   const patternsByTier: Record<Tier, number> = {
     audit: 0,
     error: 0,
@@ -1171,9 +1156,9 @@ export async function executeConfigureEngine(
   let remainingBytesToShed = targetShedBytes;
   let floorCount = 0;
   let coveredBytes = 0;
-  // Bug A counter: standard-tier rows whose final action is the
-  // destination-compat fallback (effectiveStandardAction) AND survived
-  // the target-met downgrade. Drives the bypassHint phrasing below.
+  // Standard-tier rows whose final action is the destination-compat
+  // fallback (effectiveStandardAction) AND survived the target-met
+  // downgrade. Drives the bypassHint phrasing below.
   let standardFallbackSurvivors = 0;
 
   for (const c of candidates) {
@@ -1218,15 +1203,10 @@ export async function executeConfigureEngine(
     // Suppressed when respect_default_action=true so the configured
     // defaults fire on every matching row regardless of target.
     //
-    // `audit` is exempt only because it is unconditionally `pass` anyway.
-    // The error tier is NOT exempt any more. The old exemption existed to
-    // protect a hardcoded `sample` from being undone; now that the tier
-    // takes a caller-configured default (`pass` unless opted out of), an
-    // error row that IS reducing is an ordinary row and gets downgraded
-    // like every other tier once the target is met. The old
-    // `action !== 'sample'` clause went with it: a caller-pinned `sample`
-    // on any tier is now downgrade-eligible too, which is what every other
-    // caller-pinned action already did.
+    // `audit` is the only exempt tier, and only because it is
+    // unconditionally `pass` anyway. Every other tier — including error,
+    // and including a caller-pinned `sample` — is downgrade-eligible once
+    // the target is met.
     if (
       action !== 'pass' &&
       floorHit === undefined &&
@@ -1256,7 +1236,7 @@ export async function executeConfigureEngine(
       }
     }
 
-    // Bug A: track standard-tier survivors whose final action is the
+    // Track standard-tier survivors whose final action is the
     // destination-compat fallback (`effectiveStandardAction`). When the
     // requested standard action is a no-op on this destination (e.g.
     // compact on cloudwatch → tier_down), the fallback mapping fires
@@ -1336,10 +1316,8 @@ export async function executeConfigureEngine(
       saved_dollars_monthly: roundCents(
         Math.max(0, baselineExpectedUsd - (range.expected.total_dollars ?? 0))
       ),
-      // total_dollars is now nullable on SavingsProjection — null means the
-      // destination has no list rate and no customer override. Current
-      // surface still emits a number; full rate_source propagation lands in
-      // the configure-engine patch.
+      // total_dollars is nullable on SavingsProjection — null means the
+      // destination has no list rate and no customer override.
       projected_monthly_usd_low: roundCents(range.low.total_dollars ?? 0),
       projected_monthly_usd_expected: roundCents(range.expected.total_dollars ?? 0),
       projected_monthly_usd_high: roundCents(range.high.total_dollars ?? 0),
@@ -1354,17 +1332,17 @@ export async function executeConfigureEngine(
     }
   }
 
-  // Bug A: now that the solver has run, emit the destination-compat
-  // fallback warning IF and only IF rows actually survived carrying the
-  // fallback action. When zero rows survived (every standard-tier row
-  // was demoted to pass by the target-met downgrade), we say so —
-  // claiming the fallback fired without survivors gives the agent a
-  // misleading mental model of the policy actually deployed.
+  // Emit the destination-compat fallback warning IF and only IF rows
+  // actually survived carrying the fallback action. When zero rows
+  // survived (every standard-tier row was demoted to pass by the
+  // target-met downgrade), the warning says so — claiming the fallback
+  // fired without survivors gives the agent a misleading mental model of
+  // the policy actually deployed.
   //
-  // Phase 2: under auto-recommend the per-service resolver already chose each
-  // container's no-op-compact fallback and explains it in per_service_summary,
-  // so this env-wide warning would double-report. Only fire it on the legacy
-  // single-action path (auto_recommend=false).
+  // Under auto-recommend the per-service resolver already chose each
+  // container's no-op-compact fallback and explains it in
+  // per_service_summary, so this env-wide warning would double-report.
+  // Only fire it on the single-action path (auto_recommend=false).
   if (standardCompactNoOpFallbackFired && !autoRecommend) {
     if (standardFallbackSurvivors > 0) {
       warnings.push(
@@ -1375,24 +1353,24 @@ export async function executeConfigureEngine(
         `\`compact\` is a no-op on ${destination}; the destination-compat fallback would map standard-tier rows to \`${effectiveStandardAction}\`, but all ${patternsByTier.standard} standard-tier row${patternsByTier.standard === 1 ? '' : 's'} were downgraded to \`pass\` because the target was already met by rows earlier in the greedy walk. No fallback action survived in the final policy.`
       );
     }
-    // (No warning when patternsByTier.standard === 0 — the
-    // unused-default block below already covers it.)
+  // (No warning when patternsByTier.standard === 0 — the
+  // unused-default block below already covers it.)
   }
 
   // ── action_defaults resolution diagnostic ──
-  // Build a structured record of which caller-requested defaults actually
-  // drove row output vs were swallowed. Two failure modes:
+  // A structured record of which caller-requested defaults actually drove
+  // row output vs were swallowed. Two failure modes:
   //   1. Tier had zero candidate patterns → `unused_defaults`.
   //   2. Tier had patterns but every row that would have taken the default
   //      was overridden (floor pin, target-met downgrade, or the
   //      destination-compat fallback for the standard tier) →
   //      `defined_but_unused_defaults`. Without this, `effective.standard`
   //      reads as `offload` even when zero rows took it (the action_mix
-  //      proves the contradiction) — a false positive the agent can't
-  //      detect structurally. We also null out the corresponding
-  //      `effective` field in that case.
+  //      proves the contradiction) — a false positive the agent cannot
+  //      detect structurally. The corresponding `effective` field is
+  //      nulled out in that case.
   // Audit is the only tier with a hardcoded action; error/standard/debug/
-  // synthetic are caller-configurable, so those are the tiers we surface as
+  // synthetic are caller-configurable, so those are the tiers surfaced as
   // potentially-unused. Prose warnings still fire so non-structured
   // consumers see the signal.
   const totalPatternsClassified =
@@ -1503,7 +1481,7 @@ export async function executeConfigureEngine(
       // Null when zero rows took the default (either tier was empty or every
       // candidate row was overridden by a floor / target-met downgrade / the
       // destination-compat fallback). Reading the requested action here when
-      // nothing actually applied it was the Fix-A false positive.
+      // nothing actually applied it is a false positive.
       error: appliedDefaultByTier.error > 0 ? errorAction : null,
       standard: appliedDefaultByTier.standard > 0 ? effectiveStandardAction : null,
       debug: appliedDefaultByTier.debug > 0 ? debugAction : null,
@@ -1554,10 +1532,10 @@ export async function executeConfigureEngine(
     { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
   );
 
-  // The cap CSV is now the single engine-fed file: each cap row carries the
+  // The cap CSV is the single engine-fed file: each cap row carries the
   // action folded into the value (`container,<bytes>:<action>`), so the
-  // gitops PR and the kubectl ConfigMap both deliver only caps.csv. The
-  // legacy action-intent.json / actions.csv side-files are no longer written.
+  // gitops PR and the kubectl ConfigMap both deliver only caps.csv. No
+  // action-intent.json / actions.csv side-file is written.
 
   const prCommand =
     !feasible || targetMetByCurrent
@@ -1947,11 +1925,9 @@ function buildSummaryPayload(params: {
   // unified diff (lines starting with `+` that aren't the header).
   // When the gitops repo is not configured (kubectl_configmap /
   // stdout_only delivery, or unset `gitops.repo` in envs.json) the
-  // resolved repo is an empty string — falling through to the unguarded
-  // template produced "Opens a PR against  on branch main", a literal
-  // double-space gap. We now surface the not-configured signal instead
-  // of pretending a PR will open. checks.warnings[] still
-  // carries the structured signal.
+  // resolved repo is an empty string; the summary must surface that
+  // not-configured signal rather than render "Opens a PR against  on
+  // branch main". checks.warnings[] still carries the structured signal.
   let prCommandSummary: string;
   if (!prCommand) {
     prCommandSummary = data.checks?.feasible === false
@@ -2129,18 +2105,18 @@ async function tryConsumePocSnapshot(
     const ns = args.kubectl_namespace ?? 'default';
     const result = await applyViaKubectlConfigMap(newCsv, cmName, ns);
     applied = { ...result, delivery: 'kubectl_configmap' };
-    // POC path: commitment persistence skipped here. The POC's renderInput
-    // doesn't carry baseline_monthly_bytes/_usd in the format the
-    // CommitmentRecord requires; wiring this end-to-end is a follow-on
-    // once the POC envelope surfaces the same baseline fields.
+  // POC path: commitment persistence skipped here. The POC's renderInput
+  // doesn't carry baseline_monthly_bytes/_usd in the format the
+  // CommitmentRecord requires; wiring this end-to-end is a follow-on
+  // once the POC envelope surfaces the same baseline fields.
   } else if (shouldApply && prCommand) {
     requireWriteAccess(
       'opens a GitHub PR against the gitops repo (gh CLI) to modify the cap-CSV at pipelines/run/receive/rate/caps.csv'
     );
     const result = await applyViaGh(prCommand);
     applied = { ...result, delivery: 'gitops' };
-    // Same POC-path constraint as above — commitment persistence requires
-    // baseline data the snap doesn't carry today.
+  // Same POC-path constraint as above — commitment persistence requires
+  // baseline data the snap doesn't carry today.
   }
 
   const warnings: string[] = [];
@@ -2212,11 +2188,11 @@ async function tryConsumePocSnapshot(
       .split('\n')
       .filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
     const changeNote = removals > 0 ? `${additions} additions and ${removals} changes` : `${additions} additions`;
-    // Guard the unguarded template: when the gitops repo is not
-    // configured (kubectl_configmap / stdout_only delivery, or unset
-    // `gitops.repo` in envs.json) `resolved.gitops_repo` is the
-    // back-compat empty-string fallback from resolveTarget, which used to
-    // render as "Opens a PR against  on branch main" (two-space gap).
+    // When the gitops repo is not configured (kubectl_configmap /
+    // stdout_only delivery, or unset `gitops.repo` in envs.json)
+    // `resolved.gitops_repo` is the back-compat empty-string fallback from
+    // resolveTarget. Guard the template so it does not render "Opens a PR
+    // against  on branch main".
     let prCommandSummary: string;
     if (!prCommand) {
       prCommandSummary = 'POC snapshot reported feasibility short of target; no PR command rendered.';
@@ -2385,7 +2361,7 @@ async function resolveTarget(
       envId = active.envId;
     }
   } catch {
-    // non-fatal — fall through to snapshot / explicit args / env var
+  // non-fatal — fall through to snapshot / explicit args / env var
   }
   if (!envId && typeof process.env.LOG10X_ENV_ID === 'string' && process.env.LOG10X_ENV_ID) {
     envId = process.env.LOG10X_ENV_ID;
@@ -2412,7 +2388,7 @@ async function resolveTarget(
         }
       }
     } catch {
-      // non-fatal — fall through to snapshot / explicit args / "not resolved"
+    // non-fatal — fall through to snapshot / explicit args / "not resolved"
     }
   }
 
@@ -2946,8 +2922,8 @@ export function renderCsvDiff(
   // ONE entry per service: `<bytes>:<action>:<reason>`. The cap (bytes) is the
   // trigger; the action (folded in) is the disposition of the over-budget
   // slice. The engine reads BOTH from this single file — there is no sibling
-  // actions.csv / action-intent.json to desync, go missing (a missing action
-  // file crashed the receiver at init), or lag (silently defaulting to drop).
+  // actions.csv / action-intent.json to desync, to go missing (the receiver
+  // fails at init without it), or to lag (silently defaulting to drop).
   //
   // KEY BINDING: The engine's rate module reads caps.csv keyed by the
   // value of `rateReceiverContainerField` (defaults to `k8s_container`).
@@ -2964,9 +2940,9 @@ export function renderCsvDiff(
   // budget-derived cap.
   // Per-container cap = the SUM of that container's OWN per-pattern caps
   // (each from computeCapBytesPerWindow under its pattern's action), NOT a
-  // mean across every container's patterns. Averaging produced a number that
-  // matched no real budget (a pass-heavy service got a near-full cap, an
-  // offload-heavy one ~0). Build the per-container sums once.
+  // mean across every container's patterns. A mean matches no real budget:
+  // it hands a pass-heavy service a near-full cap and an offload-heavy one
+  // ~0. Build the per-container sums once.
   const capSumByContainer = new Map<string, number>();
   for (const r of rows) {
     if (!r.container) continue;
@@ -3444,7 +3420,7 @@ async function applyViaKubectlConfigMap(
         try {
           child.kill('SIGKILL');
         } catch {
-          // ignore
+        // ignore
         }
         resolve({ ok: false, error: 'kubectl apply timed out after 30s' });
       }
@@ -3499,7 +3475,7 @@ async function readConfigMapData(
       try {
         child.kill('SIGKILL');
       } catch {
-        // ignore
+      // ignore
       }
       resolve({});
     }, 15_000);
@@ -3602,7 +3578,7 @@ async function applyViaGh(prCommand: string): Promise<{
         try {
           child.kill('SIGKILL');
         } catch {
-          // ignore — process may already be gone
+        // ignore — process may already be gone
         }
         resolve({ ok: false, error: 'apply timed out after 60s' });
       }

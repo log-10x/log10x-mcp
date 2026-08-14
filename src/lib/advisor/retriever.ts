@@ -54,11 +54,10 @@ export interface RetrieverAdviseArgs {
    * or `POST /api/v1/license` (Auth0-authed). Required for a complete
    * install plan.
    *
-   * NOTE: the retriever helm chart is on an older value-key naming
-   * convention (top-level `apiKeySecret` and the secret data is `apiKey`).
-   * The chart will be aligned with the Reporter chart's `log10xLicenseJwt`
-   * convention as part of the same engine-team migration — until then the
-   * retriever install plan renders the JWT into the old `apiKey` slot.
+   * NOTE: the retriever helm chart uses a different value-key naming
+   * convention from the Reporter chart's `log10xLicenseJwt` (top-level
+   * `apiKeySecret`, with the secret data under `apiKey`), so the retriever
+   * install plan renders the JWT into the `apiKey` slot.
    */
   licenseJwt?: string;
   /** Override: input S3 bucket name. Default: from snapshot. */
@@ -85,7 +84,7 @@ export interface RetrieverAdviseArgs {
    * the SIEM down-tier sub-sections in the offload markdown
    * (Datadog Flex only for `datadog`, CloudWatch IA only for `cloudwatch`,
    * etc., per `DEFAULT_ACTION_BY_DESTINATION`). When omitted, the offload
-   * section falls back to showing both leads (historical behavior).
+   * section shows both leads.
    */
   destination?: string;
 }
@@ -241,7 +240,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
 
   // Forwarder offload section: how to route the routeState="drop" slice to the
   // customer's own S3 (the bucket the Retriever reads) + SIEM down-tier
-  // alternatives. Only when we know the bucket + region to fill in.
+  // alternatives. Emitted only when the bucket + region are known.
   const region = snapshot.aws?.region;
   const offloadMarkdown =
     inputBucket && region
@@ -252,10 +251,10 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
         )
       : undefined;
 
-  // Fix 89 — external access guidance when the MCP runs outside the cluster.
+  // External-access guidance when the MCP runs outside the cluster.
   // The helm chart defaults to ClusterIP, which is unreachable from a laptop.
   // KUBERNETES_SERVICE_HOST is injected by k8s into every in-cluster pod; its
-  // absence is a reliable signal that we are running outside the cluster.
+  // absence is a reliable signal of running outside the cluster.
   const runningInsideCluster = process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
   const retrieverAccessMarkdown = !runningInsideCluster
     ? buildRetrieverExternalAccessMarkdown(releaseName, namespace)
@@ -453,12 +452,12 @@ async function runPreflight(
     });
   }
 
-  // Chart availability used to LIVE-probe `helm search repo` here too.
-  // Removed for the same reason as the receiver path: retriever-10x is
-  // a chart WE publish under a name we control, so verifying it exists
-  // on every plan emit just added a slow side effect (mutates the
-  // user's helm config; blocks up to 30s when helm is offline). If the
-  // chart ref ever drifts, `helm install` surfaces it meaningfully.
+  // Chart availability is NOT live-probed with `helm search repo` here
+  // either, for the same reason as the receiver path: retriever-10x is a
+  // Log10x-published chart under a name Log10x controls, so verifying it
+  // on every plan emit only adds a slow side effect (mutates the user's
+  // helm config; blocks up to 30s when helm is offline). If the chart ref
+  // drifts, `helm install` surfaces it meaningfully.
 
   // queryLogGroup preflight: per-query CW observability.
   // This is a warn (not fail) so install paths don't block on it.
@@ -487,7 +486,7 @@ async function runPreflight(
         }
       }
     } catch {
-      // best-effort; helm may not be installed in all environments
+    // best-effort; helm may not be installed in all environments
     }
 
     if (queryLogGroup) {
@@ -584,12 +583,10 @@ function renderRetrieverValues(opts: {
   irsaRoleArn: string;
   sqsUrls: Record<'index' | 'query' | 'subquery' | 'stream', string>;
 }): string {
-  // NOTE: the retriever chart's values.yaml still uses the older
-  // `apiKeySecret` / nested `tenx.apiKey` slot. We pass the license JWT
-  // into that slot until the chart is aligned with the Reporter chart's
-  // `log10xLicenseJwt` convention. Engine-team migration tracked
-  // separately; the engine itself already validates the JWT regardless
-  // of which value-key it arrives through.
+  // The retriever chart's values.yaml uses the `apiKeySecret` / nested
+  // `tenx.apiKey` slot rather than the Reporter chart's `log10xLicenseJwt`
+  // convention, so the license JWT goes into that slot. The engine
+  // validates the JWT regardless of which value-key it arrives through.
   return `tenx:
   enabled: true
   apiKey: "${opts.licenseJwt}"
@@ -652,15 +649,15 @@ function buildVerifyProbes(
     ],
   });
 
-  // Fix 89 — Retriever Service external-access probe.
+  // Retriever Service external-access probe.
   // The helm chart defaults to ClusterIP. The MCP server (and CLI) run on
   // the user's laptop, not inside the cluster, so *.svc.cluster.local DNS
   // never resolves. This probe surfaces the spec.type and explains the
   // options when it is ClusterIP.
   //
   // Detection: no /var/run/secrets/kubernetes.io mount → running outside
-  // the cluster. We check the env var as a secondary signal (KUBERNETES_SERVICE_HOST
-  // is injected by the pod infrastructure into every in-cluster container).
+  // the cluster. KUBERNETES_SERVICE_HOST, injected by the pod
+  // infrastructure into every in-cluster container, is the secondary signal.
   const runningInsideCluster =
     process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
 
@@ -801,7 +798,7 @@ async function resolveInstalledBucket(
     const bucket = values['inputBucket'];
     if (typeof bucket === 'string' && bucket.length > 0) return bucket;
   } catch {
-    // JSON parse failure — fall through
+  // JSON parse failure — fall through
   }
   return undefined;
 }

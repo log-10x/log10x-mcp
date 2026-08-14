@@ -17,10 +17,10 @@
  * the offload lookup is a TSDB query on the metric surface, NOT a
  * retriever-archive scan. The helper does not touch S3 / the bloom index;
  * it issues at most two Prometheus instant queries per call, each wrapped
- * in its OWN 2s timeout. Heavy-cohort tail-latency note: a slow kept-side
- * scan no longer poisons a fast dropped-side answer — see the
- * partial-result contract on `OffloadStatus`. `ok: false` is now reserved
- * for the case where BOTH cohorts timed out.
+ * in its OWN 2s timeout. Heavy-cohort tail latency: a slow kept-side scan
+ * does not poison a fast dropped-side answer — see the partial-result
+ * contract on `OffloadStatus`. `ok: false` is reserved for the case where
+ * BOTH cohorts timed out.
  *
  * Why not co-located with promql.ts: `promql.ts` is a pure query-builder
  * module (returns strings, no env / no executor). This helper needs both
@@ -186,7 +186,7 @@ export async function getOffloadStatus(
 
   // Each query is independently timeout-wrapped (null on timeout). Use
   // Promise.allSettled-equivalent behaviour via the per-query withTimeout
-  // null sentinel: one slow cohort no longer poisons the other. See the
+  // null sentinel, so one slow cohort does not poison the other. See the
   // partial-result contract on OffloadStatus.
   const [keptResp, droppedResp, tsResp] = await Promise.all([
     withTimeout(queryInstant(env, keptQ).catch(() => null), timeoutMs),
