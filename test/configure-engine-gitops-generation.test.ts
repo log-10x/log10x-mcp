@@ -73,3 +73,58 @@ test('sibling path is derived even when the lookup path is not named caps.csv', 
     'GEN_PATH should replace the final path segment with config-generation.csv'
   );
 });
+
+function buildWithSiblings(lookupPath: string): string {
+  const args = {
+    service: 'cartservice',
+    containers: ['cartservice'],
+    current_csv: undefined,
+    target_percent: 30,
+    reduction: 'hard',
+  } as unknown as Args;
+  const resolved = {
+    gitops_repo: 'acme/infra',
+    gitops_branch: 'main',
+    lookup_path: lookupPath,
+    destination: 'cloudwatch',
+  } as unknown as Resolved;
+  const csvDiff =
+    '--- a/caps.csv\n+++ b/caps.csv\n+container,cap\n+cartservice,100::MCP configure_engine (hard)';
+  return renderPrCommand(args, resolved, csvDiff, {
+    actionsCsv: 'container,action\ncartservice,tier_down::MCP configure_engine (hard)\n',
+    intentJson: '{"schema_version":"1.0","entries":[]}',
+  });
+}
+
+test('gitops PR commits actions.csv as a sibling of caps.csv', () => {
+  // The engine reads the per-service over-cap action ONLY from actions.csv
+  // (rateReceiverActionLookupFile). A PR that ships caps.csv without it
+  // turns every non-drop policy into hard drops and fails the receiver
+  // launch when the cap variant is active.
+  const script = buildWithSiblings('tenx/app/caps.csv');
+  assert.ok(script.includes('tenx/app/actions.csv'), 'ACTIONS_PATH sibling');
+  assert.ok(script.includes("<<'ACTIONS_EOF'"), 'actions heredoc missing');
+  assert.ok(
+    script.includes('gh api "${ACTIONS_PUT_ARGS[@]}"'),
+    'actions.csv PUT missing'
+  );
+  const actionsPut = script.indexOf('gh api "${ACTIONS_PUT_ARGS[@]}"');
+  const prCreate = script.indexOf('gh pr create');
+  assert.ok(actionsPut > 0 && actionsPut < prCreate, 'actions PUT before PR opens');
+});
+
+test('gitops PR commits data/action-intent.json for attribution read-back', () => {
+  const script = buildWithSiblings('tenx/app/caps.csv');
+  assert.ok(script.includes('data/action-intent.json'), 'INTENT_PATH present');
+  assert.ok(script.includes("<<'INTENT_EOF'"), 'intent heredoc missing');
+  assert.ok(
+    script.includes('gh api "${INTENT_PUT_ARGS[@]}"'),
+    'action-intent.json PUT missing'
+  );
+});
+
+test('renderPrCommand without siblings still emits caps + generation only', () => {
+  const script = build('tenx/app/caps.csv');
+  assert.ok(!script.includes('ACTIONS_PUT_ARGS'), 'no actions PUT without siblings');
+  assert.ok(!script.includes('INTENT_PUT_ARGS'), 'no intent PUT without siblings');
+});

@@ -11,25 +11,24 @@
  * For the compact CSV (`pipelines/run/receive/compact/compact-cap.csv`),
  * which uses a boolean per-pattern format, use `compact-csv-parser.ts`.
  *
+ * ENGINE GRAMMAR (rate-object-cap.js): `<bytes>[:<untilEpochSec>][:<reason>]`
+ * — the second field is an EXPIRY EPOCH. The engine reads no action from
+ * this file; the per-service action lives in the sibling `actions.csv`
+ * (rateReceiverActionLookupFile), and per-pattern intent in
+ * `data/action-intent.json`. A cap of 0 is a per-container regulator
+ * opt-out engine-side, so written rows always carry a cap >= 1.
+ *
  * Row format (set by configure-engine.ts):
  *   container,cap                               ← header
- *   payment-service,2048:compact:MCP default    ← container default
- *   pat:abc123def,4096:pass:keep audit floor    ← per-pattern override
- *   pat:def456abc,128:tier_down:cold dataset
+ *   payment-service,2048::MCP default           ← per-service cap, no expiry
  *
- * Value grammar: `<bytes>:<action>:<reason>` — the action is folded into
- * the cap entry. `<bytes>` alone is valid.
- *   - bytes  — integer cap_bytes_per_window (>=0)
- *   - action — one of the six engine actions; surfaced on the row as
- *              `legacy_action_suffix`
- *   - reason — free-text label (commas already replaced with `;` upstream)
- *
- * The two-file grammar `<bytes>::<reason>[:<action>]`, where action intent
- * lives in `data/action-intent.json` (action-intent-writer.ts /
- * action-intent-parser.ts) and the trailing suffix is vestigial, is also
- * parsed so those CSVs round-trip. Either way a recognized action token is
- * stripped from the reason and surfaced on `legacy_action_suffix`.
- *
+ * This parser additionally tolerates two legacy MCP emissions so old repos
+ * round-trip:
+ *   - `<bytes>:<action>:<reason>` — a folded action in the epoch slot
+ *     (which the engine never read as an action)
+ *   - `<bytes>::<reason>[:<action>]` — a trailing action suffix
+ * In either shape a recognized action token is stripped from the reason and
+ * surfaced on `legacy_action_suffix` — diagnostics only, never routing.
  *
  * Two row shapes:
  *   - `pat:<hash>` rows — per-pattern overrides; the `key` field of
@@ -195,22 +194,19 @@ interface ParsedValue {
 /**
  * Parse the value column of a cap-CSV row.
  *
- * Grammar: `<bytes>:<action>:<reason>` (action folded into the cap entry).
- * Also accepted: `<bytes>::<reason>[:<action>]` (action last, or absent).
+ * Canonical (engine) grammar: `<bytes>[:<untilEpochSec>][:<reason>]` —
+ * `<bytes>` alone and `<bytes>::<reason>` are the common shapes.
+ * Legacy MCP emissions are tolerated: `<bytes>:<action>:<reason>` (folded
+ * action in the epoch slot) and `<bytes>::<reason>[:<action>]` (trailing
+ * suffix).
  *
  * Returns null when `bytes` does not parse — that signals a malformed
  * row to the caller.
  *
- * A recognized action token — in either position — is stripped from the
- * reason and preserved in `legacy_action_suffix`.
+ * A recognized action token — in either legacy position — is stripped from
+ * the reason and preserved in `legacy_action_suffix` for diagnostics.
  */
 function parseCapValue(value: string): ParsedValue | null {
-  // Grammar (single-file design): `<bytes>:<action>:<reason>` — the action
-  // is folded into the cap entry the engine reads. `<bytes>` alone is valid
-  // (action defaults to drop at the engine). The legacy two-file grammar
-  // `<bytes>::<reason>[:<action>]` (action last) is still parsed so old CSVs
-  // round-trip. Either way, a recognized action token is surfaced on
-  // `legacy_action_suffix` and stripped from the reason.
   const firstColon = value.indexOf(':');
   const bytesStr = firstColon < 0 ? value : value.substring(0, firstColon);
   const bytesNum = Number(bytesStr);

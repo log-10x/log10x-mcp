@@ -164,21 +164,32 @@ export interface PocOutput {
   commitment_artifact?: CommitmentArtifact;
   /**
    * Ready-to-commit cap-CSV body in the format `configure_engine`
-   * writes. Composed from per-pattern recommendations (see
-   * `patterns[].actions`) plus a container-default row for each
-   * exception service. `configure_engine(from_poc_id=...)` reads this
-   * field verbatim instead of re-deriving the policy from
-   * `patterns[].actions`. Emitted only when the POC ran with a
-   * `target_percent_reduction` AND the feasibility verdict was reached.
+   * writes. Composed from per-service aggregates of the per-pattern
+   * recommendations (see `patterns[].actions`).
+   * `configure_engine(from_poc_id=...)` reads this field verbatim
+   * instead of re-deriving the policy from `patterns[].actions`.
+   * Emitted only when the POC ran with a `target_percent_reduction`
+   * AND the feasibility verdict was reached.
    *
-   * Row grammar (matches `cap-csv-parser.ts`):
-   *   container,cap                                   ← header
-   *   <container>,<bytes>::<reason>:<action>          ← container default
-   *   pat:<tenx_hash>,<bytes>::<reason>:<action>      ← per-pattern override
+   * Row grammar (the ENGINE's cap grammar — rate-object-cap.js):
+   *   container,cap                          ← header
+   *   <container>,<bytes>::<reason>          ← one row per service
    *
-   * Action vocab: pass | sample | compact | tier_down | offload | drop.
+   * Container-keyed only: the engine matches rows against the
+   * k8s_container value on the wire, so `pat:<hash>` rows are dead. The
+   * cap is never 0 — a 0 cap is a per-container regulator opt-out.
    */
   cap_csv?: string;
+  /**
+   * Sibling actions.csv body — the ENGINE's per-service action file
+   * (rateReceiverActionLookupFile). Grammar:
+   *   container,action                       ← header
+   *   <container>,<action>::<reason>         ← one row per service
+   * The engine reads the over-cap disposition ONLY from this file; a
+   * service with no row defaults to `drop`. Ships with cap_csv on every
+   * delivery.
+   */
+  actions_csv?: string;
 }
 
 export interface FeasibilityVerdict {
@@ -574,6 +585,7 @@ export function buildPocEnvelopeV2(
   let feasibility: FeasibilityVerdict | undefined;
   let commitmentArtifact: CommitmentArtifact | undefined;
   let capCsv: string | undefined;
+  let actionsCsv: string | undefined;
   if (opts?.targetPercentReduction !== undefined) {
     feasibility = computeFeasibility(
       opts.targetPercentReduction,
@@ -592,10 +604,11 @@ export function buildPocEnvelopeV2(
       monthlyCostUsd,
       perServiceConsequences,
     );
-    // cap_csv is composed from the per-pattern actions the renderer
-    // emitted above. configure_engine(from_poc_id=…) reads this field
-    // verbatim instead of re-deriving the policy.
+    // cap_csv + actions_csv are composed from the per-pattern actions the
+    // renderer emitted above. configure_engine(from_poc_id=…) reads these
+    // fields verbatim instead of re-deriving the policy.
     capCsv = buildCapCsv(patternOutputs, siem, exceptionSet, windowDurationSeconds);
+    actionsCsv = buildActionsCsv(patternOutputs, siem, exceptionSet);
   }
 
   return {
@@ -667,6 +680,7 @@ export function buildPocEnvelopeV2(
       ...(feasibility ? { feasibility } : {}),
       ...(commitmentArtifact ? { commitment_artifact: commitmentArtifact } : {}),
       ...(capCsv ? { cap_csv: capCsv } : {}),
+      ...(actionsCsv ? { actions_csv: actionsCsv } : {}),
     },
   };
 }
@@ -1371,26 +1385,28 @@ function capBytesPerWindow(action: CostAction, monthlyBytes: number, sampleN: nu
     case 'offload':
     case 'drop':
     default:
-      return 0;
+      // 1, never 0: a 0 cap is a per-container regulator OPT-OUT engine-side
+      // (rate-object-cap.js falls back to the fleet absoluteCap, usually
+      // unset, and regulates nothing). 1 byte = the whole service past
+      // floors/baseline is over-cap, which is the offload/drop intent.
+      return 1;
   }
 }
 
 /**
  * Compose the cap-CSV body that `configure_engine(from_poc_id=...)`
  * reads verbatim. Same row format as `renderCsvDiff` in
- * configure-engine.ts:
+ * configure-engine.ts — the ENGINE's cap grammar:
  *
- *   container,cap                                       ← header
- *   <container>,<bytes>::<reason>:<action>              ← container default
- *   pat:<tenx_hash>,<bytes>::<reason>:<action>          ← per-pattern row
+ *   container,cap                          ← header
+ *   <container>,<bytes>::<reason>          ← one row per service
  *
- * Container-level rows are emitted one per distinct service observed
- * across the top-N patterns. The default action is the destination's
- * level-1 action (per DEFAULT_ACTION_BY_DESTINATION); exception
- * services get `pass`. Per-pattern rows are emitted for every top-N
- * pattern whose recommendation differs from the container default OR
- * whose service is in the exception list — pinning rows so the engine
- * keeps them flowing untouched.
+ * One row per distinct service observed across the top-N patterns,
+ * capped from the service's aggregate bytes under its action (the
+ * destination's level-1 action per DEFAULT_ACTION_BY_DESTINATION;
+ * exception services get `pass`). The action itself ships in the
+ * sibling actions.csv (buildActionsCsv) — the engine never reads an
+ * action from this file.
  */
 function buildCapCsv(
   patterns: PatternOutput[],
@@ -1412,35 +1428,49 @@ function buildCapCsv(
   }
 
   const lines: string[] = ['container,cap'];
-  // Container-default rows — one per service, sorted for stable diffs.
-  // No `:action` suffix — action intent is in data/action-intent.json.
+  // One row per service, sorted for stable diffs. Container-keyed ONLY:
+  // the engine matches rows against the k8s_container value on the wire,
+  // so a `pat:<hash>` row can never match an event and is dead bytes.
+  // Per-pattern detail belongs in data/action-intent.json.
   for (const [svc, agg] of [...services.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const action: CostAction = agg.isException ? 'pass' : level1;
     const reason = agg.isException
       ? 'service_pinned_by_exception_list'
       : `MCP poc_envelope (destination_level_1=${level1})`;
     const monthlyBytes = agg.bytes * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
-    const cap = Math.round(capBytesPerWindow(action, monthlyBytes, 10));
+    const cap = Math.max(1, Math.round(capBytesPerWindow(action, monthlyBytes, 10)));
     lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}`);
   }
-  // Per-pattern overrides — emitted when the action differs from the
-  // container default OR when the row is exception-pinned. Sorted by
-  // pattern_hash so the CSV is reproducible across builds.
-  // No `:action` suffix — action intent is in data/action-intent.json.
-  const overrides: Array<{ hash: string; line: string }> = [];
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Compose the sibling actions.csv — the ENGINE's per-service action file
+ * (rateReceiverActionLookupFile): `<container>,<action>::<reason>`. The
+ * engine reads the over-cap disposition ONLY from this file; caps.csv
+ * carries bytes and an optional expiry epoch, never an action. Ships with
+ * cap_csv on every delivery — when the cap variant is active a missing or
+ * empty actions.csv fails the receiver launch.
+ */
+function buildActionsCsv(
+  patterns: PatternOutput[],
+  siem: SiemId,
+  exceptionSet: Set<string>,
+): string {
+  const level1: CostAction = getDefaultActionForDestination(siem, 1);
+  const services = new Set<string>();
   for (const p of patterns) {
-    if (!p.fingerprint_hash) continue;
     const svc = (p.service ?? '').toLowerCase();
-    const isException = svc && exceptionSet.has(svc);
-    const containerAction: CostAction = isException ? 'pass' : level1;
-    if (p.actions.recommended_action === containerAction && !isException) continue;
-    overrides.push({
-      hash: p.fingerprint_hash,
-      line: `pat:${p.fingerprint_hash},${p.actions.cap_bytes_per_window}::${p.actions.reason.replace(/,/g, ';')}`,
-    });
+    if (svc) services.add(svc);
   }
-  overrides.sort((a, b) => a.hash.localeCompare(b.hash));
-  for (const o of overrides) lines.push(o.line);
+  const lines: string[] = ['container,action'];
+  for (const svc of [...services].sort()) {
+    const action: CostAction = exceptionSet.has(svc) ? 'pass' : level1;
+    const reason = exceptionSet.has(svc)
+      ? 'service_pinned_by_exception_list'
+      : `MCP poc_envelope (destination_level_1=${level1})`;
+    lines.push(`${svc},${action}::${reason.replace(/[,:]/g, ';')}`);
+  }
   return lines.join('\n') + '\n';
 }
 
