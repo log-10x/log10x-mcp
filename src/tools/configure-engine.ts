@@ -79,6 +79,7 @@ import { loadEnvironments } from '../lib/environments.js';
 import { computeGeneration, renderGenerationCsv } from '../lib/config-generation.js';
 import { writeActionIntent, type ActionIntentEntry } from '../lib/action-intent-writer.js';
 import { parseActionIntent } from '../lib/action-intent-parser.js';
+import { fetchActionsCsvForEnv } from '../lib/cap-csv-fetch.js';
 import { LABELS, compressibilityPerContainer } from '../lib/promql.js';
 import type { PrometheusResponse } from '../lib/api.js';
 import { queryInstant } from '../lib/api.js';
@@ -208,7 +209,7 @@ export const configureEngineSchema = {
     .string()
     .optional()
     .describe(
-      'k8s namespace for the cap-CSV ConfigMap when delivery="kubectl_configmap". Defaults to the env-config doc\'s retriever.helm_release.namespace, then `default`. The engine\'s ConfigMap pull driver reads from this namespace.'
+      'k8s namespace for the policy ConfigMap when delivery="kubectl_configmap". Defaults to `default` — pass the namespace the receiver runs in (the engine\'s ConfigMap pull driver reads from its own pod namespace).'
     ),
   kubectl_configmap_name: z
     .string()
@@ -1543,11 +1544,16 @@ export async function executeConfigureEngine(
   // non-drop policy into hard drops, and fails the receiver launch outright
   // when the cap variant is active. data/action-intent.json rides along as
   // MCP-side per-pattern state for commitment_report / estimate_savings.
+  // On the gitops channel, merge over the repo's existing actions.csv so
+  // services configured in earlier runs keep their rows (the kubectl channel
+  // merges against the ConfigMap inside applyViaKubectlConfigMap instead).
+  const existingActionsCsv =
+    (args.delivery ?? 'gitops') === 'gitops' ? await fetchActionsCsvForEnv(env) : undefined;
   const actionsCsv = renderActionsCsv(
     args.containers,
     new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const)),
     effectiveStandardAction,
-    undefined,
+    existingActionsCsv,
     args.reduction ?? 'hard'
   );
   const intentJson = mergeIntentJson(undefined, buildIntentEntriesFromRows(rows));
@@ -3668,9 +3674,22 @@ async function readConfigMapData(
 /** Merge new cap rows into the existing caps.csv: new rows win per container,
  *  every other service's row is preserved, and the new file's preamble (the
  *  latest target/baseline) is carried. */
+/**
+ * The no-op row key the install wizard seeds the policy ConfigMap with so
+ * the receiver boots policy-ready (the engine aborts launch on a missing
+ * ConfigMap and refuses a rows-less CSV). It matches no real container.
+ * Both merges drop it as soon as at least one real row exists.
+ */
+const SEED_ROW_KEY = 'tenx-seed';
+
+function dropSeedRow(merged: Map<string, string>): void {
+  if (merged.size > 1) merged.delete(SEED_ROW_KEY);
+}
+
 function mergeCapsRows(existingCsv: string | undefined, newCsv: string): string {
   const merged = new Map(parseCsv(existingCsv).rows);
   for (const [k, v] of parseCsv(newCsv).rows) merged.set(k, v);
+  dropSeedRow(merged);
   return renderCsv(merged, renderPreambleFromParsed(parsePreamble(newCsv)));
 }
 
@@ -3682,6 +3701,7 @@ function mergeCapsRows(existingCsv: string | undefined, newCsv: string): string 
 export function mergeActionRows(existingCsv: string | undefined, newCsv: string): string {
   const merged = new Map(parseCsv(existingCsv).rows);
   for (const [k, v] of parseCsv(newCsv).rows) merged.set(k, v);
+  dropSeedRow(merged);
   const out: string[] = ['container,action'];
   for (const [k, v] of [...merged.entries()].sort()) out.push(`${k},${v}`);
   return out.join('\n') + '\n';

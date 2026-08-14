@@ -300,6 +300,6 @@ test('eventbridge: emit returns the CloudFormation manifest and S3-aware instruc
   assert.ok(manifest.includes('tenx-recur'));
   const instructions = String(data.apply_instructions);
   assert.ok(instructions.includes('cloudformation deploy'));
-  assert.ok(instructions.includes('TENX_RECEIVE_MUTE_S3_URI'), 'instructions must point the engine at the caps.csv key');
-  assert.ok(instructions.includes('s3://acme-logs/log10x-config/pipelines/run/receive/rate/caps.csv'));
+  assert.ok(instructions.includes('TENX_RECEIVE_MUTE_S3_URI'), 'instructions must point the engine at the mutes.csv key');
+  assert.ok(instructions.includes('s3://acme-logs/log10x-config/pipelines/run/receive/rate/mutes.csv'));
 });

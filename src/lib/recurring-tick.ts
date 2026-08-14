@@ -39,7 +39,6 @@ import {
 } from './action-intent-writer.js';
 import { parseActionIntent } from './action-intent-parser.js';
 import { parseCompactCsv } from './compact-csv-parser.js';
-import { parseCapCsv } from './cap-csv-parser.js';
 import type { Action } from './cost.js';
 
 const execFileP = promisify(execFile);
@@ -58,6 +57,11 @@ export type TickStatus =
   | 'error';       // fatal; message is set
 
 export interface PatternDecision {
+  /**
+   * The pattern's message_pattern NAME (the engine's mute-file key —
+   * rateReceiver fieldNames joins to message_pattern), NOT an 11-char
+   * tenx_hash. The field name predates that distinction.
+   */
   pattern_hash: string;
   service: string;
   severity: string;
@@ -238,21 +242,30 @@ function readCurrentSavingsPct(
     savedBytes += parsed.rows.filter((r) => r.encode).length * (totalBytes / 1000);
   }
 
-  // Mute / rate CSV
+  // Mute CSV — the engine's per-pattern mute file (rateReceiverLookupFile),
+  // keyed by message_pattern, sibling of caps.csv. Count sampled/dropped
+  // rows: value grammar `<sampleRate>:<untilEpoch>[:<reason>]`, so a rate
+  // below 1.0 is a thinning decision.
   const mutePath = pathJoin(
     repoPath,
     'pipelines',
     'run',
     'receive',
     'rate',
-    'caps.csv'
+    'mutes.csv'
   );
   if (existsSync(mutePath)) {
     const text = readFileSync(mutePath, 'utf8');
-    const parsed = parseCapCsv(text);
-    // Count field-set rows that have bytes_cap near zero as dropped.
-    savedBytes += parsed.rows.filter((r) => !r.isContainerDefault && r.bytes_cap < 1024)
-      .length * (totalBytes / 1000);
+    const muteRowCount = text
+      .split(/\r?\n/)
+      .slice(1) // header
+      .filter((l) => {
+        const c = l.indexOf(',');
+        if (c < 0) return false;
+        const rate = parseFloat(l.substring(c + 1));
+        return Number.isFinite(rate) && rate < 1;
+      }).length;
+    savedBytes += muteRowCount * (totalBytes / 1000);
   }
 
   return Math.min(100, (savedBytes / totalBytes) * 100);
@@ -347,7 +360,7 @@ function projectedSavingsBytes(decisions: PatternDecision[]): number {
 
 // ─── CSV writing ──────────────────────────────────────────────────────────
 
-function writeOutputFiles(
+export function writeOutputFiles(
   repoPath: string,
   decisions: PatternDecision[],
   verbose: boolean
@@ -394,10 +407,14 @@ function writeOutputFiles(
   mkdirSync(compactDir, { recursive: true });
   writeFileSync(pathJoin(compactDir, 'compact-cap.csv'), emitCompactRows(compactRows));
 
-  // Write mute CSV
+  // Write mute CSV — the ENGINE's per-pattern mute file
+  // (rateReceiverLookupFile), keyed by message_pattern. NEVER caps.csv:
+  // that is the container-keyed BYTE-CAP file with a different value
+  // grammar; mute rows written there are dead on both axes (wrong key
+  // space, and a sub-1 "cap" is a per-container regulator opt-out).
   const rateDir = pathJoin(repoPath, 'pipelines', 'run', 'receive', 'rate');
   mkdirSync(rateDir, { recursive: true });
-  writeFileSync(pathJoin(rateDir, 'caps.csv'), emitMuteRows(muteRows));
+  writeFileSync(pathJoin(rateDir, 'mutes.csv'), emitMuteRows(muteRows));
 
   // Write action intent JSON
   const dataDir = pathJoin(repoPath, 'data');
@@ -434,7 +451,7 @@ async function commitToConfigPlane(
   // Stage the three changed paths.
   const filesToAdd = [
     'pipelines/run/receive/compact/compact-cap.csv',
-    'pipelines/run/receive/rate/caps.csv',
+    'pipelines/run/receive/rate/mutes.csv',
     'data/action-intent.json',
   ];
 
@@ -811,7 +828,7 @@ export function isS3ConfigPlane(repo: string): boolean {
 const S3_STATE_FILES = [
   'data/action-intent.json',
   'pipelines/run/receive/compact/compact-cap.csv',
-  'pipelines/run/receive/rate/caps.csv',
+  'pipelines/run/receive/rate/mutes.csv',
 ];
 
 /**

@@ -430,8 +430,8 @@ test('s3 plane: applied tick uploads state with the aws CLI instead of git', asy
     assert.equal(result.status, 'applied', `expected applied; got ${result.status}: ${result.message}`);
     const calls = readFileSync(callLog, 'utf8');
     assert.ok(
-      calls.includes('s3://test-bucket/log10x-config/pipelines/run/receive/rate/caps.csv'),
-      'the mute caps.csv must be uploaded to the plane'
+      calls.includes('s3://test-bucket/log10x-config/pipelines/run/receive/rate/mutes.csv'),
+      'the mute mutes.csv must be uploaded to the plane'
     );
     assert.ok(
       calls.includes('s3://test-bucket/log10x-config/data/action-intent.json'),

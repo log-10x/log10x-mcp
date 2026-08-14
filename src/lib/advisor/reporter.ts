@@ -27,6 +27,8 @@ import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer
 import {
   RECEIVER_FORWARDER_SPECS,
   STANDALONE_SPEC,
+  POLICY_CONFIGMAP_NAME,
+  renderPolicyConfigMapManifest,
   type OutputDestination,
   type ForwarderSpec,
 } from './reporter-forwarders.js';
@@ -614,6 +616,7 @@ function buildInstallSteps(opts: {
     destination,
     outputHost,
     splunkHecToken,
+    app,
     optimize,
     readOnly,
     backends,
@@ -665,6 +668,25 @@ function buildInstallSteps(opts: {
         `kubectl create secret generic ${licenseSecretName} \\
   -n ${namespace} \\
   --from-literal=${licenseSecretKey}='${licenseJwt}'`,
+      ],
+    });
+  }
+
+  // Receiver only: seed the engine-policy ConfigMap + RBAC read grant BEFORE
+  // the pod starts. The receiver values wire the engine's kubernetes pull
+  // lane (K8S_ENABLED + CAP_LOOKUP_FILE/ACTION_LOOKUP_FILE) at this
+  // ConfigMap; the engine's first pull runs on the launch thread and a
+  // missing ConfigMap aborts startup, and its lookup loader refuses a
+  // rows-less CSV — so the seed carries one no-op `tenx-seed` row per file.
+  // The seed regulates nothing; log10x_configure_engine merges the real
+  // policy over it.
+  if (app === 'receiver') {
+    steps.push({
+      title: 'Seed the engine-policy ConfigMap',
+      rationale:
+        `The receiver reads its byte caps (caps.csv) and per-service actions (actions.csv) from the \`${POLICY_CONFIGMAP_NAME}\` ConfigMap via the engine's kubernetes pull lane. This seeds it with a no-op policy so the pod boots policy-ready (a missing ConfigMap aborts the engine launch by design), and grants every ServiceAccount in \`${namespace}\` read access to this one ConfigMap. \`log10x_configure_engine\` writes the real policy here later.`,
+      commands: [
+        `cat <<'POLICY_EOF' | kubectl apply -f -\n${renderPolicyConfigMapManifest(namespace).trimEnd()}\nPOLICY_EOF`,
       ],
     });
   }
