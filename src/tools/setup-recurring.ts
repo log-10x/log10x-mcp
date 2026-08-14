@@ -346,7 +346,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Which S3 prefix is the config plane?',
           [
             'The eventbridge scheduler is git-free: the tick reads `policy.yaml` from this prefix and writes updated cap CSVs back to it.',
-            'The engine-facing mute file lands at `<prefix>/pipelines/run/receive/rate/caps.csv` — Lambda functions poll it via `TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+).',
+            'The engine-facing mute file lands at `<prefix>/pipelines/run/receive/rate/mutes.csv` — Lambda functions poll it via `TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+).',
             'Example: `config_plane: "s3://acme-logs/log10x-config"`',
           ],
           'config_plane',
@@ -555,7 +555,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `     --parameter-overrides Log10xApiKeySecretArn=<secret-arn-from-step-2>`,
         `   \`\`\``,
         `4. The schedule fires \`${cronExpr}\` (UTC); each tick writes updated dispositions to`,
-        `   \`${opts.config_plane}/pipelines/run/receive/rate/caps.csv\`. Point each function's`,
+        `   \`${opts.config_plane}/pipelines/run/receive/rate/mutes.csv\`. Point each function's`,
         `   \`TENX_RECEIVE_MUTE_S3_URI\` at that key (engine 1.1.66+) — running functions pick`,
         `   changes up within the refresh window (default 5 minutes), no redeploy.`,
         `5. Trigger a manual test tick:`,

@@ -1812,9 +1812,11 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
 #   jwt_validated,0.25:1786400000:auth flood after deploy    # keep 25%
 # Baked into the layer the policy is STATIC — a change means republishing the
 # layer and updating each function. From engine 1.1.66,
-# TENX_RECEIVE_MUTE_S3_URI=s3://<offload-bucket>/tenx/mutes.csv fetches it to
-# /tmp at INIT and refreshes on INVOKE — dispositions change with one
-# "aws s3 cp", no redeploy.
+# TENX_RECEIVE_MUTE_S3_URI fetches it to /tmp at INIT and refreshes on
+# INVOKE — dispositions change with one "aws s3 cp", no redeploy. One layout
+# across planes: point it at the config-plane key,
+# TENX_RECEIVE_MUTE_S3_URI=s3://<bucket>/<prefix>/pipelines/run/receive/rate/mutes.csv
+# — the same key the eventbridge recurring tick writes.
 # optional BYO metrics:
 # PROMETHEUS_REMOTE_WRITE_URL=https://<your-prometheus>/api/v1/write`,
     placementNote:

@@ -335,7 +335,7 @@ export function emitCrontab(opts: PolicyOptions): { crontab_line: string; wrappe
  * The config plane is an S3 prefix (`s3://bucket/prefix`). The build pulls
  * `policy.yaml` from it and `tenx-recur` reads and writes its state files
  * under the same prefix. The engine-facing mute file lands at
- * `<prefix>/pipelines/run/receive/rate/caps.csv` — point
+ * `<prefix>/pipelines/run/receive/rate/mutes.csv` — point
  * `TENX_RECEIVE_MUTE_S3_URI` at that key.
  */
 export function emitEventBridge(opts: PolicyOptions): string {

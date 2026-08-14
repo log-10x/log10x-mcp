@@ -828,7 +828,7 @@ export function isS3ConfigPlane(repo: string): boolean {
 const S3_STATE_FILES = [
   'data/action-intent.json',
   'pipelines/run/receive/compact/compact-cap.csv',
-  'pipelines/run/receive/rate/caps.csv',
+  'pipelines/run/receive/rate/mutes.csv',
 ];
 
 /**
