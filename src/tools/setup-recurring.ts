@@ -29,6 +29,7 @@ import {
   emitGitHubActions,
   emitCrontab,
   emitEventBridge,
+  emitContainerAppsJob,
   resolveCronExpression,
   type PolicyOptions,
   type SchedulePreset,
@@ -47,7 +48,7 @@ const SCHEDULE_PRESETS = [
   'every-24h-localtz',
 ] as const;
 
-const SCHEDULER_KINDS = ['k8s_cron', 'github_actions', 'crontab', 'eventbridge'] as const;
+const SCHEDULER_KINDS = ['k8s_cron', 'github_actions', 'crontab', 'eventbridge', 'container_apps_job'] as const;
 
 // ─── schema ───────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ export const setupRecurringSchema = {
     .enum(SCHEDULER_KINDS)
     .optional()
     .describe(
-      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script, eventbridge = AWS-native (EventBridge Scheduler + CodeBuild, S3 config plane — no cluster, no GitHub; the fit for serverless estates).'
+      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script, eventbridge = AWS-native (EventBridge Scheduler + CodeBuild, S3 config plane — no cluster, no GitHub; the fit for AWS serverless estates), container_apps_job = Azure-native (Container Apps scheduled Job, git config plane; the fit for Azure serverless estates).'
     ),
 
   /**
@@ -328,7 +329,8 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           '**k8s_cron**: Kubernetes CronJob (recommended when `kubectl` is available)',
           '**github_actions**: GitHub Actions scheduled workflow',
           '**crontab**: crontab entry + wrapper script (simple, any Linux host)',
-          '**eventbridge**: AWS-native — EventBridge Scheduler + CodeBuild against an S3 config plane (no cluster, no GitHub; the fit for serverless estates)',
+          '**eventbridge**: AWS-native — EventBridge Scheduler + CodeBuild against an S3 config plane (no cluster, no GitHub; the fit for AWS serverless estates)',
+          '**container_apps_job**: Azure-native — a Container Apps scheduled Job runs the tick in your subscription against the git policy repo (the fit for Azure serverless estates)',
           'Example: `scheduler: "k8s_cron"`',
         ],
         'scheduler',
@@ -364,6 +366,27 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'The recurring CLI reads `policy.yaml` from here and commits updated cap CSVs.',
           'Pass a GitHub URL or a local path.',
           'Example: `config_plane: "https://github.com/acme/log10x-config"`',
+        ],
+        'config_plane',
+        session
+      ),
+    };
+  }
+  if (
+    session.scheduler === 'container_apps_job' &&
+    !/^https?:\/\//.test(session.config_plane) &&
+    !/^[\w.-]+\/[\w.-]+$/.test(session.config_plane)
+  ) {
+    return {
+      kind: 'ask',
+      question_id: 'config_plane',
+      markdown: buildQuestion(
+        'Q5',
+        'The container_apps_job scheduler needs a cloneable git repo URL',
+        [
+          `\`${session.config_plane}\` is not a git URL. The tick runs inside your Azure subscription and clones the policy repo over HTTPS — a local path or S3 prefix is not reachable from there.`,
+          'Pass a repo URL (or org/repo shorthand). The engine-facing delivery stays the gitops pull lane (GH_DEST), which is the certified path on Azure.',
+          'Example: `config_plane: "https://github.com/acme/log10x-policy"`',
         ],
         'config_plane',
         session
@@ -536,6 +559,28 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `5. Test: \`/usr/local/bin/log10x-tick.sh\``,
       ].join('\n');
 
+    case 'container_apps_job':
+      return [
+        `### Apply instructions: Container Apps scheduled Job (Azure-native)`,
+        ``,
+        `1. **Commit \`policy.yaml\`** to the root of \`${opts.config_plane}\`.`,
+        `2. **Deploy the job** into an existing Container Apps environment:`,
+        `   \`\`\`bash`,
+        `   export LOG10X_API_KEY=<key>`,
+        `   export GIT_TOKEN=<fine-grained PAT, contents:write on the policy repo>`,
+        `   bash log10x-recurring-aca.sh <resource-group> <container-apps-environment>`,
+        `   \`\`\``,
+        `3. The schedule fires \`${cronExpr}\` (UTC); each tick clones the repo, recomputes, and pushes.`,
+        `   The engine applies pushes through the gitops pull lane — pair \`GH_DEST=/tmp/policy\` with`,
+        `   \`rateReceiverLookupFile=/tmp/policy/<path-in-repo>\` (engine 1.1.69+).`,
+        `4. Trigger a manual test tick:`,
+        `   \`\`\`bash`,
+        `   az containerapp job start -n log10x-recurring-tick -g <resource-group>`,
+        `   \`\`\``,
+        `5. Do not swap the git plane for an Azure Files share: certified dead on Container Apps`,
+        `   (REST writes never wake the engine's reload poll; SMB writers are denied by the reader's mount).`,
+      ].join('\n');
+
     case 'eventbridge':
       return [
         `### Apply instructions: EventBridge Scheduler + CodeBuild (AWS-native)`,
@@ -594,6 +639,10 @@ function emitArtifacts(session: RecurringWizardSession): EmitResult {
     case 'eventbridge':
       scheduler_manifest = emitEventBridge(opts);
       scheduler_manifest_filename = 'log10x-recurring-cfn.yaml';
+      break;
+    case 'container_apps_job':
+      scheduler_manifest = emitContainerAppsJob(opts);
+      scheduler_manifest_filename = 'log10x-recurring-aca.sh';
       break;
   }
 

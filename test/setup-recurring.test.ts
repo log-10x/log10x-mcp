@@ -303,3 +303,50 @@ test('eventbridge: emit returns the CloudFormation manifest and S3-aware instruc
   assert.ok(instructions.includes('TENX_RECEIVE_MUTE_S3_URI'), 'instructions must point the engine at the mutes.csv key');
   assert.ok(instructions.includes('s3://acme-logs/log10x-config/pipelines/run/receive/rate/mutes.csv'));
 });
+
+// ─── container_apps_job path ──────────────────────────────────────────────────
+
+test('container_apps_job: a non-git plane is re-asked, a repo URL advances', async () => {
+  let result = await executeSetupRecurring({ target_services: [] });
+  const session_id = getData(result).session_id as string;
+  await executeSetupRecurring({ session_id, target_percent: 30 });
+  await executeSetupRecurring({ session_id, schedule: 'daily-03utc' });
+  await executeSetupRecurring({ session_id, scheduler: 'container_apps_job' as any });
+
+  // An S3 prefix is unreachable from the tick's git clone — the wizard re-asks.
+  let result2 = await executeSetupRecurring({ session_id, config_plane: 's3://acme-logs/cfg' });
+  let data = getData(result2);
+  assert.equal(data.mode, 'next_question');
+  assert.equal(data.question_id, 'config_plane', 'non-git plane must re-ask Q5');
+
+  result2 = await executeSetupRecurring({ session_id, config_plane: 'https://github.com/acme/log10x-policy' });
+  data = getData(result2);
+  assert.equal(data.question_id, 'confirm');
+});
+
+test('container_apps_job: emit returns the az deploy script and gitops-aware instructions', async () => {
+  let result = await executeSetupRecurring({ target_services: ['checkout'] });
+  const session_id = getData(result).session_id as string;
+  await executeSetupRecurring({ session_id, target_percent: 25 });
+  await executeSetupRecurring({ session_id, schedule: 'every-6h' });
+  await executeSetupRecurring({ session_id, scheduler: 'container_apps_job' as any });
+  await executeSetupRecurring({ session_id, config_plane: 'https://github.com/acme/log10x-policy' });
+  result = await executeSetupRecurring({ session_id, confirm: true });
+
+  const data = getData(result);
+  assert.equal(data.mode, 'emit');
+  assert.equal(data.scheduler_manifest_filename, 'log10x-recurring-aca.sh');
+  const manifest = String(data.scheduler_manifest);
+  assert.ok(manifest.includes('az containerapp job create'));
+  assert.ok(manifest.includes('tenx-recur'));
+  const instructions = String(data.apply_instructions);
+  assert.ok(instructions.includes('az containerapp job start'));
+  assert.ok(
+    instructions.includes('GH_DEST=/tmp/policy'),
+    'instructions must pair the tick with the certified gitops delivery lane'
+  );
+  assert.ok(
+    instructions.includes('Azure Files'),
+    'instructions must foreclose the share-based variant'
+  );
+});
