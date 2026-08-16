@@ -1883,6 +1883,13 @@ export interface AzureStreamsRecipe {
   collector: OffloadRecipe;
   /** The engine's environment + invocation beside that collector. */
   engine: OffloadRecipe;
+  /**
+   * The apply half of auto-tuning: the engine's gitops pull lane delivers a
+   * policy repo's mute file to a stable path (GH_DEST) that
+   * rateReceiverLookupFile points into. Cloud-agnostic — the recompute half
+   * is setup_recurring (github_actions kind writes the same repo).
+   */
+  autotune: OffloadRecipe;
 }
 
 /**
@@ -2005,5 +2012,38 @@ log10xMetricsEnabled=false`,
     ],
   };
 
-  return { hub, collector, engine };
+  const autotune: OffloadRecipe = {
+    language: 'text',
+    body: `# Add to the engine container above -- the gitops pull lane applies a
+# policy repo's per-pattern mutes and hot-reloads on every push:
+tenx @run/input/forwarder/otel-collector @apps/receiver @run/receive/rate @gitops
+
+GH_ENABLED=true
+GH_TOKEN=<fine-grained PAT, contents:read on the policy repo>
+GH_REPO=<org>/<policy-repo>
+GH_BRANCH=main
+GH_SYNC_INTERVAL=30s
+GH_DEST=/policy
+rateReceiverLookupFile=/policy/test/mutes.csv
+rateReceiverFieldNames=message_pattern
+TENX_AIRGAPPED=false
+
+# <policy-repo>/test/mutes.csv -- entries are <pattern>,<rate>:<untilEpochSec>:<reason>
+pattern,disposition
+noisy_heartbeat_ok,0:4102444800:liveness spam OPS-1234`,
+    placementNote:
+      'the recompute half is setup_recurring with the github_actions kind: a ' +
+      'scheduled workflow reads the report, rewrites mutes.csv in the same ' +
+      'repo, and the pull lane applies it. No Azure-native scheduler is ' +
+      'involved on either half, so the loop is identical on any container host.',
+    prerequisites: [
+      'Engine 1.1.69 or later. GH_DEST is the load-bearing line: the pull cache lives under a sha-addressed temp path, so without the stable mirror a delivered mute file loads and silently never matches (engine#134, fixed by #135).',
+      'CERTIFIED live (engine 1.1.69, RECERT_PENDING): git-push flip enforced against real traffic through the loopback pairing.',
+      'rateReceiverLookupFile must be the absolute path inside GH_DEST, mirroring the file’s path in the repo (here: test/mutes.csv).',
+      'A past untilEpochSec is not an error: the entry loads, the log names the file, and nothing is muted. 4102444800 is 2100-01-01, a placeholder.',
+      'The pull lane needs GitHub egress; the certified composition ran TENX_AIRGAPPED=false.',
+    ],
+  };
+
+  return { hub, collector, engine, autotune };
 }

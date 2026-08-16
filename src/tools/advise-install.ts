@@ -622,12 +622,21 @@ function azureServerlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutpu
   lines.push('');
   lines.push(`_${recipe.engine.placementNote}_`);
   lines.push('');
+  lines.push('## 4. Auto-tune: a policy repo closes the loop');
+  lines.push('');
+  lines.push('```');
+  lines.push(recipe.autotune.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${recipe.autotune.placementNote}_`);
+  lines.push('');
   lines.push('## Prerequisites and open items');
   lines.push('');
   for (const pre of [
     ...recipe.hub.prerequisites,
     ...recipe.collector.prerequisites,
     ...recipe.engine.prerequisites,
+    ...recipe.autotune.prerequisites,
   ]) {
     lines.push(`- ${pre}`);
   }

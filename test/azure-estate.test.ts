@@ -139,3 +139,49 @@ test('advise_install: azure_serverless snapshot short-circuits to the stream pla
   assert.ok(!/helm upgrade/i.test(md));
   assert.ok(!md.includes('TENX_RECEIVE_MUTE_S3_URI'));
 });
+
+test('azure auto-tune step: the GH_DEST contract is pinned and re-certified', () => {
+  const r = azureStreamsRecipe({});
+
+  // The load-bearing line: without the stable mirror, a gitops-delivered
+  // mute file loads and silently never matches (engine#134 / #135).
+  assert.ok(r.autotune.body.includes('GH_DEST=/policy'));
+  assert.ok(
+    r.autotune.body.includes('rateReceiverLookupFile=/policy/test/mutes.csv'),
+    'the lookup path must be absolute, inside the GH_DEST mirror'
+  );
+  assert.ok(
+    r.autotune.body.includes('rateReceiverFieldNames=message_pattern'),
+    'per-pattern mutes key on message_pattern, not symbolMessage'
+  );
+  assert.ok(r.autotune.body.includes('@run/receive/rate'), 'rate module must be in the app chain');
+  assert.ok(r.autotune.body.includes('@gitops'), 'gitops lane must be in the app chain');
+
+  // Version floor: the destination option only exists from 1.1.69.
+  assert.ok(r.autotune.prerequisites.some((p) => p.includes('1.1.69')));
+
+  // Epoch placeholder discipline (a past untilEpochSec self-expires silently).
+  assert.ok(r.autotune.body.includes('4102444800'));
+
+  // Tripwire: this step may not publish on the strength of the pre-release
+  // harness alone. The prerequisite must carry measured numbers from the
+  // released image, not the placeholder.
+  assert.ok(
+    !r.autotune.prerequisites.some((p) => p.includes('RECERT_PENDING')),
+    'live re-certification numbers missing: run the GH_DEST loop on the released image and replace RECERT_PENDING'
+  );
+  assert.ok(r.autotune.prerequisites.some((p) => p.includes('CERTIFIED')));
+});
+
+test('azure_serverless plan: the auto-tune section rides the plan', async () => {
+  const snap = azureSnapshot('snap-azure-autotune');
+  putSnapshot(snap);
+  const out = await executeAdviseInstall(
+    { snapshot_id: 'snap-azure-autotune', license_source: 'signin' },
+    {} as Environments
+  );
+  const md = String((out.data as Record<string, unknown>).markdown);
+  assert.ok(md.includes('## 4. Auto-tune'));
+  assert.ok(md.includes('GH_DEST=/policy'));
+  assert.ok(md.includes('setup_recurring'));
+});
