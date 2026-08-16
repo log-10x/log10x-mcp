@@ -7,6 +7,7 @@
 
 import { probeKubectl, type KubectlProbeOpts } from './kubectl.js';
 import { probeAws, type AwsProbeOpts } from './aws.js';
+import { probeAzure, type AzureProbeOpts } from './azure.js';
 import { newSnapshotId, putSnapshot } from './snapshot-store.js';
 import type {
   DiscoverySnapshot,
@@ -14,6 +15,7 @@ import type {
   InstalledComponentDetail,
   KubectlProbes,
   AwsProbes,
+  AzureProbes,
   Recommendations,
   Log10xAppKind,
 } from './types.js';
@@ -29,6 +31,9 @@ export interface DiscoverOpts {
   skipKubectl?: boolean;
   /** Skip AWS probes entirely. */
   skipAws?: boolean;
+  azure?: AzureProbeOpts;
+  /** Skip Azure probes entirely. */
+  skipAzure?: boolean;
   /** User hint that overrides detection. */
   forwarderHint?: ForwarderKind;
   /** User hint for target namespace. Defaults to "logging" if unset. */
@@ -45,8 +50,11 @@ export async function runDiscovery(opts: DiscoverOpts = {}): Promise<DiscoverySn
   const awsP = opts.skipAws
     ? Promise.resolve({ probes: emptyAws(), log: [] })
     : probeAws(opts.aws);
+  const azureP = opts.skipAzure
+    ? Promise.resolve({ probes: emptyAzure(), log: [] })
+    : probeAzure(opts.azure);
 
-  const [k, a] = await Promise.all([kubectlP, awsP]);
+  const [k, a, az] = await Promise.all([kubectlP, awsP, azureP]);
 
   // After kubectl probes complete, run the receiver-in-path SIEM probe.
   // Best-effort: failure returns null (inconclusive) and never aborts discovery.
@@ -62,7 +70,7 @@ export async function runDiscovery(opts: DiscoverOpts = {}): Promise<DiscoverySn
     // SIEM probe failure is non-fatal — leave receiverInPath as null.
   }
 
-  const recommendations = deriveRecommendations(k.probes, a.probes, opts, receiverInPath);
+  const recommendations = deriveRecommendations(k.probes, a.probes, az.probes, opts, receiverInPath);
   const finishedAt = new Date().toISOString();
 
   const snapshot: DiscoverySnapshot = {
@@ -77,8 +85,9 @@ export async function runDiscovery(opts: DiscoverOpts = {}): Promise<DiscoverySn
     },
     kubectl: k.probes,
     aws: a.probes,
+    azure: az.probes,
     recommendations,
-    probeLog: [...k.log, ...a.log].slice(-200),
+    probeLog: [...k.log, ...a.log, ...az.log].slice(-200),
   };
 
   putSnapshot(snapshot);
@@ -101,6 +110,16 @@ function emptyKubectl(): KubectlProbes {
   };
 }
 
+function emptyAzure(): AzureProbes {
+  return {
+    available: false,
+    error: 'probe skipped',
+    functionApps: [],
+    containerAppCount: 0,
+    eventHubNamespaces: [],
+  };
+}
+
 function emptyAws(): AwsProbes {
   return {
     available: false,
@@ -119,6 +138,7 @@ function emptyAws(): AwsProbes {
 function deriveRecommendations(
   kubectl: KubectlProbes,
   aws: AwsProbes,
+  azure: AzureProbes,
   opts: DiscoverOpts,
   receiverInPath: boolean | null = null
 ): Recommendations {
@@ -160,10 +180,16 @@ function deriveRecommendations(
   // Estate shape: what did the probes actually see? The advise path branches
   // on this instead of assuming Kubernetes.
   const lambdaFns = aws.lambda?.available ? aws.lambda.functions.length : 0;
+  const azureFnApps = azure.available ? azure.functionApps.length : 0;
   let estateShape: Recommendations['estateShape'];
   if (kubectl.available && lambdaFns > 0) estateShape = 'mixed';
   else if (kubectl.available) estateShape = 'kubernetes';
   else if (lambdaFns > 0) estateShape = 'serverless';
+  // Azure serverless only when nothing else claimed the estate: a cluster
+  // takes the Kubernetes path (AKS included), and Lambda takes the
+  // extension path. Function Apps have no process slot, so they get the
+  // stream topology.
+  else if (azureFnApps > 0) estateShape = 'azure_serverless';
   else estateShape = 'unknown';
 
   let serverless: Recommendations['serverless'];
@@ -180,6 +206,15 @@ function deriveRecommendations(
     if (estateShape === 'serverless' && !existingForwarder && serverless.functionsWithOtelExtension > 0) {
       existingForwarder = 'otel-collector';
     }
+  }
+
+  let azureServerless: Recommendations['azureServerless'];
+  if (azure.available && (azureFnApps > 0 || azure.containerAppCount > 0)) {
+    azureServerless = {
+      functionAppCount: azureFnApps,
+      containerAppCount: azure.containerAppCount,
+      eventHubNamespaceCount: azure.eventHubNamespaces.length,
+    };
   }
 
   // Namespace suggestion: use the hint if given; else if forwarder exists,
@@ -239,6 +274,7 @@ function deriveRecommendations(
     existingForwarderNamespace,
     estateShape,
     serverless,
+    azureServerless,
     retrieverS3Bucket: retrieverBucket,
     receiverGitopsRepo,
     receiverCompactLookupFile,
