@@ -2043,6 +2043,7 @@ noisy_heartbeat_ok,0:4102444800:liveness spam OPS-1234`,
       'rateReceiverLookupFile must be the absolute path inside GH_DEST, mirroring the file’s path in the repo (here: test/mutes.csv).',
       'A past untilEpochSec is not an error: the entry loads, the log names the file, and nothing is muted. 4102444800 is 2100-01-01, a placeholder.',
       'The pull lane needs GitHub egress; the certified composition ran TENX_AIRGAPPED=false.',
+      'An Azure Files share in place of the git repo is measured dead on Container Apps, silently: REST uploads change the file without waking the reload poll, and a second SMB client (including a scheduled Job) is denied by the reader mount’s own handle. Deliver policy through the git loop.',
     ],
   };
 

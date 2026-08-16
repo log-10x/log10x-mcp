@@ -185,3 +185,16 @@ test('azure_serverless plan: the auto-tune section rides the plan', async () => 
   assert.ok(md.includes('GH_DEST=/tmp/policy'));
   assert.ok(md.includes('setup_recurring'));
 });
+
+test('azure auto-tune step: the Azure Files dead end is stated', () => {
+  const r = azureStreamsRecipe({});
+  // Measured on ACA: REST writes invisible to the reload poll, SMB writers
+  // denied by the reader's handle. The prerequisite forecloses the obvious
+  // no-git shortcut before an agent or customer burns a day on it.
+  assert.ok(
+    r.autotune.prerequisites.some(
+      (p) => p.includes('Azure Files') && p.includes('measured dead')
+    ),
+    'the Azure Files verdict must be a stated prerequisite'
+  );
+});
