@@ -145,9 +145,9 @@ test('azure auto-tune step: the GH_DEST contract is pinned and re-certified', ()
 
   // The load-bearing line: without the stable mirror, a gitops-delivered
   // mute file loads and silently never matches (engine#134 / #135).
-  assert.ok(r.autotune.body.includes('GH_DEST=/policy'));
+  assert.ok(r.autotune.body.includes('GH_DEST=/tmp/policy'));
   assert.ok(
-    r.autotune.body.includes('rateReceiverLookupFile=/policy/test/mutes.csv'),
+    r.autotune.body.includes('rateReceiverLookupFile=/tmp/policy/test/mutes.csv'),
     'the lookup path must be absolute, inside the GH_DEST mirror'
   );
   assert.ok(
@@ -182,6 +182,6 @@ test('azure_serverless plan: the auto-tune section rides the plan', async () => 
   );
   const md = String((out.data as Record<string, unknown>).markdown);
   assert.ok(md.includes('## 4. Auto-tune'));
-  assert.ok(md.includes('GH_DEST=/policy'));
+  assert.ok(md.includes('GH_DEST=/tmp/policy'));
   assert.ok(md.includes('setup_recurring'));
 });

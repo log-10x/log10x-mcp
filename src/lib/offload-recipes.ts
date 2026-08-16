@@ -2023,8 +2023,8 @@ GH_TOKEN=<fine-grained PAT, contents:read on the policy repo>
 GH_REPO=<org>/<policy-repo>
 GH_BRANCH=main
 GH_SYNC_INTERVAL=30s
-GH_DEST=/policy
-rateReceiverLookupFile=/policy/test/mutes.csv
+GH_DEST=/tmp/policy
+rateReceiverLookupFile=/tmp/policy/test/mutes.csv
 rateReceiverFieldNames=message_pattern
 TENX_AIRGAPPED=false
 
@@ -2038,7 +2038,8 @@ noisy_heartbeat_ok,0:4102444800:liveness spam OPS-1234`,
       'involved on either half, so the loop is identical on any container host.',
     prerequisites: [
       'Engine 1.1.69 or later. GH_DEST is the load-bearing line: the pull cache lives under a sha-addressed temp path, so without the stable mirror a delivered mute file loads and silently never matches (engine#134, fixed by #135).',
-      'CERTIFIED live (engine 1.1.69, RECERT_PENDING): git-push flip enforced against real traffic through the loopback pairing.',
+      'CERTIFIED live on the released 1.1.69 image: a git-pushed mute reached the GH_DEST mirror in 23s and enforced on the next reload pass — checkout drop-marked 36/40 with the documented 10% floor, sibling pattern 40/40 untouched, identical to a local-file control.',
+      'GH_DEST must be writable by the engine user — the shipped container runs as uid 1000, so a root-level path like /policy fails the launch (measured; the error names a temp file, not the permission). /tmp/policy works out of the box.',
       'rateReceiverLookupFile must be the absolute path inside GH_DEST, mirroring the file’s path in the repo (here: test/mutes.csv).',
       'A past untilEpochSec is not an error: the entry loads, the log names the file, and nothing is muted. 4102444800 is 2100-01-01, a placeholder.',
       'The pull lane needs GitHub egress; the certified composition ran TENX_AIRGAPPED=false.',
