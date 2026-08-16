@@ -21,6 +21,7 @@ import {
   emitGitHubActions,
   emitCrontab,
   emitEventBridge,
+  emitContainerAppsJob,
   yamlString,
   type PolicyOptions,
 } from '../src/lib/scheduler-manifest-emitter.js';
@@ -391,4 +392,55 @@ test('no manifest invokes the MCP server binary as the tick', () => {
     assert.ok(!body.includes('--tick'), `${name} manifest must not use the --tick flag`);
     assert.ok(body.includes('tenx-recur'), `${name} manifest must run the tenx-recur bin`);
   }
+});
+
+// ─── container_apps_job ───────────────────────────────────────────────────────
+
+const ACA_OPTS: PolicyOptions = {
+  target_services: [],
+  target_percent: 30,
+  schedule: 'every-6h',
+  scheduler: 'container_apps_job',
+  config_plane: 'https://github.com/acme/log10x-policy',
+  exceptions: [],
+  min_delta_pp: 3,
+  env_id: 'env-42',
+};
+
+test('emitContainerAppsJob: scheduled job with the 5-field cron, UTC', () => {
+  const sh = emitContainerAppsJob(ACA_OPTS);
+  assert.ok(sh.includes('triggerType: Schedule'));
+  assert.ok(sh.includes('cronExpression: "0 */6 * * *"'));
+  assert.ok(sh.includes('replicaCompletionCount: 1'));
+});
+
+test('emitContainerAppsJob: the measured ACA traps are pinned', () => {
+  const sh = emitContainerAppsJob(ACA_OPTS);
+  // docker.io pulls from Azure IPs rate-limit and the job dies replica-less
+  assert.ok(sh.includes('image: mcr.microsoft.com/'), 'image must come from MCR, not docker.io');
+  assert.ok(!/image:\s*(docker\.io|busybox|node:)/.test(sh));
+  // npx cold fetch + clone needs headroom
+  assert.ok(sh.includes('replicaTimeout: 900'));
+  // mixing --yaml with flags makes the CLI ignore the flags
+  assert.ok(sh.includes('--yaml'));
+  assert.ok(!sh.includes('--secrets '), 'secrets ride the manifest, not CLI flags');
+});
+
+test('emitContainerAppsJob: tick clones the git plane and runs tenx-recur', () => {
+  const sh = emitContainerAppsJob(ACA_OPTS);
+  assert.ok(sh.includes('@github.com/acme/log10x-policy.git'));
+  assert.ok(sh.includes('LOG10X_GITOPS_REPO_PATH=/tmp/gitops'));
+  assert.ok(sh.includes('npx --yes --package=log10x-mcp@latest tenx-recur --policy /tmp/gitops/policy.yaml'));
+  // the token reaches the container as a secretRef, never inline
+  assert.ok(sh.includes('secretRef: git-token'));
+  assert.ok(sh.includes('secretRef: log10x-api-key'));
+  // deploy-time heredoc must NOT expand the in-container token reference
+  assert.ok(sh.includes('x-access-token:\\${GIT_TOKEN}@'));
+  assert.ok(sh.includes('- name: LOG10X_ENV_ID'));
+});
+
+test('emitContainerAppsJob: no Azure Files volume anywhere (certified dead)', () => {
+  const sh = emitContainerAppsJob(ACA_OPTS);
+  assert.ok(!sh.includes('AzureFile'));
+  assert.ok(!sh.includes('volumeMounts'));
 });
