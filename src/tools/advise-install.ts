@@ -66,7 +66,7 @@ import {
   BACKEND_ENV_SPECS,
   defaultSecretNameFor,
 } from '../lib/advisor/reporter-forwarders.js';
-import { lambdaOtelExtensionRecipe } from '../lib/offload-recipes.js';
+import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -211,6 +211,16 @@ type WizardData =
   // resumes. Treating this halt as `ok: true` lets agents that gate
   // on `data.ok` show a plan that doesn't exist.
   | { mode: 'demo_airgapped_warning'; ok: false; snapshot_id: string; is_signed_in: boolean; markdown: string }
+  | {
+      mode: 'azure_serverless_plan';
+      ok: true;
+      snapshot_id: string;
+      estate: 'azure_serverless';
+      function_app_count: number;
+      container_app_count: number;
+      event_hub_namespace_count: number;
+      markdown: string;
+    }
   | {
       mode: 'serverless_plan';
       ok: true;
@@ -439,7 +449,9 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
     case 'demo_airgapped_warning':
       return `Install wizard refused to emit an airgapped plan against a demo license — the engine downgrades to online mode silently in this combination. ${data.is_signed_in ? 'Switch to a user-scoped license' : 'Sign in via log10x_signin_start'} or drop the airgapped flag before re-invoking.`;
     case 'serverless_plan':
-      return `The snapshot shows a serverless estate (${data.function_count} Lambda functions, ${data.functions_with_otel_extension} with an OTel collector extension), so the wizard emitted the OTel-extension pairing plan instead of a Kubernetes helm plan. The plan covers the collector config splice, the engine's extension environment, and the CDK declarations; the engine extension layer itself is not published yet.`;
+      return `The snapshot shows a serverless estate (${data.function_count} Lambda functions, ${data.functions_with_otel_extension} with an OTel collector extension), so the wizard emitted the OTel-extension pairing plan instead of a Kubernetes helm plan. The plan covers the collector config splice, the engine's extension environment, and the CDK declarations; the tenx-receive layer is published publicly per region for x86_64 and arm64.`;
+    case 'azure_serverless_plan':
+      return `The snapshot shows an Azure serverless estate (${data.function_app_count} Function Apps), which offers the engine no process slot. The wizard emitted the certified stream-topology plan: diagnostic settings into an Event Hub, one central engine consuming it behind a collector, routeState routing at the return. Azure Monitor tier_down remains the shipped destination-side lever.`;
     case 'unknown_args': {
       const list = data.unknown_keys.slice(0, 3).join(', ');
       return `Install wizard received unknown arg${data.unknown_keys.length === 1 ? '' : 's'}: ${list}. Re-invoke with the canonical names (see data.valid_keys for the full list).`;
@@ -554,6 +566,89 @@ function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
   });
 }
 
+
+/**
+ * The Azure-serverless plan: Function Apps have no process slot, so the
+ * estate gets the certified stream topology — diagnostic settings into an
+ * Event Hub, one central engine consuming it behind a collector. The
+ * destination-side lever (Azure Monitor tier_down) ships regardless.
+ */
+function azureServerlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
+  const az = snapshot.recommendations.azureServerless ?? {
+    functionAppCount: 0,
+    containerAppCount: 0,
+    eventHubNamespaceCount: 0,
+  };
+  const recipe = azureStreamsRecipe({
+    eventHubNamespace: snapshot.azure?.eventHubNamespaces?.[0],
+  });
+
+  const lines: string[] = [];
+  lines.push('# Install plan — Azure serverless estate (stream topology)');
+  lines.push('');
+  lines.push(
+    `Discovery found **${az.functionAppCount} Function App${az.functionAppCount === 1 ? '' : 's'}**` +
+      (az.containerAppCount > 0 ? `, ${az.containerAppCount} Container App${az.containerAppCount === 1 ? '' : 's'},` : '') +
+      ` and no reachable Kubernetes cluster or Lambda estate. Function Apps give the engine ` +
+      `no process slot, so regulation moves off the platform: logs stream to an Event Hub and ` +
+      `one central engine consumes it. The pipeline past the hub is the same loopback pairing ` +
+      `every other topology uses.` +
+      (az.eventHubNamespaceCount > 0
+        ? ` ${az.eventHubNamespaceCount} Event Hub namespace${az.eventHubNamespaceCount === 1 ? ' is' : 's are'} already present.`
+        : '')
+  );
+  lines.push('');
+  lines.push('## 1. Stream the platform logs to a hub');
+  lines.push('');
+  lines.push('```');
+  lines.push(recipe.hub.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${recipe.hub.placementNote}_`);
+  lines.push('');
+  lines.push('## 2. Collector consumes the hub, pairs with the engine');
+  lines.push('');
+  lines.push('```yaml');
+  lines.push(recipe.collector.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${recipe.collector.placementNote}_`);
+  lines.push('');
+  lines.push('## 3. Engine beside the collector');
+  lines.push('');
+  lines.push('```');
+  lines.push(recipe.engine.body);
+  lines.push('```');
+  lines.push('');
+  lines.push(`_${recipe.engine.placementNote}_`);
+  lines.push('');
+  lines.push('## Prerequisites and open items');
+  lines.push('');
+  for (const pre of [
+    ...recipe.hub.prerequisites,
+    ...recipe.collector.prerequisites,
+    ...recipe.engine.prerequisites,
+  ]) {
+    lines.push(`- ${pre}`);
+  }
+  lines.push('');
+  lines.push(
+    '_Azure Monitor as the destination keeps its shipped tier_down lever (Basic/Auxiliary ' +
+      'tables) independent of this topology. Reference: doc.log10x.com/install/streams/._'
+  );
+
+  return wizardReturn({
+    mode: 'azure_serverless_plan',
+    ok: true,
+    snapshot_id: snapshot.snapshotId,
+    estate: 'azure_serverless',
+    function_app_count: az.functionAppCount,
+    container_app_count: az.containerAppCount,
+    event_hub_namespace_count: az.eventHubNamespaceCount,
+    markdown: lines.join('\n'),
+  });
+}
+
 function wizardEnvelopeMeta(data: WizardData): {
   headline: string;
   actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }>;
@@ -603,6 +698,17 @@ function wizardEnvelopeMeta(data: WizardData): {
         warnings: [],
       };
     }
+    case 'azure_serverless_plan':
+      return {
+        headline: `Azure serverless estate (${data.function_app_count} Function Apps): emitted the certified stream-topology plan — Event Hub in, one central engine, routeState routing out.`,
+        actions: [
+          { tool: 'log10x_configure_engine', args: {}, reason: 'once events flow, derive the per-pattern policy for the central receiver', role: 'optional-followup' },
+        ],
+        warnings: [
+          'Function Apps have no process slot: regulation is destination-side, the platform has already billed the emitted logs.',
+          'Offload fetch-back is AWS-native today; on Azure the offload slice is write-only.',
+        ],
+      };
     case 'serverless_plan':
       return {
         headline:
@@ -818,6 +924,9 @@ export async function executeAdviseInstall(
   // instead of walking the user into a helm plan they cannot apply.
   if (snapshot.recommendations.estateShape === 'serverless') {
     return serverlessPlanReturn(snapshot);
+  }
+  if (snapshot.recommendations.estateShape === 'azure_serverless') {
+    return azureServerlessPlanReturn(snapshot);
   }
 
   // Merge the latest answers into the wizard session. Each call accretes;

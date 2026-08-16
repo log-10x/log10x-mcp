@@ -1873,3 +1873,137 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
 
   return { collector, engine, executionEnvironment };
 }
+
+// ─── Azure stream topology (Function Apps / App Service — no process slot) ───
+
+export interface AzureStreamsRecipe {
+  /** Azure-side: hub creation + diagnostic settings routing logs into it. */
+  hub: OffloadRecipe;
+  /** The collector that consumes the hub and pairs with the engine. */
+  collector: OffloadRecipe;
+  /** The engine's environment + invocation beside that collector. */
+  engine: OffloadRecipe;
+}
+
+/**
+ * The stream topology for Azure surfaces that cannot host a second process:
+ * the platform streams its logs to an Event Hub, and one central engine
+ * consumes the hub behind a collector, using the same loopback pairing as
+ * every other topology.
+ *
+ * The collector settings are CERTIFIED, not inferred: verified end to end
+ * against a live Event Hub (Basic tier) with otelcol-contrib 0.158 and
+ * engine 1.1.68 — events returned carrying tenx_hash + routeState with
+ * distinct pattern identities per message type. The three prerequisites
+ * marked "measured" below are failures observed in that run.
+ */
+export function azureStreamsRecipe(p: { eventHubNamespace?: string } = {}): AzureStreamsRecipe {
+  const ns = p.eventHubNamespace ?? '<namespace>';
+
+  const hub: OffloadRecipe = {
+    language: 'text',
+    body: `# One hub receives the platform's logs; diagnostic settings route them.
+az eventhubs namespace create -g <rg> -n ${ns} -l <region>
+az eventhubs eventhub create -g <rg> --namespace-name ${ns} -n logs
+
+# Per resource whose logs should be regulated:
+az monitor diagnostic-settings create \\
+  --name tenx-stream \\
+  --resource <resource-id> \\
+  --event-hub-rule <auth-rule-id> \\
+  --event-hub logs \\
+  --logs '[{"categoryGroup":"allLogs","enabled":true}]'`,
+    placementNote:
+      'diagnostic settings are per resource, so each Function App or App ' +
+      'Service that should be regulated gets one. The hub is the fan-in; ' +
+      'the consumer below is the fan-out.',
+    prerequisites: [
+      'Regulation here is destination-side only: the platform has already emitted, transported, and billed these logs before the engine sees them. Prefer a sidecar or the Lambda extension wherever the platform allows a process.',
+    ],
+  };
+
+  const collector: OffloadRecipe = {
+    language: 'yaml',
+    body: `receivers:
+  azure_event_hub:
+    connection: \${env:EVENTHUB_CONNECTION_STRING}
+    group: $Default
+    # 'azure' parses the diagnostic-settings envelope. For application logs
+    # written straight to the hub use 'raw' -- the azure unmarshaler rejects
+    # plain text (measured: "invalid character 'I'").
+    format: azure
+    # Without a checkpoint every restart replays the retention window
+    # (measured: 400 sent, 2,800 delivered across restarts).
+    storage: file_storage
+
+  # Return path from the engine (loopback, same pod)
+  otlp/tenx:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:24225
+
+processors:
+  # Only with format: raw -- the payload arrives as a BYTES body, which the
+  # engine cannot pattern (every event collapses to ONE identity). Decode
+  # restores text; String() is not the fix, it yields base64 (both measured).
+  transform/decode:
+    log_statements:
+      - context: log
+        statements:
+          - set(log.body, Decode(log.body, "utf-8"))
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/storage
+
+exporters:
+  # Hand-off to the engine (loopback, same pod)
+  otlp/tenx:
+    endpoint: 127.0.0.1:4317
+    tls:
+      insecure: true
+
+connectors:
+  routing/tenx:
+    default_pipelines: [logs/tenx-destination]
+    table:
+      # context: log is required -- routeState is a LOG attribute
+      - context: log
+        condition: attributes["routeState"] == "offload"
+        pipelines: [logs/tenx-offload]
+      - context: log
+        condition: attributes["routeState"] == "drop"
+        pipelines: [logs/tenx-drop]`,
+    placementNote:
+      'the same loopback pairing as the Lambda extension and the sidecar: ' +
+      'collector hands records to the engine on 127.0.0.1:4317 and receives ' +
+      'them back on 127.0.0.1:24225 carrying tenx_hash + routeState.',
+    prerequisites: [
+      "CERTIFIED against a live Event Hub (otelcol-contrib 0.158, engine 1.1.68): events returned with tenx_hash + routeState and distinct pattern identities per message type.",
+      "format must match what the hub carries: 'azure' for diagnostic-settings envelopes, 'raw' for application logs. The azure unmarshaler rejects plain text outright (measured).",
+      "With format: raw, wire transform/decode into the intake pipeline before the engine exporter — a bytes body patterns to a single identity, silently (measured).",
+      'The azure_event_hub receiver is beta in otelcol-contrib.',
+    ],
+  };
+
+  const engine: OffloadRecipe = {
+    language: 'text',
+    body: `# The engine runs beside the collector as peer containers — Azure
+# Container Apps, AKS, or any container host:
+tenx @run/input/forwarder/otel-collector @apps/receiver
+
+TENX_LICENSE_KEY=<your license JWT>
+TENX_AIRGAPPED=true
+outputOffload=true
+symbolMessageHashField=tenx_hash
+log10xMetricsEnabled=false`,
+    placementNote:
+      'centralized rather than per-node: size the consumer to the hub, not ' +
+      "the estate. The hub's partition count caps consumer parallelism.",
+    prerequisites: [
+      'Offload fetch-back (the Retriever) is AWS-native today; on Azure the offload slice is write-only. tier_down against Azure Monitor (Basic/Auxiliary tables) is the shipped destination-side lever.',
+    ],
+  };
+
+  return { hub, collector, engine };
+}

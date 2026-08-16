@@ -254,6 +254,21 @@ export interface AwsProbes {
  * Everything here is a best-effort inference — the advise tools
  * should surface the reasoning, not present these as facts.
  */
+/**
+ * What the `az` CLI could see. `available: false` means az is missing or
+ * not logged in — never an error, the advisor just asks by hand.
+ */
+export interface AzureProbes {
+  available: boolean;
+  error?: string;
+  subscriptionId?: string;
+  tenantId?: string;
+  /** Function Apps with their raw `kind` string (consumption vs container-hosted). */
+  functionApps: Array<{ name: string; kind: string }>;
+  containerAppCount: number;
+  eventHubNamespaces: string[];
+}
+
 export interface Recommendations {
   suggestedNamespace: string;
   existingForwarder?: ForwarderKind;
@@ -263,10 +278,11 @@ export interface Recommendations {
    *   - `kubernetes` — a reachable cluster (with or without AWS facts)
    *   - `serverless` — no reachable cluster, Lambda functions present
    *   - `mixed`      — both a cluster and Lambda functions
+   *   - `azure_serverless` — no cluster, no Lambda, Azure Function Apps present
    *   - `unknown`    — neither probe produced a usable signal
    * The advise path branches on this instead of assuming Kubernetes.
    */
-  estateShape?: 'kubernetes' | 'serverless' | 'mixed' | 'unknown';
+  estateShape?: 'kubernetes' | 'serverless' | 'azure_serverless' | 'mixed' | 'unknown';
   /** Serverless-estate hints, set when estateShape is serverless or mixed. */
   serverless?: {
     functionCount: number;
@@ -275,6 +291,12 @@ export interface Recommendations {
     logGroupsSubscribed: number;
     /** Log groups with no subscription filter (the auto-coverage gap). */
     logGroupsUnsubscribed: number;
+  };
+  /** Azure-estate hints, set when the az probe saw a serverless surface. */
+  azureServerless?: {
+    functionAppCount: number;
+    containerAppCount: number;
+    eventHubNamespaceCount: number;
   };
   retrieverS3Bucket?: string;
   retrieverSqsUrls?: Partial<Record<'index' | 'query' | 'subquery' | 'stream', string>>;
@@ -452,6 +474,8 @@ export interface DiscoverySnapshot {
   };
   kubectl: KubectlProbes;
   aws: AwsProbes;
+  /** Optional: absent on snapshots taken before the Azure probe existed. */
+  azure?: AzureProbes;
   recommendations: Recommendations;
   /** Every shell call we made. Truncated to the last 200 entries. */
   probeLog: ProbeLogEntry[];

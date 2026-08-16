@@ -93,11 +93,14 @@ interface DiscoverEnvSummary {
   s3_buckets: string[];
   sqs_queues: string[];
   log_groups_count: number;
-  estate_shape?: 'kubernetes' | 'serverless' | 'mixed' | 'unknown';
+  estate_shape?: 'kubernetes' | 'serverless' | 'azure_serverless' | 'mixed' | 'unknown';
   lambda_functions_count?: number;
   lambda_functions_with_otel_extension?: number;
   log_groups_subscribed?: number;
   log_groups_unsubscribed?: number;
+  azure_function_apps_count?: number;
+  azure_container_apps_count?: number;
+  azure_event_hub_namespaces_count?: number;
   probe_log_entry_count: number;
   human_summary: string;
 }
@@ -172,6 +175,9 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | nu
     lambda_functions_with_otel_extension: rec.serverless?.functionsWithOtelExtension,
     log_groups_subscribed: rec.serverless?.logGroupsSubscribed,
     log_groups_unsubscribed: rec.serverless?.logGroupsUnsubscribed,
+    azure_function_apps_count: rec.azureServerless?.functionAppCount,
+    azure_container_apps_count: rec.azureServerless?.containerAppCount,
+    azure_event_hub_namespaces_count: rec.azureServerless?.eventHubNamespaceCount,
     probe_log_entry_count: snapshot.probeLog?.length ?? 0,
     human_summary: '',
   };
