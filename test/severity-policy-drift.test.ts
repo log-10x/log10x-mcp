@@ -29,6 +29,7 @@ import {
   PROTECTED_SEVERITY_LABELS,
   REDUCIBLE_SEVERITY_LABELS,
 } from '../src/lib/severity-policy.js';
+import { getAllowedActionsForDestination } from '../src/lib/cost.js';
 import { renderPocReport, _enrichForEnvelope } from '../src/lib/poc-report-renderer.js';
 import type { RenderInput } from '../src/lib/poc-report-renderer.js';
 import type { ExtractedPatterns } from '../src/lib/pattern-extraction.js';
@@ -165,6 +166,48 @@ test('the report still makes the no-sampling promise this test guards', () => {
   assert.ok(
     /kept verbatim/.test(md),
     'the "kept verbatim" promise moved or was reworded'
+  );
+});
+
+test('the report names the opt-in, and names it the way the schema defines it', () => {
+  // The "kept verbatim" promise reads as a property of the product unless the
+  // report says the lever exists. It does exist: configure_engine's
+  // action_defaults.error. This asserts the report and the schema agree on
+  // three things that are easy to drift apart — the argument's name, that its
+  // default is the one the promise describes, and that every lever it offers
+  // for error-class is lossless.
+  const md = report('splunk');
+  assert.ok(
+    md.includes('action_defaults.error'),
+    'the report no longer names the argument that turns error-class reduction on'
+  );
+  const parsed = configureEngineSchema.action_defaults.parse(undefined);
+  assert.equal(
+    parsed.error,
+    'pass',
+    'the schema default moved; the report still tells the customer error-class is kept'
+  );
+  // Whatever the report offers a reader for error-class must be lossless, or
+  // the sentence invites the exact outcome the promise above rules out. The
+  // expected list is the destination's own: hardcoding all three named levers
+  // Splunk does not have, which is what destination-lever-vocabulary guards.
+  const offered = (['compact', 'tier_down', 'offload'] as const).filter((l) =>
+    getAllowedActionsForDestination('splunk').includes(l)
+  );
+  assert.ok(offered.length > 0, 'splunk offers no lossless lever, so this test proves nothing');
+  for (const lever of offered) {
+    assert.ok(
+      md.includes(lever),
+      `the report offers no ${lever} lever for error-class on a destination that allows it`
+    );
+    assert.ok(
+      !LOSSY_ACTIONS.includes(lever as never),
+      `${lever} is lossy, so the report must not offer it as an error-class opt-in`
+    );
+  }
+  assert.ok(
+    /CRIT\/FATAL stay `pass`/.test(md),
+    'the report no longer says audit-tier is beyond the opt-in'
   );
 });
 

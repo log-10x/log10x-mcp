@@ -1626,6 +1626,27 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // only what the destination has, and nothing about what it does not.
     `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${leverRule(input.siem, siemName)}. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
   );
+  // What this report recommends is the default, and a reader could not tell
+  // that from the sentence above: it reads as a property of the product
+  // rather than a setting. On an estate whose volume is mostly error-class
+  // that difference is the whole plan, so the report says the lever exists
+  // and who owns it. The recommendation itself does not move — no auto path
+  // reduces an error-class pattern — and CRIT/FATAL are audit-tier, which no
+  // argument reaches.
+  // Naming all three levers here reintroduced exactly what the comment above
+  // describes: `destination-lever-vocabulary` failed on nine destinations,
+  // because a lever the platform lacks belongs nowhere in the plan, not even
+  // inside an aside about a setting. The list is the destination's own.
+  const optInLevers = (['compact', 'tier_down', 'offload'] as const).filter((l) =>
+    getAllowedActionsForDestination(input.siem).includes(l)
+  );
+  if (optInLevers.length > 0) {
+    lines.push(
+      `- **Error-class lines are kept by default, not by necessity**: \`configure_engine\`'s \`action_defaults.error\` takes a lossless lever (${optInLevers
+        .map((l) => `\`${l}\``)
+        .join('/')}) for ERROR and WARN when you set it. It applies per tier, not per pattern, and CRIT/FATAL stay \`pass\` whatever it is set to. Nothing here recommends that; it is yours to choose.`
+    );
+  }
   lines.push(
     '- **Confidence** is `high` for patterns with ≥100 events in the window (stable rate), `medium` for 10-99, `low` for <10.'
   );
