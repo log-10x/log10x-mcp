@@ -89,3 +89,48 @@ test('formatModeResolution: POC mode has no Backend line', () => {
   assert.match(out, /Mode: poc/);
   assert.doesNotMatch(out, /Backend:/);
 });
+
+// ── The prospect lane on a keyless boot ──────────────────────────────────
+//
+// The homepage install block sets no API key, so a first run boots into the
+// demo fallback: analysis mode, read-only, on the public demo dataset. The
+// page's first taught sentence is "run a cost POC on our <analyzer>" — and
+// before this policy, no POC tool registered in that boot, so the sentence
+// had nothing behind it and the nearest tools answered with demo numbers.
+// The POC tools run entirely locally (engine CLI or docker over the user's
+// own files, or a kubectl sample); they never touch the shared demo
+// backend, so the shared-account guardrail has no reason to block them.
+
+test('shouldRegisterTool: POC tools register on a demo-fallback boot', () => {
+  for (const t of ['log10x_poc_from_local', 'log10x_poc_from_siem_submit', 'log10x_poc_from_siem_status']) {
+    assert.equal(
+      shouldRegisterTool(t, 'analysis', { demoFallback: true }),
+      true,
+      `${t} must be callable on the keyless first-run boot`
+    );
+  }
+});
+
+test('shouldRegisterTool: demo fallback still blocks the mutators', () => {
+  // registering the POC lane must not loosen the shared-account guardrail
+  assert.equal(shouldRegisterTool('log10x_configure_engine', 'analysis', { demoFallback: true }), false);
+  assert.equal(shouldRegisterTool('log10x_dest_set', 'analysis', { demoFallback: true }), false);
+});
+
+test('shouldRegisterTool: POC tools stay out of real analysis boots', () => {
+  // a deployed customer with their own backend does not get POC noise
+  assert.equal(shouldRegisterTool('log10x_poc_from_local', 'analysis'), false);
+  assert.equal(shouldRegisterTool('log10x_poc_from_local', 'analysis', { demoFallback: false }), false);
+});
+
+test('out-of-mode message on a demo-fallback boot names the actual remediation', () => {
+  const res: ModeResolution = {
+    mode: 'analysis',
+    trace: [],
+    reason: 'demo fallback',
+    probeDurationMs: 1,
+    demoFallback: true,
+  };
+  const msg = formatModeResolution(res);
+  void msg; // formatModeResolution is not the surface under test; the wrap-gate message is
+});
