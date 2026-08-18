@@ -18,10 +18,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { extractPatterns } from '../src/lib/pattern-extraction.js';
+import { resolveRuntimeImage } from '../src/lib/runtime-image.js';
 
-function dockerAvailable(): boolean {
+/**
+ * Gate on the IMAGE being present, not merely on docker: the unit-test CI
+ * runners have docker but not the 926MB engine image, and a test that
+ * triggers a pull inside a unit job is a test of the network. The
+ * packaged-engine-smoke job runs this file explicitly after its own script
+ * has already pulled the image, so the assertion keeps CI teeth exactly
+ * where the engine actually runs.
+ */
+function engineImageAvailable(): boolean {
   try {
-    execFileSync('docker', ['info'], { stdio: 'ignore', timeout: 10_000 });
+    execFileSync('docker', ['image', 'inspect', resolveRuntimeImage()], {
+      stdio: 'ignore',
+      timeout: 10_000,
+    });
     return true;
   } catch {
     return false;
@@ -40,8 +52,8 @@ function wrapped(level: string, msg: string, i: number): string {
 }
 
 test('file-output lane resolves severity like the stdin lane does', { timeout: 300_000 }, async (t) => {
-  if (!dockerAvailable()) {
-    t.skip('docker unavailable; the file-output lane cannot run');
+  if (!engineImageAvailable()) {
+    t.skip('engine image not present locally; the packaged-engine-smoke job runs this after pulling it');
     return;
   }
   process.env.LOG10X_TENX_MODE = 'docker';

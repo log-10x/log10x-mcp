@@ -130,6 +130,15 @@ jobs:
           test -f "$WORK/node_modules/log10x-mcp/assets/tenx-mcp-file.config.yaml" \
             || { echo "::error::assets/ is not in the packaged artifact; add \"assets\" to package.json files"; exit 1; }
           node scripts/packaged-engine-smoke.mjs "$WORK/node_modules/log10x-mcp"
+      - name: File-output lane keeps severity (real engine)
+        # The smoke script above already pulled the runtime image, so this
+        # runs the one engine-driving node test where the engine exists.
+        # Unit-test jobs skip it (no image); this lane is its CI teeth.
+        run: |
+          npx tsc -p tsconfig.test.json
+          mkdir -p test-build/vendor/promql-parser
+          cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json test-build/vendor/promql-parser/
+          node --test test-build/test/file-output-severity.test.js
 
   version-bump-check:
     runs-on: ubuntu-latest
