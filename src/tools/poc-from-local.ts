@@ -548,7 +548,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     artLines.push('### Next step');
     artLines.push('');
     if (feasibility.feasible) {
-      artLines.push('1. Re-run `log10x_poc_from_siem` once log-analyzer credentials are available — the stack path produces the per-pattern action plan + native exclusion configs.');
+      artLines.push('1. Re-run `log10x_poc_from_siem_submit` once log-analyzer credentials are available — the stack path produces the per-pattern action plan + native exclusion configs.');
       artLines.push('2. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.');
     } else {
       artLines.push('1. Lower `target_percent_reduction` to within the achievable band, or trim `exception_services`.');

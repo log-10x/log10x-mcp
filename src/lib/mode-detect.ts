@@ -348,6 +348,14 @@ export function shouldRegisterTool(
   // Shared public demo account: never register mutators (UX guardrail; the
   // read credentials are public regardless).
   if (opts?.demoFallback && DEMO_FALLBACK_DENYLIST.has(toolName)) return false;
+  // The prospect lane stays open on a keyless boot. The demo fallback lands
+  // in analysis mode, which would drop the POC tools — but those run
+  // entirely locally (the engine CLI or container over the user's own files,
+  // or a kubectl sample) and never touch the shared demo backend, so the
+  // guardrail above has no reason to reach them. Without this clause the
+  // homepage's first taught sentence, "run a cost POC on our <analyzer>",
+  // had no tool behind it on the exact install block the homepage shows.
+  if (opts?.demoFallback && toolName.startsWith('log10x_poc_')) return true;
   const modes = TOOL_MODES[toolName];
   if (!modes) {
     // Unknown tool: register defensively in analysis mode, skip in others.

@@ -286,3 +286,60 @@ test('a configured environment leaves the menu ungated', () => {
   const spike = menu.find((m) => m.action === 'investigate_spike');
   assert.equal(spike!.applicable, true, 'nothing is gated when the user has their own env');
 });
+
+// ── The prospect's first item ────────────────────────────────────────────
+//
+// On a POC or keyless demo-fallback boot the person on the other end has
+// installed nothing. The menu's first offer must be the sentence the
+// homepage teaches — run a cost POC on their own logs — routed to the tool
+// that actually does it, and stating the property that earns the click.
+// The lane question is answered by the SAME gate that decides registration
+// (peekBootMode + shouldRegisterTool), so menu and registration cannot
+// drift. On a real deployed boot the item is absent; a running environment
+// is not a prospect.
+
+import { recordBootMode } from '../src/lib/tool-availability.js';
+import type { ModeResolution } from '../src/lib/mode-detect.js';
+
+async function menuWithBoot(boot: Partial<ModeResolution> | undefined) {
+  recordBootMode(
+    boot
+      ? ({ trace: [], reason: 'test', probeDurationMs: 0, ...boot } as ModeResolution)
+      : undefined
+  );
+  try {
+    const result = await executeLog10xStart({});
+    return (result.data as Log10xStartEnvelope).action_menu;
+  } finally {
+    recordBootMode(undefined);
+  }
+}
+
+test('a POC boot leads the menu with the run-a-POC item, routed to poc_from_local', async () => {
+  const menu = await menuWithBoot({ mode: 'poc' });
+  assert.ok(menu.length > 0, 'menu renders');
+  const first = menu[0];
+  assert.equal(first.routes_to, 'log10x_poc_from_local', 'the first offer routes to the POC');
+  assert.equal(first.applicable, true, 'the POC item is never gated');
+  assert.match(first.label, /POC/i, 'the label says what it is');
+  assert.match(first.label, /own logs/i, 'the label says whose logs');
+  assert.match(first.label, /locally|leaves|sent out/i, 'the label states the no-data-out property');
+});
+
+test('a keyless demo-fallback boot also leads with the POC item', async () => {
+  const menu = await menuWithBoot({ mode: 'analysis', demoFallback: true });
+  assert.equal(menu[0]?.routes_to, 'log10x_poc_from_local');
+});
+
+test('a real deployed boot shows no POC item', async () => {
+  const menu = await menuWithBoot({ mode: 'analysis' });
+  assert.ok(
+    menu.every((m) => m.routes_to !== 'log10x_poc_from_local'),
+    'a deployed customer is not offered a prospect POC'
+  );
+});
+
+test('an unbooted unit-test process shows no POC item either', async () => {
+  const menu = await menuWithBoot(undefined);
+  assert.ok(menu.every((m) => m.routes_to !== 'log10x_poc_from_local'));
+});

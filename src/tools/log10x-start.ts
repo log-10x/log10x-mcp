@@ -31,7 +31,8 @@ import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { loadEnvironments, type Environments, type EnvConfig } from '../lib/environments.js';
-import { toolUnavailableReason } from '../lib/tool-availability.js';
+import { toolUnavailableReason, peekBootMode } from '../lib/tool-availability.js';
+import { shouldRegisterTool } from '../lib/mode-detect.js';
 import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
@@ -84,7 +85,7 @@ export interface CapabilitySummary {
 
 export interface ActionMenuItem {
   /** Stable action identifier the user picks by number. */
-  action: 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'explore_receiver' | 'explore_overflow' | 'orient_only';
+  action: 'run_poc' | 'estimate_savings' | 'investigate_spike' | 'forensic_query' | 'install_receiver' | 'install_retriever' | 'explore_receiver' | 'explore_overflow' | 'orient_only';
   /** Short label rendered to the user in the menu. */
   label: string;
   /** Whether the user's current tier supports this action without further setup. */
@@ -292,9 +293,37 @@ function applyToolGates(menu: ActionMenuItem[], envs?: Environments): ActionMenu
   });
 }
 
+/**
+ * Is the prospect lane open in this boot? The same gate that decides
+ * registration answers the menu, so the two cannot drift: a keyless
+ * demo-fallback boot and a pure POC boot both register the POC tools,
+ * a real deployed boot does not, and an unbooted unit test has no lane.
+ */
+function pocLaneOpen(): boolean {
+  const bm = peekBootMode();
+  if (!bm) return false;
+  return shouldRegisterTool('log10x_poc_from_local', bm.mode, { demoFallback: bm.demoFallback });
+}
+
 /** The tier-capability half of the menu, before the routed tools' own gates. */
 function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
   return [
+    // The prospect's item comes first, in the homepage's own sentence: the
+    // person on this boot has installed nothing, and the one ask that works
+    // before anything is deployed is a POC over their own logs. The label
+    // carries the property that earns the click; the tool runs the engine
+    // locally and nothing is sent out.
+    ...(pocLaneOpen()
+      ? [
+          {
+            action: 'run_poc',
+            label:
+              'Run a cost POC on your own logs (runs locally, nothing sent out; takes a target like "cut 30%")',
+            applicable: true,
+            routes_to: 'log10x_poc_from_local',
+          } satisfies ActionMenuItem,
+        ]
+      : []),
     {
       action: 'estimate_savings',
       label: 'Show me what cutting costs would look like (estimate before action)',
