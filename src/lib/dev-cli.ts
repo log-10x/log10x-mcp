@@ -33,8 +33,8 @@
  */
 
 import { spawn } from 'child_process';
-import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir, chmod } from 'fs/promises';
+import { existsSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { basename, join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -362,6 +362,13 @@ export async function runDevCliFileOutput(
   const name = runtimeName ?? `mcp-${Date.now()}-${process.pid}`;
   const outputDir = `/tmp/log10x-mcp-pull/${name}`;
   await mkdir(outputDir, { recursive: true });
+  // The engine container runs as uid 1000; this dir belongs to whatever uid
+  // the MCP runs as. On Docker Desktop the file-sharing layer masks the
+  // difference, so this works on every dev Mac — and on plain Linux the
+  // engine dies with "aggregated.csv (Permission denied)" inside the bind
+  // mount. chmod after mkdir (mkdir's mode is umask-filtered), harmless on
+  // the local-binary leg.
+  await chmod(outputDir, 0o777);
   const started = Date.now();
 
   let cliVersion: string | undefined;
@@ -445,6 +452,14 @@ async function runAppsMcpFileViaLocalBinary(
     LOG10X_MCP_INPUT_PATH: inputFile,
     TENX_API_KEY: resolvedApiKey,
     TENX_LICENSE_KEY: engineCreds.licenseKey,
+    // The file config's encoded-output entry reads these two to emit the
+    // `pattern=` / `patternHash=` anchor fields. Unset, the engine writes
+    // anchor-less rows, the aggregated.csv join has no tenx_hash to land
+    // on, and severityCoverage collapses to 0 — the report's floor then
+    // withholds every recommendation, silently. See the anchor block in
+    // assets/tenx-mcp-file.config.yaml and test/file-output-severity.test.ts.
+    symbolMessageField: 'message_pattern',
+    symbolMessageHashField: 'tenx_hash',
   };
   await runCommandWithStdin(
     binary,
@@ -487,6 +502,12 @@ async function runAppsMcpFileViaDocker(
         '-e', `LOG10X_MCP_RUNTIME_NAME=${runtimeName}`,
         '-e', `LOG10X_MCP_OUTPUT_DIR=${containerOutputDir}`,
         '-e', `LOG10X_MCP_INPUT_PATH=${containerInputFile}`,
+        // Anchor-field env pair — same reason as the local-binary leg above:
+        // the file config emits the join keys only when these are set, and
+        // this leg passes an explicit -e list, so process env never reaches
+        // the container on its own.
+        '-e', 'symbolMessageField=message_pattern',
+        '-e', 'symbolMessageHashField=tenx_hash',
         '-v', `${hostOutputDir}:${containerOutputDir}`,
         '-v', `${hostConfigPath}:${containerConfigPath}:ro`,
         '-v', `${hostInputFile}:${containerInputFile}:ro`,
@@ -1135,8 +1156,30 @@ async function tryGetDockerEngineVersion(image: string): Promise<string | undefi
 function resolveConfigPath(envVar: string, defaultFilename: string): string {
   const override = process.env[envVar];
   if (override) return override;
-  const pkgRoot = resolve(__dirname, '..', '..');
-  return join(pkgRoot, 'assets', defaultFilename);
+  // The assets directory sits at the package root. In the published layout
+  // that is two levels above this file (build/lib -> package). In deeper
+  // compiled layouts (a test build with rootDir '.', so src/lib nests one
+  // further) the two-up walk lands on a directory with no assets, and the
+  // engine is handed a path to nothing — which docker then materializes as
+  // an empty directory, and the run dies with "no app config specified"
+  // three layers away from the actual mistake. Walk up until the file
+  // exists; keep the first candidate as the error path when none does, so
+  // the failure message still names the expected location.
+  const candidates = [
+    join(resolve(__dirname, '..', '..'), 'assets', defaultFilename),
+    join(resolve(__dirname, '..', '..', '..'), 'assets', defaultFilename),
+  ];
+  for (const c of candidates) {
+    // isFile, not existsSync: docker materializes a bind-mount of a missing
+    // path as an empty DIRECTORY at exactly this location, so after one
+    // failed run a bare existence check would resolve to the ghost forever.
+    try {
+      if (statSync(c).isFile()) return c;
+    } catch {
+      // absent: try the next candidate
+    }
+  }
+  return candidates[0];
 }
 
 // ── Binary helpers ──

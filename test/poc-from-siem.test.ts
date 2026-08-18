@@ -72,6 +72,18 @@ test('executePocStatus returns a typed input_invalid envelope for unknown snapsh
 
 test('runPipeline surfaces analyze failure cleanly when local engine missing', async () => {
   _resetSnapshots();
+  // Simulate the missing engine DETERMINISTICALLY. This test used to rely on
+  // the analyze step failing on its own — which it did on every docker-having
+  // machine, but only because the file-output lane's config path resolved to
+  // nothing (the defect test/file-output-severity.test.ts now pins). Once
+  // that was fixed, analyze legitimately completed here and this test's
+  // assertion flipped: its green had been the bug in a test's clothing.
+  // Forcing local mode with a nonexistent binary makes the simulation true
+  // on every machine, docker or not.
+  const prevMode = process.env.LOG10X_TENX_MODE;
+  const prevPath = process.env.LOG10X_TENX_PATH;
+  process.env.LOG10X_TENX_MODE = 'local';
+  process.env.LOG10X_TENX_PATH = '/nonexistent/tenx-for-this-test';
   const id = randomUUID();
   const snap: Parameters<typeof runPipeline>[1] = {
     id,
@@ -102,7 +114,14 @@ test('runPipeline surfaces analyze failure cleanly when local engine missing', a
     ai_prettify: false,
   };
 
-  await runPipeline(connector, snap, args);
+  try {
+    await runPipeline(connector, snap, args);
+  } finally {
+    if (prevMode === undefined) delete process.env.LOG10X_TENX_MODE;
+    else process.env.LOG10X_TENX_MODE = prevMode;
+    if (prevPath === undefined) delete process.env.LOG10X_TENX_PATH;
+    else process.env.LOG10X_TENX_PATH = prevPath;
+  }
   assert.equal(snap.status, 'failed');
   assert.ok(snap.error && /analyze_failed/.test(snap.error));
   assert.ok(snap.retryHint);
