@@ -272,8 +272,8 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q1',
         'Which services should the recurring policy target?',
         [
-          'Run `log10x_services` to see all monitored services, then pass the names you want.',
-          'Pass `target_services: []` (empty array) to target **all** services.',
+          'Pass `target_services: []` (empty array) to target **all** services — the right answer before anything is deployed.',
+          'With a deployed environment, `log10x_services` lists the monitored services by name.',
           'Example: `target_services: ["frontend", "checkout", "payments"]`',
         ],
         'target_services',

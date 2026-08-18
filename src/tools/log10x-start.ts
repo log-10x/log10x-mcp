@@ -471,10 +471,15 @@ function renderVerbatim(args: {
     })
     .join('\n');
 
+  // Each line names the tool it routes to. The instructions tell the agent
+  // to "call that item's routes_to tool", and the structured action_menu has
+  // always carried it — but the text the agent actually reads did not, so
+  // obeying the instruction meant guessing. A blind agent given only the
+  // shipped artifacts guessed wrong on two of seven items.
   const menuLines = args.menu
     .map((m, i) => {
       const gate = m.applicable ? '' : `  _(not available: ${m.gated_reason})_`;
-      return `  ${i + 1}. ${m.label}${gate}`;
+      return `  ${i + 1}. ${m.label}${gate}\n     → \`${m.routes_to}\``;
     })
     .join('\n');
 

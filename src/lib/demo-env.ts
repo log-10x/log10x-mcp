@@ -66,6 +66,13 @@ export const DEMO_FALLBACK_DENYLIST: ReadonlySet<string> = new Set([
   'log10x_offload_archive',
   'log10x_retriever_register',
   'log10x_configure_engine',
-  'log10x_setup_recurring',
   'log10x_backfill_metric',
+  // setup_recurring is deliberately NOT here. The others on this list write
+  // to the shared demo account (config, envs, offload targets, metric
+  // backfill); setup_recurring writes nothing anywhere — it renders
+  // scheduler manifests (k8s CronJob, GitHub Actions, crontab, EventBridge,
+  // Container Apps job) into the reply for the user to apply in their OWN
+  // infrastructure, exactly like the install advisors that have always been
+  // allowed here. Blocking it removed the journey's fourth beat from the
+  // one boot the homepage actually produces.
 ]);

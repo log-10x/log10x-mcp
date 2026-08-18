@@ -304,6 +304,21 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_rank_by_shape_similarity: ['analysis', 'analysis_pending'],
   log10x_metric_overlay: ['analysis', 'analysis_pending'],
 
+  // ── The documented cost chain ──
+  // log10x_start -> cost_options -> explain_mode -> configure_engine ->
+  // preview_filter -> pattern_detail. These had NO entry at all, so the
+  // unlisted-tool fallback registered them in analysis modes and skipped
+  // them in poc — while the server instructions named cost_options five
+  // times as the answer to "what would cutting cost look like". A prospect
+  // agent following the documented path called a tool that was not there.
+  // They are analysis-tier by nature (they read attributed cost), so the
+  // effective behaviour is unchanged; what changes is that the table now
+  // SAYS so, and the drift is visible instead of silent.
+  log10x_cost_options: ['analysis', 'analysis_pending'],
+  log10x_explain_mode: ['analysis', 'analysis_pending'],
+  log10x_preview_filter: ['analysis', 'analysis_pending'],
+  log10x_pattern_detail: ['analysis', 'analysis_pending'],
+
   // ── Analysis (secondary / primitive / utility) ──
   log10x_pattern_mitigate_legacy: ['analysis', 'analysis_pending'], // alias if any
   log10x_savings: ['analysis', 'analysis_pending'],
@@ -326,10 +341,35 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_advise_install: ['poc', 'analysis_pending', 'analysis'],
   log10x_advise_retriever: ['poc', 'analysis_pending', 'analysis'],
   log10x_configure_engine: ['poc', 'analysis_pending', 'analysis'],
-  log10x_setup_recurring: ['analysis', 'analysis_pending'],
+  // Every customer mode. "Keep this plan updated" is the fourth beat of the
+  // journey (POC -> plan -> apply -> auto-tune) and was unreachable for the
+  // person being taught it. The analysis gate was never earned: this tool
+  // imports the manifest emitter and the envelope builder and nothing else —
+  // no metrics backend, no TSDB query. It renders scheduler manifests from
+  // the wizard's own answers, which is the same class of work as the install
+  // advisors that have always registered in poc mode.
+  log10x_setup_recurring: ['poc', 'analysis', 'analysis_pending'],
   log10x_estimate_savings: ['analysis', 'analysis_pending'],
   log10x_baseline: ['analysis', 'analysis_pending'],
   log10x_commitment_report: ['analysis', 'analysis_pending'],
+
+  // ── Registered but previously unlisted ──
+  // These reached the registry through the unlisted-tool fallback, which
+  // registers in analysis modes and skips everything else. That is the right
+  // behaviour for all of them, but leaving it implicit is how four tools of
+  // the documented cost chain silently vanished in poc mode. An explicit row
+  // makes the policy readable and lets a test enforce that every registered
+  // tool has one.
+  log10x_whats_changing: ['analysis', 'analysis_pending'],
+  log10x_whats_new: ['analysis', 'analysis_pending'],
+  log10x_pattern_diff: ['analysis', 'analysis_pending'],
+  log10x_retriever_probe: ['analysis', 'analysis_pending'],
+  log10x_retriever_query_status: ['analysis', 'analysis_pending'],
+  log10x_siem_connector: ['analysis', 'analysis_pending'],
+  // Local-engine and developer tools: no backend, so they work anywhere.
+  log10x_compile_link: ['always'],
+  log10x_compile_status: ['always'],
+  log10x_dev_restart: ['always'],
 
   // ── POC (prospect-only) ──
   log10x_poc_from_siem_submit: ['poc'],
