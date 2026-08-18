@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldRegisterTool, formatModeResolution } from '../src/lib/mode-detect.js';
+import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+import { shouldRegisterTool, formatModeResolution, TOOL_MODES } from '../src/lib/mode-detect.js';
 import type { ModeResolution } from '../src/lib/mode-detect.js';
 
 test('shouldRegisterTool: analysis tools register in analysis mode', () => {
@@ -133,4 +135,51 @@ test('out-of-mode message on a demo-fallback boot names the actual remediation',
   };
   const msg = formatModeResolution(res);
   void msg; // formatModeResolution is not the surface under test; the wrap-gate message is
+});
+
+// ── The recurring step belongs to the plan, not to the deployment ─────────
+//
+// "Keep this plan updated" is the fourth beat of the journey the product
+// teaches (POC -> plan -> apply -> auto-tune), and it was unreachable for
+// the person being taught it. The gate was never earned: the tool imports
+// the manifest emitter and the envelope builder and nothing else — no
+// metrics backend, no TSDB query. It renders scheduler manifests from the
+// wizard's own answers, the same class of work as the install advisors
+// that have always registered for prospects.
+test('shouldRegisterTool: setup_recurring is reachable in every customer mode', () => {
+  for (const mode of ['poc', 'analysis_pending', 'analysis'] as const) {
+    assert.equal(
+      shouldRegisterTool('log10x_setup_recurring', mode),
+      true,
+      `setup_recurring must be askable in ${mode}: it emits manifests from wizard answers and queries no backend`
+    );
+  }
+});
+
+test('shouldRegisterTool: setup_recurring survives the keyless demo boot', () => {
+  // Emitting a CronJob manifest mutates nothing in the shared demo account,
+  // so the guardrail has no reason to reach it.
+  assert.equal(
+    shouldRegisterTool('log10x_setup_recurring', 'analysis', { demoFallback: true }),
+    true
+  );
+});
+
+// Every registered tool carries an explicit mode row. The fallback for an
+// unlisted tool is "analysis modes only, skip everywhere else" — correct for
+// most, wrong and invisible for the rest, which is how four tools of the
+// documented cost chain disappeared in poc mode while the instructions named
+// cost_options five times. Reads registrations out of index.ts so a new tool
+// cannot be added without deciding its modes.
+test('every registered tool has an explicit TOOL_MODES row', async () => {
+  const src = await readFile(new URL('src/index.ts', pathToFileURL(process.cwd() + '/')), 'utf8');
+  const registered = [...src.matchAll(/registerLog10xTool\('([a-z0-9_]+)'/g)].map((m) => m[1]);
+  assert.ok(registered.length > 40, `expected the full tool set, found ${registered.length}`);
+  const missing = registered.filter((t) => !Object.prototype.hasOwnProperty.call(TOOL_MODES, t));
+  assert.deepEqual(
+    missing,
+    [],
+    `these tools register but have no TOOL_MODES row, so the fallback decides their ` +
+      `modes silently: ${missing.join(', ')}`
+  );
 });

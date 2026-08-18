@@ -343,3 +343,22 @@ test('an unbooted unit-test process shows no POC item either', async () => {
   const menu = await menuWithBoot(undefined);
   assert.ok(menu.every((m) => m.routes_to !== 'log10x_poc_from_local'));
 });
+
+// ── The menu must carry the routing the instructions promise ──────────────
+//
+// The instructions tell the agent: "match it to the corresponding
+// action_menu item and call that item's routes_to tool." The rendered
+// verbatim block carried labels and gating reasons but not tool names, so an
+// agent obeying that instruction had to guess. A blind agent given only the
+// shipped artifacts guessed wrong on two of seven items.
+test('the rendered menu names the tool each number routes to', async () => {
+  const result = await executeLog10xStart({});
+  const data = result.data as Log10xStartEnvelope;
+  for (const item of data.action_menu) {
+    assert.ok(
+      data.must_render_verbatim.includes(item.routes_to),
+      `the menu renders "${item.label.slice(0, 40)}" without naming ${item.routes_to}, ` +
+        `so an agent following the routes_to instruction has to guess`
+    );
+  }
+});
