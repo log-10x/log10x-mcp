@@ -33,7 +33,7 @@
  */
 
 import { spawn } from 'child_process';
-import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir } from 'fs/promises';
+import { mkdtemp, readFile, writeFile as fsWriteFile, rm, mkdir, chmod } from 'fs/promises';
 import { existsSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { basename, join, dirname, resolve } from 'path';
@@ -362,6 +362,13 @@ export async function runDevCliFileOutput(
   const name = runtimeName ?? `mcp-${Date.now()}-${process.pid}`;
   const outputDir = `/tmp/log10x-mcp-pull/${name}`;
   await mkdir(outputDir, { recursive: true });
+  // The engine container runs as uid 1000; this dir belongs to whatever uid
+  // the MCP runs as. On Docker Desktop the file-sharing layer masks the
+  // difference, so this works on every dev Mac — and on plain Linux the
+  // engine dies with "aggregated.csv (Permission denied)" inside the bind
+  // mount. chmod after mkdir (mkdir's mode is umask-filtered), harmless on
+  // the local-binary leg.
+  await chmod(outputDir, 0o777);
   const started = Date.now();
 
   let cliVersion: string | undefined;
