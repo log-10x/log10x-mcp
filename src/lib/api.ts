@@ -29,6 +29,16 @@ const DEFAULT_BASE = 'https://prometheus.log10x.com';
 const RETRY_ATTEMPTS = 3;
 /** Base backoff in ms. Override via LOG10X_RETRY_BASE_MS (tests set to 1). */
 const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
+/**
+ * Per-attempt wall-clock bound for gateway fetches. Node's `fetch` has NO
+ * default timeout, so a hung connection (blackholed host, stalled TLS) blocks
+ * indefinitely — and at boot, initEnvs awaits fetchUserProfile which awaits
+ * this, so an intermittent stall froze the whole MCP before `initialize` (F4,
+ * observed >85s). Bounding each attempt lets a hang fail fast and either retry
+ * or fall through to offline boot. 15s is generous for a slow-but-working
+ * gateway; override via LOG10X_FETCH_TIMEOUT_MS.
+ */
+const FETCH_TIMEOUT_MS = parseInt(process.env.LOG10X_FETCH_TIMEOUT_MS || '15000', 10) || 15000;
 
 function getBase(): string {
   return process.env.LOG10X_API_BASE || DEFAULT_BASE;
@@ -65,7 +75,13 @@ export async function fetchWithRetry(url: string, init: RequestInit, label: stri
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
     try {
-      const res = await fetch(url, init);
+      // Bound each attempt: compose the caller's signal (if any) with a
+      // per-attempt timeout so a hung socket cannot stall the caller forever.
+      const timeoutSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+      const signal = init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : timeoutSignal;
+      const res = await fetch(url, { ...init, signal });
       if (res.ok) return res;
       // Retry on 5xx and 429; surface other 4xx immediately.
       if (res.status >= 500 || res.status === 429) {

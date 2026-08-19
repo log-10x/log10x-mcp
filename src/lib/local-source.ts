@@ -347,7 +347,7 @@ export async function sampleFromFiles(opts: FileSourceOptions): Promise<LocalSou
   // 3. Tail each file.
   for (const file of sampled) {
     try {
-      const lines = await readFileTail(file, perFileLimit, maxBytesPerFile);
+      const lines = await readStridedFileLines(file, perFileLimit, maxBytesPerFile);
       let fileBytes = 0;
       let fileLines = 0;
       for (const line of lines) {
@@ -489,22 +489,66 @@ function couldMatchPrefix(pat: string[], segs: string[]): boolean {
  * Read the last `maxBytes` of a file, drop the leading partial line when
  * truncated, and return at most the last `maxLines` non-empty lines.
  */
-async function readFileTail(path: string, maxLines: number, maxBytes: number): Promise<string[]> {
+/**
+ * Number of evenly-spaced windows a large file is sampled across. A single
+ * tail (or head) window under-covers the pattern space of a time-ordered log:
+ * HDFS's 279 templates collapsed to 4 when only the last 16MB was read, which
+ * inflated the projected reduction to 85-100% (F15). Striding across the file
+ * spans its whole pattern space for the same IO budget.
+ */
+const STRIDE_WINDOWS = 8;
+
+/**
+ * Read up to `maxBytes` of a file as `STRIDE_WINDOWS` evenly-spaced chunks
+ * (head … tail), so the sample covers the whole file's pattern space rather
+ * than one contiguous slice. Small files (<= maxBytes) are read whole. The
+ * leading partial line of each mid-file chunk is dropped. Returns at most
+ * `maxLines`, drawn evenly from across the chunks so no single window
+ * dominates.
+ */
+export async function readStridedFileLines(path: string, maxLines: number, maxBytes: number): Promise<string[]> {
   const fh = await open(path, 'r');
   try {
     const st = await fh.stat();
-    const readBytes = Math.min(st.size, maxBytes);
-    if (readBytes === 0) return [];
-    const buf = Buffer.alloc(readBytes);
-    await fh.read(buf, 0, readBytes, st.size - readBytes);
-    let text = buf.toString('utf8');
-    if (readBytes < st.size) {
-      const nl = text.indexOf('\n');
-      text = nl >= 0 ? text.slice(nl + 1) : text;
+    if (st.size === 0) return [];
+    if (st.size <= maxBytes) {
+      const buf = Buffer.alloc(st.size);
+      await fh.read(buf, 0, st.size, 0);
+      const lines = buf.toString('utf8').split('\n').filter((l) => l.length > 0);
+      return lines.length > maxLines ? evenSubsample(lines, maxLines) : lines;
     }
-    const lines = text.split('\n').filter((s) => s.length > 0);
-    return lines.length > maxLines ? lines.slice(-maxLines) : lines;
+    const windows = STRIDE_WINDOWS;
+    const chunkBytes = Math.floor(maxBytes / windows);
+    const stride = Math.floor((st.size - chunkBytes) / (windows - 1));
+    const collected: string[] = [];
+    for (let w = 0; w < windows; w++) {
+      const offset = Math.min(st.size - chunkBytes, w * stride);
+      const buf = Buffer.alloc(chunkBytes);
+      await fh.read(buf, 0, chunkBytes, offset);
+      let text = buf.toString('utf8');
+      // Drop the partial first line of every chunk except the head chunk.
+      if (offset > 0) {
+        const nl = text.indexOf('\n');
+        text = nl >= 0 ? text.slice(nl + 1) : text;
+      }
+      // Drop the partial last line of every chunk except the tail chunk.
+      if (offset + chunkBytes < st.size) {
+        const nl = text.lastIndexOf('\n');
+        text = nl >= 0 ? text.slice(0, nl) : text;
+      }
+      for (const l of text.split('\n')) if (l.length > 0) collected.push(l);
+    }
+    return collected.length > maxLines ? evenSubsample(collected, maxLines) : collected;
   } finally {
     await fh.close();
   }
+}
+
+/** Take `n` items spread evenly across `arr` (keeps coverage, not just a slice). */
+function evenSubsample<T>(arr: T[], n: number): T[] {
+  if (arr.length <= n) return arr;
+  const step = arr.length / n;
+  const out: T[] = [];
+  for (let i = 0; i < n; i++) out.push(arr[Math.floor(i * step)]);
+  return out;
 }

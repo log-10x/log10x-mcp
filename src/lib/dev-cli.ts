@@ -834,7 +834,7 @@ async function runAppsMcpViaLocalBinary(
     binary,
     ['@apps/mcp'],
     rawLogText,
-    { env, timeoutMs: 120_000, configPath: '@apps/mcp', tenxMode: 'local' }
+    { env, timeoutMs: 180_000, configPath: '@apps/mcp', tenxMode: 'local' }
   );
   return { stdout, cliVersion };
 }
