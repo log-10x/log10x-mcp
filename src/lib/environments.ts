@@ -870,9 +870,38 @@ async function tryBuildDemoLicenseEnv(source: 'env' | 'persisted'): Promise<Envi
   // the public key, so that case keeps the Bearer backend.
   const onDefaultGateway = !process.env.LOG10X_API_BASE;
   if (onDefaultGateway) {
+    // The demo license is DESIGNED to read the data the user's own engine wrote
+    // under it (via /api/v1/demo/*, the quickstart "see your logs" flow). So
+    // try that tenant FIRST and keep it when it carries pattern data — never
+    // mask a user's own results. Only when it has no pattern series (the pure
+    // "minted a license, never ran an engine" case, which otherwise renders an
+    // empty Installed view) fall back to the shared public demo so the prospect
+    // sees the live otel dataset instead of nothing.
+    const ownTenant = buildDemoLicenseEnvironments(jwt, expiresAtEpochSec);
+    const hasOwnPatterns = await demoTenantHasPatternData(ownTenant.default.metricsBackend);
+    if (hasOwnPatterns) return ownTenant;
     return buildSharedDemoReadEnvironments(source);
   }
   return buildDemoLicenseEnvironments(jwt, expiresAtEpochSec);
+}
+
+/**
+ * Probe a demo-license backend for pattern data (all_events_* series). Returns
+ * false on any error/empty — the caller then falls back to the shared demo, so
+ * a probe failure degrades to "show the demo" rather than "show nothing". The
+ * query is bounded by the backend's own fetch timeout.
+ */
+export async function demoTenantHasPatternData(backend: MetricsBackend): Promise<boolean> {
+  try {
+    const res = (await backend.queryInstant(
+      'count(count by (message_pattern) (all_events_summaryBytes_total))',
+    )) as { status?: string; data?: { result?: Array<{ value?: [number, string] }> } };
+    const first = res?.data?.result?.[0];
+    const count = first ? Number(first.value?.[1] ?? '0') : 0;
+    return Number.isFinite(count) && count > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**

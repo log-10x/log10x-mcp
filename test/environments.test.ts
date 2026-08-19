@@ -70,7 +70,7 @@ test('setLastUsed: pinned env overrides resolveEnv default fallback', () => {
 
 // ── Phase 3 paths: env vars + envs.json + both-set detection ───────────
 
-import { loadEnvironments, EnvironmentValidationError } from '../src/lib/environments.js';
+import { loadEnvironments, EnvironmentValidationError, demoTenantHasPatternData } from '../src/lib/environments.js';
 import { beforeEach, afterEach } from 'node:test';
 import { writeFile, mkdir, unlink, mkdtemp } from 'fs/promises';
 import { join } from 'path';
@@ -189,10 +189,13 @@ test('phase 3: ~/.log10x/envs.json is read when present', async () => {
   assert.equal(envs.all[1].metricsBackend.kind, 'mimir');
 });
 
-test('demo license: LOG10X_LICENSE_JWT reads the shared demo via X-10X-Auth (F13)', async () => {
-  // F13: the demo-license path used to build a `log10x_demo` Bearer backend
-  // against /api/v1/demo/*, which serves no data. On the default gateway it now
-  // reads the shared public demo through the working `log10x` X-10X-Auth path.
+test('demo license: an EMPTY license tenant falls back to the shared demo via X-10X-Auth (F13)', async () => {
+  // F13: the demo-license path probes its own tenant first (the quickstart
+  // "see your engine's output" flow). This fake license has no pattern data, so
+  // the probe fails/empties and the path falls back to the shared public demo
+  // through the working `log10x` X-10X-Auth path rather than the dead Bearer
+  // mirror. A license whose tenant DOES carry patterns keeps its own data —
+  // see the demoTenantHasPatternData unit tests below.
   const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
   process.env.LOG10X_LICENSE_JWT = jwt;
   try {
@@ -284,4 +287,32 @@ test('phase 3: envs.json missing required field throws with entry index', async 
     JSON.stringify([{ nickname: 'incomplete' }])
   );
   await assert.rejects(() => loadEnvironments(), /entry #0.*missing/);
+});
+
+
+test('demoTenantHasPatternData: true when the license tenant carries pattern series', async () => {
+  const backend = {
+    async queryInstant() {
+      return { status: 'success', data: { result: [{ value: [0, '37'] }] } };
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), true);
+});
+
+test('demoTenantHasPatternData: false on an empty tenant (falls back to shared demo)', async () => {
+  const backend = {
+    async queryInstant() {
+      return { status: 'success', data: { result: [] } };
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), false);
+});
+
+test('demoTenantHasPatternData: false when the probe throws (degrades to the demo, not an error)', async () => {
+  const backend = {
+    async queryInstant() {
+      throw new Error('network unreachable');
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), false);
 });
