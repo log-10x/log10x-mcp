@@ -24,6 +24,7 @@
  */
 
 import { promises as fs } from 'fs';
+import { readStridedFileLines } from './local-source.js';
 
 import type { LocalSourceResult } from './local-source.js';
 
@@ -33,6 +34,16 @@ const SNIFF_LINES = 50;
 const SNIFF_THRESHOLD = 0.8;
 /** Hard input cap — refuse above rather than OOM. */
 export const MAX_FILE_BYTES = 512 * 1024 * 1024;
+/**
+ * Above this size, the single file is SAMPLED strided across its length rather
+ * than fed whole to the engine. Feeding a 70MB file whole timed out the engine
+ * (120s cap in dev-cli), and a contiguous read under-covers a time-ordered
+ * file's pattern space (F8/F15). 24MB processes in well under the engine
+ * timeout and, sampled strided, spans the whole file.
+ */
+export const SINGLE_FILE_SAMPLE_BYTES = 24 * 1024 * 1024;
+/** Line ceiling for the sampled single-file read. */
+const SINGLE_FILE_SAMPLE_LINES = 12_000;
 
 export interface FileSourceResult extends LocalSourceResult {
   /** What extractPatterns should consume: objects when wrapped
@@ -92,8 +103,26 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
     );
   }
   const start = Date.now();
-  const text = await fs.readFile(path, 'utf8');
-  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  // Large files are sampled strided across their length rather than read whole:
+  // the engine has a bounded per-run timeout, and a contiguous read of a
+  // time-ordered log under-covers its pattern space (F8/F15).
+  let lines: string[];
+  let sampledLargeFile = false;
+  if (stat.size > SINGLE_FILE_SAMPLE_BYTES) {
+    lines = await readStridedFileLines(path, SINGLE_FILE_SAMPLE_LINES, SINGLE_FILE_SAMPLE_BYTES);
+    sampledLargeFile = true;
+  } else {
+    const text = await fs.readFile(path, 'utf8');
+    lines = text.split('\n').filter((l) => l.trim().length > 0);
+  }
+  if (sampledLargeFile) {
+    notes.push(
+      `file is ${(stat.size / 1024 / 1024).toFixed(0)} MB; sampled ${lines.length.toLocaleString()} lines ` +
+        `across ${8} windows spanning the whole file (not read whole). The reduction estimate assumes these ` +
+        `windows are representative of the file's pattern mix — if it has phases with very different logging, ` +
+        `split it and analyse each phase.`,
+    );
+  }
   if (lines.length === 0) {
     notes.push(`file ${path} contains no non-empty lines.`);
     return {
