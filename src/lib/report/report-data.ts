@@ -154,6 +154,25 @@ export interface ReportData {
     /** 0..100 */
     removablePct: number;
   };
+  /** Full addressable volume this window, split by who acts on it. Present
+   *  only when a dominant fix-at-source cluster sits beside the lossless
+   *  levers, so the report headline can lead with the same total the agent
+   *  and the feasibility verdict report instead of the lossless slice alone. */
+  achievable?: {
+    /** Bytes 10x removes losslessly (== totals.removableBytes). */
+    losslessBytes: number;
+    /** Bytes addressable by fixing the source (the dominant cluster). */
+    sourceFixBytes: number;
+    /** 0..100 of the window: lossless + source-fix. */
+    totalPct: number;
+    /** 0..100 of the window, lossless only. */
+    losslessPct: number;
+    /** 0..100 of the window, source-fix only. */
+    sourceFixPct: number;
+    /** True when the dominant cluster is error-class (a real failure) vs
+     *  informational (repeated debug/telemetry output). Drives the wording. */
+    sourceIsFailure: boolean;
+  };
   verdict: ReportVerdict;
   /** 1..6, enforced by the builder. */
   actions: ReportAction[];

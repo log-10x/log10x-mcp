@@ -106,6 +106,17 @@ export function buildReportData(
       ? { ...dominant, cluster: enriched.clusters[dominant.idx] }
       : null;
 
+  // The dominant cluster is addressable volume too — the feasibility verdict
+  // and the agent headline both count it — but it is fixed at SOURCE, not by a
+  // lossless 10x lever. Track whether it is a real failure (error-class) or
+  // repeated informational output (collector debug/telemetry), which decides
+  // the wording below (F7b) and lets the headline lead with the full
+  // addressable total broken into its two parts (F7).
+  const dominantIsFailure = dominantCluster
+    ? dominantCluster.members.filter((m) => isProtectedSeverity(m.severity)).length * 2 >=
+      dominantCluster.members.length
+    : false;
+
   // ── Volume action selection (severity-gated, reducible only) ──
   const inDominant = new Set(dominantCluster?.members ?? []);
   const reducible = severitySufficient
@@ -191,11 +202,15 @@ export function buildReportData(
     );
     actions.push({
       kind: 'operational',
-      title: `Fix the failure behind ${pct}% of this window`,
+      title: dominantIsFailure
+        ? `Fix the failure behind ${pct}% of this window`
+        : `Cut the repeated output driving ${pct}% of this window`,
       note:
         `${fmtCount(members.length)} statement${members.length === 1 ? '' : 's'}` +
         (services.size > 0 ? ` across ${services.size} service${services.size === 1 ? '' : 's'}` : '') +
-        ` report the same failure. Fixing it removes the volume at source; the re-run measures it.`,
+        (dominantIsFailure
+          ? ` report the same failure. Fixing it removes the volume at source; the re-run measures it.`
+          : ` emit the same output on every occurrence. Turning it down at the source (log level or exporter verbosity) removes the volume before it is ever ingested; the re-run measures it.`),
       evidence: faces,
       ...(members.length > 2 ? { moreStatements: members.length - 2 } : {}),
       ...(dnsLike && cell?.checkDns ? { check: { commands: cell.checkDns(cmdCtx) } } : {}),
@@ -210,7 +225,24 @@ export function buildReportData(
   // ── Verdict ──
   const removableBytes = actions.reduce((s, a) => s + (a.impactBytes ?? 0), 0);
   const removablePct = (removableBytes / totalBytes) * 100;
-  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage);
+  // F7: when a dominant fix-at-source cluster sits beside the lossless levers,
+  // surface the full addressable total (lossless + source-fix) with its split,
+  // so the report leads with the same number the agent and feasibility report
+  // rather than the lossless slice alone.
+  const sourceFixBytes = dominantCluster ? dominant!.bytes : 0;
+  const achievable =
+    sourceFixBytes > 0
+      ? {
+          losslessBytes: removableBytes,
+          sourceFixBytes,
+          losslessPct: (removableBytes / totalBytes) * 100,
+          sourceFixPct: (sourceFixBytes / totalBytes) * 100,
+          totalPct: ((removableBytes + sourceFixBytes) / totalBytes) * 100,
+          sourceIsFailure: dominantIsFailure,
+        }
+      : undefined;
+
+  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage, dominantIsFailure);
 
   // ── Verify panel ──
   const verify = buildVerifyChecks(input, enriched, severitySufficient, actions);
@@ -261,6 +293,7 @@ export function buildReportData(
       beforeBytes: extraction.totalBytes,
       afterBytes: Math.max(0, extraction.totalBytes - removableBytes),
     },
+    ...(achievable ? { achievable } : {}),
     verify,
     kept: { protectedEvents, sentences: keptSentences },
   };
@@ -302,6 +335,7 @@ function buildVerdict(
   dominantShare: number,
   severitySufficient: boolean,
   severityCoverage: number,
+  dominantIsFailure = false,
 ): ReportData['verdict'] {
   const sentences: string[] = [];
   let headline: string;
@@ -312,9 +346,14 @@ function buildVerdict(
     // face below, not in a heading. Taking the head line is a
     // selection, not an intra-line cut.
     const headLine = cluster.representativeLabel.split('\n')[0];
-    headline = `${pct}% of this window is one repeating failure: ${headLine}`;
+    // F7b: token clustering joins any repeated statement, not only errors. A
+    // cluster of collector INFO debug lines is repeated OUTPUT, not a failure —
+    // call it what its severity says it is.
+    const noun = dominantIsFailure ? 'repeating failure' : 'repeated output';
+    const verb = dominantIsFailure ? 'report the same failure' : 'emit the same output';
+    headline = `${pct}% of this window is one ${noun}: ${headLine}`;
     sentences.push(
-      `${fmtCount(cluster.members.length)} statements in ${cluster.service} report the same failure on every occurrence.`,
+      `${fmtCount(cluster.members.length)} statements in ${cluster.service} ${verb} on every occurrence.`,
     );
   } else if (actions.length > 0) {
     const covered = actions.reduce((s, a) => s + a.evidence.length + (a.moreStatements ?? 0), 0);
@@ -334,7 +373,11 @@ function buildVerdict(
     } else if (a.kind === 'cap') {
       sentences.push(`Action ${i + 1} caps that volume at the engine.`);
     } else {
-      sentences.push(`Action ${i + 1} is the actual fix.`);
+      sentences.push(
+        dominantIsFailure
+          ? `Action ${i + 1} is the actual fix.`
+          : `Action ${i + 1} cuts that repeated output at its source.`,
+      );
     }
   });
   return { headline, sentences };

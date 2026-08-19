@@ -56,8 +56,34 @@ export function segmentLine(line: string): FaceSegment[] {
  * Build the masked face for a pattern. `bytesEach` is window
  * arithmetic (total bytes / count), rounded to whole bytes.
  */
+/**
+ * True when a template renders as opaque noise a prospect cannot read — only
+ * short symbol/punctuation tokens, no word of 4+ letters and no space-separated
+ * phrase. The engine occasionally emits such a body for a line it symbolized
+ * almost entirely (e.g. a heavily-structured JSON metrics line), and showing
+ * "-.ExmX.eKQs" in a customer deliverable reads as a rendering bug (F10). See
+ * HANDOFF_ENGINE_DEMO_POC.md — the underlying parser mis-assignment is the
+ * proper fix; this keeps the deliverable honest until then.
+ */
+function isReadableTemplate(t: string): boolean {
+  if (!t) return false;
+  // A real log line has either a run of lowercase letters that reads as a word
+  // (5+), or two alpha tokens separated by a space (a phrase). Symbol-code
+  // noise like "-.ExmX.eKQs" or "-5m2H4;1D!S" has neither: its "words" are
+  // short CamelCase or mixed tokens joined by punctuation, not spaces.
+  return /[a-z]{5,}/.test(t) || /[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(t);
+}
+
 export function buildFace(p: ExtractedPattern, maxLines: number = MAX_FACE_LINES): EvidenceFace {
-  const rawLines = (p.template ?? '').split('\n').filter((l) => l.trim().length > 0);
+  // Prefer the abstracted template; if it is opaque, fall back to the real
+  // sample line, which is always a readable log statement. The sample carries
+  // concrete values instead of $ markers, so it is a faithful, if less
+  // abstracted, face — never noise.
+  const body =
+    isReadableTemplate(p.template ?? '') || !p.sampleEvent
+      ? (p.template ?? '')
+      : p.sampleEvent;
+  const rawLines = body.split('\n').filter((l) => l.trim().length > 0);
   const shown = rawLines.slice(0, maxLines);
   const lines: FaceLine[] = shown.map((l, i) => ({
     cont: i > 0,

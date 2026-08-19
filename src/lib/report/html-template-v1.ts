@@ -47,6 +47,12 @@ h1{font-size:clamp(26px,4.2vw,36px);line-height:1.12;letter-spacing:-.022em;font
 .verdict{margin:30px 0 0;padding:20px 22px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--val);border-radius:5px}
 .verdict h3{margin:0 0 8px;font-size:16.5px;font-weight:650;letter-spacing:-.01em}
 .verdict p{margin:0;color:var(--dim);font-size:14px;max-width:72ch}
+.split{margin:14px 0 0;display:flex;flex-direction:column;gap:9px}
+.split-row{display:flex;align-items:baseline;gap:13px}
+.split-pct{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:650;font-size:19px;flex:0 0 auto;min-width:52px;font-variant-numeric:tabular-nums}
+.split-pct.lossless{color:var(--ok)}
+.split-pct.source{color:var(--wrn)}
+.split-lab{color:var(--dim);font-size:13.5px;line-height:1.4}
 h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);font-weight:650;margin:50px 0 6px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .sub{max-width:66ch;color:var(--dim);font-size:13.5px;margin:12px 0 4px}
 .act{padding:26px 0;border-bottom:1px solid var(--line)}
@@ -185,10 +191,18 @@ export function renderReportHtml(data: ReportData): string {
   // Time-window labels read as "One hour of logs"; the file label already says
   // "this log sample", so appending "of logs" would double the noun.
   const subject = d.window.label === 'this log sample' ? cap(d.window.label) : `${cap(d.window.label)} of logs`;
+  // F7: lead with the full addressable total (lossless + fix-at-source) when a
+  // dominant cluster sits beside the levers, so the headline matches the agent
+  // and the feasibility verdict. "addressable" not "less volume" because part
+  // of it is the customer fixing their source, not 10x removing it — the
+  // breakdown strip below the hero splits the two.
+  const addrPct = d.achievable ? Math.round(d.achievable.totalPct) : pct;
   const h1 =
-    volumeActions > 0
-      ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${pct}% less volume`
-      : `${subject}, analysed in place`;
+    volumeActions > 0 && d.achievable
+      ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${addrPct}% addressable`
+      : volumeActions > 0
+        ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${pct}% less volume`
+        : `${subject}, analysed in place`;
   const covered = statementsCovered(d.actions);
 
   const chips: string[] = [];
@@ -212,6 +226,16 @@ export function renderReportHtml(data: ReportData): string {
   }
 
   const verdictBody = d.verdict.sentences.map((s) => escapeHtml(s)).join(' ');
+
+  // F7 breakdown strip: names the two halves of the addressable total so the
+  // hero number can never be read as "10x removes 58%".
+  const breakdown = d.achievable
+    ? `
+<div class="split">
+<div class="split-row"><span class="split-pct lossless">${Math.round(d.achievable.losslessPct)}%</span><span class="split-lab">via 10x's lossless levers: offload, compact, or tier down. Nothing deleted.</span></div>
+<div class="split-row"><span class="split-pct source">${Math.round(d.achievable.sourceFixPct)}%</span><span class="split-lab">by ${d.achievable.sourceIsFailure ? 'fixing the failure' : 'turning down the repeated output'} at its source. The change is yours to make; 10x measures it.</span></div>
+</div>`
+    : '';
 
   const expected = `
 <h2>Expected result</h2>
@@ -246,6 +270,7 @@ ${totals.join('\n')}
 <h3>${escapeHtml(d.verdict.headline)}</h3>
 <p>${verdictBody}</p>
 </div>
+${breakdown}
 </header>
 
 <h2>Action plan</h2>
