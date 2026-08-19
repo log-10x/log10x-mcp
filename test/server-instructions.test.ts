@@ -24,3 +24,16 @@ test('the instructions route the POC ask to the tool that does it', () => {
 test('the instructions require demo-data numbers to be labeled', () => {
   assert.match(SERVER_INSTRUCTIONS, /demo dataset[\s\S]*must say so/);
 });
+
+test('instructions carry the plan-row rendering grammar (stacked list, never a table)', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  // The grammar is what makes every host render a plan the same way: headline
+  // verbatim, stacked rows so the pattern identity never crops, gloss under the
+  // interpretation rules, gap relayed verbatim with the choice left to the user.
+  assert.match(SERVER_INSTRUCTIONS, /RENDERING A PLAN/);
+  assert.match(SERVER_INSTRUCTIONS, /STACKED\s+LIST, never a markdown table/);
+  assert.match(SERVER_INSTRUCTIONS, /headline sentence first, verbatim/);
+  assert.match(SERVER_INSTRUCTIONS, /never truncate/);
+  assert.match(SERVER_INSTRUCTIONS, /hedged guess is worse than silence/);
+  assert.match(SERVER_INSTRUCTIONS, /belongs to the user, never to you/);
+});
