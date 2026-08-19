@@ -65,10 +65,22 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
         '',
       ]
     : [];
+  // F5: in the keyless/demo boot a demo backend IS attached read-only, so
+  // "no metrics backend configured" is both false and contradictory with the
+  // boot banner ("attached READ-ONLY to the public demo dataset"). Say the true
+  // thing: the tool is held back on the shared demo account so the user
+  // connects their own environment. Only the non-demo case is a genuine
+  // "nothing configured".
+  const header = configureEnvClosed
+    ? `# \`${callingTool}\` is held back on the demo dataset`
+    : `# Metrics backend not configured`;
+  const opening = configureEnvClosed
+    ? `This session is attached READ-ONLY to the public 10x demo dataset (same data as the website console). \`${callingTool}\` is held back here so it runs against the user's OWN environment, not the shared demo account.`
+    : `The MCP has no metrics backend configured for this session — \`${callingTool}\` cannot query metrics until one is set up.`;
   return [
-    `# Metrics backend not configured`,
+    header,
     '',
-    `The MCP has no metrics backend configured for this session — \`${callingTool}\` cannot query metrics until one is set up.`,
+    opening,
     '',
     ...demoPreamble,
     `**To set up**: ask the user where their 10x engine ships metrics, then call \`log10x_configure_env\` with the corresponding \`metricsBackend\` config. Supported backend kinds:`,

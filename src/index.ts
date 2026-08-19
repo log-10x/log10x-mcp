@@ -208,7 +208,16 @@ async function initEnvs(): Promise<void> {
  * instead of 5xx'ing on a missing backend.
  */
 async function initBootMode(): Promise<void> {
-  bootMode = await detectMode();
+  // Hand mode-detect the backend the ENV LOADER already built (from
+  // credentials / API key / demo-license), so it probes the same backend the
+  // tools will use rather than only its own CUSTOMER_METRICS_* cascade (F3).
+  // `envs` is populated by initEnvs(), which main() awaits before this.
+  const def = envs?.default;
+  bootMode = await detectMode({
+    loadedBackend: def?.metricsBackend,
+    loadedIsDemo: envs?.isDemoMode,
+    loadedNickname: def?.nickname,
+  });
   // Publish it to lib/tool-availability so callers that cannot import this
   // module (log10x_start's action_menu, which index.ts imports) can ask the
   // mode gate the same question wrap() asks.

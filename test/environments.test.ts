@@ -70,7 +70,7 @@ test('setLastUsed: pinned env overrides resolveEnv default fallback', () => {
 
 // ── Phase 3 paths: env vars + envs.json + both-set detection ───────────
 
-import { loadEnvironments, EnvironmentValidationError } from '../src/lib/environments.js';
+import { loadEnvironments, EnvironmentValidationError, demoTenantHasPatternData } from '../src/lib/environments.js';
 import { beforeEach, afterEach } from 'node:test';
 import { writeFile, mkdir, unlink, mkdtemp } from 'fs/promises';
 import { join } from 'path';
@@ -189,22 +189,44 @@ test('phase 3: ~/.log10x/envs.json is read when present', async () => {
   assert.equal(envs.all[1].metricsBackend.kind, 'mimir');
 });
 
-test('demo license: LOG10X_LICENSE_JWT resolves to a log10x_demo env (no api key)', async () => {
-  // payload decodes to {"tenant_id":"demo-xyz"}
+test('demo license: an EMPTY license tenant falls back to the shared demo via X-10X-Auth (F13)', async () => {
+  // F13: the demo-license path probes its own tenant first (the quickstart
+  // "see your engine's output" flow). This fake license has no pattern data, so
+  // the probe fails/empties and the path falls back to the shared public demo
+  // through the working `log10x` X-10X-Auth path rather than the dead Bearer
+  // mirror. A license whose tenant DOES carry patterns keeps its own data —
+  // see the demoTenantHasPatternData unit tests below.
   const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
   process.env.LOG10X_LICENSE_JWT = jwt;
   try {
     const envs = await loadEnvironments();
     assert.equal(envs.all.length, 1);
     assert.equal(envs.default.nickname, 'demo');
-    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
-    assert.equal(envs.default.metricsBackend.endpoint, 'https://prometheus.log10x.com');
+    assert.equal(envs.default.metricsBackend.kind, 'log10x');
     assert.equal(envs.isDemoMode, true);
     assert.equal(envs.default.apiKey, '');
-    // tenant id is decoded from the JWT for display
+    // reads the shared public demo env, not the license's own (empty) tenant
+    assert.equal(envs.default.envId, '6aa99191-f827-4579-a96a-c0ebdfe73884');
+    // the reroute is disclosed so the demo banner explains it
+    assert.match(envs.demoFallbackReason ?? '', /shared public 10x demo dataset/);
+  } finally {
+    delete process.env.LOG10X_LICENSE_JWT;
+  }
+});
+
+test('demo license: self-host gateway (LOG10X_API_BASE) keeps the Bearer demo mirror', async () => {
+  // A self-hosted / staging gateway may serve /api/v1/demo/* correctly and its
+  // operator did not opt into the public demo key, so that case is untouched.
+  const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
+  process.env.LOG10X_LICENSE_JWT = jwt;
+  process.env.LOG10X_API_BASE = 'https://gw.staging.example.com';
+  try {
+    const envs = await loadEnvironments();
+    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
     assert.equal(envs.default.envId, 'demo-xyz');
   } finally {
     delete process.env.LOG10X_LICENSE_JWT;
+    delete process.env.LOG10X_API_BASE;
   }
 });
 
@@ -219,9 +241,11 @@ test('demo license: explicit LOG10X_LICENSE_JWT wins over a persisted login (~/.
   process.env.LOG10X_LICENSE_JWT = jwt;
   try {
     const envs = await loadEnvironments();
-    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
+    // F13: explicit intent still wins over the stored login; reads now go to
+    // the shared demo via X-10X-Auth rather than the dead Bearer mirror.
+    assert.equal(envs.default.metricsBackend.kind, 'log10x');
     assert.equal(envs.isDemoMode, true);
-    assert.equal(envs.default.envId, 'demo-xyz');
+    assert.equal(envs.default.envId, '6aa99191-f827-4579-a96a-c0ebdfe73884');
   } finally {
     delete process.env.LOG10X_LICENSE_JWT;
   }
@@ -263,4 +287,32 @@ test('phase 3: envs.json missing required field throws with entry index', async 
     JSON.stringify([{ nickname: 'incomplete' }])
   );
   await assert.rejects(() => loadEnvironments(), /entry #0.*missing/);
+});
+
+
+test('demoTenantHasPatternData: true when the license tenant carries pattern series', async () => {
+  const backend = {
+    async queryInstant() {
+      return { status: 'success', data: { result: [{ value: [0, '37'] }] } };
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), true);
+});
+
+test('demoTenantHasPatternData: false on an empty tenant (falls back to shared demo)', async () => {
+  const backend = {
+    async queryInstant() {
+      return { status: 'success', data: { result: [] } };
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), false);
+});
+
+test('demoTenantHasPatternData: false when the probe throws (degrades to the demo, not an error)', async () => {
+  const backend = {
+    async queryInstant() {
+      throw new Error('network unreachable');
+    },
+  } as unknown as Parameters<typeof demoTenantHasPatternData>[0];
+  assert.equal(await demoTenantHasPatternData(backend), false);
 });
