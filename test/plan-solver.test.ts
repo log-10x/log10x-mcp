@@ -81,3 +81,23 @@ test('reconciliation: same method on two different windows both hit the target',
   // same lever, same action vocabulary — the plans agree in shape at any scale
   assert.equal(a.keepEverythingLever, b.keepEverythingLever);
 });
+
+test('tier_down is priced on its destinations (regression: Datadog was $0, Serverless absent)', async () => {
+  const { projectAction } = await import('../src/lib/cost.js');
+  // The exact bug surface: tier_down must produce a real dollar cut where it is
+  // the destination lever. Datadog (Flex) had no tier and returned $0; Elastic
+  // Serverless had no tier at all.
+  for (const destination of ['datadog', 'cloudwatch', 'elastic-serverless'] as const) {
+    const bill = projectAction({ action: 'pass', bytes_in: 1e9, destination }).total_dollars ?? 0;
+    const after = projectAction({ action: 'tier_down', bytes_in: 1e9, destination }).total_dollars ?? bill;
+    assert.ok(bill > 0, `${destination} should have a bill`);
+    assert.ok(after < bill, `${destination} tier_down must cut the bill (was ${bill} -> ${after})`);
+  }
+  // Datadog cut 50% now reaches the target on tier_down alone.
+  const dd = solvePlan(
+    [{ hash: 'x', name: 'noisy', services: { app: 50_000_000_000 }, severity: 'INFO', bytes: 50_000_000_000 }],
+    { destination: 'datadog', retrieverInstalled: false, targetPct: 40 },
+  );
+  assert.equal(dd.keepEverythingLever, 'tier_down');
+  assert.ok(dd.met, `Datadog should meet 40% via tier_down, got ${dd.achievedPct}%`);
+});
