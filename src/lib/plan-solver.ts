@@ -72,6 +72,10 @@ export interface SolveOpts {
    *  Default false: the plan stops at the keep-everything ceiling and names the
    *  gap instead of silently discarding data. */
   allowLossy?: boolean;
+  /** Services pinned at pass (the POC's exception_services): their patterns
+   *  stay in the bill but are never planned, exactly like protected severities.
+   *  Matched case-insensitively against the pattern's dominant service. */
+  exceptionServices?: string[];
 }
 
 export interface PlannedRow {
@@ -189,6 +193,16 @@ export function solvePlan(patterns: SolverPattern[], opts: SolveOpts): Plan {
   const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled);
 
   // Scope: keep patterns touching a scoped service; weight by scoped bytes.
+  const exceptions = new Set(
+    (opts.exceptionServices ?? []).map((x) => x.toLowerCase()),
+  );
+  const isPinned = (p: SolverPattern): boolean => {
+    if (isProtectedSeverity(p.severity)) return true;
+    if (exceptions.size === 0) return false;
+    const { dominant } = serviceMix(p.services);
+    return exceptions.has(dominant.toLowerCase());
+  };
+
   const rows = patterns
     .map((p) => {
       const scopedBytes = scopeSet
@@ -218,7 +232,7 @@ export function solvePlan(patterns: SolverPattern[], opts: SolveOpts): Plan {
   // event from the SIEM, so it is the deepest lossless cut; otherwise the
   // in-SIEM lever caps it.
   const deepest: Action | null = canOffload ? 'offload' : inSiem;
-  const nonError = rows.filter((r) => !isProtectedSeverity(r.p.severity));
+  const nonError = rows.filter((r) => !isPinned(r.p));
   const ceilingUsd = deepest
     ? nonError.reduce(
         (s, r) => s + saveUsd(deepest, r.scopedBytes, opts.destination, r.p.avgEventBytes),
@@ -231,7 +245,7 @@ export function solvePlan(patterns: SolverPattern[], opts: SolveOpts): Plan {
   const ranked = [...rows].sort(
     (a, b) => billOf(b.scopedBytes, opts.destination, b.p.avgEventBytes) - billOf(a.scopedBytes, opts.destination, a.p.avgEventBytes),
   );
-  const rankedNonError = ranked.filter((r) => !isProtectedSeverity(r.p.severity));
+  const rankedNonError = ranked.filter((r) => !isPinned(r.p));
 
   const build = (r: (typeof rows)[number], action: Action | 'pass', saved: number): PlannedRow => {
     const { dominant, mix } = serviceMix(r.p.services);

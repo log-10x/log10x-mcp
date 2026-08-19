@@ -41,6 +41,7 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
 import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/build-report-data.js';
+import { solvePlan, type Plan } from '../lib/plan-solver.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
 
@@ -133,6 +134,23 @@ export const pocFromLocalSchema = {
     .optional()
     .default(20)
     .describe('Cap on number of pods sampled. Default 20.'),
+  retriever_installed: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Whether the prospect will install the S3 retriever. Gates the offload rung of the plan ladder: ' +
+        'without it offloaded events would be unreachable, so the plan stops at the in-SIEM levers and ' +
+        'the gap names "install the retriever" as the lossless remedy. Set from conversation.'
+    ),
+  allow_lossy: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Permit sample/drop (lossy) to close a keep-everything shortfall. Default false: the plan stops at ' +
+        'the keep-everything ceiling and reports the gap. Only set after the user explicitly chooses loss.'
+    ),
   target_percent_reduction: z
     .number()
     .min(0)
@@ -181,6 +199,8 @@ export interface PocFromLocalArgs {
   per_pod_limit?: number;
   max_pods?: number;
   ai_prettify?: boolean;
+  retriever_installed?: boolean;
+  allow_lossy?: boolean;
   target_percent_reduction?: number;
   exception_services?: string[];
   pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
@@ -343,6 +363,9 @@ interface PocFromLocalInner {
   markdown: string;
   /** Populated only when target_percent_reduction was supplied on submit. */
   feasibility?: LocalFeasibility;
+  /** The shared ladder plan (same object estimate_savings emits) — pattern-first,
+   *  dollar-denominated, with the keep-everything ceiling and the honest gap. */
+  plan?: Plan;
   commitment_artifact?: LocalCommitmentArtifact;
 }
 
@@ -563,6 +586,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   // ── Feasibility + commitment artifact (only when target supplied) ──
   let feasibility: LocalFeasibility | undefined;
   let commitment_artifact: LocalCommitmentArtifact | undefined;
+  /** The shared ladder plan; attached to the envelope as `plan`. */
+  let plan: Plan | undefined;
   if (args.target_percent_reduction !== undefined) {
     const exceptions = args.exception_services ?? [];
     const exceptionSet = new Set(exceptions.map((s) => s.toLowerCase()));
@@ -582,12 +607,44 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       if (pinServicesLower.get(src) === 'pass') { exceptionBytes += c.bytes; }
     }
     const exceptionShare = sample.totalBytes > 0 ? exceptionBytes / sample.totalBytes : 0;
-    const maxAchievable = Math.max(0, expectedPct - exceptionShare * 100);
-    const feasible = maxAchievable >= args.target_percent_reduction;
+    // The shared ladder solver (lib/plan-solver) — the SAME routine
+    // estimate_savings runs on the analysis path, so a prospect's POC number
+    // and the deployed forecast answer "cut N%" identically by construction.
+    // It replaces the old byte "droppable fraction" (which was destination-
+    // blind and implicitly assumed drop, overstating e.g. 65% on a destination
+    // whose real keep-everything lever was tier_down).
+    plan = solvePlan(
+      patterns.map((p) => ({
+        hash: p.tenxHash ?? p.hash,
+        name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
+        services: { [p.service ?? '(unattributed)']: p.bytes },
+        severity: p.severity ?? '',
+        bytes: p.bytes,
+        ...(p.count > 0 ? { avgEventBytes: p.bytes / p.count } : {}),
+      })),
+      {
+        // Same assumption rule as the report header: absent siem -> cloudwatch.
+        destination: (args.siem ?? 'cloudwatch') as SiemId,
+        retrieverInstalled: args.retriever_installed ?? false,
+        targetPct: args.target_percent_reduction,
+        scope: 'all',
+        allowLossy: args.allow_lossy ?? false,
+        exceptionServices: [
+          ...exceptions,
+          ...[...pinServicesLower.entries()].filter(([, a]) => a === 'pass').map(([k]) => k),
+        ],
+      },
+    );
+    const maxAchievable = plan.keepEverythingCeilingPct;
+    const feasible = plan.met;
     const reasonParts = [
       `Total sample bytes ${fmtBytes(sample.totalBytes)} across ${sample.composition.length} pod(s).`,
-      `Droppable fraction (non-error, ≥1% volume patterns): ${fmtPct(expectedPct)}.`,
+      `Ladder plan on ${args.siem ?? 'cloudwatch'}: ${plan.keepEverythingLever ?? 'no keep-everything lever'} first; ` +
+        `achieved ${fmtPct(plan.achievedPct)} of the bill keeping everything` +
+        `${plan.planned.some((r) => !r.keepsEverything) ? ' plus opted-in loss' : ''}; ` +
+        `keep-everything ceiling ${fmtPct(plan.keepEverythingCeilingPct)}.`,
     ];
+    if (plan.gap) reasonParts.push(plan.gap.message);
     if (exceptions.length > 0) {
       reasonParts.push(
         `${exceptions.length} exception pod(s) cover ${fmtPct(exceptionShare * 100)} of bytes and are pinned to pass.`,
@@ -756,6 +813,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     notes: sample.notes,
     markdown: lines.join('\n'),
     feasibility,
+    ...(plan ? { plan } : {}),
     commitment_artifact,
   };
 }
