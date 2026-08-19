@@ -101,3 +101,29 @@ test('tier_down is priced on its destinations (regression: Datadog was $0, Serve
   assert.equal(dd.keepEverythingLever, 'tier_down');
   assert.ok(dd.met, `Datadog should meet 40% via tier_down, got ${dd.achievedPct}%`);
 });
+
+test('same-hash template variants merge into one row (per-row savings stay per-lever)', () => {
+  // Two variants of one message type share a tenx_hash. Planned separately they
+  // collided in the action map and a row could render a 4% cut where the lever
+  // gives ~51%. Merged, there is one row whose saving is the lever's cut of the
+  // combined bill.
+  const twoVariants: SolverPattern[] = [
+    { hash: 'same', name: 'variant A', services: { app: 60_000_000_000 }, severity: 'INFO', bytes: 60_000_000_000 },
+    { hash: 'same', name: 'variant B', services: { app: 40_000_000_000 }, severity: 'INFO', bytes: 40_000_000_000 },
+  ];
+  const pl = solvePlan(twoVariants, { destination: 'cloudwatch', retrieverInstalled: false, targetPct: 40 });
+  assert.equal(pl.planned.length + pl.kept.length, 1, 'variants must merge to one message type');
+  const row = pl.planned[0];
+  const cut = row.savedUsd / row.billUsd;
+  assert.ok(cut > 0.4 && cut < 0.7, `merged row must carry the lever's real cut, got ${(cut * 100).toFixed(0)}%`);
+});
+
+test('a protected variant pins the whole merged message type', () => {
+  const mixed: SolverPattern[] = [
+    { hash: 'same', name: 'big INFO variant', services: { app: 90_000_000_000 }, severity: 'INFO', bytes: 90_000_000_000 },
+    { hash: 'same', name: 'ERROR variant', services: { app: 10_000_000_000 }, severity: 'ERROR', bytes: 10_000_000_000 },
+  ];
+  const pl = solvePlan(mixed, { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 40 });
+  assert.equal(pl.planned.length, 0, 'a protected variant must pin the merged row at pass');
+  assert.equal(pl.kept[0]?.action, 'pass');
+});
