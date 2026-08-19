@@ -187,7 +187,34 @@ function saveUsd(
   return Math.max(0, bill - after);
 }
 
-export function solvePlan(patterns: SolverPattern[], opts: SolveOpts): Plan {
+export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
+  // MERGE same-hash inputs first: two extraction rows sharing a tenx_hash are
+  // template VARIANTS of one message type (the product's unit of identity),
+  // and planning them as separate rows collided in the action map — the last
+  // variant's action/saving was attributed to every sibling, so a row could
+  // render a 4% cut where the lever gives 51%. One hash, one row: bytes and
+  // service distributions sum; a protected severity on any variant pins the
+  // merged row (the rail must not be washed out by a larger INFO sibling).
+  const byHash = new Map<string, SolverPattern>();
+  for (const p of rawPatterns) {
+    const prev = byHash.get(p.hash);
+    if (!prev) {
+      byHash.set(p.hash, { ...p, services: { ...p.services } });
+      continue;
+    }
+    prev.bytes += p.bytes;
+    for (const [svc, b] of Object.entries(p.services)) {
+      prev.services[svc] = (prev.services[svc] ?? 0) + b;
+    }
+    if (isProtectedSeverity(p.severity) && !isProtectedSeverity(prev.severity)) {
+      prev.severity = p.severity;
+    }
+    if (prev.avgEventBytes !== undefined && p.avgEventBytes !== undefined) {
+      prev.avgEventBytes = (prev.avgEventBytes + p.avgEventBytes) / 2;
+    }
+  }
+  const patterns = [...byHash.values()];
+
   const scopeSet =
     opts.scope && opts.scope !== 'all' ? new Set(opts.scope) : null;
   const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled);
