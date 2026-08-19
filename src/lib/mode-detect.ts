@@ -90,6 +90,17 @@ export const TENX_SERIES_PROBE =
  */
 export async function detectMode(opts?: {
   probeTimeoutMs?: number;
+  /** The backend the ENV LOADER already built (credentials / API key /
+   *  demo-license), so mode-detect can probe the same backend the tools will
+   *  use instead of only its own `resolveBackend()` cascade. Prevents a
+   *  signed-in user whose metrics are SaaS-hosted (no CUSTOMER_METRICS_* env
+   *  vars) from being misclassified into POC mode (F3). */
+  loadedBackend?: { queryInstant(promql: string, timeoutMs?: number): Promise<unknown> };
+  /** Skip the loadedBackend probe for a demo env — the keyless path below owns
+   *  demo messaging and setup. */
+  loadedIsDemo?: boolean;
+  /** Nickname of the loaded default env, for the reason string. */
+  loadedNickname?: string;
 }): Promise<ModeResolution> {
   const probeTimeoutMs = opts?.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const startedAt = Date.now();
@@ -131,6 +142,40 @@ export async function detectMode(opts?: {
   }
 
   if (!resolution.backend) {
+    // F3: the env loader may already hold a real (non-demo) backend from
+    // ~/.log10x/credentials or LOG10X_API_KEY — resolveBackend() only reads the
+    // CUSTOMER_METRICS_* / cloud-autodetect cascade, so a signed-in user whose
+    // metrics are log10x-SaaS-hosted (no CUSTOMER_METRICS_* set) resolves to
+    // nothing here and, before this clause, fell all the way to POC. Probe the
+    // backend the tools will actually use so the boot mode matches the tools.
+    if (opts?.loadedBackend && !opts?.loadedIsDemo) {
+      const where = opts.loadedNickname ? ` (env "${opts.loadedNickname}")` : '';
+      const loadedProbe = await probeTenxSeriesCount(
+        opts.loadedBackend as Parameters<typeof probeTenxSeriesCount>[0],
+        probeTimeoutMs,
+      );
+      if (loadedProbe.outcome === 'ok') {
+        return {
+          mode: loadedProbe.seriesCount === 0 ? 'analysis_pending' : 'analysis',
+          trace: resolution.trace,
+          reason:
+            `No CUSTOMER_METRICS_* backend, but a configured account backend${where} is present ` +
+            `(${loadedProbe.seriesCount === 0 ? 'no series yet — fresh deploy' : `${loadedProbe.seriesCount} pattern series live`}). ` +
+            `Registered analysis tools against it.`,
+          probeDurationMs: Date.now() - startedAt,
+        };
+      }
+      // timeout / error: register analysis optimistically, same as the
+      // resolved-backend path does, rather than dropping a live account to POC.
+      return {
+        mode: 'analysis',
+        trace: resolution.trace,
+        reason:
+          `A configured account backend${where} is present but its tenx_* probe ` +
+          `${loadedProbe.outcome === 'timeout' ? 'timed out' : 'failed'}; registered analysis tools optimistically.`,
+        probeDurationMs: Date.now() - startedAt,
+      };
+    }
     // Keyless first-run: attach read-only to the public demo dataset so the
     // first experience is the real orientation on real data, not an empty
     // POC shell. LOG10X_DEMO_FALLBACK=off opts out (pure POC mode).

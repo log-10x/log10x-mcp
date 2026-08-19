@@ -209,3 +209,70 @@ test('TENX_SERIES_PROBE queries the metric the analysis tools actually read', as
     'boot probe must not query tenx_pattern_bytes_total — no engine emits it (F1).'
   );
 });
+
+// ── F3: mode-detect probes the ENV-LOADER's backend, not only its own cascade ──
+// A signed-in user whose metrics are log10x-SaaS-hosted sets no CUSTOMER_METRICS_*
+// env vars, so resolveBackend() finds nothing. Before this, that dropped a live
+// account to POC mode. detectMode now probes the loaded backend the tools use.
+test('detectMode: a loaded account backend with series → analysis, not POC', async () => {
+  const { detectMode } = await import('../src/lib/mode-detect.js');
+  // No CUSTOMER_METRICS_*, demo fallback off → resolveBackend resolves nothing.
+  const prev = process.env.LOG10X_DEMO_FALLBACK;
+  process.env.LOG10X_DEMO_FALLBACK = 'off';
+  try {
+    const loadedBackend = {
+      // The probe is count(count by(message_pattern)(...)); return a single
+      // series whose value is the pattern count.
+      async queryInstant() {
+        return { status: 'success', data: { result: [{ value: [0, '42'] }] } };
+      },
+    };
+    const res = await detectMode({ loadedBackend, loadedIsDemo: false, loadedNickname: 'acme' });
+    assert.equal(res.mode, 'analysis');
+    assert.match(res.reason, /configured account backend/);
+    assert.match(res.reason, /acme/);
+  } finally {
+    if (prev === undefined) delete process.env.LOG10X_DEMO_FALLBACK;
+    else process.env.LOG10X_DEMO_FALLBACK = prev;
+  }
+});
+
+test('detectMode: a loaded backend with zero series → analysis_pending', async () => {
+  const { detectMode } = await import('../src/lib/mode-detect.js');
+  const prev = process.env.LOG10X_DEMO_FALLBACK;
+  process.env.LOG10X_DEMO_FALLBACK = 'off';
+  try {
+    const loadedBackend = {
+      async queryInstant() {
+        return { status: 'success', data: { result: [] } };
+      },
+    };
+    const res = await detectMode({ loadedBackend, loadedIsDemo: false });
+    assert.equal(res.mode, 'analysis_pending');
+  } finally {
+    if (prev === undefined) delete process.env.LOG10X_DEMO_FALLBACK;
+    else process.env.LOG10X_DEMO_FALLBACK = prev;
+  }
+});
+
+test('detectMode: a demo loaded backend is NOT probed here (keyless path owns it)', async () => {
+  const { detectMode } = await import('../src/lib/mode-detect.js');
+  const prev = process.env.LOG10X_DEMO_FALLBACK;
+  process.env.LOG10X_DEMO_FALLBACK = 'off';
+  try {
+    let probed = false;
+    const loadedBackend = {
+      async queryInstant() {
+        probed = true;
+        return { status: 'success', data: { result: [{ value: [0, '9'] }] } };
+      },
+    };
+    // loadedIsDemo:true → skip this probe, fall through to POC (fallback off).
+    const res = await detectMode({ loadedBackend, loadedIsDemo: true });
+    assert.equal(probed, false);
+    assert.equal(res.mode, 'poc');
+  } finally {
+    if (prev === undefined) delete process.env.LOG10X_DEMO_FALLBACK;
+    else process.env.LOG10X_DEMO_FALLBACK = prev;
+  }
+});

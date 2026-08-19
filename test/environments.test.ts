@@ -189,22 +189,41 @@ test('phase 3: ~/.log10x/envs.json is read when present', async () => {
   assert.equal(envs.all[1].metricsBackend.kind, 'mimir');
 });
 
-test('demo license: LOG10X_LICENSE_JWT resolves to a log10x_demo env (no api key)', async () => {
-  // payload decodes to {"tenant_id":"demo-xyz"}
+test('demo license: LOG10X_LICENSE_JWT reads the shared demo via X-10X-Auth (F13)', async () => {
+  // F13: the demo-license path used to build a `log10x_demo` Bearer backend
+  // against /api/v1/demo/*, which serves no data. On the default gateway it now
+  // reads the shared public demo through the working `log10x` X-10X-Auth path.
   const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
   process.env.LOG10X_LICENSE_JWT = jwt;
   try {
     const envs = await loadEnvironments();
     assert.equal(envs.all.length, 1);
     assert.equal(envs.default.nickname, 'demo');
-    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
-    assert.equal(envs.default.metricsBackend.endpoint, 'https://prometheus.log10x.com');
+    assert.equal(envs.default.metricsBackend.kind, 'log10x');
     assert.equal(envs.isDemoMode, true);
     assert.equal(envs.default.apiKey, '');
-    // tenant id is decoded from the JWT for display
+    // reads the shared public demo env, not the license's own (empty) tenant
+    assert.equal(envs.default.envId, '6aa99191-f827-4579-a96a-c0ebdfe73884');
+    // the reroute is disclosed so the demo banner explains it
+    assert.match(envs.demoFallbackReason ?? '', /shared public 10x demo dataset/);
+  } finally {
+    delete process.env.LOG10X_LICENSE_JWT;
+  }
+});
+
+test('demo license: self-host gateway (LOG10X_API_BASE) keeps the Bearer demo mirror', async () => {
+  // A self-hosted / staging gateway may serve /api/v1/demo/* correctly and its
+  // operator did not opt into the public demo key, so that case is untouched.
+  const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJ0ZW5hbnRfaWQiOiJkZW1vLXh5eiJ9.sig';
+  process.env.LOG10X_LICENSE_JWT = jwt;
+  process.env.LOG10X_API_BASE = 'https://gw.staging.example.com';
+  try {
+    const envs = await loadEnvironments();
+    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
     assert.equal(envs.default.envId, 'demo-xyz');
   } finally {
     delete process.env.LOG10X_LICENSE_JWT;
+    delete process.env.LOG10X_API_BASE;
   }
 });
 
@@ -219,9 +238,11 @@ test('demo license: explicit LOG10X_LICENSE_JWT wins over a persisted login (~/.
   process.env.LOG10X_LICENSE_JWT = jwt;
   try {
     const envs = await loadEnvironments();
-    assert.equal(envs.default.metricsBackend.kind, 'log10x_demo');
+    // F13: explicit intent still wins over the stored login; reads now go to
+    // the shared demo via X-10X-Auth rather than the dead Bearer mirror.
+    assert.equal(envs.default.metricsBackend.kind, 'log10x');
     assert.equal(envs.isDemoMode, true);
-    assert.equal(envs.default.envId, 'demo-xyz');
+    assert.equal(envs.default.envId, '6aa99191-f827-4579-a96a-c0ebdfe73884');
   } finally {
     delete process.env.LOG10X_LICENSE_JWT;
   }

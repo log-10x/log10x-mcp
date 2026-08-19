@@ -70,6 +70,10 @@ import { DEFAULT_LABELS, type LabelNameMap } from './promql.js';
  * auto-applied.
  */
 const DEMO_API_KEY = '4d985100-ee4a-4b6c-b784-a416b8684868';
+/** The shared public-demo envId (matches DEMO_ENV.envId in demo-env.ts). The
+ *  demo-license reroute (F13) reads this env via X-10X-Auth, the working path,
+ *  instead of the dead /api/v1/demo/* Bearer mirror. */
+const DEMO_ENV_ID = '6aa99191-f827-4579-a96a-c0ebdfe73884';
 
 export interface EnvConfig {
   nickname: string;
@@ -849,7 +853,77 @@ async function tryBuildDemoLicenseEnv(source: 'env' | 'persisted'): Promise<Envi
     }
   }
   if (!jwt) return undefined;
+
+  // F13 (2026-08-19): the demo-license read path builds a `log10x_demo`
+  // backend that reads `/api/v1/demo/*`. On the public gateway that mirror
+  // returns EMPTY for every query, even for a valid OWNER license (verified
+  // 2026-08-19: Bearer /api/v1/demo/query count(up) == empty, while
+  // X-10X-Auth /api/v1/query count(all_events{edge}) == 374). So a prospect
+  // who ran the quickstart (which mints a demo license) then saw an EMPTY
+  // Installed experience over live data.
+  //
+  // Reroute reads to the shared public-demo dataset via the working
+  // X-10X-Auth path — exactly what the keyless boot and the website console
+  // read — so both demo entrypoints show the same populated data. Kept behind
+  // the default-gateway check: a self-hosted / staging gateway (LOG10X_API_BASE
+  // set) may serve `/api/v1/demo/*` correctly and its operator did not opt into
+  // the public key, so that case keeps the Bearer backend.
+  const onDefaultGateway = !process.env.LOG10X_API_BASE;
+  if (onDefaultGateway) {
+    return buildSharedDemoReadEnvironments(source);
+  }
   return buildDemoLicenseEnvironments(jwt, expiresAtEpochSec);
+}
+
+/**
+ * Build the shared public-demo READ environment via the working X-10X-Auth
+ * path (`log10x` backend on /api/v1/query) — the same data the website console
+ * and the keyless boot read. Constructed synchronously from the known demo
+ * credentials (no /api/v1/user discovery), using the ${VAR} reference form so
+ * the literal-secret guard is bypassed exactly as loadFromApi does. This is the
+ * F13 reroute target: the demo-license path used to build a `log10x_demo`
+ * Bearer backend against the dead /api/v1/demo/* mirror.
+ */
+function buildSharedDemoReadEnvironments(source: 'env' | 'persisted'): Environments {
+  const prevKey = process.env.LOG10X_API_KEY;
+  const prevEnvId = process.env.LOG10X_ENV_ID;
+  process.env.LOG10X_API_KEY = DEMO_API_KEY;
+  process.env.LOG10X_ENV_ID = DEMO_ENV_ID;
+  let backend;
+  try {
+    backend = createMetricsBackend({
+      kind: 'log10x',
+      apiKey: '${LOG10X_API_KEY}',
+      envId: '${LOG10X_ENV_ID}',
+    });
+  } finally {
+    // Restore: the backend captured the resolved values at construction, so we
+    // must not leave the demo key injected in process.env for later readers.
+    if (prevKey === undefined) delete process.env.LOG10X_API_KEY;
+    else process.env.LOG10X_API_KEY = prevKey;
+    if (prevEnvId === undefined) delete process.env.LOG10X_ENV_ID;
+    else process.env.LOG10X_ENV_ID = prevEnvId;
+  }
+  const env: EnvConfig = {
+    nickname: 'demo',
+    metricsBackend: backend,
+    labels: { ...DEFAULT_LABELS },
+    apiKey: '',
+    envId: DEMO_ENV_ID,
+    isDefault: true,
+    permissions: 'READ',
+  };
+  return {
+    all: [env],
+    byNickname: new Map([['demo', env]]),
+    default: env,
+    isDemoMode: true,
+    demoFallbackReason:
+      `A demo license was present (${source}), but the public /api/v1/demo/* read mirror ` +
+      `serves no data; reads are attached to the shared public 10x demo dataset instead ` +
+      `(same data as the website console). Sign in (log10x_signin_start) or set LOG10X_API_KEY ` +
+      `to read your own environment.`,
+  };
 }
 
 function buildDemoLicenseEnvironments(jwt: string, _expiresAtEpochSec?: number): Environments {
