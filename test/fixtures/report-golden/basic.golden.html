@@ -23,6 +23,12 @@ h1{font-size:clamp(26px,4.2vw,36px);line-height:1.12;letter-spacing:-.022em;font
 .verdict{margin:30px 0 0;padding:20px 22px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--val);border-radius:5px}
 .verdict h3{margin:0 0 8px;font-size:16.5px;font-weight:650;letter-spacing:-.01em}
 .verdict p{margin:0;color:var(--dim);font-size:14px;max-width:72ch}
+.split{margin:14px 0 0;display:flex;flex-direction:column;gap:9px}
+.split-row{display:flex;align-items:baseline;gap:13px}
+.split-pct{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-weight:650;font-size:19px;flex:0 0 auto;min-width:52px;font-variant-numeric:tabular-nums}
+.split-pct.lossless{color:var(--ok)}
+.split-pct.source{color:var(--wrn)}
+.split-lab{color:var(--dim);font-size:13.5px;line-height:1.4}
 h2{font-size:12px;letter-spacing:.13em;text-transform:uppercase;color:var(--faint);font-weight:650;margin:50px 0 6px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .sub{max-width:66ch;color:var(--dim);font-size:13.5px;margin:12px 0 4px}
 .act{padding:26px 0;border-bottom:1px solid var(--line)}
@@ -68,7 +74,7 @@ footer p{margin:0 0 9px} footer b{color:var(--dim);font-weight:600}
 <header>
 <p class="eyebrow">Log10x &middot; proof of concept, first run
 <span class="stack"><span>SIEM&nbsp;&middot;&nbsp;CloudWatch</span><span>forwarder&nbsp;&middot;&nbsp;fluentd</span></span></p>
-<h1>One hour of logs, 2 changes, 20% less volume</h1>
+<h1>One hour of logs, 2 changes, 100% addressable</h1>
 <p class="lede">This window produced <b>9.9K events</b>. They resolve to <b>5 distinct log statements</b>; the plan below acts on <b>4 of them</b>.</p>
 <div class="totals">
 <div class="tot"><b>19.9 MB</b><span>ingested this window</span></div>
@@ -79,6 +85,11 @@ footer p{margin:0 0 9px} footer b{color:var(--dim);font-weight:600}
 <div class="verdict">
 <h3>80% of this window is one repeating failure: Request failed dial tcp lookup opensearch on $ no such host exporter $</h3>
 <p>2 statements in otelcol report the same failure on every occurrence. Action 1 routes low-severity statements off the ingest path; nothing is deleted. Action 2 is the actual fix.</p>
+</div>
+
+<div class="split">
+<div class="split-row"><span class="split-pct lossless">20%</span><span class="split-lab">via 10x's lossless levers: offload, compact, or tier down. Nothing deleted.</span></div>
+<div class="split-row"><span class="split-pct source">80%</span><span class="split-lab">by fixing the failure at its source. The change is yours to make; 10x measures it.</span></div>
 </div>
 </header>
 
@@ -138,7 +149,7 @@ kubectl -n demo rollout restart daemonset tenx-fluentd</pre>
 
 <footer>
 <p><b>How to read this.</b> A statement is one line of code in one of your services, recognised across every line it produced. <i class="v" style="font-style:normal;color:var(--val);background:var(--val-bg);border-radius:2px;padding:0 2.5px;font-weight:600">$</i> marks a value that varied and was removed. The identifier on each statement is stable across restarts and deployments and works as a query key.</p>
-<p><b>Scope.</b> One hour, analysed in place; no log data left the machine. Figures are this window's arithmetic, not an extrapolation. The re-run after applying is the authoritative measurement.</p>
+<p><b>Scope.</b> One hour of logs, analysed in place; no log data left the machine. Figures are this window's arithmetic, not an extrapolation. The re-run after applying is the authoritative measurement.</p>
 <p>template v1 &middot; generated 2026-08-07T01:00:00.000Z &middot; log10x-mcp 0.0.0-golden &middot; tenx golden</p>
 </footer>
 </div>

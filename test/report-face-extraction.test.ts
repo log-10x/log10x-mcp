@@ -72,3 +72,34 @@ test('buildFace: bytesEach is window arithmetic', () => {
   const f = buildFace(pattern({ count: 4, bytes: 1000 }));
   assert.equal(f.bytesEach, 250);
 });
+
+test('buildFace: opaque template falls back to the readable sample line (F10)', () => {
+  // The engine occasionally emits a symbol-code body a prospect cannot read
+  // ("-.ExmX.eKQs"). The deliverable must show the real log line instead.
+  const f = buildFace(
+    pattern({
+      template: '-.ExmX.eKQs',
+      sampleEvent: 'oteldemo.AdService no baggage found in context trace_id=abc',
+    }),
+  );
+  const rendered = f.lines.map((l) => l.segs.map((seg) => (seg.t === 'text' ? seg.s : seg.t === 'val' ? '$' : '\t')).join('')).join('\n');
+  assert.ok(
+    /no baggage found in context/.test(rendered),
+    `expected the sample line, got: ${rendered}`,
+  );
+  assert.ok(!/ExmX/.test(rendered), 'opaque template must not render');
+});
+
+test('buildFace: a readable template is NOT replaced by the sample', () => {
+  // CamelCase words and space-separated phrases are readable; keep the
+  // abstracted template (with $ markers) rather than the concrete sample.
+  const f = buildFace(
+    pattern({
+      template: 'GetCartAsync called with userId=$',
+      sampleEvent: 'GetCartAsync called with userId=1557e8a2',
+    }),
+  );
+  const rendered = f.lines.map((l) => l.segs.map((seg) => (seg.t === 'text' ? seg.s : seg.t === 'val' ? '$' : '\t')).join('')).join('\n');
+  assert.ok(/userId=/.test(rendered));
+  assert.ok(/\$/.test(rendered), 'the $ marker from the template should survive');
+});

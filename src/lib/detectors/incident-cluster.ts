@@ -160,7 +160,11 @@ export function detectIncidents(inputs: IncidentInput[]): IncidentCluster[] {
         descriptor: inputs[i].descriptor,
       })),
       representativeLabel: inputs[idxs[0]].descriptor,
-      service: inputs[idxs[0]].service || '(unattributed)',
+      // Attribute the cluster to the most common non-empty member service, not
+      // just the highest-cost member's: a collector cluster where the top
+      // member happens to lack the k8s_container label would otherwise read
+      // "(unattributed)" even though its siblings carry the service (F7b).
+      service: mostCommonService(idxs.map((i) => inputs[i].service)) || '(unattributed)',
       combinedMonthlyUsd: idxs.reduce((s, i) => s + inputs[i].costPerMonthUsd, 0),
       joinSignal: signal.signal,
       confidence: signal.confidence,
@@ -168,6 +172,24 @@ export function detectIncidents(inputs: IncidentInput[]): IncidentCluster[] {
   }
   clusters.sort((a, b) => b.combinedMonthlyUsd - a.combinedMonthlyUsd);
   return clusters;
+}
+
+/** The most frequent non-empty value, ties broken by first appearance. */
+function mostCommonService(services: Array<string | undefined>): string | undefined {
+  const counts = new Map<string, number>();
+  for (const s of services) {
+    if (!s) continue;
+    counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  let best: string | undefined;
+  let bestN = 0;
+  for (const [svc, n] of counts) {
+    if (n > bestN) {
+      best = svc;
+      bestN = n;
+    }
+  }
+  return best;
 }
 
 /**

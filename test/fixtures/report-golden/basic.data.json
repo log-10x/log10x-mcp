@@ -207,6 +207,14 @@
     "beforeBytes": 19905000,
     "afterBytes": 16005000
   },
+  "achievable": {
+    "losslessBytes": 3900000,
+    "sourceFixBytes": 16000000,
+    "losslessPct": 19.593067068575735,
+    "sourceFixPct": 80.38181361466968,
+    "totalPct": 99.97488068324542,
+    "sourceIsFailure": true
+  },
   "verify": [
     {
       "id": "engine_ran",
