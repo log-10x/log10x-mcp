@@ -331,6 +331,17 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
+    // Datadog Flex Logs — the cheaper, still-searchable tier tier_down routes to.
+    // Without this, tier_down had no cheaper tier to price against and returned
+    // $0 saving on Datadog, the destination whose whole tier_down story IS Flex.
+    // $1.00/GB is standard $2.50 × 0.40, i.e. the canonical conservative
+    // tier_down cost-delta of 0.60 (poc-envelope-v2 reducibility coefficients).
+    // Datadog bills on ingest, not separate storage, so the delta is all ingest.
+    tier_down_target_tier: {
+      name: 'Datadog Flex Logs',
+      ingest_rate_usd_per_gb: 1.0,
+      storage_rate_usd_per_gb_month: 0.0,
+    },
   },
   elasticsearch: {
     destination: 'elasticsearch',
@@ -391,6 +402,15 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 0.3,
     compact_ratio_high: 0.4,
     small_event_floor_bytes: 100,
+    // Elastic Serverless DOES offer a cheaper searchable tier (confirmed with
+    // product): tier_down routes there, and per the ladder it is taken before
+    // offload. Rate is the conservative 0.60 cost-delta on the ingest floor
+    // ($0.07 × 0.40 = $0.028); confirm against the live Serverless tier price.
+    tier_down_target_tier: {
+      name: 'Elastic Serverless cost-efficient tier',
+      ingest_rate_usd_per_gb: 0.028,
+      storage_rate_usd_per_gb_month: 0.008,
+    },
   },
   clickhouse: {
     destination: 'clickhouse',
@@ -552,8 +572,8 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // that subsystem does the routing.
   coralogix: ['tier_down', 'offload'],
   // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
-  splunk: ['offload', 'compact'],
-  splunk_cloud: ['offload', 'compact'],
+  splunk: ['compact', 'offload'],
+  splunk_cloud: ['compact', 'offload'],
   // Self-hosted ES/OS can run the 10x plugin; managed offerings cannot.
   // tier_down works via a frozen searchable snapshot (identity
   // survives). Needs an Enterprise licence self-managed, or Gold+ on Elastic
@@ -561,10 +581,10 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   elasticsearch: ['tier_down', 'offload', 'compact'],
   // Same actions as self-hosted, different rates. tier_down is absent on
   // purpose: Serverless retention is already near object-storage cost.
-  'elastic-serverless': ['offload', 'compact'],
-  elasticsearch_self: ['offload', 'compact'],
+  'elastic-serverless': ['tier_down', 'compact', 'offload'],
+  elasticsearch_self: ['compact', 'offload'],
   elasticsearch_managed: ['offload'],
-  opensearch_self: ['offload', 'compact'],
+  opensearch_self: ['compact', 'offload'],
   opensearch_managed: ['offload'],
   // ClickHouse: the dict+UDF+view compact path is the level-1 lever (PoC: 70-78%).
   clickhouse: ['compact', 'offload'],

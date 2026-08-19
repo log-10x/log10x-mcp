@@ -63,11 +63,15 @@ test('auto path never emits a destination-illegal action on any of the 8 destina
   }
 });
 
-// ─── 2. THE regression: datadog auto must be offload, never tier_down ─
+// ─── 2. datadog auto: tier_down, now that Flex is priced ─────────────
+// (This test previously asserted offload BECAUSE Flex was unpriced — that was
+// the bug, confirmed 2026-08-19: Datadog's whole tier_down story is Flex Logs,
+// and cost.ts now carries its $1.00/GB rate. tier_down keeps the events in
+// Datadog, queryable; offload is the fallback rung of the ladder.)
 
-test('datadog auto-recommends offload (Flex tier_down is unpriced, so not legal)', () => {
+test('datadog auto-recommends tier_down (Flex Logs is priced)', () => {
   const { decision } = resolve('datadog');
-  assert.equal(decision.action, 'offload');
+  assert.equal(decision.action, 'tier_down');
   assert.equal(decision.source, 'auto');
 });
 
@@ -124,7 +128,7 @@ test('an illegal pin (compact on datadog) is rejected, warns, and falls back to 
   const { decision, warnings } = resolve('datadog', { policy: { standard_action: 'compact' } });
   assert.notEqual(decision.action, 'compact');
   assert.ok(isLegal('datadog', decision.action));
-  assert.equal(decision.action, 'offload'); // datadog auto fallback
+  assert.equal(decision.action, 'tier_down'); // datadog auto fallback = priced Flex
   assert.ok(warnings.some((w) => /compact.*no-op on datadog/.test(w)), warnings.join('|'));
 });
 
@@ -146,7 +150,8 @@ test('auto_recommend=false: an explicit illegal non-compact action passes throug
 
 test('auto_recommend=false: compact on a no-op destination remaps to its first legal lever (matches Phase 1)', () => {
   const { decision } = resolve('datadog', { autoRecommend: false, globalStandardAction: 'compact' });
-  assert.equal(decision.action, 'offload');
+  // First legal lever per DEFAULT_ACTION_BY_DESTINATION.datadog = tier_down (Flex).
+  assert.equal(decision.action, 'tier_down');
 });
 
 test('auto_recommend=false: compact carries NO measured override even when a ratio exists (legacy dollar-identity)', () => {

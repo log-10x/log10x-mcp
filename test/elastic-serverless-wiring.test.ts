@@ -55,13 +55,16 @@ test('elastic-serverless bills on ingest, self-hosted on indexed volume', () => 
   assert.equal(COST_MODEL_BY_DESTINATION.elasticsearch.billing_basis, 'indexed-uncompressed');
 });
 
-test('compact is offered on serverless; tier_down is NOT', () => {
+test('compact AND tier_down are offered on serverless; ladder puts tier before offload', () => {
+  // Corrected 2026-08-19 with product: Elastic Serverless DOES have a cheaper
+  // searchable tier, so tier_down is a real lever there, and the ladder rule is
+  // always tier_down/compact (in-SIEM) before offload (out of SIEM).
   const actions = getAllowedActionsForDestination('elastic-serverless');
   assert.ok(actions.includes('compact'), 'index-pruned compact is real here and lands on the ingest line');
+  assert.ok(actions.includes('tier_down'), 'the Serverless cost-efficient tier is a real tier_down target');
   assert.ok(
-    !actions.includes('tier_down'),
-    'serverless retention is already near object-storage cost — there is no premium tier to escape, ' +
-      'and the frozen-tier lever has not been proven on a live deployment'
+    actions.indexOf('tier_down') < actions.indexOf('offload'),
+    'in-SIEM levers come before offload'
   );
 });
 
@@ -124,10 +127,13 @@ test('elasticsearch offers tier_down with a genuinely cheaper target', () => {
   assert.match(t.name, /frozen/i, 'target tier should name the frozen tier');
 });
 
-test('serverless still does NOT offer tier_down', () => {
-  // Its retention is already near object-storage cost. Offering a "cheaper
-  // tier" there would be a saving that does not exist.
-  assert.ok(!getAllowedActionsForDestination('elastic-serverless').includes('tier_down'));
+test('serverless tier_down is priced (cheaper than its baseline)', () => {
+  const m = COST_MODEL_BY_DESTINATION['elastic-serverless'];
+  assert.ok(m.tier_down_target_tier, 'serverless carries a tier_down target');
+  assert.ok(
+    m.tier_down_target_tier!.ingest_rate_usd_per_gb < m.ingest_per_gb,
+    'the tier must be cheaper than the baseline or tier_down saves nothing'
+  );
 });
 
 test('the frozen recipe emits the artifacts the live run actually used', async () => {

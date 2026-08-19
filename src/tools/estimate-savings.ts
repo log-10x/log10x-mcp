@@ -83,6 +83,8 @@ import {
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
+import { solvePlan, type Plan, type SolverPattern } from '../lib/plan-solver.js';
+import { isProtectedSeverity } from '../lib/severity-policy.js';
 import * as pql from '../lib/promql.js';
 import { type FilterValue } from '../lib/promql.js';
 
@@ -152,9 +154,32 @@ export const estimateSavingsSchema = {
     ),
   default_action: z
     .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
-    .default('compact')
+    .optional()
     .describe(
-      'forecast mode: action assigned to top patterns by the greedy solver when target_percent is used. This is a hard constraint — every per_pattern row receives this action (subject to destination compatibility: compact is silently replaced by the destination canonical action when compact_mode=no-op). Default: compact.'
+      'forecast mode, OPTIONAL: force one action onto every solver-selected pattern (a mode choice — ' +
+        '"cut 50% via drop"). Hard constraint when present, subject to destination compatibility ' +
+        '(compact is replaced by the destination canonical action when compact_mode=no-op). ' +
+        'OMIT for the product default: the ladder solver picks the destination\'s keep-everything ' +
+        'lever per pattern (compact -> tier_down -> offload-with-retriever), never lossy unless allow_lossy.'
+    ),
+  retriever_installed: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Whether the S3 retriever is installed (or the user has agreed to install it). Gates the offload ' +
+        'rung of the ladder solver: without it, offloaded events would be unreachable, so the plan stops ' +
+        'at the in-SIEM levers and the gap names "install the retriever" as the lossless remedy. ' +
+        'Set from conversation; log10x_advise_retriever is the install path.'
+    ),
+  allow_lossy: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Permit the ladder solver to close a keep-everything shortfall with sample/drop (lossy, opt-in). ' +
+        'Default false: the plan stops at the keep-everything ceiling and reports the gap instead of ' +
+        'silently discarding events. Only set after the user explicitly chooses loss.'
     ),
   pattern_limit: z
     .number()
@@ -292,6 +317,13 @@ export interface ForecastResult {
   observation_window: string;
   target_percent?: number;
   per_pattern: ForecastRow[];
+  /**
+   * The ladder-solver plan (product-default path only: target_percent with no
+   * forced default_action). Pattern-first, dollar-denominated, ladder-ordered,
+   * with the keep-everything ceiling and the honest gap. The SAME object
+   * poc_from_local emits, so the two paths render identically.
+   */
+  plan?: Plan;
   /** True when per_pattern was sliced to pattern_limit (service-omitted mode). */
   per_pattern_truncated: boolean;
   /** Total number of modeled patterns before the limit slice. */
@@ -731,7 +763,9 @@ export interface RunForecastArgs {
     sample_n?: number;
   }>;
   target_percent?: number;
-  default_action: Action;
+  default_action?: Action;
+  retriever_installed?: boolean;
+  allow_lossy?: boolean;
   /** PromQL range expression for the observation window. Default 30d. */
   observation_window?: string;
   /** Alias for `observation_window`. observation_window wins when both are set. */
@@ -785,9 +819,11 @@ export async function runEstimateForecast(
   // forecast-fold, the standalone runner, or a unit test). Without this
   // every per-pattern projection runs with action=undefined and projects
   // bytes_out as NaN, which serializes to null in the envelope.
+  // default_action is deliberately NOT folded to 'compact' here: absence is the
+  // signal for the ladder-solver path. Every modeled row carries its own action,
+  // so no downstream projection reads args.default_action.
   args = {
     ...args,
-    default_action: args.default_action ?? 'compact',
     retention_months: args.retention_months ?? 1,
   };
 
@@ -815,7 +851,9 @@ export async function runEstimateForecast(
       earlyModel.compact_mode === 'no-op' &&
       canonicalAction === 'compact';
     if (actionIsExplicitlyBad) {
-      throw new NoOpActionError(args.default_action, args.destination);
+      // actionIsExplicitlyBad requires default_action === 'compact', so it is
+      // defined here; the literal keeps the optional-typed arg honest.
+      throw new NoOpActionError('compact', args.destination);
     }
   }
 
@@ -878,8 +916,10 @@ export async function runEstimateForecast(
   // leaking pattern_hash as the only identifier in user-facing rows.
   // Group by hash + service + message_pattern; take the dominant (service,
   // descriptor) per hash by bytes (same tie-break as extractHashContainerMap).
+  // severity is grouped in too: the ladder solver pins error/warn patterns at
+  // pass, and without a per-hash severity every pattern would read reducible.
   const hashServiceQuery =
-    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern}) (increase(${BYTES_METRIC}{routeState=~"${pql.KEPT_STATES_RE}",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
+    `sum by (${env.labels.hash},${env.labels.service},${env.labels.pattern},${env.labels.severity}) (increase(${BYTES_METRIC}{routeState=~"${pql.KEPT_STATES_RE}",${env.labels.env}="${metricsEnv}"}[${observationWindow}]))`;
 
   // increase[observation_window] legs surface exact bytes/$ to the user → heavy
   // budget. distinctCount is a count-of-counts disclosure value → cheap. Each
@@ -939,6 +979,12 @@ export async function runEstimateForecast(
   // lexicographically on service then descriptor.
   const hashToService = new Map<string, string>();
   const hashToDescriptor = new Map<string, string>();
+  /** service -> bytes distribution per hash, for the ladder solver's scope +
+   *  "which services does this pattern hit" rendering. */
+  const hashToServiceBytes = new Map<string, Record<string, number>>();
+  /** Dominant severity per hash; any PROTECTED slice marks the whole pattern
+   *  protected (the rail must not be washed out by a larger unlabelled slice). */
+  const hashToSeverity = new Map<string, string>();
   if (hashServiceRes) {
     const svcRows = hashServiceRes?.data?.result ?? [];
     const acc = new Map<string, { service: string; descriptor: string; bytes: number }>();
@@ -946,9 +992,19 @@ export async function runEstimateForecast(
       const hash = row.metric?.[env.labels.hash];
       const svc = row.metric?.[env.labels.service];
       const desc = row.metric?.[env.labels.pattern] ?? '';
+      const sev = row.metric?.[env.labels.severity] ?? '';
       if (!hash || !svc) continue;
       const v = row.value ? parseFloat(row.value[1]) : NaN;
       const bytes = Number.isFinite(v) ? v : 0;
+      const dist = hashToServiceBytes.get(hash) ?? {};
+      dist[svc] = (dist[svc] ?? 0) + bytes;
+      hashToServiceBytes.set(hash, dist);
+      if (sev) {
+        const priorSev = hashToSeverity.get(hash);
+        if (!priorSev || (isProtectedSeverity(sev) && !isProtectedSeverity(priorSev))) {
+          hashToSeverity.set(hash, sev);
+        }
+      }
       const prior = acc.get(hash);
       if (
         !prior ||
@@ -968,6 +1024,8 @@ export async function runEstimateForecast(
   // Decide which rows to model.
   type Row = { pattern_hash: string; action: Action; sample_n?: number };
   let rows: Row[] = [];
+  /** Populated on the ladder-solver path; attached to the payload as `plan`. */
+  let ladderPlan: Plan | null = null;
 
   if (args.proposed_config && args.proposed_config.length > 0) {
     rows = args.proposed_config.map((r) => ({
@@ -975,16 +1033,10 @@ export async function runEstimateForecast(
       action: r.action,
       sample_n: r.sample_n,
     }));
-  } else {
-    // Greedy from target_percent. Sort patterns by 30d bytes DESC and
-    // assign the destination's canonical action until cumulative savings >= target.
-    //
-    // The canonical action comes from DEFAULT_ACTION_BY_DESTINATION (level 1),
-    // NOT from args.default_action — that field is an explicit caller override
-    // and the solver should not use it when the caller is cost_options building
-    // a routes_to hint (it will have passed a mode-appropriate action already).
-    // When the caller explicitly passes default_action AND it is valid for the
-    // destination, we honour it; otherwise we fall back to the canonical action.
+  } else if (args.default_action !== undefined) {
+    // MODE-CHOICE path: the caller forced one action ("cut 50% via drop" —
+    // cost_options passes this per menu pick). Uniform byte-weighted greedy,
+    // exactly the pre-ladder behavior, so mode flows keep their contract.
     const model = getDestinationCostModel(args.destination, {
       esPruned: args.es_pruned,
     });
@@ -1029,6 +1081,41 @@ export async function runEstimateForecast(
       if (saved >= targetBytes) break;
       rows.push({ pattern_hash: row.hash, action: solverAction });
       saved += row.bytes * expectedReductionPerByte;
+    }
+  } else {
+    // PRODUCT-DEFAULT path: no forced action — the shared ladder solver
+    // (lib/plan-solver) picks the destination's keep-everything lever per
+    // pattern, escalates to offload only when the retriever is available and
+    // the in-SIEM lever falls short, and touches sample/drop only when the
+    // caller opted into loss. Dollar-denominated; error/warn pinned at pass.
+    // The SAME routine poc_from_local runs, so the two paths answer "cut N%"
+    // identically by construction.
+    const solverPatterns: SolverPattern[] = Object.entries(bytesByHash).map(
+      ([hash, b]) => {
+        const bytes = b * scale;
+        const events = eventsByHash[hash];
+        return {
+          hash,
+          name: hashToDescriptor.get(hash) ?? hash,
+          services: hashToServiceBytes.get(hash) ?? {
+            [hashToService.get(hash) ?? '(unattributed)']: bytes,
+          },
+          severity: hashToSeverity.get(hash) ?? '',
+          bytes,
+          ...(events && events > 0 ? { avgEventBytes: b / events } : {}),
+        };
+      },
+    );
+    ladderPlan = solvePlan(solverPatterns, {
+      destination: args.destination as SiemId,
+      retrieverInstalled: args.retriever_installed ?? false,
+      targetPct: args.target_percent!,
+      // args.service already scoped the queries; the solver sees pre-scoped data.
+      scope: 'all',
+      allowLossy: args.allow_lossy ?? false,
+    });
+    for (const r of ladderPlan.planned) {
+      rows.push({ pattern_hash: r.hash, action: r.action as Action });
     }
   }
 
@@ -1363,6 +1450,7 @@ export async function runEstimateForecast(
     service: args.service,
     observation_window: observationWindow,
     target_percent: args.target_percent,
+    ...(ladderPlan ? { plan: ladderPlan } : {}),
     per_pattern: per_pattern_sliced,
     per_pattern_truncated,
     per_pattern_total_count,
@@ -2055,7 +2143,10 @@ export async function executeEstimateSavings(
           retention_months: args.retention_months ?? 1,
           proposed_config: proposed,
           target_percent: args.target_percent,
-          default_action: (args.default_action ?? 'compact') as Action,
+          // NOT folded to 'compact': absence selects the ladder-solver path.
+          default_action: args.default_action,
+          retriever_installed: args.retriever_installed,
+          allow_lossy: args.allow_lossy,
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
           observation_window: explicitObservationWindow,
@@ -2118,7 +2209,19 @@ export async function executeEstimateSavings(
         ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% reduction`
         : '0% reduction';
       let headline: string;
-      if (args.enforcement_mode === 'manual_report') {
+      if (result.plan) {
+        // Ladder-solver path: the plan IS the answer — lead with the target,
+        // the achieved percent of the BILL, the lever, and the honest gap.
+        const pl = result.plan;
+        const lever = pl.keepEverythingLever ?? 'no keep-everything lever';
+        const lossyCount = pl.planned.filter((r) => !r.keepsEverything).length;
+        const keepNote = lossyCount > 0
+          ? `keeping everything except ${lossyCount} opted-in lossy pattern${lossyCount === 1 ? '' : 's'}`
+          : 'keeping everything';
+        headline = pl.met
+          ? `Plan (${destination}): cut ${pl.targetPct}% of the bill — achieved ${pl.achievedPct.toFixed(0)}% via ${lever} on ${pl.planned.length} of ${pl.planned.length + pl.kept.length} message types, ${keepNote}. Errors and warnings untouched.`
+          : `Plan (${destination}): target ${pl.targetPct}% of the bill, reached ${pl.achievedPct.toFixed(0)}% via ${lever} ${keepNote} (keep-everything ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`;
+      } else if (args.enforcement_mode === 'manual_report') {
         headline = leadDollar
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
           : `If you enforce externally: ${savedVol}/mo (${bytePctReduced})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
