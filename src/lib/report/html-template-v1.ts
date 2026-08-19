@@ -182,10 +182,13 @@ export function renderReportHtml(data: ReportData): string {
   const d = data;
   const volumeActions = d.actions.filter((a) => a.kind !== 'operational').length;
   const pct = Math.round(d.totals.removablePct);
+  // Time-window labels read as "One hour of logs"; the file label already says
+  // "this log sample", so appending "of logs" would double the noun.
+  const subject = d.window.label === 'this log sample' ? cap(d.window.label) : `${cap(d.window.label)} of logs`;
   const h1 =
     volumeActions > 0
-      ? `${cap(d.window.label)} of logs, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${pct}% less volume`
-      : `${cap(d.window.label)} of logs, analysed in place`;
+      ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${pct}% less volume`
+      : `${subject}, analysed in place`;
   const covered = statementsCovered(d.actions);
 
   const chips: string[] = [];
@@ -259,7 +262,7 @@ ${d.verify.map(renderCheck).join('\n')}
 
 <footer>
 <p><b>How to read this.</b> A statement is one line of code in one of your services, recognised across every line it produced. <i class="v" style="font-style:normal;color:var(--val);background:var(--val-bg);border-radius:2px;padding:0 2.5px;font-weight:600">$</i> marks a value that varied and was removed. The identifier on each statement is stable across restarts and deployments and works as a query key.</p>
-<p><b>Scope.</b> ${escapeHtml(cap(d.window.label))}, analysed in place; no log data left the machine. Figures are this window's arithmetic, not an extrapolation. The re-run after applying is the authoritative measurement.</p>
+<p><b>Scope.</b> ${escapeHtml(subject)}, analysed in place; no log data left the machine. Figures are this window's arithmetic, not an extrapolation. The re-run after applying is the authoritative measurement.</p>
 <p>template ${escapeHtml(d.templateVersion)} &middot; generated ${escapeHtml(d.meta.generatedAtIso)} &middot; log10x-mcp ${escapeHtml(d.meta.mcpVersion)}${d.meta.engineBuild ? ` &middot; ${escapeHtml(d.meta.engineBuild)}` : ''}</p>
 </footer>
 </div>

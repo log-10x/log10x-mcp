@@ -613,7 +613,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       exception_share_of_bytes: Math.round(exceptionShare * 1000) / 1000,
     };
     const artLines: string[] = [];
-    artLines.push(`## Projected commitment — local (kubectl sample)`);
+    artLines.push(`## Projected commitment — local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
     artLines.push('');
     artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%`);
     artLines.push(
@@ -641,7 +641,11 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       artLines.push('2. Re-run with a wider `window` or `namespace: "*"` to confirm the sample is representative before negotiating the target.');
     }
     artLines.push('');
-    artLines.push('_This is a PRE-DEPLOY projection from a kubectl sample. Local-source feasibility carries higher uncertainty than the stack-attached path because it does not see CloudTrail / ALB / VM-hosted apps._');
+    artLines.push(
+      source === 'file'
+        ? '_This is a PRE-DEPLOY projection from a local file sample. Local-source feasibility carries higher uncertainty than the stack-attached path because the sample may not cover CloudTrail / ALB / VM-hosted apps the analyzer also ingests._'
+        : '_This is a PRE-DEPLOY projection from a kubectl sample. Local-source feasibility carries higher uncertainty than the stack-attached path because it does not see CloudTrail / ALB / VM-hosted apps._',
+    );
     commitment_artifact = {
       markdown: artLines.join('\n'),
       next_step: feasibility.feasible

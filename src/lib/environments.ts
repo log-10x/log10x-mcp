@@ -709,7 +709,7 @@ async function consumeDevRestartMarker(): Promise<string | undefined> {
     process.env.LOG10X_API_KEY = parsed.apiKey;
     if (typeof parsed.envId === 'string') process.env.LOG10X_ENV_ID = parsed.envId;
     // eslint-disable-next-line no-console
-    console.info(
+    console.error(
       `[log10x-mcp] dev-restart marker found — restored LOG10X_API_KEY from ~/.log10x/dev-restart-pending.json`
     );
     return parsed.apiKey;
@@ -731,7 +731,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
     try {
       const result = await loadFromApi(apiKey, /*isDemoMode=*/ false);
       // eslint-disable-next-line no-console
-      console.info(`[log10x-mcp] metricsBackend resolved via env-vars (LOG10X_API_KEY)`);
+      console.error(`[log10x-mcp] metricsBackend resolved via env-vars (LOG10X_API_KEY)`);
       return result;
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
@@ -748,7 +748,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
           `Fix the key (or unset LOG10X_API_KEY entirely) to use your own data.\n`
       );
       // eslint-disable-next-line no-console
-      console.info(`[log10x-mcp] metricsBackend resolved via demo (key-validation-failed-fallback)`);
+      console.error(`[log10x-mcp] metricsBackend resolved via demo (key-validation-failed-fallback)`);
       return demoEnvs;
     }
   }
@@ -762,7 +762,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
   const envDemoLicense = await tryBuildDemoLicenseEnv('env');
   if (envDemoLicense) {
     // eslint-disable-next-line no-console
-    console.info(`[log10x-mcp] metricsBackend resolved via demo license (LOG10X_LICENSE_JWT, /api/v1/demo/*)`);
+    console.error(`[log10x-mcp] metricsBackend resolved via demo license (LOG10X_LICENSE_JWT, /api/v1/demo/*)`);
     return envDemoLicense;
   }
 
@@ -778,14 +778,14 @@ async function loadLegacyLog10x(): Promise<Environments> {
     const demoEnvs = await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
     demoEnvs.demoFallbackReason = reason;
     // eslint-disable-next-line no-console
-    console.info(`[log10x-mcp] metricsBackend resolved via demo (credentials-file-error-fallback)`);
+    console.error(`[log10x-mcp] metricsBackend resolved via demo (credentials-file-error-fallback)`);
     return demoEnvs;
   }
   if (creds) {
     try {
       const result = await loadFromApi(creds.apiKey, /*isDemoMode=*/ false);
       // eslint-disable-next-line no-console
-      console.info(`[log10x-mcp] metricsBackend resolved via ~/.log10x/credentials`);
+      console.error(`[log10x-mcp] metricsBackend resolved via ~/.log10x/credentials`);
       return result;
     } catch (e) {
       if (!(e instanceof EnvironmentValidationError)) throw e;
@@ -800,7 +800,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
         `console.log10x.com → Profile → API Settings, or \`log10x_signout\` to clear and use demo. ` +
         `See \`log10x_login_status\` for the full breakdown.`;
       // eslint-disable-next-line no-console
-      console.info(`[log10x-mcp] metricsBackend resolved via demo (credentials-key-failed-fallback)`);
+      console.error(`[log10x-mcp] metricsBackend resolved via demo (credentials-key-failed-fallback)`);
       return demoEnvs;
     }
   }
@@ -814,7 +814,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
   const persistedDemoLicense = await tryBuildDemoLicenseEnv('persisted');
   if (persistedDemoLicense) {
     // eslint-disable-next-line no-console
-    console.info(`[log10x-mcp] metricsBackend resolved via demo license (persisted, own demo tenant, /api/v1/demo/*)`);
+    console.error(`[log10x-mcp] metricsBackend resolved via demo license (persisted, own demo tenant, /api/v1/demo/*)`);
     return persistedDemoLicense;
   }
 
@@ -822,7 +822,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
   // user can play without signing up. This silent fallback is slated to
   // be replaced by an explicit "not configured" state.
   // eslint-disable-next-line no-console
-  console.info(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
+  console.error(`[log10x-mcp] metricsBackend resolved via demo (no-credentials-configured)`);
   return await loadFromApi(DEMO_API_KEY, /*isDemoMode=*/ true);
 }
 

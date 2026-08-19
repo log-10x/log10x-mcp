@@ -249,7 +249,7 @@ export function buildReportData(
       mcpVersion: opts.mcpVersion,
     },
     window: {
-      label: windowLabel(input.windowHours),
+      label: windowLabel(input.windowHours, input.window),
       events: extraction.totalEvents,
       statements: extraction.patterns.length,
       ingestedBytes: extraction.totalBytes,
@@ -422,7 +422,11 @@ function serviceLabel(services: Map<string, number>): string {
   return services.size === 1 ? top : `${top} and other low-severity`;
 }
 
-export function windowLabel(windowHours: number): string {
+export function windowLabel(windowHours: number, window?: string): string {
+  // A file source has no pull window — its span is an artifact of which lines
+  // were sampled, so a time claim ("one hour of logs") is fabricated. Name the
+  // sample instead. `window === 'file'` is the sentinel poc-from-local passes.
+  if (window === 'file') return 'this log sample';
   if (windowHours <= 0) return 'this window';
   if (windowHours < 1) {
     const mins = Math.round(windowHours * 60);

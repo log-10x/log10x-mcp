@@ -164,4 +164,7 @@ test('windowLabel wording', () => {
   assert.equal(windowLabel(24), '24 hours');
   assert.equal(windowLabel(0.5), '30 minutes');
   assert.equal(windowLabel(6), '6 hours');
+  // A file source has no time window — the label must not fabricate an hour count.
+  assert.equal(windowLabel(1, 'file'), 'this log sample');
+  assert.equal(windowLabel(6, 'file'), 'this log sample');
 });
