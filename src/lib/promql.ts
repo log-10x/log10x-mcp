@@ -399,18 +399,26 @@ export function patternBytesOverTime(
   return `sum by (${labels.pattern}) (increase(${BYTES_METRIC}{${labels.env}="${env}",${labels.pattern}="${escapeLabel(pattern)}"}[${step}]))`;
 }
 
-/** Probe: does edge env have data? */
-export function edgeProbe(labels: LabelNameMap = DEFAULT_LABELS): string {
-  return `count(increase(${BYTES_METRIC}{${labels.env}="edge"}[7d]) > 0)`;
+/**
+ * Probe: does edge env have data?
+ *
+ * `range` defaults to 7d — wide enough that a sparse-but-live real backend is
+ * not misread as absent. The demo gateway rejects any range >3h with HTTP 400,
+ * so the resolver retries this probe at a short range on error rather than
+ * narrowing the window for every real customer (see resolve-env.ts).
+ */
+export function edgeProbe(labels: LabelNameMap = DEFAULT_LABELS, range = '7d'): string {
+  return `count(increase(${BYTES_METRIC}{${labels.env}="edge"}[${range}]) > 0)`;
 }
 
 /** Probe: does edge env have data for specific filters? */
 export function edgeProbeFiltered(
   filters: Record<string, FilterValue>,
-  labels: LabelNameMap = DEFAULT_LABELS
+  labels: LabelNameMap = DEFAULT_LABELS,
+  range = '7d'
 ): string {
   const selector = buildSelector(filters, 'edge', labels);
-  return `count(increase(${BYTES_METRIC}{${selector}}[7d]) > 0)`;
+  return `count(increase(${BYTES_METRIC}{${selector}}[${range}]) > 0)`;
 }
 
 /** Pipeline instance count. */

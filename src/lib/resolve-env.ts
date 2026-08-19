@@ -15,8 +15,23 @@ export async function resolveMetricsEnv(env: EnvConfig, timeoutMs?: number): Pro
     if (res.status === 'success' && res.data.result.length > 0) {
       return 'edge';
     }
-  } catch {
-    // fall through to cloud
+  } catch (e) {
+    // The 7d probe can be REJECTED (not "no data") by a backend that caps the
+    // query range — the public demo gateway returns HTTP 400 for any range >3h.
+    // That threw here and silently fell to 'cloud', emptying every downstream
+    // query against a live edge deployment. Retry once at 3h (inside the demo
+    // cap) before giving up: a real customer's 7d probe never hits this path,
+    // and a range-capped backend gets a second, valid chance to answer 'edge'.
+    if (/\b400\b|range|limited/i.test(String(e))) {
+      try {
+        const retry = await queryInstant(env, pql.edgeProbe(undefined, '3h'), timeoutMs);
+        if (retry.status === 'success' && retry.data.result.length > 0) {
+          return 'edge';
+        }
+      } catch {
+        // retry also failed — fall through to the historic cloud default.
+      }
+    }
   }
   return 'cloud';
 }
