@@ -57,8 +57,26 @@ export interface ModeResolution {
 
 const DEFAULT_PROBE_TIMEOUT_MS = 5000;
 
-/** PromQL probe asking "how many distinct tenx_pattern_bytes_total series exist right now?" */
-const TENX_SERIES_PROBE = 'count(count by (__name__)(tenx_pattern_bytes_total))';
+/**
+ * PromQL probe asking "are there any live 10x pattern series right now?"
+ *
+ * MUST name the metric the analysis tools actually read
+ * (`all_events_summaryBytes_total`, see promql.ts BYTES_METRIC). The probe
+ * previously counted `tenx_pattern_bytes_total`, a series NO engine emits and
+ * that appears nowhere else in this codebase or the Grafana dashboards. On a
+ * correctly-configured install it always returned zero, so every analysis boot
+ * fell to `analysis_pending` ("fresh deploy — patterns appear after 24h") and
+ * `log10x_top_patterns` reported no data over a live 194-pattern deployment.
+ * Steady-state `analysis` was only ever reached via a probe TIMEOUT, never a
+ * successful count. Verified 2026-08-19 against the public demo backend, which
+ * exposes all_events_* but not tenx_pattern_bytes_total.
+ *
+ * `count(...)` over an absent metric is an empty vector, which the probe reads
+ * as seriesCount 0 (same as a genuinely fresh deploy), so the two are
+ * indistinguishable until the metric name is right.
+ */
+export const TENX_SERIES_PROBE =
+  'count(count by (message_pattern) (all_events_summaryBytes_total))';
 
 /**
  * Detect the operating mode for this MCP boot.
@@ -196,7 +214,7 @@ export async function detectMode(opts?: {
       backend: resolution.backend,
       detectionPath: resolution.detectionPath,
       trace: resolution.trace,
-      reason: `TSDB resolved (${resolution.detectionPath}) but zero tenx_pattern_bytes_total series. Fresh deploy: analysis + install advisors both enabled.`,
+      reason: `TSDB resolved (${resolution.detectionPath}) but zero all_events_* pattern series. Fresh deploy: analysis + install advisors both enabled.`,
       probeDurationMs: Date.now() - startedAt,
     };
   }

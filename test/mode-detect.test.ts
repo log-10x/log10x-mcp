@@ -183,3 +183,29 @@ test('every registered tool has an explicit TOOL_MODES row', async () => {
       `modes silently: ${missing.join(', ')}`
   );
 });
+
+// ── Regression: the boot probe must query a metric the engine actually emits ──
+// F1 (2026-08-19): the probe counted `tenx_pattern_bytes_total`, a series NO
+// engine writes and that appears nowhere else in the codebase or the Grafana
+// dashboards. On every correctly-configured install it returned zero, so the
+// boot fell to `analysis_pending` ("fresh deploy, wait 24h") over a live
+// deployment, and `top_patterns` reported no data. The tools all read
+// `all_events_summaryBytes_total` (promql.ts BYTES_METRIC); the probe must read
+// the same family, or the boot mode and the tools disagree about whether data
+// exists. This test pins the probe to that metric so the drift cannot recur.
+test('TENX_SERIES_PROBE queries the metric the analysis tools actually read', async () => {
+  const { TENX_SERIES_PROBE } = await import('../src/lib/mode-detect.js');
+  // The one metric every analysis tool ranks on. If BYTES_METRIC is ever
+  // renamed, this literal is the intentional checkpoint to update in lockstep.
+  const BYTES_METRIC = 'all_events_summaryBytes_total';
+  assert.ok(
+    TENX_SERIES_PROBE.includes(BYTES_METRIC),
+    `boot probe must count ${BYTES_METRIC} (what the tools read), not a metric ` +
+      `no engine emits. Probe was: ${TENX_SERIES_PROBE}`
+  );
+  // And it must NOT resurrect the phantom metric that caused F1.
+  assert.ok(
+    !TENX_SERIES_PROBE.includes('tenx_pattern_bytes_total'),
+    'boot probe must not query tenx_pattern_bytes_total — no engine emits it (F1).'
+  );
+});
