@@ -26,6 +26,8 @@ export interface PolicyOptions {
   target_services: string[];
   /** Desired savings percentage (1-95). */
   target_percent: number;
+  /** Volume budget (GB/mo, thermostat). When set it replaces target_percent in policy.yaml. */
+  budget_gb_monthly?: number;
   /** Cron schedule. Either a preset name or a raw cron expression. */
   schedule: SchedulePreset;
   /** Which scheduler runtime to emit a manifest for. */
@@ -122,7 +124,12 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    `  target_percent: ${opts.target_percent}`,
+    ...(opts.budget_gb_monthly !== undefined
+      ? [
+          `  # standing volume line: cut only the overage each tick; under budget = all pass`,
+          `  budget_gb_monthly: ${opts.budget_gb_monthly}`,
+        ]
+      : [`  target_percent: ${opts.target_percent}`]),
     exceptionsYaml.trimEnd(),
     `  min_delta_pp: ${opts.min_delta_pp}`,
     ``,

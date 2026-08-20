@@ -127,3 +127,84 @@ test('a protected variant pins the whole merged message type', () => {
   assert.equal(pl.planned.length, 0, 'a protected variant must pin the merged row at pass');
   assert.equal(pl.kept[0]?.action, 'pass');
 });
+
+// ── Budget targets ──────────────────────────────────────────────────
+
+test('usd_budget: derives the cut, lands at or under the line, echoes the ask', () => {
+  const base = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 1 });
+  const budget = base.billUsd * 0.6; // force a ~40% cut
+  const pl = solvePlan(estate(), {
+    destination: 'splunk', retrieverInstalled: true,
+    target: { kind: 'usd_budget', value: budget },
+  });
+  assert.equal(pl.target.kind, 'usd_budget');
+  assert.ok(pl.met, `expected met, landsAt=${pl.landsAtUsd} budget=${budget}`);
+  assert.ok(pl.landsAtUsd !== undefined && pl.landsAtUsd <= budget * 1.0001);
+  assert.ok(pl.planned.length > 0);
+  // rows still speak dollars
+  assert.ok(pl.planned.every((r) => r.savedUsd > 0));
+});
+
+test('usd_budget: already under budget is an empty plan, met, full headroom', () => {
+  const base = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 1 });
+  const pl = solvePlan(estate(), {
+    destination: 'splunk', retrieverInstalled: true,
+    target: { kind: 'usd_budget', value: base.billUsd * 2 },
+  });
+  assert.ok(pl.met);
+  assert.equal(pl.planned.length, 0);
+  assert.ok(Math.abs((pl.landsAtUsd ?? 0) - pl.billUsd) < 1e-9);
+});
+
+test('usd_budget: unreachable line names the gap in budget terms', () => {
+  // cloudwatch without retriever: tier_down alone cannot get near a 90% cut.
+  const base = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: false, targetPct: 1 });
+  const budget = base.billUsd * 0.1;
+  const pl = solvePlan(estate(), {
+    destination: 'cloudwatch', retrieverInstalled: false,
+    target: { kind: 'usd_budget', value: budget },
+  });
+  assert.equal(pl.met, false);
+  assert.ok(pl.gap);
+  assert.ok(pl.gap!.message.includes('budget'), pl.gap!.message);
+  assert.ok(pl.gap!.message.includes('over'), pl.gap!.message);
+  assert.ok(pl.gap!.remedies.includes('install_retriever'));
+});
+
+test('gb_budget: tier_down is excluded — bytes only move via offload/compact', () => {
+  // 400 GB of non-error bytes; budget 150 GB/mo forces real byte removal.
+  const pl = solvePlan(estate(), {
+    destination: 'cloudwatch', retrieverInstalled: true,
+    target: { kind: 'gb_budget', value: 150 },
+  });
+  assert.ok(pl.planned.every((r) => r.action !== 'tier_down'),
+    `tier_down leaked into a volume plan: ${pl.planned.map((r) => r.action).join(',')}`);
+  assert.ok(pl.met, `landsAt=${pl.landsAtBytesMonthly}`);
+  assert.ok((pl.landsAtBytesMonthly ?? Infinity) <= 150 * 1_000_000_000 * 1.0001);
+  // volume rows carry the byte figure alongside the dollar one
+  assert.ok(pl.planned.every((r) => (r.savedBytes ?? 0) > 0 && r.savedUsd >= 0));
+});
+
+test('gb_budget: destination whose only lever is tier_down has no lossless volume path', () => {
+  const pl = solvePlan(estate(), {
+    destination: 'cloudwatch', retrieverInstalled: false,
+    target: { kind: 'gb_budget', value: 150 },
+  });
+  assert.equal(pl.met, false);
+  assert.equal(pl.planned.length, 0); // nothing keeps everything AND removes bytes
+  assert.ok(pl.gap);
+  assert.ok(pl.gap!.message.includes('tier_down keeps every byte'), pl.gap!.message);
+  assert.ok(pl.gap!.remedies.includes('install_retriever'));
+});
+
+test('percent callers are untouched by the target union (back-compat)', () => {
+  const viaPct = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  const viaUnion = solvePlan(estate(), {
+    destination: 'cloudwatch', retrieverInstalled: true,
+    target: { kind: 'percent', value: 50 },
+  });
+  assert.equal(viaPct.met, viaUnion.met);
+  assert.equal(viaPct.achievedPct, viaUnion.achievedPct);
+  assert.equal(viaPct.targetPct, 50);
+  assert.equal(viaPct.target.kind, 'percent');
+});

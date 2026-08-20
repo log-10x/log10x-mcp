@@ -43,3 +43,16 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /hedged guess is worse than silence/);
   assert.match(SERVER_INSTRUCTIONS, /belongs to the\s+user, never to you/);
 });
+
+test('instructions carry the budget-target grammar (denomination discipline)', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  assert.match(SERVER_INSTRUCTIONS, /BUDGET TARGETS/);
+  assert.match(SERVER_INSTRUCTIONS, /budget_usd_monthly/);
+  assert.match(SERVER_INSTRUCTIONS, /budget_gb_monthly/);
+  // the verdict stays in the user's denomination — a dollar budget met by
+  // tier_down moves nothing out; a volume budget says nothing about the bill.
+  assert.match(SERVER_INSTRUCTIONS, /stay in the\s+user's denomination/);
+  assert.match(SERVER_INSTRUCTIONS, /tier_down cannot serve\s+a volume budget/);
+  // idempotence: under budget renders the headroom line and no cards.
+  assert.match(SERVER_INSTRUCTIONS, /headroom/);
+});
