@@ -81,6 +81,11 @@ export interface SolveOpts {
 export interface PlannedRow {
   hash: string;
   name: string;
+  /** Readable opener for the card: the identifier de-underscored and
+   *  whitespace-collapsed. Tool-emitted so every host opens the card with the
+   *  same noun instead of each agent deriving its own. Mechanical, never
+   *  interpretive: same tokens as `name`. */
+  displayName: string;
   dominantService: string;
   serviceMix: { service: string; sharePct: number }[];
   severity: string;
@@ -279,6 +284,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     return {
       hash: r.p.hash,
       name: r.p.name,
+      displayName: r.p.name.replace(/_/g, ' ').replace(/\s+/g, ' ').trim(),
       dominantService: dominant,
       serviceMix: mix,
       severity: r.p.severity,
@@ -377,8 +383,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       remainingPct,
       remedies,
       message:
-        `Keeping everything, this destination cuts ${Math.round(keepEverythingCeilingPct)}% of the bill — ` +
-        `${Math.round(remainingPct)} short of your ${opts.targetPct}% target. To close it, ${parts.join(', or ')}.`,
+        `Keeping everything, this destination cuts ${Math.round(keepEverythingCeilingPct)}% of the bill, ` +
+        `${Math.round(remainingPct)} points short of the ${opts.targetPct}% target. To close it, ${parts.join(', or ')}.`,
     };
   }
 

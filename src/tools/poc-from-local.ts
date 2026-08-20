@@ -298,8 +298,8 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
   const pl = inner.plan;
   const headline = hasData && pl
     ? (pl.met
-        ? `Plan (${pl.destination}): cut ${pl.targetPct}% of the bill — achieved ${pl.achievedPct.toFixed(0)}% via ${pl.keepEverythingLever ?? 'offload'} on ${pl.planned.length} of ${pl.planned.length + pl.kept.length} message types, keeping everything. Errors and warnings untouched. (${inner.events_pulled.toLocaleString()} lines sampled from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.)`
-        : `Plan (${pl.destination}): target ${pl.targetPct}% of the bill, reached ${pl.achievedPct.toFixed(0)}% keeping everything (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
+        ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
+        : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
     ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : inner.source === 'file'
