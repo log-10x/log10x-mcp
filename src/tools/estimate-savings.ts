@@ -83,7 +83,7 @@ import {
 import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
-import { solvePlan, type Plan, type SolverPattern } from '../lib/plan-solver.js';
+import { solvePlan, type Plan, type PlanTarget, type SolverPattern } from '../lib/plan-solver.js';
 import { isProtectedSeverity } from '../lib/severity-policy.js';
 import * as pql from '../lib/promql.js';
 import { type FilterValue } from '../lib/promql.js';
@@ -151,6 +151,27 @@ export const estimateSavingsSchema = {
     .optional()
     .describe(
       'forecast mode: % volume reduction goal. Tool runs the same greedy solver as configure_engine on observed 30d bytes.'
+    ),
+  budget_usd_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'forecast mode: DOLLAR BUDGET — keep the (service-scoped or whole) destination bill at or under ' +
+        'this $/mo. The ladder solver derives the reduction: max(0, bill - budget). Idempotent: already ' +
+        'under budget returns an empty plan with the headroom stated. Mutually exclusive with ' +
+        'target_percent, budget_gb_monthly, default_action, and proposed_config.'
+    ),
+  budget_gb_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'forecast mode: VOLUME BUDGET — keep monthly ingest toward the destination at or under this many ' +
+        'GB/mo. BYTE accounting: tier_down keeps every byte in the destination, so it cannot serve this ' +
+        'target and is excluded from the ladder (compact only where it lands on the billed wire, then ' +
+        'offload with the retriever, then lossy on allow_lossy). Mutually exclusive with target_percent, ' +
+        'budget_usd_monthly, default_action, and proposed_config.'
     ),
   default_action: z
     .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
@@ -316,6 +337,8 @@ export interface ForecastResult {
   service?: string;
   observation_window: string;
   target_percent?: number;
+  budget_usd_monthly?: number;
+  budget_gb_monthly?: number;
   per_pattern: ForecastRow[];
   /**
    * The ladder-solver plan (product-default path only: target_percent with no
@@ -763,6 +786,8 @@ export interface RunForecastArgs {
     sample_n?: number;
   }>;
   target_percent?: number;
+  budget_usd_monthly?: number;
+  budget_gb_monthly?: number;
   default_action?: Action;
   retriever_installed?: boolean;
   allow_lossy?: boolean;
@@ -808,9 +833,31 @@ export async function runEstimateForecast(
   args: RunForecastArgs,
   env: EnvConfig
 ): Promise<ForecastResult> {
-  if (!args.proposed_config && args.target_percent === undefined) {
+  const budgetCount =
+    (args.budget_usd_monthly !== undefined ? 1 : 0) +
+    (args.budget_gb_monthly !== undefined ? 1 : 0);
+  if (
+    !args.proposed_config &&
+    args.target_percent === undefined &&
+    budgetCount === 0
+  ) {
     throw new Error(
-      'estimate_savings forecast requires either proposed_config or target_percent.'
+      'estimate_savings forecast requires proposed_config, target_percent, budget_usd_monthly, or budget_gb_monthly.'
+    );
+  }
+  if (budgetCount > 1) {
+    throw new Error(
+      'budget_usd_monthly and budget_gb_monthly are mutually exclusive — pick the denomination the user actually asked in.'
+    );
+  }
+  if (budgetCount > 0 && args.target_percent !== undefined) {
+    throw new Error(
+      'target_percent and a budget are mutually exclusive: a percent is a one-shot cut, a budget is a standing line. Pass one.'
+    );
+  }
+  if (budgetCount > 0 && (args.default_action !== undefined || args.proposed_config)) {
+    throw new Error(
+      'budgets run the ladder solver only — default_action and proposed_config do not combine with budget_usd_monthly/budget_gb_monthly.'
     );
   }
 
@@ -1106,10 +1153,16 @@ export async function runEstimateForecast(
         };
       },
     );
+    const target: PlanTarget =
+      args.budget_usd_monthly !== undefined
+        ? { kind: 'usd_budget', value: args.budget_usd_monthly }
+        : args.budget_gb_monthly !== undefined
+          ? { kind: 'gb_budget', value: args.budget_gb_monthly }
+          : { kind: 'percent', value: args.target_percent! };
     ladderPlan = solvePlan(solverPatterns, {
       destination: args.destination as SiemId,
       retrieverInstalled: args.retriever_installed ?? false,
-      targetPct: args.target_percent!,
+      target,
       // args.service already scoped the queries; the solver sees pre-scoped data.
       scope: 'all',
       allowLossy: args.allow_lossy ?? false,
@@ -1450,6 +1503,8 @@ export async function runEstimateForecast(
     service: args.service,
     observation_window: observationWindow,
     target_percent: args.target_percent,
+    ...(args.budget_usd_monthly !== undefined ? { budget_usd_monthly: args.budget_usd_monthly } : {}),
+    ...(args.budget_gb_monthly !== undefined ? { budget_gb_monthly: args.budget_gb_monthly } : {}),
     ...(ladderPlan ? { plan: ladderPlan } : {}),
     per_pattern: per_pattern_sliced,
     per_pattern_truncated,
@@ -2069,11 +2124,16 @@ export async function executeEstimateSavings(
 
   try {
     if (mode === 'forecast') {
-      if (!args.proposed_config && args.target_percent === undefined) {
+      if (
+        !args.proposed_config &&
+        args.target_percent === undefined &&
+        args.budget_usd_monthly === undefined &&
+        args.budget_gb_monthly === undefined
+      ) {
         return buildChassisEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
-          headline: 'estimate_savings needs target_percent or proposed_config — neither was passed.',
+          headline: 'estimate_savings needs target_percent, a budget (budget_usd_monthly / budget_gb_monthly), or proposed_config — none was passed.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
           source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
@@ -2093,15 +2153,22 @@ export async function executeEstimateSavings(
                 description: 'an explicit list of per-pattern rows (pattern_hash + action) — the forecast scores exactly that plan.',
                 example_call: 'log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }, ...] })',
               },
+              option_3: {
+                arg: 'budget_usd_monthly | budget_gb_monthly',
+                description: 'a standing budget: keep the (optionally service-scoped) bill under $N/mo, or ingest under N GB/mo. The ladder solver derives the cut.',
+                example_call: 'log10x_estimate_savings({ service: "payment", budget_usd_monthly: 100 })',
+              },
               gathering_tool: 'log10x_top_patterns',
               gathering_note: 'Most starting points: call log10x_top_patterns first, pick the heavy patterns, then call estimate_savings with either a target_percent or those patterns as proposed_config rows.',
             },
           },
           human_summary:
-            'estimate_savings needs one of two inputs and neither was passed.\n\n' +
+            'estimate_savings needs one of three inputs and none was passed.\n\n' +
             'Option 1 — a savings target. Tell me how much you want to save.\n' +
             '  Example: log10x_estimate_savings({ target_percent: 30 }) — estimates what it would take to cut your bill by 30%.\n\n' +
-            'Option 2 — specific patterns to target. Tell me which patterns you would mitigate.\n' +
+            'Option 2 — a standing budget. Tell me the line to stay under, in dollars or GB per month.\n' +
+            '  Example: log10x_estimate_savings({ service: "payment", budget_usd_monthly: 100 }) — plans whatever it takes to keep payment under $100/mo.\n\n' +
+            'Option 3 — specific patterns to target. Tell me which patterns you would mitigate.\n' +
             '  Example: log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }] }) — estimates savings if you mitigate those patterns.\n\n' +
             'Most starting points: run log10x_top_patterns first, pick the heavy ones, then call this with their hashes.',
           error: {
@@ -2143,6 +2210,8 @@ export async function executeEstimateSavings(
           retention_months: args.retention_months ?? 1,
           proposed_config: proposed,
           target_percent: args.target_percent,
+          budget_usd_monthly: args.budget_usd_monthly,
+          budget_gb_monthly: args.budget_gb_monthly,
           // NOT folded to 'compact': absence selects the ladder-solver path.
           default_action: args.default_action,
           retriever_installed: args.retriever_installed,
@@ -2219,9 +2288,35 @@ export async function executeEstimateSavings(
         const keepNote = lossyCount > 0
           ? `keeping everything except ${lossyCount} opted-in lossy pattern${lossyCount === 1 ? '' : 's'}`
           : 'keeping everything';
-        headline = pl.met
-          ? `Target: cut ${pl.targetPct}% of the ${destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, ${keepNote}.`
-          : `Target: cut ${pl.targetPct}% of the ${destination} bill. ${keepNote[0].toUpperCase()}${keepNote.slice(1)}, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`;
+        // The verdict line states the ask in the user's own denomination.
+        // A dollar budget met by tier_down leaves the volume unchanged, and a
+        // volume budget says nothing about the bill — never blur the two.
+        const scopeNoun = args.service
+          ? `${args.service} slice of the ${destination} bill`
+          : `${destination} bill`;
+        const fmtBudgetUsd = (v: number) => '$' + Number(v.toFixed(2)).toString();
+        if (pl.target.kind === 'usd_budget') {
+          const landsAt = fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd);
+          headline = pl.met && pl.planned.length === 0
+            ? `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. Already under: the bill is ${fmtBudgetUsd(pl.billUsd)}/mo, ${fmtBudgetUsd(Math.max(0, pl.target.value - pl.billUsd))}/mo of headroom. No action needed.`
+            : pl.met
+              ? `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo (today: ${fmtBudgetUsd(pl.billUsd)}/mo), ${keepNote}.`
+              : `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo. ${pl.gap ? pl.gap.message : ''}`;
+        } else if (pl.target.kind === 'gb_budget') {
+          const scopeVol = args.service
+            ? `${args.service} ingest toward ${destination}`
+            : `ingest toward ${destination}`;
+          const landsAtVol = fmtBytes(pl.landsAtBytesMonthly ?? 0);
+          headline = pl.met && pl.planned.length === 0
+            ? `Budget: keep ${scopeVol} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. Already under: ingest is ${landsAtVol}/mo. No action needed.`
+            : pl.met
+              ? `Budget: keep ${scopeVol} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${landsAtVol}/mo, ${keepNote}, and takes ${fmtDollar(pl.billUsd - (pl.landsAtUsd ?? pl.billUsd))}/mo off the bill with it.`
+              : `Budget: keep ${scopeVol} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${landsAtVol}/mo. ${pl.gap ? pl.gap.message : ''}`;
+        } else {
+          headline = pl.met
+            ? `Target: cut ${pl.targetPct}% of the ${destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, ${keepNote}.`
+            : `Target: cut ${pl.targetPct}% of the ${destination} bill. ${keepNote[0].toUpperCase()}${keepNote.slice(1)}, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`;
+        }
       } else if (args.enforcement_mode === 'manual_report') {
         headline = leadDollar
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`

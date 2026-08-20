@@ -60,12 +60,31 @@ export interface SolverPattern {
   avgEventBytes?: number;
 }
 
+/**
+ * What the plan is solving FOR. Three denominations:
+ *  - percent:    "cut X% of the bill" — a one-shot project.
+ *  - usd_budget: "keep the (scoped) bill under $B/mo" — a standing constraint;
+ *                the reduction is derived: max(0, bill - budget). Idempotent:
+ *                already under budget -> an empty plan with headroom.
+ *  - gb_budget:  "keep (scoped) ingest under V GB/mo" — BYTE accounting.
+ *                tier_down keeps every byte, so it contributes NOTHING to this
+ *                target and is excluded from the ladder; compact counts only
+ *                where it lands on the billed wire (compactsInPlace).
+ */
+export type PlanTarget =
+  | { kind: 'percent'; value: number }
+  | { kind: 'usd_budget'; value: number }
+  | { kind: 'gb_budget'; value: number };
+
 export interface SolveOpts {
   destination: SiemId;
   /** Whether the S3 retriever is installed. Gates the offload rung. */
   retrieverInstalled: boolean;
-  /** Reduction goal as a percent of the (scoped) bill, e.g. 50. */
-  targetPct: number;
+  /** Reduction goal as a percent of the (scoped) bill, e.g. 50. Ignored when
+   *  `target` is supplied; kept for the existing percent callers. */
+  targetPct?: number;
+  /** The full target union; wins over targetPct when present. */
+  target?: PlanTarget;
   /** Services to solve for; omit or 'all' for the whole estate. */
   scope?: string[] | 'all';
   /** Permit the lossy rungs (sample/drop) to close a keep-everything shortfall.
@@ -92,6 +111,8 @@ export interface PlannedRow {
   billUsd: number;
   action: Action | 'pass';
   savedUsd: number;
+  /** Volume-budget plans only: bytes this row removes from the billed wire. */
+  savedBytes?: number;
   keepsEverything: boolean;
 }
 
@@ -99,6 +120,9 @@ export interface Plan {
   destination: SiemId;
   retrieverInstalled: boolean;
   scope: string[] | 'all';
+  /** The ask, echoed. For budgets this is the user's budget, and targetPct is
+   *  the DERIVED reduction percent the solver actually chased. */
+  target: PlanTarget;
   targetPct: number;
   billUsd: number;
   /** The keep-everything lever the destination resolves to (rung 1-3), or null
@@ -109,6 +133,10 @@ export interface Plan {
   keepEverythingCeilingPct: number;
   achievedPct: number;
   met: boolean;
+  /** usd_budget / percent targets: the bill after the plan, in $/mo. */
+  landsAtUsd?: number;
+  /** gb_budget targets: monthly bytes toward the destination after the plan. */
+  landsAtBytesMonthly?: number;
   planned: PlannedRow[];
   kept: PlannedRow[];
   /** Present when the keep-everything ceiling is below the target. Names the
@@ -192,6 +220,24 @@ function saveUsd(
   return Math.max(0, bill - after);
 }
 
+/** BYTES removed from the destination's billed wire by `action`. tier_down is
+ *  always 0 here (every byte still lands); compact counts only where it lands
+ *  on the wire (projectAction's ratio is 1.0 on no-op destinations). */
+function saveBytes(
+  action: Action,
+  bytes: number,
+  destination: SiemId,
+  avgEventBytes: number | undefined,
+): number {
+  const proj = projectAction({
+    action,
+    bytes_in: bytes,
+    destination,
+    ...(avgEventBytes ? { avg_event_size_bytes: avgEventBytes } : {}),
+  });
+  return Math.max(0, bytes - proj.bytes_out);
+}
+
 export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   // MERGE same-hash inputs first: two extraction rows sharing a tenx_hash are
   // template VARIANTS of one message type (the product's unit of identity),
@@ -250,14 +296,33 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     (s, r) => s + billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes),
     0,
   );
-  const targetUsd = (opts.targetPct / 100) * billUsd;
+  const bytesIn = rows.reduce((s, r) => s + r.scopedBytes, 0);
+
+  // Resolve the ask into ONE denomination and one target amount.
+  const target: PlanTarget = opts.target ?? { kind: 'percent', value: opts.targetPct ?? 0 };
+  const denom: 'usd' | 'bytes' = target.kind === 'gb_budget' ? 'bytes' : 'usd';
+  const poolTotal = denom === 'usd' ? billUsd : bytesIn;
+  const targetAmount =
+    target.kind === 'percent' ? (target.value / 100) * billUsd
+    : target.kind === 'usd_budget' ? Math.max(0, billUsd - target.value)
+    : Math.max(0, bytesIn - target.value * 1_000_000_000);
+  const derivedPct = poolTotal > 0 ? (targetAmount * 100) / poolTotal : 0;
+  /** The denomination's gain function: dollars off the bill, or bytes off the wire. */
+  const gain = (action: Action, bytes: number, avg: number | undefined): number =>
+    denom === 'usd'
+      ? saveUsd(action, bytes, opts.destination, avg)
+      : saveBytes(action, bytes, opts.destination, avg);
 
   const allowed = new Set(getAllowedActionsForDestination(opts.destination));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
   // The in-SIEM keep-everything lever (compact/tier_down), separate from offload
-  // so the two can be applied as an escalation, not an either/or.
-  const inSiem: Action | null =
+  // so the two can be applied as an escalation, not an either/or. For a VOLUME
+  // target, tier_down keeps every byte and therefore is not a lever at all.
+  let inSiem: Action | null =
     lever === 'compact' || lever === 'tier_down' ? lever : null;
+  if (denom === 'bytes' && inSiem === 'tier_down') {
+    inSiem = compactsInPlace(opts.destination) ? 'compact' : null;
+  }
 
   // Keep-everything ceiling = the DEEPEST keep-everything rung on every
   // non-error pattern. offload (when the retriever is present) removes the
@@ -265,13 +330,13 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   // in-SIEM lever caps it.
   const deepest: Action | null = canOffload ? 'offload' : inSiem;
   const nonError = rows.filter((r) => !isPinned(r.p));
-  const ceilingUsd = deepest
+  const ceilingAmount = deepest
     ? nonError.reduce(
-        (s, r) => s + saveUsd(deepest, r.scopedBytes, opts.destination, r.p.avgEventBytes),
+        (s, r) => s + gain(deepest, r.scopedBytes, r.p.avgEventBytes),
         0,
       )
     : 0;
-  const keepEverythingCeilingPct = billUsd > 0 ? (ceilingUsd * 100) / billUsd : 0;
+  const keepEverythingCeilingPct = poolTotal > 0 ? (ceilingAmount * 100) / poolTotal : 0;
 
   // Rank by bill (biggest cost first).
   const ranked = [...rows].sort(
@@ -279,7 +344,13 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   );
   const rankedNonError = ranked.filter((r) => !isPinned(r.p));
 
-  const build = (r: (typeof rows)[number], action: Action | 'pass', saved: number): PlannedRow => {
+  const build = (r: (typeof rows)[number], action: Action | 'pass', gained: number): PlannedRow => {
+    // Row display is ALWAYS dollars; on a volume target the greedy ran on
+    // bytes, so recompute the dollar figure for the card.
+    const savedUsd =
+      action === 'pass' ? 0
+      : denom === 'usd' ? gained
+      : saveUsd(action, r.scopedBytes, opts.destination, r.p.avgEventBytes);
     const { dominant, mix } = serviceMix(r.p.services);
     return {
       hash: r.p.hash,
@@ -290,58 +361,60 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       severity: r.p.severity,
       billUsd: billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes),
       action,
-      savedUsd: saved,
+      savedUsd,
+      ...(denom === 'bytes' && action !== 'pass' ? { savedBytes: gained } : {}),
       keepsEverything: action === 'pass' || action === 'compact' || action === 'tier_down' || action === 'offload',
     };
   };
 
-  // action[hash] chosen so far, and the running dollar saving.
+  // action[hash] chosen so far, and the running saving in the TARGET
+  // denomination (dollars for percent/usd_budget, bytes for gb_budget).
   const chosen = new Map<string, { action: Action; saved: number }>();
-  let savedUsd = 0;
+  let savedAmount = 0;
 
   // Rung 1-2: the in-SIEM lever, biggest patterns first, until the target.
   if (inSiem) {
     for (const r of rankedNonError) {
-      if (savedUsd >= targetUsd) break;
-      const saved = saveUsd(inSiem, r.scopedBytes, opts.destination, r.p.avgEventBytes);
+      if (savedAmount >= targetAmount) break;
+      const saved = gain(inSiem, r.scopedBytes, r.p.avgEventBytes);
       if (saved <= 0) continue;
       chosen.set(r.p.hash, { action: inSiem, saved });
-      savedUsd += saved;
+      savedAmount += saved;
     }
   }
 
   // Rung 3: escalate the biggest patterns to offload to close any shortfall,
   // still keeping everything (recoverable from the customer's S3). Upgrading a
   // pattern already on the in-SIEM lever adds only the delta.
-  if (savedUsd < targetUsd * 0.9999 && canOffload) {
+  if (savedAmount < targetAmount * 0.9999 && canOffload) {
     for (const r of rankedNonError) {
-      if (savedUsd >= targetUsd) break;
-      const off = saveUsd('offload', r.scopedBytes, opts.destination, r.p.avgEventBytes);
+      if (savedAmount >= targetAmount) break;
+      const off = gain('offload', r.scopedBytes, r.p.avgEventBytes);
       const prev = chosen.get(r.p.hash);
       if (prev) {
         if (off <= prev.saved) continue;
-        savedUsd += off - prev.saved;
+        savedAmount += off - prev.saved;
       } else {
         if (off <= 0) continue;
-        savedUsd += off;
+        savedAmount += off;
       }
       chosen.set(r.p.hash, { action: 'offload', saved: off });
     }
   }
 
   // Rung 4-5: lossy, opt-in only, when the keep-everything ceiling falls short.
-  if (savedUsd < targetUsd * 0.9999 && opts.allowLossy) {
+  if (savedAmount < targetAmount * 0.9999 && opts.allowLossy) {
     const lossy: Action = allowed.has('sample') ? 'sample' : 'drop';
     for (const r of rankedNonError) {
-      if (savedUsd >= targetUsd) break;
-      const l = saveUsd(lossy, r.scopedBytes, opts.destination, r.p.avgEventBytes);
+      if (savedAmount >= targetAmount) break;
+      const l = gain(lossy, r.scopedBytes, r.p.avgEventBytes);
       const prev = chosen.get(r.p.hash);
       if (prev) {
         if (l <= prev.saved) continue;
-        savedUsd += l - prev.saved;
+        savedAmount += l - prev.saved;
       } else {
         if (l <= 0) continue;
-        savedUsd += l;
+        savedAmount += l;
       }
       chosen.set(r.p.hash, { action: lossy, saved: l });
     }
@@ -355,12 +428,26 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     else kept.push(build(r, 'pass', 0));
   }
 
-  const achievedPct = billUsd > 0 ? (savedUsd * 100) / billUsd : 0;
-  const met = achievedPct >= opts.targetPct - 0.5;
+  const achievedPct = poolTotal > 0 ? (savedAmount * 100) / poolTotal : 0;
+  // percent keeps its half-point slack; a budget is a hard line — met means
+  // the landing is at or under it (targetAmount 0 = already under budget).
+  const met =
+    target.kind === 'percent'
+      ? achievedPct >= target.value - 0.5
+      : savedAmount >= targetAmount * 0.9999;
+
+  // Where the plan LANDS, in both denominations where tracked.
+  const totalSavedUsd = planned.reduce((s, r) => s + r.savedUsd, 0);
+  const landsAtUsd = Math.max(0, billUsd - totalSavedUsd);
+  const landsAtBytesMonthly =
+    denom === 'bytes' ? Math.max(0, bytesIn - savedAmount) : undefined;
+
+  const fmtUsd = (v: number) => '$' + Number(v.toFixed(2)).toString();
+  const fmtGb = (bytes: number) => Number((bytes / 1_000_000_000).toFixed(1)).toString() + ' GB';
 
   let gap: Plan['gap'] = null;
   if (!met && !opts.allowLossy) {
-    const remainingPct = Math.max(0, opts.targetPct - achievedPct);
+    const remainingPct = Math.max(0, derivedPct - achievedPct);
     const remedies: Array<'install_retriever' | 'accept_loss'> = [];
     // If offload would help but the retriever isn't installed, that's the
     // lossless remedy; otherwise the only way down is loss.
@@ -379,12 +466,23 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
         ? 'sample or drop them (lossy — you stop keeping some or all of these events)'
         : 'drop them (lossy — these events stop reaching the destination)',
     );
+    const opening =
+      target.kind === 'percent'
+        ? `Keeping everything, this destination cuts ${Math.round(keepEverythingCeilingPct)}% of the bill, ` +
+          `${Math.round(remainingPct)} points short of the ${target.value}% target.`
+        : target.kind === 'usd_budget'
+          ? `Keeping everything, this destination gets the bill to ${fmtUsd(landsAtUsd)}/mo against the ` +
+            `${fmtUsd(target.value)}/mo budget, ${fmtUsd(Math.max(0, landsAtUsd - target.value))}/mo over.`
+          : `Keeping everything, this destination gets ingest to ${fmtGb(landsAtBytesMonthly ?? bytesIn)}/mo against the ` +
+            `${fmtGb(target.value * 1_000_000_000)}/mo budget, ` +
+            `${fmtGb(Math.max(0, (landsAtBytesMonthly ?? bytesIn) - target.value * 1_000_000_000))}/mo over.` +
+            (lever === 'tier_down'
+              ? ' tier_down keeps every byte in the destination, so it cannot reduce volume.'
+              : '');
     gap = {
       remainingPct,
       remedies,
-      message:
-        `Keeping everything, this destination cuts ${Math.round(keepEverythingCeilingPct)}% of the bill, ` +
-        `${Math.round(remainingPct)} points short of the ${opts.targetPct}% target. To close it, ${parts.join(', or ')}.`,
+      message: `${opening} To close it, ${parts.join(', or ')}.`,
     };
   }
 
@@ -392,12 +490,15 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     destination: opts.destination,
     retrieverInstalled: opts.retrieverInstalled,
     scope: opts.scope ?? 'all',
-    targetPct: opts.targetPct,
+    target,
+    targetPct: target.kind === 'percent' ? target.value : Math.round(derivedPct * 10) / 10,
     billUsd,
     keepEverythingLever: lever,
     keepEverythingCeilingPct,
     achievedPct,
     met,
+    landsAtUsd,
+    ...(landsAtBytesMonthly !== undefined ? { landsAtBytesMonthly } : {}),
     planned,
     kept,
     gap,

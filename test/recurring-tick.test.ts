@@ -442,3 +442,46 @@ test('s3 plane: applied tick uploads state with the aws CLI instead of git', asy
     if (prevRepo !== undefined) process.env.LOG10X_GITOPS_REPO_PATH = prevRepo;
   }
 });
+
+// ─── budget_gb_monthly thermostat ─────────────────────────────────────────────
+
+test('budget: over the line cuts only the overage, biggest first', async () => {
+  // 24h lookback → the monthly budget scales by 24/720 = 1/30.
+  // Rows total 30 decimal GB in the window; budget 450 GB/mo → 15 GB window
+  // line → 15 GB of overage must move.
+  const policy = makePolicy({ budget_gb_monthly: 450 });
+  process.env.LOG10X_ENV_ID = 'test-env';
+
+  const result = await withMockBackend(
+    [
+      { pattern: 'hash-big', service: 'api', severity: 'INFO', bytes: 20_000_000_000 },
+      { pattern: 'hash-mid', service: 'api', severity: 'INFO', bytes: 6_000_000_000 },
+      { pattern: 'hash-small', service: 'api', severity: 'INFO', bytes: 4_000_000_000 },
+    ],
+    () => runTick(policy, { dryRun: true })
+  );
+
+  const big = result.applied_changes.find((d) => d.pattern_hash === 'hash-big');
+  assert.ok(big && big.action !== 'pass', 'the biggest pattern carries the cut');
+  const small = result.applied_changes.find((d) => d.pattern_hash === 'hash-small');
+  assert.ok(small, 'small pattern present');
+  assert.equal(small!.action, 'pass', 'under-the-line remainder passes');
+  assert.ok(small!.reason.includes('GB/mo budget'), small!.reason);
+});
+
+test('budget: already under the line passes everything (thermostat idle)', async () => {
+  // 10 GB in the window = 300 GB/mo pace, well under a 1200 GB/mo budget.
+  const policy = makePolicy({ budget_gb_monthly: 1200 });
+  process.env.LOG10X_ENV_ID = 'test-env';
+
+  const result = await withMockBackend(
+    [
+      { pattern: 'hash-a', service: 'api', severity: 'INFO', bytes: 6_000_000_000 },
+      { pattern: 'hash-b', service: 'api', severity: 'INFO', bytes: 4_000_000_000 },
+    ],
+    () => runTick(policy, { dryRun: true })
+  );
+
+  assert.ok(result.applied_changes.every((d) => d.action === 'pass'),
+    `expected all pass, got ${result.applied_changes.map((d) => d.action).join(',')}`);
+});

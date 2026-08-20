@@ -301,3 +301,36 @@ test('PolicyLoadError has correct name', () => {
     assert.equal((err as PolicyLoadError).name, 'PolicyLoadError');
   }
 });
+
+// ─── budget_gb_monthly (volume thermostat) ────────────────────────────────────
+
+const BUDGET_POLICY = `
+schema_version: "1.0"
+
+reduction:
+  target_services: []
+  budget_gb_monthly: 2000
+  exceptions: []
+  min_delta_pp: 2
+
+config_plane:
+  repo: https://github.com/acme/log10x-config
+`;
+
+test('budget_gb_monthly parses and rides alongside the default target_percent', () => {
+  const p = parsePolicyYaml(BUDGET_POLICY);
+  assert.equal(p.budget_gb_monthly, 2000);
+  // target_percent keeps its default for back-compat readers; the tick
+  // checks budget first, so the default never drives a budget policy.
+  assert.equal(p.target_percent, 30);
+});
+
+test('budget_gb_monthly + explicit target_percent is rejected as ambiguous', () => {
+  const both = BUDGET_POLICY.replace('budget_gb_monthly: 2000', 'budget_gb_monthly: 2000\n  target_percent: 40');
+  assert.throws(() => parsePolicyYaml(both), PolicyLoadError);
+});
+
+test('budget_gb_monthly must be positive', () => {
+  const bad = BUDGET_POLICY.replace('budget_gb_monthly: 2000', 'budget_gb_monthly: -5');
+  assert.throws(() => parsePolicyYaml(bad), PolicyLoadError);
+});

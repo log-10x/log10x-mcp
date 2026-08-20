@@ -41,7 +41,7 @@ import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
 import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/build-report-data.js';
-import { solvePlan, type Plan } from '../lib/plan-solver.js';
+import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
 
@@ -161,6 +161,25 @@ export const pocFromLocalSchema = {
         'If present, POC produces a feasibility verdict + a pre-deploy commitment artifact stub the agent ' +
         'can surface alongside the per-pod savings matrix. The cap CSV is attached by a later change.'
     ),
+  budget_usd_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'DOLLAR BUDGET: keep the projected monthly bill on the assumed SIEM at or under this $/mo. The ' +
+        'sample is scaled to a 30-day month (kubectl window, or file timestamp span) before solving, so ' +
+        'the budget and the bill share a denominator. Mutually exclusive with target_percent_reduction ' +
+        'and budget_gb_monthly.'
+    ),
+  budget_gb_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'VOLUME BUDGET: keep projected monthly ingest at or under this many GB/mo. BYTE accounting: ' +
+        'tier_down keeps every byte and is excluded from the ladder for this target. Sample scaled to a ' +
+        '30-day month before solving. Mutually exclusive with target_percent_reduction and budget_usd_monthly.'
+    ),
   exception_services: z
     .array(z.string())
     .optional()
@@ -202,6 +221,8 @@ export interface PocFromLocalArgs {
   retriever_installed?: boolean;
   allow_lossy?: boolean;
   target_percent_reduction?: number;
+  budget_usd_monthly?: number;
+  budget_gb_monthly?: number;
   exception_services?: string[];
   pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
   pin_patterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
@@ -214,7 +235,10 @@ export interface PocFromLocalArgs {
  */
 interface LocalFeasibility {
   feasible: boolean;
+  /** For budget targets this is the DERIVED reduction percent the solver chased. */
   target_percent_reduction: number;
+  budget_usd_monthly?: number;
+  budget_gb_monthly?: number;
   max_achievable_percent: number;
   reason: string;
   exception_services: string[];
@@ -296,10 +320,24 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
   // identically in the agent's chat. The byte-range framing remains for the
   // no-target exploratory run.
   const pl = inner.plan;
+  const sampledNote = `Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}, projected to a 30-day month.`;
+  const fmtBudgetUsd = (v: number) => '$' + Number(v.toFixed(2)).toString();
   const headline = hasData && pl
-    ? (pl.met
-        ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
-        : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
+    ? (pl.target.kind === 'usd_budget'
+        ? (pl.met && pl.planned.length === 0
+            ? `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. Already under: the projected bill is ${fmtBudgetUsd(pl.billUsd)}/mo. No action needed. ${sampledNote}`
+            : pl.met
+              ? `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo (projected today: ${fmtBudgetUsd(pl.billUsd)}/mo), keeping everything. ${sampledNote}`
+              : `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo. ${pl.gap ? pl.gap.message : ''}`)
+        : pl.target.kind === 'gb_budget'
+          ? (pl.met && pl.planned.length === 0
+              ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. Already under: projected ingest is ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. No action needed. ${sampledNote}`
+              : pl.met
+                ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo, keeping everything. ${sampledNote}`
+                : `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. ${pl.gap ? pl.gap.message : ''}`)
+        : pl.met
+          ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
+          : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
     ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : inner.source === 'file'
@@ -597,7 +635,16 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   let commitment_artifact: LocalCommitmentArtifact | undefined;
   /** The shared ladder plan; attached to the envelope as `plan`. */
   let plan: Plan | undefined;
-  if (args.target_percent_reduction !== undefined) {
+  const budgetCount =
+    (args.budget_usd_monthly !== undefined ? 1 : 0) +
+    (args.budget_gb_monthly !== undefined ? 1 : 0);
+  if (budgetCount > 1) {
+    throw new Error('budget_usd_monthly and budget_gb_monthly are mutually exclusive — pick one denomination.');
+  }
+  if (budgetCount > 0 && args.target_percent_reduction !== undefined) {
+    throw new Error('target_percent_reduction and a budget are mutually exclusive: a percent is a one-shot cut, a budget is a standing line. Pass one.');
+  }
+  if (args.target_percent_reduction !== undefined || budgetCount > 0) {
     const exceptions = args.exception_services ?? [];
     const exceptionSet = new Set(exceptions.map((s) => s.toLowerCase()));
     const pinServices = args.pin_services ?? {};
@@ -622,20 +669,40 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     // It replaces the old byte "droppable fraction" (which was destination-
     // blind and implicitly assumed drop, overstating e.g. 65% on a destination
     // whose real keep-everything lever was tier_down).
+    // A percent target is scale-invariant, so the sample solves as-is. A
+    // BUDGET is $/mo or GB/mo — the sample must be projected onto a 30-day
+    // month first or the comparison is meaningless. kubectl: the pull window;
+    // file: the event-timestamp span (1h floor, same rule the report uses).
+    let sampleWindowHours = source === 'file' ? 0 : windowHours;
+    if (source === 'file') {
+      const fs = patterns.map((p) => p.firstSeenMs).filter((x): x is number => x !== undefined);
+      const ls = patterns.map((p) => p.lastSeenMs).filter((x): x is number => x !== undefined);
+      if (fs.length > 0 && ls.length > 0) {
+        sampleWindowHours = Math.max(1 / 60, (Math.max(...ls) - Math.min(...fs)) / 3_600_000);
+      }
+    }
+    if (sampleWindowHours <= 0) sampleWindowHours = 1;
+    const monthScale = budgetCount > 0 ? (24 * 30) / sampleWindowHours : 1;
+    const target: PlanTarget =
+      args.budget_usd_monthly !== undefined
+        ? { kind: 'usd_budget', value: args.budget_usd_monthly }
+        : args.budget_gb_monthly !== undefined
+          ? { kind: 'gb_budget', value: args.budget_gb_monthly }
+          : { kind: 'percent', value: args.target_percent_reduction! };
     plan = solvePlan(
       patterns.map((p) => ({
         hash: p.tenxHash ?? p.hash,
         name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
-        services: { [p.service ?? '(unattributed)']: p.bytes },
+        services: { [p.service ?? '(unattributed)']: p.bytes * monthScale },
         severity: p.severity ?? '',
-        bytes: p.bytes,
+        bytes: p.bytes * monthScale,
         ...(p.count > 0 ? { avgEventBytes: p.bytes / p.count } : {}),
       })),
       {
         // Same assumption rule as the report header: absent siem -> cloudwatch.
         destination: (args.siem ?? 'cloudwatch') as SiemId,
         retrieverInstalled: args.retriever_installed ?? false,
-        targetPct: args.target_percent_reduction,
+        target,
         scope: 'all',
         allowLossy: args.allow_lossy ?? false,
         exceptionServices: [
@@ -665,14 +732,22 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     if (pinServicesLower.size > 0) {
       reasonParts.push(`${pinServicesLower.size} service pin(s) applied; max_achievable shifted accordingly.`);
     }
+    const targetLabel =
+      plan.target.kind === 'usd_budget'
+        ? `the $${plan.target.value}/mo budget (derived cut ${plan.targetPct}%)`
+        : plan.target.kind === 'gb_budget'
+          ? `the ${plan.target.value} GB/mo budget (derived cut ${plan.targetPct}%)`
+          : `target ${args.target_percent_reduction}%`;
     reasonParts.push(
       feasible
-        ? `Achievable ${maxAchievable.toFixed(1)}% meets target ${args.target_percent_reduction}%.`
-        : `Achievable ${maxAchievable.toFixed(1)}% short of target ${args.target_percent_reduction}%; trim exceptions or widen the sample.`,
+        ? `Achievable ${maxAchievable.toFixed(1)}% meets ${targetLabel}.`
+        : `Achievable ${maxAchievable.toFixed(1)}% short of ${targetLabel}; trim exceptions or widen the sample.`,
     );
     feasibility = {
       feasible,
-      target_percent_reduction: args.target_percent_reduction,
+      target_percent_reduction: args.target_percent_reduction ?? plan.targetPct,
+      ...(args.budget_usd_monthly !== undefined ? { budget_usd_monthly: args.budget_usd_monthly } : {}),
+      ...(args.budget_gb_monthly !== undefined ? { budget_gb_monthly: args.budget_gb_monthly } : {}),
       max_achievable_percent: Math.round(maxAchievable * 10) / 10,
       reason: reasonParts.join(' '),
       exception_services: exceptions,
@@ -681,7 +756,13 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     const artLines: string[] = [];
     artLines.push(`## Projected commitment — local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
     artLines.push('');
-    artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%`);
+    if (feasibility.budget_usd_monthly !== undefined) {
+      artLines.push(`- **Budget**: $${feasibility.budget_usd_monthly}/mo (derived reduction ${feasibility.target_percent_reduction}%)`);
+    } else if (feasibility.budget_gb_monthly !== undefined) {
+      artLines.push(`- **Budget**: ${feasibility.budget_gb_monthly} GB/mo ingest (derived reduction ${feasibility.target_percent_reduction}%)`);
+    } else {
+      artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%`);
+    }
     artLines.push(
       `- **Projected max achievable**: ${feasibility.max_achievable_percent.toFixed(1)}% (${feasibility.feasible ? 'feasible' : 'short of target'})`,
     );

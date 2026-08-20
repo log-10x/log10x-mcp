@@ -444,3 +444,17 @@ test('emitContainerAppsJob: no Azure Files volume anywhere (certified dead)', ()
   assert.ok(!sh.includes('AzureFile'));
   assert.ok(!sh.includes('volumeMounts'));
 });
+
+// ─── budget_gb_monthly in policy.yaml ─────────────────────────────────────────
+
+test('emitPolicyYaml: budget replaces target_percent, never both', () => {
+  const yaml = emitPolicyYaml({ ...BASE_OPTS, budget_gb_monthly: 2000 });
+  assert.ok(yaml.includes('budget_gb_monthly: 2000'), yaml);
+  assert.ok(!yaml.includes('target_percent:'), 'a budget policy must not also carry target_percent');
+});
+
+test('emitPolicyYaml: no budget keeps the classic target_percent line', () => {
+  const yaml = emitPolicyYaml(BASE_OPTS);
+  assert.ok(yaml.includes('target_percent: 30'));
+  assert.ok(!yaml.includes('budget_gb_monthly'));
+});

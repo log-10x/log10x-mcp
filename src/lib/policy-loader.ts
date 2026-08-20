@@ -81,6 +81,13 @@ export interface Policy {
   target_services: string[];
   /** Desired savings target (1-95). */
   target_percent: number;
+  /**
+   * VOLUME BUDGET (thermostat): keep monthly ingest for the targeted scope at
+   * or under this many GB/mo. When present it REPLACES target_percent as the
+   * tick's goal: the tick scales the budget to its lookback window and cuts
+   * only the overage — already under budget means every pattern passes.
+   */
+  budget_gb_monthly?: number;
   /** Services the policy must never touch. */
   exceptions: string[];
   /**
@@ -308,6 +315,25 @@ export function parsePolicyYaml(text: string): Policy {
     ? rawSvcs.filter((s): s is string => typeof s === 'string' && s.trim() !== '')
     : [];
 
+  // budget_gb_monthly (volume thermostat — wins over target_percent)
+  const rawBudget = red?.['budget_gb_monthly'];
+  const budget_gb_monthly =
+    typeof rawBudget === 'string'
+      ? parseFloat(rawBudget)
+      : typeof rawBudget === 'number'
+      ? rawBudget
+      : undefined;
+  if (budget_gb_monthly !== undefined && (!Number.isFinite(budget_gb_monthly) || budget_gb_monthly <= 0)) {
+    throw new PolicyLoadError(
+      `budget_gb_monthly must be a positive number of GB per month; got: ${rawBudget}`
+    );
+  }
+  if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
+    throw new PolicyLoadError(
+      'reduction carries BOTH budget_gb_monthly and target_percent — they are different goals (a standing line vs a one-shot cut). Keep exactly one.'
+    );
+  }
+
   // target_percent
   const rawPct = red?.['target_percent'];
   const target_percent =
@@ -376,6 +402,7 @@ export function parsePolicyYaml(text: string): Policy {
       typeof raw['schema_version'] === 'string' ? raw['schema_version'] : '1.0',
     target_services,
     target_percent,
+    ...(budget_gb_monthly !== undefined ? { budget_gb_monthly } : {}),
     exceptions,
     min_delta_pp,
     lookback_window,

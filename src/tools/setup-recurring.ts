@@ -92,6 +92,22 @@ export const setupRecurringSchema = {
     ),
 
   /**
+   * Volume budget (GB/mo). Standing thermostat alternative to target_percent:
+   * each tick cuts only the overage above this line; under budget = all pass.
+   */
+  budget_gb_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'VOLUME BUDGET: keep monthly ingest for the targeted services at or under this many GB/mo. A ' +
+        'standing line, not a one-shot cut: each tick scales the budget to its lookback window and cuts ' +
+        'only the overage — already under budget means every pattern passes. Replaces target_percent in ' +
+        'policy.yaml (mutually exclusive). Dollar budgets are a one-shot answer via ' +
+        'log10x_estimate_savings (budget_usd_monthly); the recurring tick is byte-denominated.'
+    ),
+
+  /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
    * The wizard asks if omitted.
    */
@@ -197,6 +213,7 @@ interface RecurringWizardSession {
   session_id: string;
   target_services?: string[];
   target_percent?: number;
+  budget_gb_monthly?: number;
   schedule?: SchedulePreset;
   scheduler?: SchedulerKind;
   config_plane?: string;
@@ -230,6 +247,12 @@ function getOrCreateSession(id: string | undefined): RecurringWizardSession {
 function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringArgs): void {
   if (args.target_services !== undefined) session.target_services = args.target_services;
   if (args.target_percent !== undefined) session.target_percent = args.target_percent;
+  if (args.budget_gb_monthly !== undefined) session.budget_gb_monthly = args.budget_gb_monthly;
+  if (args.target_percent !== undefined && args.budget_gb_monthly !== undefined) {
+    throw new Error(
+      'target_percent and budget_gb_monthly are mutually exclusive: a percent is a one-shot cut, a budget is a standing line. Pass one.'
+    );
+  }
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
   if (args.scheduler !== undefined) session.scheduler = args.scheduler as SchedulerKind;
   if (args.config_plane !== undefined) session.config_plane = args.config_plane;
@@ -281,17 +304,18 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.target_percent === undefined) {
+  if (session.target_percent === undefined && session.budget_gb_monthly === undefined) {
     return {
       kind: 'ask',
       question_id: 'target_percent',
       markdown: buildQuestion(
         'Q2',
-        'What savings target (% of current log volume)?',
+        'What savings target (% of current log volume) — or a standing volume budget?',
         [
           'Integer 1-95. Default: **30** (a conservative starting point).',
           'The per-pattern planner works backward from this target using current byte volumes.',
           'Example: `target_percent: 30`',
+          'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead — each tick cuts only the overage.',
         ],
         'target_percent',
         session
@@ -453,6 +477,7 @@ function buildProgressLine(session: RecurringWizardSession): string {
   if (session.target_services !== undefined)
     parts.push(`services=${session.target_services.length === 0 ? 'all' : session.target_services.join(',')}`);
   if (session.target_percent !== undefined) parts.push(`target=${session.target_percent}%`);
+  if (session.budget_gb_monthly !== undefined) parts.push(`budget=${session.budget_gb_monthly}GB/mo`);
   if (session.schedule !== undefined) parts.push(`schedule=${session.schedule}`);
   if (session.scheduler !== undefined) parts.push(`scheduler=${session.scheduler}`);
   if (session.config_plane !== undefined) parts.push(`repo=${session.config_plane}`);
@@ -472,7 +497,9 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Field            | Value |`,
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
-    `| Target savings   | ${session.target_percent ?? 30}% |`,
+    session.budget_gb_monthly !== undefined
+      ? `| Volume budget    | ${session.budget_gb_monthly} GB/mo (standing line) |`
+      : `| Target savings   | ${session.target_percent ?? 30}% |`,
     `| Exceptions       | ${exc} |`,
     `| Min delta        | ${session.min_delta_pp ?? 2}pp |`,
     `| Schedule         | ${session.schedule ?? 'daily-03utc'} (${resolveCronExpression(session.schedule ?? 'daily-03utc')}) |`,
@@ -496,6 +523,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
   return {
     target_services: session.target_services ?? [],
     target_percent: session.target_percent ?? 30,
+    ...(session.budget_gb_monthly !== undefined ? { budget_gb_monthly: session.budget_gb_monthly } : {}),
     schedule: session.schedule ?? 'daily-03utc',
     scheduler: (session.scheduler ?? 'k8s_cron') as SchedulerKind,
     config_plane: session.config_plane ?? '',
@@ -817,13 +845,16 @@ function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult):
 
 function buildEmitHumanSummary(session: RecurringWizardSession, result: EmitResult): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
-  const target = session.target_percent ?? 30;
+  const target =
+    session.budget_gb_monthly !== undefined
+      ? `a ${session.budget_gb_monthly} GB/mo budget`
+      : `${session.target_percent ?? 30}% savings`;
   const svcDesc =
     !session.target_services || session.target_services.length === 0
       ? 'all services'
       : `${session.target_services.length} service${session.target_services.length !== 1 ? 's' : ''}`;
   return (
-    `Recurring policy emitted for ${svcDesc} targeting ${target}% savings via ${scheduler}. ` +
+    `Recurring policy emitted for ${svcDesc} targeting ${target} via ${scheduler}. ` +
     `Artifacts: policy.yaml + ${result.scheduler_manifest_filename}. ` +
     `Apply instructions are in data.apply_instructions. ` +
     `Run log10x_commitment_report after the first week to verify realized savings.`

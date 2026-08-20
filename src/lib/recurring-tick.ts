@@ -328,6 +328,21 @@ function decideAction(
   return { action: 'compact', reason: `low-moderate volume ${fmtBytes(bytes)}; compacting` };
 }
 
+/** PromQL range string -> hours ("24h" -> 24, "7d" -> 168, "30m" -> 0.5). 24h fallback. */
+function lookbackHours(window: string): number {
+  const m = /^(\d+(?:\.\d+)?)([smhdw])$/.exec(window.trim());
+  if (!m) return 24;
+  const v = parseFloat(m[1]);
+  switch (m[2]) {
+    case 's': return v / 3600;
+    case 'm': return v / 60;
+    case 'h': return v;
+    case 'd': return v * 24;
+    case 'w': return v * 168;
+    default: return 24;
+  }
+}
+
 function fmtBytes(b: number): string {
   if (b >= 1024 * 1024 * 1024) return `${(b / 1024 / 1024 / 1024).toFixed(1)} GB`;
   if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(0)} MB`;
@@ -630,7 +645,21 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
 
   const decisions: PatternDecision[] = [];
   let cumulativeSavedBytes = 0;
-  const targetSavedBytes = totalBytes * (policy.target_percent / 100);
+  // Volume budget (thermostat): scale the monthly line down to this tick's
+  // lookback window and cut only the overage. Already under budget -> target
+  // 0 bytes -> every pattern passes. Otherwise: the classic percent goal.
+  const targetSavedBytes =
+    policy.budget_gb_monthly !== undefined
+      ? Math.max(
+          0,
+          totalBytes -
+            policy.budget_gb_monthly * 1_000_000_000 * (lookbackHours(policy.lookback_window) / 720),
+        )
+      : totalBytes * (policy.target_percent / 100);
+  const goalLabel =
+    policy.budget_gb_monthly !== undefined
+      ? `${policy.budget_gb_monthly} GB/mo budget`
+      : `${policy.target_percent}%`;
 
   for (const row of deduped) {
     const sharePct = totalBytes > 0 ? (row.bytes / totalBytes) * 100 : 0;
@@ -642,7 +671,7 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
     if (alreadyMet) {
       // Target already met — pass remaining patterns.
       action = 'pass';
-      reason = `target already met (${policy.target_percent}% reached)`;
+      reason = `target already met (${goalLabel} reached)`;
     } else {
       const decided = decideAction(row.service, row.severity, row.bytes, policy);
       action = decided.action;

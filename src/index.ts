@@ -1506,6 +1506,8 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
       target_percent_reduction: args.target_percent_reduction,
+      budget_usd_monthly: args.budget_usd_monthly,
+      budget_gb_monthly: args.budget_gb_monthly,
       retriever_installed: args.retriever_installed,
       allow_lossy: args.allow_lossy,
       exception_services: args.exception_services,
