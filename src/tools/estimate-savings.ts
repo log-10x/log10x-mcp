@@ -2210,17 +2210,18 @@ export async function executeEstimateSavings(
         : '0% reduction';
       let headline: string;
       if (result.plan) {
-        // Ladder-solver path: the plan IS the answer — lead with the target,
-        // the achieved percent of the BILL, the lever, and the honest gap.
+        // Ladder-solver path: the headline is the VERDICT LINE only — the
+        // rendering grammar (server-instructions, RENDERING A PLAN) has the
+        // agent unpack the how/never-touched lines and the cards from the plan
+        // object itself, so one compressed sentence stops carrying five jobs.
         const pl = result.plan;
-        const lever = pl.keepEverythingLever ?? 'no keep-everything lever';
         const lossyCount = pl.planned.filter((r) => !r.keepsEverything).length;
         const keepNote = lossyCount > 0
           ? `keeping everything except ${lossyCount} opted-in lossy pattern${lossyCount === 1 ? '' : 's'}`
           : 'keeping everything';
         headline = pl.met
-          ? `Plan (${destination}): cut ${pl.targetPct}% of the bill — achieved ${pl.achievedPct.toFixed(0)}% via ${lever} on ${pl.planned.length} of ${pl.planned.length + pl.kept.length} message types, ${keepNote}. Errors and warnings untouched.`
-          : `Plan (${destination}): target ${pl.targetPct}% of the bill, reached ${pl.achievedPct.toFixed(0)}% via ${lever} ${keepNote} (keep-everything ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`;
+          ? `Target: cut ${pl.targetPct}% of the ${destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, ${keepNote}.`
+          : `Target: cut ${pl.targetPct}% of the ${destination} bill. ${keepNote[0].toUpperCase()}${keepNote.slice(1)}, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`;
       } else if (args.enforcement_mode === 'manual_report') {
         headline = leadDollar
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`

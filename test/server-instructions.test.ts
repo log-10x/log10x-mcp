@@ -31,9 +31,15 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   // verbatim, stacked rows so the pattern identity never crops, gloss under the
   // interpretation rules, gap relayed verbatim with the choice left to the user.
   assert.match(SERVER_INSTRUCTIONS, /RENDERING A PLAN/);
-  assert.match(SERVER_INSTRUCTIONS, /STACKED\s+LIST, never a markdown table/);
-  assert.match(SERVER_INSTRUCTIONS, /headline sentence first, verbatim/);
-  assert.match(SERVER_INSTRUCTIONS, /never truncate/);
+  // v3 (approved in the phone-readability review): verdict/how/never-touched
+  // opening block; noun-first numbered cards with the verdict LAST; identifier
+  // only when it adds information; never a table.
+  assert.match(SERVER_INSTRUCTIONS, /THREE-LINE BLOCK/);
+  assert.match(SERVER_INSTRUCTIONS, /Target: cut <targetPct>%/);
+  assert.match(SERVER_INSTRUCTIONS, /NUMBERED stacked list/);
+  assert.match(SERVER_INSTRUCTIONS, /NEVER a markdown table/);
+  assert.match(SERVER_INSTRUCTIONS, /opens with the NOUN, and the verdict comes last/);
+  assert.match(SERVER_INSTRUCTIONS, /never truncated/);
   assert.match(SERVER_INSTRUCTIONS, /hedged guess is worse than silence/);
-  assert.match(SERVER_INSTRUCTIONS, /belongs to the user, never to you/);
+  assert.match(SERVER_INSTRUCTIONS, /belongs to the\s+user, never to you/);
 });
