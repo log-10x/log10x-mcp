@@ -208,3 +208,22 @@ test('percent callers are untouched by the target union (back-compat)', () => {
   assert.equal(viaPct.targetPct, 50);
   assert.equal(viaPct.target.kind, 'percent');
 });
+
+// ── Render credibility fields ───────────────────────────────────────
+
+test('plan arithmetic closes: totalSavedUsd = billUsd - landsAtUsd = sum of rows', () => {
+  const pl = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  const rowSum = pl.planned.reduce((s, r) => s + r.savedUsd, 0);
+  assert.ok(Math.abs(pl.totalSavedUsd - rowSum) < 1e-9);
+  assert.ok(Math.abs(pl.billUsd - pl.totalSavedUsd - (pl.landsAtUsd ?? NaN)) < 1e-9);
+});
+
+test('rateBasis names the destination, the list-price basis, and the lever rate', () => {
+  const cw = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  assert.ok(cw.rateBasis.includes('cloudwatch list price'), cw.rateBasis);
+  assert.ok(cw.rateBasis.includes('ingest $'), cw.rateBasis);
+  assert.ok(/Infrequent Access/i.test(cw.rateBasis), cw.rateBasis);
+  const sp = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
+  assert.ok(sp.rateBasis.includes('splunk list price'), sp.rateBasis);
+  assert.ok(/compact assumed \d+-\d+% of original size/.test(sp.rateBasis), sp.rateBasis);
+});
