@@ -60,6 +60,11 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /arithmetic on the page MUST close/);
   assert.match(SERVER_INSTRUCTIONS, /Rates: <rateBasis>/);
   assert.match(SERVER_INSTRUCTIONS, /List-price dollars, not a quote/);
+  // blast radius: the Touches line renders what the plan changes the behavior
+  // of, before the user agrees; unchecked plans say why, only when asked.
+  assert.match(SERVER_INSTRUCTIONS, /\*\*Touches:\*\*/);
+  assert.match(SERVER_INSTRUCTIONS, /plan_dependencies/);
+  assert.match(SERVER_INSTRUCTIONS, /BEFORE agreeing/);
 });
 
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {

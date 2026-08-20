@@ -84,6 +84,7 @@ import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { solvePlan, type Plan, type PlanTarget, type SolverPattern } from '../lib/plan-solver.js';
+import { checkPlanDependencies, type PlanDependencySummary } from '../lib/plan-dependencies.js';
 import { isProtectedSeverity } from '../lib/severity-policy.js';
 import * as pql from '../lib/promql.js';
 import { type FilterValue } from '../lib/promql.js';
@@ -201,6 +202,17 @@ export const estimateSavingsSchema = {
       'Permit the ladder solver to close a keep-everything shortfall with sample/drop (lossy, opt-in). ' +
         'Default false: the plan stops at the keep-everything ceiling and reports the gap instead of ' +
         'silently discarding events. Only set after the user explicitly chooses loss.'
+    ),
+  check_dependencies: z
+    .boolean()
+    .optional()
+    .default(true)
+    .describe(
+      'Ladder-plan path only: scan the destination (read-only) for dashboards, alerts, and saved '
+        + 'searches that reference the top planned message types, and attach the result as '
+        + 'plan_dependencies. Runs only when credentials for the destination are present in the '
+        + 'session environment; otherwise the plan carries a one-line note saying it was not checked. '
+        + 'Set false to skip the scan for speed.'
     ),
   pattern_limit: z
     .number()
@@ -2224,6 +2236,20 @@ export async function executeEstimateSavings(
         env
       );
       recordQuery(telemetry);
+      // Batch blast-radius scan over the plan's top rows (persona reviews'
+      // top blocker: "the plan says WHAT, never what it TOUCHES"). Read-only,
+      // credential-gated, deadline-capped; never blocks the plan on failure.
+      let planDeps: PlanDependencySummary | null = null;
+      if (result.plan && args.check_dependencies !== false) {
+        try {
+          planDeps = await checkPlanDependencies(result.plan);
+        } catch (e) {
+          planDeps = {
+            checked: false, scanned_rows: 0, rows_with_refs: 0, total_refs: 0, rows: [],
+            note: `not checked: dependency scan failed (${e instanceof Error ? e.message : String(e)})`,
+          };
+        }
+      }
       const patternCountLabel = result.per_pattern_truncated
         ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
@@ -2384,7 +2410,7 @@ export async function executeEstimateSavings(
           candidates_count: result.per_pattern_total_count,
           candidates_evaluated: result.per_pattern.length,
         },
-        payload: { ok: true, ...result },
+        payload: { ok: true, ...result, ...(planDeps ? { plan_dependencies: planDeps } : {}) },
         human_summary,
         actions: [
           {
