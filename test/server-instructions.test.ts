@@ -52,6 +52,14 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /The choice, left with the user/);
   assert.match(SERVER_INSTRUCTIONS, /Never pick for the user/);
   assert.match(SERVER_INSTRUCTIONS, /never soften the\s+word "lossy"/);
+  // v4.1 (persona-review fixes): mechanism disclosure, visible ceiling,
+  // closing arithmetic, and the pricing basis on every render.
+  assert.match(SERVER_INSTRUCTIONS, /Applies as:/);
+  assert.match(SERVER_INSTRUCTIONS, /never the <destination>\s+config again/);
+  assert.match(SERVER_INSTRUCTIONS, /keep-everything ceiling <keepEverythingCeilingPct>%/);
+  assert.match(SERVER_INSTRUCTIONS, /arithmetic on the page MUST close/);
+  assert.match(SERVER_INSTRUCTIONS, /Rates: <rateBasis>/);
+  assert.match(SERVER_INSTRUCTIONS, /List-price dollars, not a quote/);
 });
 
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {

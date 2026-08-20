@@ -31,6 +31,7 @@
 
 import {
   getAllowedActionsForDestination,
+  getDestinationCostModel,
   compactsInPlace,
   projectAction,
   type Action,
@@ -133,6 +134,13 @@ export interface Plan {
   keepEverythingCeilingPct: number;
   achievedPct: number;
   met: boolean;
+  /** Sum of planned rows' savedUsd — equals billUsd minus landsAtUsd, so the
+   *  arithmetic on a rendered plan closes visibly. */
+  totalSavedUsd: number;
+  /** The pricing basis behind every dollar on this plan, one human-readable
+   *  line. List-price by construction: the solver prices with the destination
+   *  cost model, never a customer's contracted rate. Render it verbatim. */
+  rateBasis: string;
   /** usd_budget / percent targets: the bill after the plan, in $/mo. */
   landsAtUsd?: number;
   /** gb_budget targets: monthly bytes toward the destination after the plan. */
@@ -486,6 +494,28 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     };
   }
 
+  // The pricing basis, stated once so every rendered dollar has its source on
+  // the page. The solver always prices at the destination's list-price cost
+  // model; say so plainly instead of letting the reader wonder whose rates
+  // these are.
+  const model = getDestinationCostModel(opts.destination);
+  const rate = (v: number) => '$' + Number(v.toFixed(4)).toString();
+  const basisParts = [`${opts.destination} list price: ingest ${rate(model.ingest_per_gb)}/GB`];
+  if (model.storage_per_gb_month > 0) {
+    basisParts.push(`storage ${rate(model.storage_per_gb_month)}/GB-mo`);
+  }
+  if (lever === 'tier_down' && model.tier_down_target_tier) {
+    basisParts.push(
+      `${model.tier_down_target_tier.name} ingest ${rate(model.tier_down_target_tier.ingest_rate_usd_per_gb)}/GB`,
+    );
+  }
+  if (lever === 'compact' && model.compact_mode !== 'no-op') {
+    basisParts.push(
+      `compact assumed ${Math.round(model.compact_ratio_low * 100)}-${Math.round(model.compact_ratio_high * 100)}% of original size`,
+    );
+  }
+  const rateBasis = basisParts.join(', ');
+
   return {
     destination: opts.destination,
     retrieverInstalled: opts.retrieverInstalled,
@@ -497,6 +527,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     keepEverythingCeilingPct,
     achievedPct,
     met,
+    totalSavedUsd,
+    rateBasis,
     landsAtUsd,
     ...(landsAtBytesMonthly !== undefined ? { landsAtBytesMonthly } : {}),
     planned,

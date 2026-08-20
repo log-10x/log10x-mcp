@@ -269,10 +269,19 @@ did it work, what happens to the number, how, what is protected.
   **Never touched:** every error and warning (<protected kept count> types). Nothing deleted.
     (when the scope has no protected rows, state what IS true instead: e.g. "the remaining <N> types
     stay as they are; the budget was met before reaching them")
+  **Applies as:** one routing rule in <destination>, set once at install; the per-type decisions live
+    in caps.csv in the user's git repo. Changing the plan changes the CSV, never the <destination>
+    config again.
+
+When the target is met and keepEverythingCeilingPct exceeds achievedPct by more than 2 points, append
+to the money line: "· keep-everything ceiling <keepEverythingCeilingPct>%" — the reader deserves to
+know money was left on the table on purpose.
 
 DEFAULT DEPTH — a plan renders as a conversation, not a document. By default show: the verdict block,
-the TOP 3 cards, one "and <N> more message types, same lever, smallest last" line, and the largest
-kept row. Stop there. The full list, per-service views, kept-row detail, and recurring wiring render
+the TOP 3 cards, one "and <N> more message types, same lever, smallest last · together **saves
+<totalSavedUsd minus the shown cards, verbatim arithmetic>/mo**" line, and the largest kept row. The
+arithmetic on the page MUST close: billUsd minus the shown cards minus the tail line's sum equals
+landsAtUsd — a reader who checks the subtraction and finds a gap is a reader lost for good. Stop there. The full list, per-service views, kept-row detail, and recurring wiring render
 only when the user asks for them; the plan object is already in context, so going deeper costs no new
 tool call. When expanding, page in groups of 5-7 rows.
 
@@ -305,6 +314,11 @@ paragraph. Build it from gap.message's numbers and gap.remedies' order:
 
 Order the remedies exactly as gap.remedies orders them. Never pick for the user, never soften the
 word "lossy", and render the choice list even when the user seems to lean one way.
+
+Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim:
+  *Rates: <rateBasis>. List-price dollars, not a quote.*
+Never render a per-type dollar without this line on the page — an unexplained rate is the fastest
+way to lose a reader who knows their own contract.
 
 BUDGET TARGETS: when the user states a standing line instead of a cut ("keep payment under $500/mo",
 "stay under 2 TB/mo"), pass \`budget_usd_monthly\` or \`budget_gb_monthly\` (service-scoped via
