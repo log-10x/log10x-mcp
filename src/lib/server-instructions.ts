@@ -272,6 +272,13 @@ did it work, what happens to the number, how, what is protected.
   **Applies as:** one routing rule in <destination>, set once at install; the per-type decisions live
     in caps.csv in the user's git repo. Changing the plan changes the CSV, never the <destination>
     config again.
+  **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, one line from its
+    fields: "checked <vendor> dashboards and alerts: <rows_with_refs> of the top <scanned_rows>
+    planned types are referenced" plus the matched object names (from rows[].names) when any exist —
+    a referenced type is a dashboard or alert that changes behavior when the plan applies, and the
+    user must see that BEFORE agreeing. When checked=false, render no Touches line; if the user asks
+    what the plan breaks, relay plan_dependencies.note verbatim (it names the missing credentials or
+    the unsupported destination).
 
 When the target is met and keepEverythingCeilingPct exceeds achievedPct by more than 2 points, append
 to the money line: "· keep-everything ceiling <keepEverythingCeilingPct>%" — the reader deserves to
