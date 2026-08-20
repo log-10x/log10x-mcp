@@ -31,17 +31,27 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   // verbatim, stacked rows so the pattern identity never crops, gloss under the
   // interpretation rules, gap relayed verbatim with the choice left to the user.
   assert.match(SERVER_INSTRUCTIONS, /RENDERING A PLAN/);
-  // v3 (approved in the phone-readability review): verdict/how/never-touched
-  // opening block; noun-first numbered cards with the verdict LAST; identifier
-  // only when it adds information; never a table.
-  assert.match(SERVER_INSTRUCTIONS, /THREE-LINE BLOCK/);
-  assert.match(SERVER_INSTRUCTIONS, /Target: cut <targetPct>%/);
+  // v4 (structured-header review): labeled VERDICT BLOCK with one fact per
+  // line; conversation-paced default depth (top 3, expand on request);
+  // noun-first numbered cards with the verdict LAST; structured gap with the
+  // remedies as a numbered choice; never a table.
+  assert.match(SERVER_INSTRUCTIONS, /VERDICT BLOCK/);
+  assert.match(SERVER_INSTRUCTIONS, /ONE fact per line/);
+  assert.match(SERVER_INSTRUCTIONS, /met, keeping everything/);
+  assert.match(SERVER_INSTRUCTIONS, /DEFAULT DEPTH/);
+  assert.match(SERVER_INSTRUCTIONS, /TOP 3 cards/);
+  assert.match(SERVER_INSTRUCTIONS, /renders as a conversation, not a document/);
   assert.match(SERVER_INSTRUCTIONS, /NUMBERED stacked list/);
   assert.match(SERVER_INSTRUCTIONS, /NEVER a markdown table/);
   assert.match(SERVER_INSTRUCTIONS, /opens with the NOUN, and the verdict comes last/);
   assert.match(SERVER_INSTRUCTIONS, /never truncated/);
   assert.match(SERVER_INSTRUCTIONS, /hedged guess is worse than silence/);
-  assert.match(SERVER_INSTRUCTIONS, /belongs to the\s+user, never to you/);
+  // the gap is a labeled block, not a paragraph, and the loss decision is
+  // never made by the agent.
+  assert.match(SERVER_INSTRUCTIONS, /out of reach while keeping everything/);
+  assert.match(SERVER_INSTRUCTIONS, /The choice, left with the user/);
+  assert.match(SERVER_INSTRUCTIONS, /Never pick for the user/);
+  assert.match(SERVER_INSTRUCTIONS, /never soften the\s+word "lossy"/);
 });
 
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {

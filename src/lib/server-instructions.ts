@@ -252,41 +252,68 @@ Decoding aids you may use:
 These are aids, not certainties. Cite the raw token; let the user verify.
 
 RENDERING A PLAN (the \`plan\` object from log10x_estimate_savings / log10x_poc_from_local):
-open with a THREE-LINE BLOCK built from the plan's fields, every number verbatim:
-  **Target: cut <targetPct>% of the <destination> bill. This plan reaches <achievedPct>%.**
-  **How:** <planned count> of <planned+kept count> message types move to <the lever, in plain words —
-    e.g. "CloudWatch's Infrequent Access tier: same events, still queryable, lower rate">. When rows
-    escalated to offload, say so as the deliberate step it is ("the costliest type goes to S3 instead,
-    which closes the target; the retriever fetches those events back on demand").
-  **Never touched:** every error and warning (<count of protected kept rows> message types). Nothing in
-    this plan deletes an event.
-Then the rows, as a NUMBERED stacked list, costliest first, capped at 5-7 plus an
-"and N more message types, same levers, smallest last" line. NEVER a markdown table: table cells crop
-or horizontally-scroll long identifiers. Each card opens with the NOUN, and the verdict comes last:
+open with the VERDICT BLOCK — four labeled lines built from the plan's fields, every number verbatim,
+ONE fact per line so the reader scans labels instead of parsing sentences. The lines answer, in order:
+did it work, what happens to the number, how, what is protected.
+
+  **<Target|Budget> met, keeping everything.**
+    (append "except <N> opted-in lossy types" only when lossy rows exist)
+  **<billUsd verbatim>/mo → <landsAtUsd verbatim>/mo**, <restate the ask: "a <achievedPct>% cut against
+    the <targetPct>% ask" for percent · "under the $<budget>/mo line" for a dollar budget>
+    For a VOLUME budget the hero numbers are BYTES: "**<bytes today> → <landsAtBytesMonthly>**, under
+    the <N> GB/mo line", with the dollar effect second ("and takes $<X>/mo off the bill with it").
+  **Lever:** <plain words, e.g. "CloudWatch Infrequent Access tier: same events, still queryable,
+    lower rate">, <planned count> of <planned+kept count> message types. When rows escalated to
+    offload, narrate it as the deliberate step it is ("the costliest types go to S3 instead, which
+    closes the line; the retriever fetches them back on demand").
+  **Never touched:** every error and warning (<protected kept count> types). Nothing deleted.
+    (when the scope has no protected rows, state what IS true instead: e.g. "the remaining <N> types
+    stay as they are; the budget was met before reaching them")
+
+DEFAULT DEPTH — a plan renders as a conversation, not a document. By default show: the verdict block,
+the TOP 3 cards, one "and <N> more message types, same lever, smallest last" line, and the largest
+kept row. Stop there. The full list, per-service views, kept-row detail, and recurring wiring render
+only when the user asks for them; the plan object is already in context, so going deeper costs no new
+tool call. When expanding, page in groups of 5-7 rows.
+
+Cards are a NUMBERED stacked list, costliest first. NEVER a markdown table: table cells crop or
+horizontally-scroll long identifiers. Each card opens with the NOUN, and the verdict comes last:
 
   1. **<displayName>** · <dominantService>
      \`<name — the full identifier, in inline code, never truncated>\`  (only when it says more than displayName)
      <one-clause gloss, per the INTERPRETING METRIC PATTERNS rules above>.
      → <action, plain words> · **saves <savedUsd verbatim>**  (percent of the bill when dollars are sub-dollar)
+     (volume-budget rows lead with bytes instead: "→ <action> · **moves <savedBytes> out** · saves <savedUsd>")
 
 The gloss is one clause of business meaning ONLY for a code path recognized with high confidence
 (public OSS / vendor SDKs); an unrecognized symbol gets the literal treatment ("application log
 statement") or no gloss at all — a hedged guess is worse than silence. The gloss never carries a
 number. Severity is omitted on planned rows (INFO earns no ink); on KEPT rows it is the REASON the
 row is kept, stated as such: "**ERROR** · never touched". Show the largest kept row as one card ending
-"→ kept, never touched · <billUsd verbatim> stays". When the plan carries a \`gap\`, relay its message
-and remedies verbatim — the choice between installing the retriever and accepting loss belongs to the
-user, never to you.
+"→ kept, never touched · <billUsd verbatim> stays".
 
-BUDGET TARGETS: when the user states a standing line instead of a cut — "keep payment under $500/mo",
-"stay under 2 TB/mo" — pass \`budget_usd_monthly\` or \`budget_gb_monthly\` (service-scoped via
-\`service\` when they named one) instead of a percent. The verdict line changes and MUST stay in the
-user's denomination: "**Budget: keep <scope> under <budget>/mo. This plan lands at <landsAt>/mo.**"
-Never restate a dollar budget as a volume claim or the reverse: a dollar budget met by tier_down moves
-NOTHING out of the destination, and a volume budget says nothing about the bill. tier_down cannot serve
-a volume budget at all (every byte still lands) — the tool already excludes it; do not re-add it in
-prose. A budget is idempotent: already under budget returns an empty plan with the headroom stated —
-render that single line and no cards. Everything else (three-line block, numbered cards, gap verbatim)
-renders exactly as above.
+WHEN THE PLAN CARRIES A GAP (met=false): the gap gets the same labeled treatment, never a prose
+paragraph. Build it from gap.message's numbers and gap.remedies' order:
+
+  **<Target|Budget> out of reach while keeping everything.**
+  **<today's number, in the ask's denomination>**, <amount over the line | points short of the ask>
+  **Why:** <one clause, e.g. "the tier lever keeps every byte in CloudWatch, so volume stays put" ·
+    "without the retriever, offloaded events would be unreachable">
+  **The choice, left with the user:**
+  1. Install the S3 retriever: offload closes the gap, everything stays recoverable
+  2. <Drop | Sample or drop> the overage: lossy, those events stop reaching the destination
+
+Order the remedies exactly as gap.remedies orders them. Never pick for the user, never soften the
+word "lossy", and render the choice list even when the user seems to lean one way.
+
+BUDGET TARGETS: when the user states a standing line instead of a cut ("keep payment under $500/mo",
+"stay under 2 TB/mo"), pass \`budget_usd_monthly\` or \`budget_gb_monthly\` (service-scoped via
+\`service\` when they named one) instead of a percent. The verdict block MUST stay in the
+user's denomination: dollars hero for a dollar budget, bytes hero for a volume budget with the dollar
+effect second. Never restate a dollar budget as a volume claim or the reverse: a dollar budget met by
+tier_down moves NOTHING out of the destination, and a volume budget says nothing about the bill.
+tier_down cannot serve a volume budget at all (every byte still lands); the tool already excludes it,
+do not re-add it in prose. A budget is idempotent: already under budget returns an empty plan,
+rendered as the single headroom line and nothing else, no cards, no lever line.
 
 PROSPECT LANE: When the user asks to run a POC on their own logs ("run a cost POC", "analyze this log file", "what would 10x save on our <analyzer>"), or asks for a plan that cuts a given percentage before anything is installed ("define a plan that cuts 30%", "what is the difference between cutting 10% and 20%"), the answer is log10x_poc_from_local — after log10x_start on a fresh session, directly afterwards. It reads local files or a kubectl sample, runs the engine on this machine, sends nothing out, and takes target_percent_reduction for percentage asks; re-run it with two targets to compare them. log10x_poc_from_siem_submit is the same ask when log-analyzer credentials exist. These tools are registered on every keyless or POC boot. When any number in an answer comes from the public demo dataset rather than the user\'s own logs, the answer must say so.`;
