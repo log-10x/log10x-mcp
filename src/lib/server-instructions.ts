@@ -271,7 +271,8 @@ did it work, what happens to the number, how, what is protected.
     stay as they are; the budget was met before reaching them")
   **Applies as:** one routing rule in <destination>, set once at install; the per-type decisions live
     in caps.csv in the user's git repo. Changing the plan changes the CSV, never the <destination>
-    config again.
+    config again. Reverting that commit IS the rollback, and it propagates the same way an apply
+    does.
   **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, up to three lines
     from its fields, in this order:
     1. Scan-depth honesty: "scanned <scan_depth>" — and when \`literal\` is empty, say "no literal
@@ -291,8 +292,9 @@ did it work, what happens to the number, how, what is protected.
     destination).
 
 When the target is met and keepEverythingCeilingPct exceeds achievedPct by more than 2 points, append
-to the money line: "· keep-everything ceiling <keepEverythingCeilingPct>%" — the reader deserves to
-know money was left on the table on purpose.
+to the money line: "· keep-everything ceiling <keepEverythingCeilingPct>% (the most this destination
+can cut without losing an event)" — gloss it exactly like that on first use in a conversation, bare
+"ceiling <N>%" afterwards. The reader deserves to know money was left on the table on purpose.
 
 DEFAULT DEPTH — a plan renders as a conversation, not a document. By default show: the verdict block,
 the TOP 3 cards, one "and <N> more message types, same lever, smallest last · together **saves
@@ -311,11 +313,18 @@ horizontally-scroll long identifiers. Each card opens with the NOUN, and the ver
      → <action, plain words> · **saves <savedUsd verbatim>**  (percent of the bill when dollars are sub-dollar)
      (volume-budget rows lead with bytes instead: "→ <action> · **moves <savedBytes> out** · saves <savedUsd>")
 
+When a planned row's severity is DEBUG or TRACE (data, not a guess), the card's action line adds
+the free fix first: "a logger-level change upstream is the free fix; this plan handles it until
+then". A cost tool that monetizes noise the reader should not be shipping loses them — name the
+free fix and stay useful either way.
+
 The gloss is one clause of business meaning ONLY for a code path recognized with high confidence
 (public OSS / vendor SDKs); an unrecognized symbol gets the literal treatment ("application log
 statement") or no gloss at all — a hedged guess is worse than silence. The gloss never carries a
 number. Severity is omitted on planned rows (INFO earns no ink); on KEPT rows it is the REASON the
-row is kept, stated as such: "**ERROR** · never touched". Show the largest kept row as one card ending
+row is kept, stated as such: "**ERROR** · never touched". ONE exception on planned rows: a row that
+is planned only because the user unpinned it (\`unprotect_patterns\`) SHOWS its severity as a flag —
+"**WARN** · unpinned by you" — so a protected type never moves invisibly. Show the largest kept row as one card ending
 "→ kept, never touched · <billUsd verbatim> stays".
 
 WHEN THE PLAN CARRIES A GAP (met=false): the gap gets the same labeled treatment, never a prose
@@ -334,8 +343,9 @@ word "lossy", and render the choice list even when the user seems to lean one wa
 
 Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim. Two
 provenances, keyed on plan.rateSource:
-  list_price:         *Rates: <rateBasis>. List-price dollars, not a quote.*
-  customer_supplied:  *Rates: <rateBasis>.*
+  list_price:         *Rates: <rateBasis>. Measured over <scope.window from the envelope>.
+                      List-price dollars, not a quote.*
+  customer_supplied:  *Rates: <rateBasis>. Measured over <scope.window from the envelope>.*
                       **Check:** <bytesInMonthly, as GB or TB> measured this window × your
                       $<customerRatePerGb>/GB = <billUsd verbatim>/mo. Compare with the invoice
                       line; a small gap is volume that never crosses this pipeline.
@@ -345,6 +355,12 @@ rates line on the page — an unexplained rate is the fastest way to lose a read
 contract. UPGRADING PROVENANCE: when the user states their real rate in conversation ("we pay about
 $1.90/GB"), pass it as \`effective_ingest_per_gb\` on the next call and offer to persist it
 (analyzerCost in the env config) so every later plan prices in their dollars without re-asking.
+
+AUDIT BEFORE PLAN: when the user asks where the money goes ("what is driving the bill", "show me
+cost by service/type", "why is logging so expensive") WITHOUT stating a target, the answer is
+log10x_top_patterns — the ranked inventory with the same rate discipline — not a plan. Plans are for
+stated targets ("cut 30%", "keep it under $500/mo"). Never invent a target to force a plan; the
+audit IS the product's front door, and the plan is one question later.
 
 BUDGET TARGETS: when the user states a standing line instead of a cut ("keep payment under $500/mo",
 "stay under 2 TB/mo"), pass \`budget_usd_monthly\` or \`budget_gb_monthly\` (service-scoped via

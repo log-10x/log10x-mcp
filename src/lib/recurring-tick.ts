@@ -447,6 +447,69 @@ export function writeOutputFiles(
   }
 }
 
+// ─── run report ────────────────────────────────────────────────────────────
+
+/**
+ * The thermostat's audit trail: one markdown report per APPLIED tick, written
+ * into the config repo so it rides the same commit as the CSVs it describes.
+ * "When a scheduled run cuts something on a Tuesday, where do I see what it
+ * did" — here, in the artifact the change-control process already reviews.
+ * noop ticks write nothing (a daily no-change commit would be churn); they
+ * land in the local history file instead.
+ */
+export function writeRunReport(
+  repoPath: string,
+  policy: Policy,
+  decisions: PatternDecision[],
+  totalBytes: number,
+  projectedSavingsPct: number,
+  deltaPatterns: number,
+  deltaPp: number
+): void {
+  const now = new Date().toISOString();
+  const goal =
+    policy.budget_gb_monthly !== undefined
+      ? `keep ingest under ${policy.budget_gb_monthly} GB/mo (standing line)`
+      : `cut ${policy.target_percent}% of lookback volume`;
+  const scope =
+    policy.target_services.length > 0 ? policy.target_services.join(', ') : 'all services';
+  const acted = decisions.filter((d) => d.action !== 'pass');
+  const byAction = new Map<string, number>();
+  for (const d of acted) byAction.set(d.action, (byAction.get(d.action) ?? 0) + 1);
+  const actionMix = [...byAction.entries()].map(([a, n]) => `${n} ${a}`).join(', ') || 'none';
+  const lines: string[] = [
+    `# Recurring tick — ${now}`,
+    ``,
+    `- **Goal**: ${goal}`,
+    `- **Scope**: ${scope} · lookback ${policy.lookback_window}`,
+    `- **Observed**: ${fmtBytes(totalBytes)} across ${decisions.length} pattern rows`,
+    `- **Acted on**: ${acted.length} rows (${actionMix}) · projected ${projectedSavingsPct.toFixed(1)}% of lookback volume`,
+    `- **Delta vs previous applied state**: ${deltaPatterns} pattern change(s), ${deltaPp.toFixed(1)}pp`,
+    `- **Severity floor**: every ERROR/CRITICAL row passed untouched`,
+    ``,
+    `## Largest actions`,
+    ``,
+  ];
+  const top = [...acted].sort((a, b) => b.bytes - a.bytes).slice(0, 10);
+  if (top.length === 0) {
+    lines.push('(none — every row passed)');
+  } else {
+    for (const d of top) {
+      lines.push(
+        `1. \`${d.pattern_hash}\` · ${d.service || '(no service)'} · ${d.severity || '(no severity)'} — ` +
+          `${fmtBytes(d.bytes)} (${d.share_pct.toFixed(1)}%) → **${d.action}** (${d.reason})`
+      );
+    }
+  }
+  lines.push('', `Rollback: revert this commit; the engine re-reads policy on its refresh cycle, the same path an apply takes.`, '');
+
+  const reportsDir = pathJoin(repoPath, 'reports');
+  mkdirSync(reportsDir, { recursive: true });
+  const stamp = now.slice(0, 19).replace(/[:T]/g, '-');
+  writeFileSync(pathJoin(reportsDir, `tick-${stamp}.md`), lines.join('\n'));
+  writeFileSync(pathJoin(reportsDir, 'latest.md'), lines.join('\n'));
+}
+
 // ─── git commit ────────────────────────────────────────────────────────────
 
 async function commitToConfigPlane(
@@ -774,6 +837,7 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
 
   // Write output files.
   writeOutputFiles(repoPath, decisions, verbose);
+  writeRunReport(repoPath, policy, decisions, totalBytes, projectedSavingsPct, deltaPatterns, deltaPp);
 
   // Commit to the config plane — git for a repo plane, object puts for S3.
   try {

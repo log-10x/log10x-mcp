@@ -203,6 +203,23 @@ export const estimateSavingsSchema = {
         'Default false: the plan stops at the keep-everything ceiling and reports the gap instead of ' +
         'silently discarding events. Only set after the user explicitly chooses loss.'
     ),
+  exception_services: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Ladder-plan path only: services pinned at pass — their patterns stay in the bill but are '
+        + 'never planned, exactly like protected severities. The SOC-owned or compliance-bound '
+        + 'slice of the estate, stated as a hard exclusion. Case-insensitive.'
+    ),
+  unprotect_patterns: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Ladder-plan path only: pattern hashes the user EXPLICITLY unpinned from the severity floor '
+        + '(a warn-level retry storm they chose to act on). Bypasses severity protection for the '
+        + 'listed hashes only; hard exclusions still win. Set only after the user names the type '
+        + 'and chooses this — never inferred. The render flags these rows with their severity.'
+    ),
   check_dependencies: z
     .boolean()
     .optional()
@@ -814,6 +831,8 @@ export interface RunForecastArgs {
   default_action?: Action;
   retriever_installed?: boolean;
   allow_lossy?: boolean;
+  exception_services?: string[];
+  unprotect_patterns?: string[];
   check_dependencies?: boolean;
   include_referenced?: boolean;
   /** PromQL range expression for the observation window. Default 30d. */
@@ -1212,6 +1231,8 @@ export async function runEstimateForecast(
       // args.service already scoped the queries; the solver sees pre-scoped data.
       scope: 'all',
       allowLossy: args.allow_lossy ?? false,
+      ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
+      ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
     });
     // Blast radius, two tiers (persona reviews' top blocker): batch-match the
     // vendor's object inventory against EVERY planned type. Literal hits are
@@ -1237,6 +1258,8 @@ export async function runEstimateForecast(
             : {}),
           scope: 'all',
           allowLossy: args.allow_lossy ?? false,
+          ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
+          ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
         }, planDeps);
         ladderPlan = res.plan;
         planDeps = { ...planDeps, excluded: res.excluded };
@@ -2281,6 +2304,8 @@ export async function executeEstimateSavings(
           default_action: args.default_action,
           retriever_installed: args.retriever_installed,
           allow_lossy: args.allow_lossy,
+          exception_services: args.exception_services,
+          unprotect_patterns: args.unprotect_patterns,
           check_dependencies: args.check_dependencies,
           include_referenced: args.include_referenced,
           pattern_limit: args.pattern_limit,

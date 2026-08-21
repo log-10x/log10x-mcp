@@ -31,6 +31,7 @@ import {
   isS3ConfigPlane,
   _setBackendLoader,
   _resetBackendLoader,
+  writeRunReport,
 } from '../src/lib/recurring-tick.js';
 import type { Policy } from '../src/lib/policy-loader.js';
 
@@ -484,4 +485,33 @@ test('budget: already under the line passes everything (thermostat idle)', async
 
   assert.ok(result.applied_changes.every((d) => d.action === 'pass'),
     `expected all pass, got ${result.applied_changes.map((d) => d.action).join(',')}`);
+});
+
+// ─── run report ───────────────────────────────────────────────────────────────
+
+test('writeRunReport: the applied tick leaves an audit artifact in the repo', () => {
+  const repoPath = pathJoin(tmpdir(), `log10x-report-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(repoPath, { recursive: true });
+  const policy = makePolicy({ target_percent: 40, target_services: ['payments'] });
+  const decisions = [
+    { pattern_hash: 'h1', service: 'payments', severity: 'INFO', bytes: 9 * GB, share_pct: 60, action: 'compact' as const, reason: 'high volume' },
+    { pattern_hash: 'h2', service: 'payments', severity: 'ERROR', bytes: 6 * GB, share_pct: 40, action: 'pass' as const, reason: 'severity floor' },
+  ];
+  writeRunReport(repoPath, policy, decisions, 15 * GB, 38.2, 1, 5.1);
+  const latest = readFileSync(pathJoin(repoPath, 'reports', 'latest.md'), 'utf8');
+  assert.ok(latest.includes('cut 40% of lookback volume'), latest);
+  assert.ok(latest.includes('payments'), latest);
+  assert.ok(latest.includes('1 compact'), latest);
+  assert.ok(latest.includes('38.2%'), latest);
+  assert.ok(latest.includes('Rollback: revert this commit'), latest);
+  assert.ok(latest.includes('h1'), latest);
+});
+
+test('writeRunReport: budget policies state the standing line as the goal', () => {
+  const repoPath = pathJoin(tmpdir(), `log10x-report-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(repoPath, { recursive: true });
+  const policy = makePolicy({ budget_gb_monthly: 2000 });
+  writeRunReport(repoPath, policy, [], 0, 0, 0, 0);
+  const latest = readFileSync(pathJoin(repoPath, 'reports', 'latest.md'), 'utf8');
+  assert.ok(latest.includes('keep ingest under 2000 GB/mo (standing line)'), latest);
 });
