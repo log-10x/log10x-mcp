@@ -19,11 +19,8 @@ import { join } from 'path';
 import {
   type DepCheckOptions,
   type DepCheckResult,
-  type DepMatch,
-  type DepMatchedIn,
-  emptyResult,
-  allTokensMatchExact,
-  meaningfulTokens,
+  type VendorInventory,
+  inventoryToDepResult,
 } from './types.js';
 
 interface Conn {
@@ -114,15 +111,19 @@ interface ViewEntry {
   acl?: { app?: string };
 }
 
-export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
-  const result = emptyResult('splunk', opts.pattern);
+export async function fetchSplunkInventory(): Promise<VendorInventory> {
+  const inv: VendorInventory = {
+    vendor: 'splunk',
+    objects: [],
+    notes: [],
+    scanDepth: 'saved-search SPL, alert definitions, and dashboard XML',
+  };
   const conn = getConn();
   if (!conn) {
-    result.error = 'Splunk credentials not detected (need SPLUNK_HOST + SPLUNK_TOKEN, or basic auth, or ~/.splunkrc)';
-    return result;
+    inv.error = 'Splunk credentials not detected (need SPLUNK_HOST + SPLUNK_TOKEN, or basic auth, or ~/.splunkrc)';
+    return inv;
   }
   const webHost = webHostFor(conn.host);
-  const tokens = meaningfulTokens(opts.pattern, opts.tokens);
 
   // 1. Saved searches (and alerts — same endpoint, distinguished by alert.track).
   try {
@@ -136,24 +137,17 @@ export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckRe
       const trackStr = String(e.content?.['alert.track'] ?? '0');
       const alertType = String(e.content?.alert_type || '');
       const isAlert = trackStr === '1' || (alertType !== '' && alertType !== 'always');
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(e.name, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(search, tokens) || allTokensMatchExact(description, tokens)) matchedIn.push('query');
-      if (matchedIn.length === 0) continue;
       const app = String(e.acl?.app || 'search');
-      const url = `${webHost}/en-US/manager/${encodeURIComponent(app)}/saved/searches/${encodeURIComponent(e.name)}`;
-      const match: DepMatch = {
+      inv.objects.push({
         type: isAlert ? 'alert' : 'saved-search',
         name: e.name,
-        url,
-        matchedIn,
-      };
-      result.matches.push(match);
-      if (isAlert) result.byType.alerts++;
-      else result.byType.savedSearches++;
+        url: `${webHost}/en-US/manager/${encodeURIComponent(app)}/saved/searches/${encodeURIComponent(e.name)}`,
+        texts: { name: [e.name], query: [search, description], definition: [] },
+        hasQueryText: true,
+      });
     }
   } catch (e) {
-    result.notes.push(`saved/searches fetch failed: ${(e as Error).message.slice(0, 200)}`);
+    inv.notes.push(`saved/searches fetch failed: ${(e as Error).message.slice(0, 200)}`);
   }
 
   // 2. Dashboards (Simple XML + Studio share this endpoint).
@@ -165,18 +159,22 @@ export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckRe
     for (const e of data.entry || []) {
       const xml = String(e.content?.['eai:data'] || '');
       const label = String(e.content?.label || '');
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(e.name, tokens) || allTokensMatchExact(label, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(xml, tokens)) matchedIn.push('definition');
-      if (matchedIn.length === 0) continue;
       const app = String(e.acl?.app || 'search');
-      const url = `${webHost}/en-US/app/${encodeURIComponent(app)}/${encodeURIComponent(e.name)}`;
-      result.matches.push({ type: 'dashboard', name: label || e.name, url, matchedIn });
-      result.byType.dashboards++;
+      inv.objects.push({
+        type: 'dashboard',
+        name: label || e.name,
+        url: `${webHost}/en-US/app/${encodeURIComponent(app)}/${encodeURIComponent(e.name)}`,
+        texts: { name: [e.name, label], query: [], definition: [xml] },
+        hasQueryText: true,
+      });
     }
   } catch (e) {
-    result.notes.push(`dashboards fetch failed: ${(e as Error).message.slice(0, 200)}`);
+    inv.notes.push(`dashboards fetch failed: ${(e as Error).message.slice(0, 200)}`);
   }
 
-  return result;
+  return inv;
+}
+
+export async function checkSplunkDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
+  return inventoryToDepResult(await fetchSplunkInventory(), opts.pattern, opts.tokens);
 }

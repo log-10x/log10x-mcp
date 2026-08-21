@@ -272,13 +272,23 @@ did it work, what happens to the number, how, what is protected.
   **Applies as:** one routing rule in <destination>, set once at install; the per-type decisions live
     in caps.csv in the user's git repo. Changing the plan changes the CSV, never the <destination>
     config again.
-  **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, one line from its
-    fields: "checked <vendor> dashboards and alerts: <rows_with_refs> of the top <scanned_rows>
-    planned types are referenced" plus the matched object names (from rows[].names) when any exist —
-    a referenced type is a dashboard or alert that changes behavior when the plan applies, and the
-    user must see that BEFORE agreeing. When checked=false, render no Touches line; if the user asks
-    what the plan breaks, relay plan_dependencies.note verbatim (it names the missing credentials or
-    the unsupported destination).
+  **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, up to three lines
+    from its fields, in this order:
+    1. Scan-depth honesty: "scanned <scan_depth>" — and when \`literal\` is empty, say "no literal
+       references found in what was scanned", NEVER "none referenced" or "safe": monitors usually
+       reference slices (service, severity, index), not template text, and absence of a literal hit
+       proves nothing about those.
+    2. When \`excluded\` is non-empty: "**Excluded by default:** <N> message types are referenced by
+       name — <object names from excluded[].names> — and stay exactly as they are. Including them
+       adds <sum of excluded[].forgoneUsd>/mo; say so to trade." (the agent re-calls with
+       \`include_referenced: true\` when the user chooses that trade; the exclusion decision must
+       see the page BEFORE the user agrees to the plan)
+    3. When \`slice\` is non-empty: "<total slice objects> monitors and dashboards mention
+       <the services>: <platform_truth verbatim>." — this is DISCLOSURE, not exclusion; slice
+       overlap is deliberately broad and must never silently shrink the plan.
+    When checked=false, render no Touches line; if the user asks what the plan breaks, relay
+    plan_dependencies.note verbatim (it names the missing credentials or the unsupported
+    destination).
 
 When the target is met and keepEverythingCeilingPct exceeds achievedPct by more than 2 points, append
 to the money line: "· keep-everything ceiling <keepEverythingCeilingPct>%" — the reader deserves to

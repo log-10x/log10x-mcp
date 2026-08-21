@@ -84,7 +84,7 @@ import { parseActionIntent } from '../lib/action-intent-parser.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { solvePlan, type Plan, type PlanTarget, type SolverPattern } from '../lib/plan-solver.js';
-import { checkPlanDependencies, type PlanDependencySummary } from '../lib/plan-dependencies.js';
+import { checkPlanDependencies, applyReferencedExclusion, type PlanDependencySummary } from '../lib/plan-dependencies.js';
 import { isProtectedSeverity } from '../lib/severity-policy.js';
 import * as pql from '../lib/promql.js';
 import { type FilterValue } from '../lib/promql.js';
@@ -213,6 +213,16 @@ export const estimateSavingsSchema = {
         + 'plan_dependencies. Runs only when credentials for the destination are present in the '
         + 'session environment; otherwise the plan carries a one-line note saying it was not checked. '
         + 'Set false to skip the scan for speed.'
+    ),
+  include_referenced: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Ladder-plan path only: message types LITERALLY referenced by a monitor, alert, saved search, '
+        + 'or dashboard (found by the dependency scan) are EXCLUDED from the plan by default — they '
+        + 'stay exactly as they are, and the plan re-solves around them. Pass true only after the user '
+        + 'explicitly chooses to include them (the render shows what including them adds).'
     ),
   pattern_limit: z
     .number()
@@ -351,6 +361,7 @@ export interface ForecastResult {
   target_percent?: number;
   budget_usd_monthly?: number;
   budget_gb_monthly?: number;
+  plan_dependencies?: PlanDependencySummary;
   per_pattern: ForecastRow[];
   /**
    * The ladder-solver plan (product-default path only: target_percent with no
@@ -803,6 +814,8 @@ export interface RunForecastArgs {
   default_action?: Action;
   retriever_installed?: boolean;
   allow_lossy?: boolean;
+  check_dependencies?: boolean;
+  include_referenced?: boolean;
   /** PromQL range expression for the observation window. Default 30d. */
   observation_window?: string;
   /** Alias for `observation_window`. observation_window wins when both are set. */
@@ -1097,6 +1110,8 @@ export async function runEstimateForecast(
   let rows: Row[] = [];
   /** Populated on the ladder-solver path; attached to the payload as `plan`. */
   let ladderPlan: Plan | null = null;
+  /** Two-tier blast-radius summary; rides the envelope as `plan_dependencies`. */
+  let planDeps: PlanDependencySummary | null = null;
 
   if (args.proposed_config && args.proposed_config.length > 0) {
     rows = args.proposed_config.map((r) => ({
@@ -1198,6 +1213,35 @@ export async function runEstimateForecast(
       scope: 'all',
       allowLossy: args.allow_lossy ?? false,
     });
+    // Blast radius, two tiers (persona reviews' top blocker): batch-match the
+    // vendor's object inventory against EVERY planned type. Literal hits are
+    // excluded by default — pinned at pass, plan re-solved — unless the caller
+    // passed include_referenced. Slice mentions are disclosure only. Read-only,
+    // credential-gated, deadline-capped; never blocks or fails the plan.
+    if (args.check_dependencies !== false) {
+      try {
+        planDeps = await checkPlanDependencies(ladderPlan);
+      } catch (e) {
+        planDeps = {
+          checked: false, scanned_rows: 0, literal: [], excluded: [], slice: [], total_refs: 0,
+          note: `not checked: dependency scan failed (${e instanceof Error ? e.message : String(e)})`,
+        };
+      }
+      if (planDeps.checked && planDeps.literal.length > 0 && args.include_referenced !== true) {
+        const res = applyReferencedExclusion(solverPatterns, {
+          destination: args.destination as SiemId,
+          retrieverInstalled: args.retriever_installed ?? false,
+          target,
+          ...(forecastRateResolved.source === 'customer_supplied' && forecastRateResolved.rate_per_gb != null
+            ? { customerRatePerGb: forecastRateResolved.rate_per_gb }
+            : {}),
+          scope: 'all',
+          allowLossy: args.allow_lossy ?? false,
+        }, planDeps);
+        ladderPlan = res.plan;
+        planDeps = { ...planDeps, excluded: res.excluded };
+      }
+    }
     for (const r of ladderPlan.planned) {
       rows.push({ pattern_hash: r.hash, action: r.action as Action });
     }
@@ -1526,6 +1570,7 @@ export async function runEstimateForecast(
     ...(args.budget_usd_monthly !== undefined ? { budget_usd_monthly: args.budget_usd_monthly } : {}),
     ...(args.budget_gb_monthly !== undefined ? { budget_gb_monthly: args.budget_gb_monthly } : {}),
     ...(ladderPlan ? { plan: ladderPlan } : {}),
+    ...(planDeps ? { plan_dependencies: planDeps } : {}),
     per_pattern: per_pattern_sliced,
     per_pattern_truncated,
     per_pattern_total_count,
@@ -2236,6 +2281,8 @@ export async function executeEstimateSavings(
           default_action: args.default_action,
           retriever_installed: args.retriever_installed,
           allow_lossy: args.allow_lossy,
+          check_dependencies: args.check_dependencies,
+          include_referenced: args.include_referenced,
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
           observation_window: explicitObservationWindow,
@@ -2244,20 +2291,6 @@ export async function executeEstimateSavings(
         env
       );
       recordQuery(telemetry);
-      // Batch blast-radius scan over the plan's top rows (persona reviews'
-      // top blocker: "the plan says WHAT, never what it TOUCHES"). Read-only,
-      // credential-gated, deadline-capped; never blocks the plan on failure.
-      let planDeps: PlanDependencySummary | null = null;
-      if (result.plan && args.check_dependencies !== false) {
-        try {
-          planDeps = await checkPlanDependencies(result.plan);
-        } catch (e) {
-          planDeps = {
-            checked: false, scanned_rows: 0, rows_with_refs: 0, total_refs: 0, rows: [],
-            note: `not checked: dependency scan failed (${e instanceof Error ? e.message : String(e)})`,
-          };
-        }
-      }
       const patternCountLabel = result.per_pattern_truncated
         ? `top ${result.per_pattern.length} of ${result.per_pattern_total_count} patterns`
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
@@ -2418,7 +2451,7 @@ export async function executeEstimateSavings(
           candidates_count: result.per_pattern_total_count,
           candidates_evaluated: result.per_pattern.length,
         },
-        payload: { ok: true, ...result, ...(planDeps ? { plan_dependencies: planDeps } : {}) },
+        payload: { ok: true, ...result },
         human_summary,
         actions: [
           {

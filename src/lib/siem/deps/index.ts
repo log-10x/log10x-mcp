@@ -9,12 +9,13 @@
 import type { SiemId } from '../pricing.js';
 import { SIEM_DISPLAY_NAMES } from '../pricing.js';
 import type { DepCheckOptions, DepCheckResult } from './types.js';
-import { checkSplunkDeps } from './splunk.js';
-import { checkDatadogDeps } from './datadog.js';
-import { checkCloudWatchDeps } from './cloudwatch.js';
-import { checkElasticsearchDeps } from './elasticsearch.js';
+import { checkSplunkDeps, fetchSplunkInventory } from './splunk.js';
+import { checkDatadogDeps, fetchDatadogInventory } from './datadog.js';
+import { checkCloudWatchDeps, fetchCloudWatchInventory } from './cloudwatch.js';
+import { checkElasticsearchDeps, fetchElasticsearchInventory } from './elasticsearch.js';
 
-export type { DepCheckOptions, DepCheckResult } from './types.js';
+export type { DepCheckOptions, DepCheckResult, VendorInventory, InventoryObject } from './types.js';
+export { matchObject, inventoryToDepResult } from './types.js';
 
 /** Which SIEM ids the dep-check tool supports (subset of full registry). */
 export const DEP_CHECK_VENDORS: SiemId[] = ['datadog', 'splunk', 'elasticsearch', 'cloudwatch'];
@@ -56,7 +57,11 @@ export function renderDepCheckResult(result: DepCheckResult): string {
   if (total === 0) {
     lines.push(`Scan complete: 0 dependencies found in ${vendorLabel} for pattern \`${result.pattern}\`.`);
     lines.push('');
-    lines.push(`**Safe to drop.** Generate the vendor-specific exclusion: \`log10x_pattern_mitigate({ pattern: '${result.pattern}' })\`.`);
+    lines.push(
+      `**No literal references found in what was scanned.** Queries that filter by slice ` +
+        `(service, index, severity) can still include this pattern's events without naming it. ` +
+        `To proceed: \`log10x_pattern_mitigate({ pattern: '${result.pattern}' })\`.`
+    );
   } else {
     const counts: string[] = [];
     if (result.byType.dashboards) counts.push(`${result.byType.dashboards} dashboard${result.byType.dashboards === 1 ? '' : 's'}`);
@@ -90,4 +95,26 @@ export function renderDepCheckResult(result: DepCheckResult): string {
 
 function escapePipe(s: string): string {
   return s.replace(/\|/g, '\\|');
+}
+
+/** Fetch a vendor's full object inventory ONCE — the batch/plan path. */
+export async function fetchVendorInventory(vendor: SiemId): Promise<import('./types.js').VendorInventory> {
+  switch (vendor) {
+    case 'splunk':
+      return fetchSplunkInventory();
+    case 'datadog':
+      return fetchDatadogInventory();
+    case 'cloudwatch':
+      return fetchCloudWatchInventory();
+    case 'elasticsearch':
+      return fetchElasticsearchInventory();
+    default:
+      return {
+        vendor,
+        objects: [],
+        notes: [],
+        scanDepth: 'nothing',
+        error: `Vendor "${vendor}" is not in the dep-check supported set (${DEP_CHECK_VENDORS.join(', ')})`,
+      };
+  }
 }

@@ -21,12 +21,8 @@
 import {
   type DepCheckOptions,
   type DepCheckResult,
-  type DepMatch,
-  type DepMatchedIn,
-  type DepMatchType,
-  emptyResult,
-  allTokensMatchExact,
-  meaningfulTokens,
+  type VendorInventory,
+  inventoryToDepResult,
 } from './types.js';
 
 interface KConn {
@@ -85,13 +81,10 @@ interface AlertingRuleHit {
   params?: Record<string, unknown>;
 }
 
-async function scanSavedObjects(
+async function fetchSavedObjects(
   conn: KConn,
   type: string,
-  tokens: string[],
-  resultType: DepMatchType,
-  result: DepCheckResult,
-  countKey: keyof DepCheckResult['byType']
+  inv: VendorInventory,
 ): Promise<void> {
   let page = 1;
   const perPage = 100;
@@ -105,50 +98,41 @@ async function scanSavedObjects(
     for (const o of data.saved_objects || []) {
       const title = o.attributes?.title || '';
       const desc = o.attributes?.description || '';
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(title, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(desc, tokens)) matchedIn.push('definition');
-      if (matchedIn.length === 0) continue;
-      const m: DepMatch = {
-        type: resultType,
+      inv.objects.push({
+        type: 'dashboard',
         name: title || o.id,
         url: `${conn.url}/app/${type === 'dashboard' ? 'dashboards#/view/' + encodeURIComponent(o.id) : 'visualize#/edit/' + encodeURIComponent(o.id)}`,
-        matchedIn,
-      };
-      result.matches.push(m);
-      result.byType[countKey]++;
+        texts: { name: [title], query: [], definition: [desc] },
+        hasQueryText: false,
+      });
     }
     page++;
   }
 }
 
-export async function checkElasticsearchDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
-  const result = emptyResult('elasticsearch', opts.pattern);
+export async function fetchElasticsearchInventory(): Promise<VendorInventory> {
+  const inv: VendorInventory = {
+    vendor: 'elasticsearch',
+    objects: [],
+    notes: [],
+    scanDepth: 'dashboard/visualization titles/descriptions and alerting-rule params',
+  };
   const conn = getKibanaConn();
   if (!conn) {
-    result.error =
+    inv.error =
       'Kibana endpoint not configured (set KIBANA_URL, plus KIBANA_API_KEY or ELASTIC_API_KEY). Saved-object dependency scan needs Kibana, not bare Elasticsearch.';
-    return result;
+    return inv;
   }
-  const tokens = meaningfulTokens(opts.pattern, opts.tokens);
 
-  // Dashboards.
-  try {
-    await scanSavedObjects(conn, 'dashboard', tokens, 'dashboard', result, 'dashboards');
-  } catch (e) {
-    result.notes.push(`dashboards _find failed: ${(e as Error).message.slice(0, 200)}`);
+  // Dashboards, visualizations, lens — all surfaced as dashboard-type objects.
+  for (const type of ['dashboard', 'visualization', 'lens']) {
+    try {
+      await fetchSavedObjects(conn, type, inv);
+    } catch (e) {
+      inv.notes.push(`${type} _find failed: ${(e as Error).message.slice(0, 200)}`);
+    }
   }
-  // Visualizations + Lens — surface as dashboard-adjacent dependencies.
-  try {
-    await scanSavedObjects(conn, 'visualization', tokens, 'dashboard', result, 'dashboards');
-  } catch (e) {
-    result.notes.push(`visualization _find failed: ${(e as Error).message.slice(0, 200)}`);
-  }
-  try {
-    await scanSavedObjects(conn, 'lens', tokens, 'dashboard', result, 'dashboards');
-  } catch (e) {
-    result.notes.push(`lens _find failed: ${(e as Error).message.slice(0, 200)}`);
-  }
+  inv.notes.push('saved-object match is title/description only (panel queries are not in the _find projection)');
 
   // Alerting rules (Kibana 7.16+). Endpoint may 404 on older clusters — non-fatal.
   try {
@@ -159,23 +143,23 @@ export async function checkElasticsearchDeps(opts: DepCheckOptions): Promise<Dep
     for (const r of data.data || []) {
       const name = r.name || '';
       const params = r.params ? JSON.stringify(r.params) : '';
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(params, tokens)) matchedIn.push('query');
-      if (matchedIn.length === 0) continue;
-      result.matches.push({
+      inv.objects.push({
         type: 'alert',
         name: name || r.id,
         url: `${conn.url}/app/management/insightsAndAlerting/triggersActions/rule/${encodeURIComponent(r.id)}`,
-        matchedIn,
+        texts: { name: [name], query: [params], definition: [] },
+        hasQueryText: true,
       });
-      result.byType.alerts++;
     }
   } catch (e) {
-    result.notes.push(
+    inv.notes.push(
       `alerting rules _find failed (cluster may pre-date 7.16): ${(e as Error).message.slice(0, 200)}`
     );
   }
 
-  return result;
+  return inv;
+}
+
+export async function checkElasticsearchDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
+  return inventoryToDepResult(await fetchElasticsearchInventory(), opts.pattern, opts.tokens);
 }

@@ -20,10 +20,8 @@ import { client, v1 } from '@datadog/datadog-api-client';
 import {
   type DepCheckOptions,
   type DepCheckResult,
-  type DepMatchedIn,
-  emptyResult,
-  allTokensMatchExact,
-  meaningfulTokens,
+  type VendorInventory,
+  inventoryToDepResult,
 } from './types.js';
 
 function getKeys(): { apiKey?: string; appKey?: string; site?: string } {
@@ -39,12 +37,17 @@ function appUrlFor(site: string | undefined): string {
   return `https://app.${s}`;
 }
 
-export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
-  const result = emptyResult('datadog', opts.pattern);
+export async function fetchDatadogInventory(): Promise<VendorInventory> {
+  const inv: VendorInventory = {
+    vendor: 'datadog',
+    objects: [],
+    notes: [],
+    scanDepth: 'monitor queries and dashboard titles/descriptions',
+  };
   const { apiKey, appKey, site } = getKeys();
   if (!apiKey || !appKey) {
-    result.error = 'Datadog credentials not detected (need DD_API_KEY + DD_APP_KEY)';
-    return result;
+    inv.error = 'Datadog credentials not detected (need DD_API_KEY + DD_APP_KEY)';
+    return inv;
   }
 
   const config = client.createConfiguration({ authMethods: { apiKeyAuth: apiKey, appKeyAuth: appKey } });
@@ -52,34 +55,29 @@ export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckR
   const dashboardsApi = new v1.DashboardsApi(config);
   const monitorsApi = new v1.MonitorsApi(config);
   const appUrl = appUrlFor(site);
-  const tokens = meaningfulTokens(opts.pattern, opts.tokens);
 
-  // 1. Dashboards.
+  // 1. Dashboards — title + description only (widget queries need a
+  //    per-dashboard GetDashboard round-trip; too chatty for large accounts).
   try {
     const resp = await dashboardsApi.listDashboards({});
-    const dashboards = resp.dashboards || [];
-    for (const d of dashboards) {
+    for (const d of resp.dashboards || []) {
       const id = d.id || '';
       const title = d.title || '';
       const description = d.description || '';
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(title, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(description, tokens)) matchedIn.push('definition');
-      if (matchedIn.length === 0) continue;
-      result.matches.push({
+      inv.objects.push({
         type: 'dashboard',
         name: title || id,
         url: id ? `${appUrl}/dashboard/${id}` : undefined,
-        matchedIn,
+        texts: { name: [title], query: [], definition: [description] },
+        hasQueryText: false,
       });
-      result.byType.dashboards++;
     }
+    inv.notes.push('dashboard match is title/description only (widget queries need per-dashboard fetches)');
   } catch (e) {
-    result.notes.push(`dashboards list failed: ${(e as Error).message.slice(0, 200)}`);
+    inv.notes.push(`dashboards list failed: ${(e as Error).message.slice(0, 200)}`);
   }
 
-  // 2. Monitors. Datadog uses "monitor" terminology; we surface as `monitor`
-  //    type (alerting is implied — monitors that aren't alerting are rare).
+  // 2. Monitors — full query body available from the list call.
   try {
     const monitors = await monitorsApi.listMonitors({});
     for (const m of monitors) {
@@ -87,21 +85,21 @@ export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckR
       const name = m.name || '';
       const query = m.query || '';
       const message = m.message || '';
-      const matchedIn: DepMatchedIn[] = [];
-      if (allTokensMatchExact(name, tokens)) matchedIn.push('name');
-      if (allTokensMatchExact(query, tokens) || allTokensMatchExact(message, tokens)) matchedIn.push('query');
-      if (matchedIn.length === 0) continue;
-      result.matches.push({
+      inv.objects.push({
         type: 'monitor',
         name: name || id,
         url: id ? `${appUrl}/monitors/${id}` : undefined,
-        matchedIn,
+        texts: { name: [name], query: [query, message], definition: [] },
+        hasQueryText: true,
       });
-      result.byType.monitors++;
     }
   } catch (e) {
-    result.notes.push(`monitors list failed: ${(e as Error).message.slice(0, 200)}`);
+    inv.notes.push(`monitors list failed: ${(e as Error).message.slice(0, 200)}`);
   }
 
-  return result;
+  return inv;
+}
+
+export async function checkDatadogDeps(opts: DepCheckOptions): Promise<DepCheckResult> {
+  return inventoryToDepResult(await fetchDatadogInventory(), opts.pattern, opts.tokens);
 }
