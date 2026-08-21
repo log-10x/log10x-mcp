@@ -96,6 +96,14 @@ export interface SolveOpts {
    *  stay in the bill but are never planned, exactly like protected severities.
    *  Matched case-insensitively against the pattern's dominant service. */
   exceptionServices?: string[];
+  /**
+   * The customer's blended all-in $/GB for this destination (their contracted
+   * or invoice-derived rate). When present, every dollar on the plan is scaled
+   * from the list-price structure to this blend — the ladder physics (lever
+   * ratios) stay list-structure, the absolute dollars become theirs. Provenance
+   * is echoed on the plan (rateSource / rateBasis). Absent = list price.
+   */
+  customerRatePerGb?: number;
 }
 
 export interface PlannedRow {
@@ -138,9 +146,16 @@ export interface Plan {
    *  arithmetic on a rendered plan closes visibly. */
   totalSavedUsd: number;
   /** The pricing basis behind every dollar on this plan, one human-readable
-   *  line. List-price by construction: the solver prices with the destination
-   *  cost model, never a customer's contracted rate. Render it verbatim. */
+   *  line. Render it verbatim. */
   rateBasis: string;
+  /** Whose dollars these are: the destination list-price model, or the
+   *  customer's supplied blended rate scaled over the list structure. */
+  rateSource: 'list_price' | 'customer_supplied';
+  /** Echo of the supplied blended rate when rateSource is customer_supplied. */
+  customerRatePerGb?: number;
+  /** Total scoped bytes/mo behind the bill — the reconciliation multiplicand:
+   *  bytesInMonthly times the rate should foot against the invoice line. */
+  bytesInMonthly: number;
   /** usd_budget / percent targets: the bill after the plan, in $/mo. */
   landsAtUsd?: number;
   /** gb_budget targets: monthly bytes toward the destination after the plan. */
@@ -300,11 +315,22 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     })
     .filter((r) => r.scopedBytes > 0);
 
-  const billUsd = rows.reduce(
+  const billUsdList = rows.reduce(
     (s, r) => s + billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes),
     0,
   );
   const bytesIn = rows.reduce((s, r) => s + r.scopedBytes, 0);
+
+  // Customer-rate seam: scale list-structure dollars to the customer's blended
+  // all-in $/GB. Ratios (percent targets, lever ordering, ceiling %) are
+  // scale-invariant; absolute dollars (usd budgets, row savings, lands-at)
+  // become the customer's. bytes denomination is untouched.
+  const impliedListRatePerGb = bytesIn > 0 ? billUsdList / (bytesIn / 1_000_000_000) : 0;
+  const dollarScale =
+    opts.customerRatePerGb && opts.customerRatePerGb > 0 && impliedListRatePerGb > 0
+      ? opts.customerRatePerGb / impliedListRatePerGb
+      : 1;
+  const billUsd = billUsdList * dollarScale;
 
   // Resolve the ask into ONE denomination and one target amount.
   const target: PlanTarget = opts.target ?? { kind: 'percent', value: opts.targetPct ?? 0 };
@@ -318,7 +344,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   /** The denomination's gain function: dollars off the bill, or bytes off the wire. */
   const gain = (action: Action, bytes: number, avg: number | undefined): number =>
     denom === 'usd'
-      ? saveUsd(action, bytes, opts.destination, avg)
+      ? saveUsd(action, bytes, opts.destination, avg) * dollarScale
       : saveBytes(action, bytes, opts.destination, avg);
 
   const allowed = new Set(getAllowedActionsForDestination(opts.destination));
@@ -358,7 +384,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     const savedUsd =
       action === 'pass' ? 0
       : denom === 'usd' ? gained
-      : saveUsd(action, r.scopedBytes, opts.destination, r.p.avgEventBytes);
+      : saveUsd(action, r.scopedBytes, opts.destination, r.p.avgEventBytes) * dollarScale;
     const { dominant, mix } = serviceMix(r.p.services);
     return {
       hash: r.p.hash,
@@ -367,7 +393,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       dominantService: dominant,
       serviceMix: mix,
       severity: r.p.severity,
-      billUsd: billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes),
+      billUsd: billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes) * dollarScale,
       action,
       savedUsd,
       ...(denom === 'bytes' && action !== 'pass' ? { savedBytes: gained } : {}),
@@ -495,26 +521,36 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   }
 
   // The pricing basis, stated once so every rendered dollar has its source on
-  // the page. The solver always prices at the destination's list-price cost
-  // model; say so plainly instead of letting the reader wonder whose rates
-  // these are.
+  // the page. Two provenances: the destination's list-price cost model
+  // (default), or the customer's blended rate scaled over the list structure.
   const model = getDestinationCostModel(opts.destination);
   const rate = (v: number) => '$' + Number(v.toFixed(4)).toString();
-  const basisParts = [`${opts.destination} list price: ingest ${rate(model.ingest_per_gb)}/GB`];
-  if (model.storage_per_gb_month > 0) {
-    basisParts.push(`storage ${rate(model.storage_per_gb_month)}/GB-mo`);
-  }
+  const ingestLabel = model.ingest_label ?? 'ingest';
+  const structureParts: string[] = [];
   if (lever === 'tier_down' && model.tier_down_target_tier) {
-    basisParts.push(
+    structureParts.push(
       `${model.tier_down_target_tier.name} ingest ${rate(model.tier_down_target_tier.ingest_rate_usd_per_gb)}/GB`,
     );
   }
   if (lever === 'compact' && model.compact_mode !== 'no-op') {
-    basisParts.push(
+    structureParts.push(
       `compact assumed ${Math.round(model.compact_ratio_low * 100)}-${Math.round(model.compact_ratio_high * 100)}% of original size`,
     );
   }
-  const rateBasis = basisParts.join(', ');
+  const rateSource: 'list_price' | 'customer_supplied' = dollarScale !== 1 ? 'customer_supplied' : 'list_price';
+  let rateBasis: string;
+  if (rateSource === 'customer_supplied') {
+    rateBasis =
+      `${opts.destination} at your rate: ${rate(opts.customerRatePerGb!)}/GB all-in (customer supplied)` +
+      (structureParts.length > 0 ? `; lever ratios from list structure: ${structureParts.join(', ')}` : '');
+  } else {
+    const basisParts = [`${opts.destination} list price: ${ingestLabel} ${rate(model.ingest_per_gb)}/GB`];
+    if (model.storage_per_gb_month > 0) {
+      basisParts.push(`storage ${rate(model.storage_per_gb_month)}/GB-mo`);
+    }
+    basisParts.push(...structureParts);
+    rateBasis = basisParts.join(', ');
+  }
 
   return {
     destination: opts.destination,
@@ -529,6 +565,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     met,
     totalSavedUsd,
     rateBasis,
+    rateSource,
+    ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
+    bytesInMonthly: bytesIn,
     landsAtUsd,
     ...(landsAtBytesMonthly !== undefined ? { landsAtBytesMonthly } : {}),
     planned,

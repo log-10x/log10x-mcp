@@ -1080,6 +1080,18 @@ export async function runEstimateForecast(
     }
   }
 
+  // Resolve the $/GB ONCE via the shared chain (caller arg → envs.json
+  // analyzerCost → LOG10X_ANALYZER_COST → destination list) and use it for BOTH
+  // the per-pattern dollar math (below) and the rate_source / rate_disclosure
+  // label (further down). Resolving in two places lets the label and the
+  // math disagree.
+  const forecastRateResolved = resolveRate(
+    { effective_ingest_per_gb: args.effective_ingest_per_gb },
+    env,
+    args.destination,
+    { lensed: args.lensed === true },
+  );
+
   // Decide which rows to model.
   type Row = { pattern_hash: string; action: Action; sample_n?: number };
   let rows: Row[] = [];
@@ -1175,6 +1187,13 @@ export async function runEstimateForecast(
       destination: args.destination as SiemId,
       retrieverInstalled: args.retriever_installed ?? false,
       target,
+      // Provenance upgrade: when the shared rate chain resolved a customer
+      // rate (arg / envs.json analyzerCost / env var), the plan's dollars are
+      // scaled to it and the plan says so (rateSource / rateBasis). List
+      // price otherwise.
+      ...(forecastRateResolved.source === 'customer_supplied' && forecastRateResolved.rate_per_gb != null
+        ? { customerRatePerGb: forecastRateResolved.rate_per_gb }
+        : {}),
       // args.service already scoped the queries; the solver sees pre-scoped data.
       scope: 'all',
       allowLossy: args.allow_lossy ?? false,
@@ -1185,17 +1204,6 @@ export async function runEstimateForecast(
   }
 
   // Project each row.
-  // Resolve the $/GB ONCE via the shared chain (caller arg → envs.json
-  // analyzerCost → LOG10X_ANALYZER_COST → destination list) and use it for BOTH
-  // the per-pattern dollar math (below) and the rate_source / rate_disclosure
-  // label (further down). Resolving in two places lets the label and the
-  // math disagree.
-  const forecastRateResolved = resolveRate(
-    { effective_ingest_per_gb: args.effective_ingest_per_gb },
-    env,
-    args.destination,
-    { lensed: args.lensed === true },
-  );
 
   const per_pattern: ForecastRow[] = [];
   let totalIn = 0;

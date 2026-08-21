@@ -124,6 +124,13 @@ export interface DestinationCostModel {
   destination: SiemId;
   /** $/GB billed at ingest. */
   ingest_per_gb: number;
+  /**
+   * How to LABEL ingest_per_gb when quoting the model to a human. Default
+   * 'ingest'. Datadog is 'all-in': its real ingest meter is ~$0.10/GB and the
+   * money is per-million-event indexing, so the $2.50 figure is a blend —
+   * calling that blend "ingest" reads as not knowing the platform.
+   */
+  ingest_label?: string;
   /** $/GB-month billed for retention. */
   storage_per_gb_month: number;
   billing_basis: BillingBasis;
@@ -325,6 +332,9 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
   datadog: {
     destination: 'datadog',
     ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.datadog,
+    // The $2.50 is the canonical ALL-IN blend (real ingest meter is ~$0.10/GB;
+    // the money is per-M-event indexing). Label it honestly when quoted.
+    ingest_label: 'all-in',
     storage_per_gb_month: 0.0,
     billing_basis: 'compressed-ingest',
     compact_mode: 'no-op',
