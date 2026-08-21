@@ -110,6 +110,13 @@ export interface SolveOpts {
    * user explicitly trades it back in. Pinned like protected severities.
    */
   pinnedHashes?: string[];
+  /**
+   * Specific pattern hashes the user EXPLICITLY unpinned from the severity
+   * floor — a warn-level retry storm they chose to act on. Bypasses ONLY the
+   * severity protection for the listed hashes; pinnedHashes and
+   * exceptionServices still win. Never inferred, never estate-wide.
+   */
+  unprotectPatterns?: string[];
 }
 
 export interface PlannedRow {
@@ -304,9 +311,11 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     (opts.exceptionServices ?? []).map((x) => x.toLowerCase()),
   );
   const pinnedHashes = new Set(opts.pinnedHashes ?? []);
+  const unprotect = new Set(opts.unprotectPatterns ?? []);
   const isPinned = (p: SolverPattern): boolean => {
-    if (isProtectedSeverity(p.severity)) return true;
+    // Explicit pins win over everything, including an unpin of the same hash.
     if (pinnedHashes.has(p.hash)) return true;
+    if (isProtectedSeverity(p.severity) && !unprotect.has(p.hash)) return true;
     if (exceptions.size === 0) return false;
     const { dominant } = serviceMix(p.services);
     return exceptions.has(dominant.toLowerCase());

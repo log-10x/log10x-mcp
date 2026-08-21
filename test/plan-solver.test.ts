@@ -279,3 +279,32 @@ test('datadog rate label is the honest all-in blend, not "ingest"', () => {
   assert.ok(dd.rateBasis.includes('all-in $2.5/GB'), dd.rateBasis);
   assert.ok(!dd.rateBasis.includes('ingest $2.5/GB'), dd.rateBasis);
 });
+
+// ── Explicit unpin of the severity floor ────────────────────────────
+
+test('unprotectPatterns: a named WARN type becomes plannable; everything else stays protected', () => {
+  const withWarn: SolverPattern[] = [
+    ...estate(),
+    { hash: 'w1', name: 'Retry storm', services: { checkout: 120_000_000_000 }, severity: 'WARN', bytes: 120_000_000_000 },
+  ];
+  const locked = solvePlan(withWarn, { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  assert.ok(!locked.planned.some((r) => r.hash === 'w1'), 'WARN is protected by default');
+  const unpinned = solvePlan(withWarn, {
+    destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50,
+    unprotectPatterns: ['w1'],
+  });
+  assert.ok(unpinned.planned.some((r) => r.hash === 'w1'), 'explicitly unpinned WARN is plannable');
+  assert.ok(!unpinned.planned.some((r) => r.hash === 'e1'), 'the ERROR stays protected — unpin is per-hash, never estate-wide');
+});
+
+test('an explicit pin beats an unpin of the same hash', () => {
+  const withWarn: SolverPattern[] = [
+    ...estate(),
+    { hash: 'w1', name: 'Retry storm', services: { checkout: 120_000_000_000 }, severity: 'WARN', bytes: 120_000_000_000 },
+  ];
+  const pl = solvePlan(withWarn, {
+    destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50,
+    unprotectPatterns: ['w1'], pinnedHashes: ['w1'],
+  });
+  assert.ok(!pl.planned.some((r) => r.hash === 'w1'));
+});

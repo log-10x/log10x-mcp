@@ -80,6 +80,24 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /platform_truth verbatim/);
 });
 
+test('instructions carry the review riders: window, ceiling gloss, audit-first, free fix, unpin flag', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  // every dollar states its measurement period
+  assert.match(SERVER_INSTRUCTIONS, /Measured over <scope\.window/);
+  // the ceiling is glossed on first use, never left as jargon
+  assert.match(SERVER_INSTRUCTIONS, /the most this destination\s+can cut without losing an event/);
+  // audit is the front door; plans are for stated targets
+  assert.match(SERVER_INSTRUCTIONS, /AUDIT BEFORE PLAN/);
+  assert.match(SERVER_INSTRUCTIONS, /Never invent a target to force a plan/);
+  // DEBUG noise names the free fix instead of monetizing it silently
+  assert.match(SERVER_INSTRUCTIONS, /logger-level change upstream is the free fix/);
+  // an unpinned protected type never moves invisibly
+  assert.match(SERVER_INSTRUCTIONS, /unprotect_patterns/);
+  assert.match(SERVER_INSTRUCTIONS, /unpinned by you/);
+  // rollback is stated where the mechanism is stated
+  assert.match(SERVER_INSTRUCTIONS, /Reverting that commit IS the rollback/);
+});
+
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {
   const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
   assert.match(SERVER_INSTRUCTIONS, /BUDGET TARGETS/);
