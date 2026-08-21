@@ -60,6 +60,13 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /arithmetic on the page MUST close/);
   assert.match(SERVER_INSTRUCTIONS, /Rates: <rateBasis>/);
   assert.match(SERVER_INSTRUCTIONS, /List-price dollars, not a quote/);
+  // provenance upgrade: customer-supplied rates get the reconciliation Check
+  // line — the one multiplication the reader verifies against their invoice.
+  assert.match(SERVER_INSTRUCTIONS, /plan\.rateSource/);
+  assert.match(SERVER_INSTRUCTIONS, /\*\*Check:\*\*/);
+  assert.match(SERVER_INSTRUCTIONS, /Compare with the invoice/);
+  assert.match(SERVER_INSTRUCTIONS, /UPGRADING PROVENANCE/);
+  assert.match(SERVER_INSTRUCTIONS, /effective_ingest_per_gb/);
   // blast radius: the Touches line renders what the plan changes the behavior
   // of, before the user agrees; unchecked plans say why, only when asked.
   assert.match(SERVER_INSTRUCTIONS, /\*\*Touches:\*\*/);

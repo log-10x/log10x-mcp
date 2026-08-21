@@ -322,10 +322,19 @@ paragraph. Build it from gap.message's numbers and gap.remedies' order:
 Order the remedies exactly as gap.remedies orders them. Never pick for the user, never soften the
 word "lossy", and render the choice list even when the user seems to lean one way.
 
-Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim:
-  *Rates: <rateBasis>. List-price dollars, not a quote.*
-Never render a per-type dollar without this line on the page — an unexplained rate is the fastest
-way to lose a reader who knows their own contract.
+Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim. Two
+provenances, keyed on plan.rateSource:
+  list_price:         *Rates: <rateBasis>. List-price dollars, not a quote.*
+  customer_supplied:  *Rates: <rateBasis>.*
+                      **Check:** <bytesInMonthly, as GB or TB> measured this window × your
+                      $<customerRatePerGb>/GB = <billUsd verbatim>/mo. Compare with the invoice
+                      line; a small gap is volume that never crosses this pipeline.
+The Check line is the one multiplication the reader can verify against a number they already know —
+when it foots, every per-type figure inherits the trust. Never render a per-type dollar without the
+rates line on the page — an unexplained rate is the fastest way to lose a reader who knows their own
+contract. UPGRADING PROVENANCE: when the user states their real rate in conversation ("we pay about
+$1.90/GB"), pass it as \`effective_ingest_per_gb\` on the next call and offer to persist it
+(analyzerCost in the env config) so every later plan prices in their dollars without re-asking.
 
 BUDGET TARGETS: when the user states a standing line instead of a cut ("keep payment under $500/mo",
 "stay under 2 TB/mo"), pass \`budget_usd_monthly\` or \`budget_gb_monthly\` (service-scoped via

@@ -227,3 +227,55 @@ test('rateBasis names the destination, the list-price basis, and the lever rate'
   assert.ok(sp.rateBasis.includes('splunk list price'), sp.rateBasis);
   assert.ok(/compact assumed \d+-\d+% of original size/.test(sp.rateBasis), sp.rateBasis);
 });
+
+// ── Customer-rate seam ──────────────────────────────────────────────
+
+test('customer rate scales every dollar, leaves the plan rows and ratios alone', () => {
+  const list = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  const impliedList = list.billUsd / (list.bytesInMonthly / 1_000_000_000);
+  const custom = solvePlan(estate(), {
+    destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50,
+    customerRatePerGb: impliedList * 2,
+  });
+  // same physics: identical row set and actions, identical achieved percent
+  assert.deepEqual(custom.planned.map((r) => [r.hash, r.action]), list.planned.map((r) => [r.hash, r.action]));
+  assert.ok(Math.abs(custom.achievedPct - list.achievedPct) < 1e-9);
+  // their dollars: everything exactly doubled, and the arithmetic still closes
+  assert.ok(Math.abs(custom.billUsd - list.billUsd * 2) < 1e-6);
+  assert.ok(Math.abs(custom.totalSavedUsd - list.totalSavedUsd * 2) < 1e-6);
+  assert.ok(Math.abs(custom.billUsd - custom.totalSavedUsd - (custom.landsAtUsd ?? NaN)) < 1e-9);
+  assert.equal(custom.rateSource, 'customer_supplied');
+  assert.ok(custom.rateBasis.includes('your rate'), custom.rateBasis);
+  assert.ok(custom.rateBasis.includes('customer supplied'), custom.rateBasis);
+  assert.equal(list.rateSource, 'list_price');
+});
+
+test('usd budget is judged in the customer\'s dollars, not list dollars', () => {
+  const list = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 1 });
+  const impliedList = list.billUsd / (list.bytesInMonthly / 1_000_000_000);
+  // Budget above the list bill but below the customer-priced bill: with list
+  // dollars this is "already under"; with the doubled customer rate it forces
+  // a real cut. The budget must be compared against THEIR bill.
+  const budget = list.billUsd * 1.5;
+  const pl = solvePlan(estate(), {
+    destination: 'splunk', retrieverInstalled: true,
+    target: { kind: 'usd_budget', value: budget },
+    customerRatePerGb: impliedList * 2,
+  });
+  assert.ok(pl.billUsd > budget, 'premise: customer bill exceeds the budget');
+  assert.ok(pl.planned.length > 0, 'a real cut is required in customer dollars');
+  assert.ok(pl.met);
+  assert.ok((pl.landsAtUsd ?? Infinity) <= budget * 1.0001);
+});
+
+test('bytesInMonthly is the reconciliation multiplicand', () => {
+  const pl = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  const inputBytes = estate().reduce((s, p) => s + p.bytes, 0);
+  assert.equal(pl.bytesInMonthly, inputBytes);
+});
+
+test('datadog rate label is the honest all-in blend, not "ingest"', () => {
+  const dd = solvePlan(estate(), { destination: 'datadog', retrieverInstalled: true, targetPct: 50 });
+  assert.ok(dd.rateBasis.includes('all-in $2.5/GB'), dd.rateBasis);
+  assert.ok(!dd.rateBasis.includes('ingest $2.5/GB'), dd.rateBasis);
+});
