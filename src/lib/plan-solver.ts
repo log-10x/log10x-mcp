@@ -104,6 +104,12 @@ export interface SolveOpts {
    * is echoed on the plan (rateSource / rateBasis). Absent = list price.
    */
   customerRatePerGb?: number;
+  /**
+   * Specific pattern hashes pinned at pass — the referenced-types exclusion:
+   * a type a monitor or saved search names stays exactly as it is unless the
+   * user explicitly trades it back in. Pinned like protected severities.
+   */
+  pinnedHashes?: string[];
 }
 
 export interface PlannedRow {
@@ -297,8 +303,10 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const exceptions = new Set(
     (opts.exceptionServices ?? []).map((x) => x.toLowerCase()),
   );
+  const pinnedHashes = new Set(opts.pinnedHashes ?? []);
   const isPinned = (p: SolverPattern): boolean => {
     if (isProtectedSeverity(p.severity)) return true;
+    if (pinnedHashes.has(p.hash)) return true;
     if (exceptions.size === 0) return false;
     const { dominant } = serviceMix(p.services);
     return exceptions.has(dominant.toLowerCase());

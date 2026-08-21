@@ -67,11 +67,17 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /Compare with the invoice/);
   assert.match(SERVER_INSTRUCTIONS, /UPGRADING PROVENANCE/);
   assert.match(SERVER_INSTRUCTIONS, /effective_ingest_per_gb/);
-  // blast radius: the Touches line renders what the plan changes the behavior
-  // of, before the user agrees; unchecked plans say why, only when asked.
+  // blast radius, two tiers: scan-depth honesty (absence of a literal hit is
+  // never "safe"), literal hits excluded by default with the trade priced,
+  // slice mentions as disclosure with the platform truth relayed verbatim.
   assert.match(SERVER_INSTRUCTIONS, /\*\*Touches:\*\*/);
   assert.match(SERVER_INSTRUCTIONS, /plan_dependencies/);
-  assert.match(SERVER_INSTRUCTIONS, /BEFORE agreeing/);
+  assert.match(SERVER_INSTRUCTIONS, /no literal\s+references found in what was scanned/);
+  assert.match(SERVER_INSTRUCTIONS, /NEVER "none referenced" or "safe"/);
+  assert.match(SERVER_INSTRUCTIONS, /Excluded by default:/);
+  assert.match(SERVER_INSTRUCTIONS, /include_referenced/);
+  assert.match(SERVER_INSTRUCTIONS, /DISCLOSURE, not exclusion/);
+  assert.match(SERVER_INSTRUCTIONS, /platform_truth verbatim/);
 });
 
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {

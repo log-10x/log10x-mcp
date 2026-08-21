@@ -1,32 +1,38 @@
 /**
- * Batch SIEM dependency scan for a ladder plan.
+ * Two-tier SIEM dependency scan for a ladder plan.
  *
  * The persona reviews' top blocker was "the plan says WHAT, never what it
- * TOUCHES" — nobody applies a routing change without knowing which dashboards,
- * alerts, and saved searches read the moved message types. The per-pattern
- * scanner already exists (lib/siem/deps, read-only API calls); this module
- * batches it over the rows a plan will actually render and folds the result
- * into one summary the verdict block can carry.
+ * TOUCHES". A naive literal scan is half theater: real monitors reference
+ * SLICES (service:payment status:error), not message templates, so literal
+ * absence is not safety — and slice overlap is too broad to exclude on
+ * (every payment monitor overlaps every payment type). Hence two tiers:
  *
- * Scope, deliberately v1:
- *  - Scans the TOP rows only (default 7 — the cards plus a margin). Each
- *    vendor call refetches the object inventory, so a full-estate scan (100+
- *    rows) belongs to a batched-inventory refactor of lib/siem/deps, not here.
- *  - Credential preflight is instant: env vars, plus ~/.aws/credentials for
- *    CloudWatch. An EC2 instance role is not detected — the note says so
- *    rather than letting the SDK's IMDS probe stall a plan render.
- *  - An overall deadline caps the scan; rows not reached are reported, never
- *    silently skipped.
+ *  TIER 1 — LITERAL: an object's query/title contains the type's distinctive
+ *  tokens. High precision. These types are EXCLUDED from the plan by default
+ *  (pinned at pass, plan re-solved) unless the user trades them back in.
+ *
+ *  TIER 2 — SLICE: objects whose text mentions a planned service at all.
+ *  High recall, deliberately broad. A DISCLOSURE, never an exclusion —
+ *  rendered with the destination's platform truth (Flex data and real-time
+ *  monitors, the IA class and metric filters, offload and every query).
+ *
+ * The vendor inventory is fetched ONCE (lib/siem/deps fetchVendorInventory)
+ * and matched locally, so a 200-type plan costs the same API calls as one.
+ * Scan-depth honesty rides on the summary: what was scanned is stated, and
+ * "no literal references found in what was scanned" is the strongest claim
+ * the data supports — never "safe".
  */
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Plan } from './plan-solver.js';
+import type { Plan, PlannedRow, SolverPattern, SolveOpts } from './plan-solver.js';
+import { solvePlan } from './plan-solver.js';
 import type { SiemId } from './siem/pricing.js';
 import {
-  checkDeps as realCheckDeps,
+  fetchVendorInventory as realFetchVendorInventory,
+  matchObject,
   DEP_CHECK_VENDORS,
-  type DepCheckResult,
+  type VendorInventory,
 } from './siem/deps/index.js';
 
 export interface PlanRowDependencies {
@@ -34,8 +40,16 @@ export interface PlanRowDependencies {
   name: string;
   displayName: string;
   refs: number;
-  by_type: DepCheckResult['byType'];
-  /** Names of the matched objects (dashboards/alerts/...), capped at 5. */
+  /** Names of the referencing objects (monitors/searches/dashboards), capped at 5. */
+  names: string[];
+  /** Savings this row carried in the ORIGINAL solve — what excluding it forgoes. */
+  forgoneUsd: number;
+}
+
+export interface SliceDependency {
+  service: string;
+  objects: number;
+  /** Referencing-object names, capped at 5. */
   names: string[];
 }
 
@@ -43,12 +57,21 @@ export interface PlanDependencySummary {
   /** True when a scan actually ran (credentials present, vendor supported). */
   checked: boolean;
   vendor?: SiemId;
-  /** How many of the plan's top rows were scanned. */
+  /** What the scan could actually see, e.g. "monitor queries and dashboard
+   *  titles/descriptions". The honesty line: absence of literal hits means
+   *  "none found in THIS", never "safe". */
+  scan_depth?: string;
+  /** How many planned rows were matched (all of them — batch inventory). */
   scanned_rows: number;
-  /** Rows (of the scanned set) with at least one referencing object. */
-  rows_with_refs: number;
+  /** TIER 1: planned types literally referenced by name/query text. */
+  literal: PlanRowDependencies[];
+  /** TIER 1 outcome: types excluded from the final plan (pinned at pass). */
+  excluded: PlanRowDependencies[];
+  /** TIER 2: objects that mention a planned service at all — disclosure only. */
+  slice: SliceDependency[];
+  /** Destination truth for the levers in play, stated once. */
+  platform_truth?: string;
   total_refs: number;
-  rows: PlanRowDependencies[];
   /** One human-readable line: what ran, or why nothing did. Render-safe. */
   note: string;
 }
@@ -100,20 +123,60 @@ export function depCredsPresent(vendor: SiemId): { present: boolean; missing: st
   }
 }
 
-type DepsChecker = typeof realCheckDeps;
-let depsChecker: DepsChecker = realCheckDeps;
+type InventoryFetcher = typeof realFetchVendorInventory;
+let inventoryFetcher: InventoryFetcher = realFetchVendorInventory;
 /** Test seam, same pattern as _setBackendLoader / _setVerifyRunner. */
-export function _setDepsChecker(fn: DepsChecker): void {
-  depsChecker = fn;
+export function _setInventoryFetcher(fn: InventoryFetcher): void {
+  inventoryFetcher = fn;
 }
-export function _resetDepsChecker(): void {
-  depsChecker = realCheckDeps;
+export function _resetInventoryFetcher(): void {
+  inventoryFetcher = realFetchVendorInventory;
+}
+
+/** Destination truth for the levers a plan actually uses. */
+export function platformTruth(plan: Plan): string | undefined {
+  const actions = new Set(plan.planned.map((r) => r.action));
+  const parts: string[] = [];
+  if (actions.has('tier_down')) {
+    if (plan.destination === 'datadog') {
+      parts.push('Flex-tier events do not feed real-time log monitors; monitors on these services evaluate on less data once types move');
+    } else if (plan.destination === 'cloudwatch') {
+      parts.push('the Infrequent Access class does not support metric filters or subscription filters; filters on these services stop seeing moved types');
+    }
+  }
+  if (actions.has('offload')) {
+    parts.push('offloaded types leave the destination entirely; every query, dashboard, and alert on these services sees fewer events (recoverable through the retriever)');
+  }
+  if (actions.has('drop') || actions.has('sample')) {
+    parts.push('dropped or sampled types are gone from the destination; nothing downstream sees them');
+  }
+  return parts.length > 0 ? parts.join('. ') + '.' : undefined;
+}
+
+function objectAllText(o: { texts: { name: string[]; query: string[]; definition: string[] } }): string {
+  return [...o.texts.name, ...o.texts.query, ...o.texts.definition].join('\n');
+}
+
+const GENERIC_SERVICE_NAMES = new Set(['api', 'app', 'web', 'www', 'all', 'main', 'core', 'base', 'test']);
+
+/** TIER 2: which inventory objects mention each planned service at all. */
+export function sliceScan(inv: VendorInventory, services: string[]): SliceDependency[] {
+  const out: SliceDependency[] = [];
+  for (const svc of services) {
+    const name = svc.trim();
+    if (name.length < 3) continue;
+    if (name === '(unattributed)') continue;
+    if (GENERIC_SERVICE_NAMES.has(name.toLowerCase())) continue;
+    const re = new RegExp(`(^|[^a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`, 'i');
+    const hits = inv.objects.filter((o) => re.test(objectAllText(o)));
+    if (hits.length === 0) continue;
+    out.push({ service: name, objects: hits.length, names: hits.slice(0, 5).map((h) => h.name) });
+  }
+  return out;
 }
 
 export interface CheckPlanDepsOptions {
-  /** Top planned rows to scan. Default 7. */
-  limit?: number;
-  /** Overall wall-clock budget for the whole scan. Default 15000ms. */
+  /** Overall wall-clock budget for the inventory fetch. Default 20000ms. */
   timeoutMs?: number;
 }
 
@@ -121,15 +184,15 @@ export async function checkPlanDependencies(
   plan: Plan,
   opts: CheckPlanDepsOptions = {},
 ): Promise<PlanDependencySummary> {
-  const limit = opts.limit ?? 7;
-  const timeoutMs = opts.timeoutMs ?? 15_000;
+  const timeoutMs = opts.timeoutMs ?? 20_000;
 
   const none = (note: string): PlanDependencySummary => ({
     checked: false,
     scanned_rows: 0,
-    rows_with_refs: 0,
+    literal: [],
+    excluded: [],
+    slice: [],
     total_refs: 0,
-    rows: [],
     note,
   });
 
@@ -144,64 +207,83 @@ export async function checkPlanDependencies(
     return none(`not checked: no ${vendor} credentials in this session (need ${creds.missing}); run log10x_dependency_check after setting them`);
   }
 
-  const targets = plan.planned.slice(0, limit);
-  const deadline = Date.now() + timeoutMs;
-  const rows: PlanRowDependencies[] = [];
-  let scanned = 0;
-  let timedOut = false;
+  let inv: VendorInventory;
+  try {
+    inv = await Promise.race([
+      inventoryFetcher(vendor),
+      new Promise<VendorInventory>((_res, rej) => {
+        const t = setTimeout(() => rej(new Error('inventory fetch timeout')), timeoutMs);
+        t.unref?.();
+      }),
+    ]);
+  } catch (e) {
+    return none(`not checked: inventory fetch failed (${e instanceof Error ? e.message : String(e)})`);
+  }
+  if (inv.error) return none(`not checked: ${inv.error}`);
 
-  for (const r of targets) {
-    if (Date.now() >= deadline) {
-      timedOut = true;
-      break;
-    }
-    const tokens = r.name.split('_').filter((t) => t.length > 0);
-    let scan: DepCheckResult;
-    try {
-      scan = await Promise.race([
-        depsChecker(vendor, { pattern: r.name, tokens }),
-        new Promise<DepCheckResult>((_res, rej) =>
-          setTimeout(() => rej(new Error('row scan timeout')), Math.max(1000, deadline - Date.now())).unref?.(),
-        ),
-      ]);
-    } catch {
-      timedOut = true;
-      break;
-    }
-    if (scan.error) {
-      // Same error would repeat for every row (auth/endpoint) — stop, report.
-      return none(`not checked: ${scan.error}`);
-    }
-    scanned += 1;
-    if (scan.matches.length > 0) {
-      rows.push({
-        hash: r.hash,
-        name: r.name,
-        displayName: r.displayName,
-        refs: scan.matches.length,
-        by_type: scan.byType,
-        names: scan.matches.slice(0, 5).map((m) => m.name),
-      });
-    }
+  // TIER 1 — literal, ALL planned rows against the one inventory.
+  const literal: PlanRowDependencies[] = [];
+  for (const r of plan.planned) {
+    const tokens = r.name.split('_').filter((t) => t.length >= 4);
+    const effective = tokens.length > 0 ? tokens : [r.name.replace(/_/g, ' ')];
+    const hits = inv.objects.filter((o) => matchObject(o, effective).length > 0);
+    if (hits.length === 0) continue;
+    literal.push({
+      hash: r.hash,
+      name: r.name,
+      displayName: r.displayName,
+      refs: hits.length,
+      names: hits.slice(0, 5).map((h) => h.name),
+      forgoneUsd: r.savedUsd,
+    });
   }
 
-  const totalRefs = rows.reduce((s, x) => s + x.refs, 0);
+  // TIER 2 — slice disclosure over the planned services.
+  const services = [...new Set(plan.planned.map((r) => r.dominantService))];
+  const slice = sliceScan(inv, services);
+
+  const totalRefs = literal.reduce((s, x) => s + x.refs, 0);
   const noteParts = [
-    `checked ${vendor} dashboards and alerts for the top ${scanned} planned message type${scanned === 1 ? '' : 's'}`,
-    rows.length > 0
-      ? `${rows.length} referenced by ${totalRefs} object${totalRefs === 1 ? '' : 's'}`
-      : 'none referenced',
+    `scanned ${inv.scanDepth} (${inv.objects.length} objects) against all ${plan.planned.length} planned message types`,
+    literal.length > 0
+      ? `${literal.length} referenced by name (${totalRefs} object${totalRefs === 1 ? '' : 's'})`
+      : 'no literal references found in what was scanned',
   ];
-  if (timedOut) noteParts.push(`scan budget hit before the rest; run log10x_dependency_check for deeper coverage`);
-  else if (plan.planned.length > scanned) noteParts.push(`${plan.planned.length - scanned} more planned types not scanned; run log10x_dependency_check per type for the rest`);
+  if (slice.length > 0) {
+    noteParts.push(`${slice.reduce((s, x) => s + x.objects, 0)} objects mention the planned services`);
+  }
 
   return {
     checked: true,
     vendor,
-    scanned_rows: scanned,
-    rows_with_refs: rows.length,
+    scan_depth: inv.scanDepth,
+    scanned_rows: plan.planned.length,
+    literal,
+    excluded: [],
+    slice,
+    platform_truth: platformTruth(plan),
     total_refs: totalRefs,
-    rows,
     note: noteParts.join('; '),
   };
 }
+
+/**
+ * TIER 1 outcome: pin the literally-referenced types at pass and re-solve.
+ * Pure given the summary — the caller passes the same patterns/opts it solved
+ * with. Returns the re-solved plan and the exclusion record for the render;
+ * the excluded rows carry the savings the exclusion forgoes.
+ */
+export function applyReferencedExclusion(
+  patterns: SolverPattern[],
+  solveOpts: SolveOpts,
+  summary: PlanDependencySummary,
+): { plan: Plan; excluded: PlanRowDependencies[] } {
+  const excludedHashes = summary.literal.map((h) => h.hash);
+  const plan = solvePlan(patterns, {
+    ...solveOpts,
+    pinnedHashes: [...(solveOpts.pinnedHashes ?? []), ...excludedHashes],
+  });
+  return { plan, excluded: summary.literal };
+}
+
+export type { PlannedRow };

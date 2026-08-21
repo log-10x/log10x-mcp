@@ -132,7 +132,7 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
   }
   const count = d.dependencies.length;
   const verdict = d.safe_to_drop_recommendation;
-  return `Scanned ${d.vendor ?? 'analyzer'} for dependencies on \`${d.pattern}\` and found ${count} matching ${count === 1 ? 'dependency' : 'dependencies'}. Verdict: ${verdict}${verdict === 'blocked' ? ' — review the listed dashboards / alerts / saved searches before mute or drop.' : verdict === 'safe' ? ' — no dependencies blocking a mute or drop.' : '.'}`;
+  return `Scanned ${d.vendor ?? 'analyzer'} for dependencies on \`${d.pattern}\` and found ${count} matching ${count === 1 ? 'dependency' : 'dependencies'}. Verdict: ${verdict}${verdict === 'blocked' ? ' — review the listed dashboards / alerts / saved searches before mute or drop.' : verdict === 'safe' ? ' — no literal references in what was scanned; queries that filter by slice (service, index, severity) can still include these events without naming them.' : '.'}`;
 }
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
@@ -195,7 +195,16 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
     patternValidation.checked && patternValidation.exists === false
       ? `Warning: pattern \`${d.pattern}\` not found in metrics backend. Continuing with dependency scan, but verify the name before applying any action. `
       : '';
-  const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (recommendation: ${d.safe_to_drop_recommendation})`;
+  // The enum stays a structured contract; the prose must not overclaim.
+  // "safe" means only: no LITERAL references in what was scanned — slice-
+  // filtered queries can still include these events without naming them.
+  const verdictLabel =
+    d.safe_to_drop_recommendation === 'safe'
+      ? 'no literal references found in what was scanned'
+      : d.safe_to_drop_recommendation === 'blocked'
+        ? 'referenced — review before acting'
+        : 'unverifiable';
+  const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (${verdictLabel})`;
 
   // Build scan_scope: surface what was actually scanned. Report the
   // surfaces THIS vendor's scanner queries, not a fixed all-vendor union

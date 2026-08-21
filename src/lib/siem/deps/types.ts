@@ -127,3 +127,75 @@ export function meaningfulTokens(pattern: string, tokens: string[]): string[] {
   if (meaningful.length > 0) return meaningful;
   return [pattern.replace(/_/g, ' ')];
 }
+
+// ─── inventory layer (fetch once, match many) ────────────────────────────────
+//
+// The original per-pattern check refetches the vendor's object inventory on
+// every call. The inventory layer splits fetch from match so a PLAN (100+
+// message types) is matched against ONE fetch, and so the same inventory can
+// serve the slice-level disclosure (which objects watch a service at all).
+
+export interface InventoryObject {
+  type: DepMatchType;
+  name: string;
+  url?: string;
+  /**
+   * Candidate strings per match surface. The matcher requires ALL of a
+   * pattern's tokens inside ONE candidate string (parity with the original
+   * per-field checks — concatenating surfaces would invent cross-field hits).
+   */
+  texts: { name: string[]; query: string[]; definition: string[] };
+  /** True when `query` carries a real query body. False = titles only — the
+   *  honesty bit behind scan-depth reporting. */
+  hasQueryText: boolean;
+}
+
+export interface VendorInventory {
+  vendor: SiemId;
+  objects: InventoryObject[];
+  notes: string[];
+  /** Human phrase for what was actually scanned, e.g.
+   *  "monitor queries and dashboard titles". Drives the honesty line. */
+  scanDepth: string;
+  /** Set when the fetch couldn't run at all (credentials, endpoint). */
+  error?: string;
+}
+
+/** Match one pattern's tokens against one object; returns the surfaces hit. */
+export function matchObject(obj: InventoryObject, tokens: string[]): DepMatchedIn[] {
+  const matchedIn: DepMatchedIn[] = [];
+  if (obj.texts.name.some((t) => allTokensMatchExact(t, tokens))) matchedIn.push('name');
+  if (obj.texts.query.some((t) => allTokensMatchExact(t, tokens))) matchedIn.push('query');
+  if (obj.texts.definition.some((t) => allTokensMatchExact(t, tokens))) matchedIn.push('definition');
+  return matchedIn;
+}
+
+const BY_TYPE_KEY: Record<DepMatchType, keyof DepCheckResult['byType']> = {
+  dashboard: 'dashboards',
+  alert: 'alerts',
+  'saved-search': 'savedSearches',
+  monitor: 'monitors',
+  'metric-filter': 'metricFilters',
+};
+
+/** Rebuild the classic per-pattern DepCheckResult from a fetched inventory. */
+export function inventoryToDepResult(
+  inv: VendorInventory,
+  pattern: string,
+  tokens: string[],
+): DepCheckResult {
+  const result = emptyResult(inv.vendor, pattern);
+  result.notes.push(...inv.notes);
+  if (inv.error) {
+    result.error = inv.error;
+    return result;
+  }
+  const meaningful = meaningfulTokens(pattern, tokens);
+  for (const obj of inv.objects) {
+    const matchedIn = matchObject(obj, meaningful);
+    if (matchedIn.length === 0) continue;
+    result.matches.push({ type: obj.type, name: obj.name, url: obj.url, matchedIn });
+    result.byType[BY_TYPE_KEY[obj.type]]++;
+  }
+  return result;
+}
