@@ -44,6 +44,13 @@ const LADDER: Action[] = ['compact', 'tier_down', 'offload', 'sample', 'drop'];
 
 /** One pattern (message type) as the solver consumes it. */
 export interface SolverPattern {
+  /**
+   * The template body with `$` marking variable slots — the message type's
+   * own skeleton, the unit made visible. Present where the source has real
+   * templates (the POC extraction); absent on the analysis path until its
+   * metrics carry one. First line only for multi-line templates.
+   */
+  skeleton?: string;
   /** Stable identity (tenx_hash / templateHash). */
   hash: string;
   /** Human-readable message-type face. */
@@ -133,6 +140,8 @@ export interface PlannedRow {
   billUsd: number;
   action: Action | 'pass';
   savedUsd: number;
+  /** The template skeleton ($-slots), passed through from the source. */
+  skeleton?: string;
   /** Volume-budget plans only: bytes this row removes from the billed wire. */
   savedBytes?: number;
   keepsEverything: boolean;
@@ -411,6 +420,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       serviceMix: mix,
       severity: r.p.severity,
       billUsd: billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes) * dollarScale,
+      ...(r.p.skeleton ? { skeleton: r.p.skeleton } : {}),
       action,
       savedUsd,
       ...(denom === 'bytes' && action !== 'pass' ? { savedBytes: gained } : {}),

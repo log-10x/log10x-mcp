@@ -693,6 +693,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       patterns.map((p) => ({
         hash: p.tenxHash ?? p.hash,
         name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
+        ...(p.template ? { skeleton: p.template.split('\n')[0] } : {}),
         services: { [p.service ?? '(unattributed)']: p.bytes * monthScale },
         severity: p.severity ?? '',
         bytes: p.bytes * monthScale,
