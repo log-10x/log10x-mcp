@@ -308,3 +308,13 @@ test('an explicit pin beats an unpin of the same hash', () => {
   });
   assert.ok(!pl.planned.some((r) => r.hash === 'w1'));
 });
+
+test('skeleton passes through from source pattern to planned row', () => {
+  const withSkel: SolverPattern[] = estate().map((p) =>
+    p.hash === 'p1' ? { ...p, skeleton: 'Transaction complete order=$ amount=$' } : p,
+  );
+  const pl = solvePlan(withSkel, { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
+  const r = pl.planned.find((x) => x.hash === 'p1')!;
+  assert.equal(r.skeleton, 'Transaction complete order=$ amount=$');
+  assert.ok(pl.planned.filter((x) => x.hash !== 'p1').every((x) => x.skeleton === undefined));
+});

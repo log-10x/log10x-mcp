@@ -308,7 +308,10 @@ Cards are a NUMBERED stacked list, costliest first. NEVER a markdown table: tabl
 horizontally-scroll long identifiers. Each card opens with the NOUN, and the verdict comes last:
 
   1. **<displayName>** · <dominantService>
-     \`<name — the full identifier, in inline code, never truncated>\`  (only when it says more than displayName)
+     \`<skeleton — the template body, $ slots and all, in inline code, never truncated>\`
+       (whenever the row carries one: the skeleton IS the message type made visible — constant text
+       plus $ slots explains the unit without a word of prose. When no skeleton exists, fall back to
+       \`<name>\` only when it says more than displayName.)
      <one-clause gloss, per the INTERPRETING METRIC PATTERNS rules above>.
      → <action, plain words> · **saves <savedUsd verbatim>**  (percent of the bill when dollars are sub-dollar)
      (volume-budget rows lead with bytes instead: "→ <action> · **moves <savedBytes> out** · saves <savedUsd>")
