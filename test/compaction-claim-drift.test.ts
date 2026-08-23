@@ -21,11 +21,19 @@ import assert from 'node:assert/strict';
 import { renderPocReport } from '../src/lib/poc-report-renderer.js';
 import type { RenderInput } from '../src/lib/poc-report-renderer.js';
 import type { ExtractedPatterns } from '../src/lib/pattern-extraction.js';
-import { compactsInPlace, COST_MODEL_BY_DESTINATION } from '../src/lib/cost.js';
+import { getAllowedActionsForDestination, getDestinationCostModel, compactsInPlace, COST_MODEL_BY_DESTINATION } from '../src/lib/cost.js';
 import type { SiemId } from '../src/lib/siem/pricing.js';
 
 /** Destinations where `compact` keeps the line queryable in place. */
-const COMPACTING: SiemId[] = ['splunk', 'elasticsearch', 'clickhouse'];
+const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId, 'clickhouse'];
+/**
+ * Mechanism real, AVAILABILITY unknown. Encoded events do shrink the _source
+ * footprint Elasticsearch bills on, but the expander is the l1es plugin and
+ * only a self-managed deployment can install it. Until the customer says
+ * which they run, the report must not claim compaction — the claim follows
+ * availability, never the mechanism.
+ */
+const MECHANISM_ONLY: SiemId[] = ['elasticsearch'];
 /** Destinations where `compact` is a no-op and the claim would be false. */
 const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo'];
 
@@ -112,7 +120,7 @@ test('no-op destinations never claim in-place compaction', () => {
       assert.ok(
         !claim.test(md),
         `${siem} report asserts in-place compaction (${claim}) but compact_mode is ` +
-          `'${COST_MODEL_BY_DESTINATION[siem].compact_mode}'. The line stays lossless via ` +
+          `'${getDestinationCostModel(siem).compact_mode}'. The line stays lossless via ` +
           `tier_down or offload; say that instead.`,
       );
     }
@@ -125,8 +133,26 @@ test('compacting destinations still make the claim', () => {
     const md = report(siem);
     assert.ok(
       COMPACTION_CLAIMS.some((c) => c.test(md)),
-      `${siem} compacts in place (compact_mode='${COST_MODEL_BY_DESTINATION[siem].compact_mode}') ` +
+      `${siem} compacts in place (compact_mode='${getDestinationCostModel(siem).compact_mode}') ` +
         `but the report never says so. Gating the prose must not silence the true case.`,
+    );
+  }
+});
+
+test('deployment-unknown destinations claim nothing, though the mechanism is real', () => {
+  for (const siem of MECHANISM_ONLY) {
+    assert.equal(compactsInPlace(siem), true, `fixture assumption: ${siem} has the mechanism`);
+    const md = report(siem);
+    for (const claim of COMPACTION_CLAIMS) {
+      assert.ok(
+        !claim.test(md),
+        `${siem} claims in-place compaction, but whether the expander can be installed depends on ` +
+          `the deployment. Ask, then use elasticsearch_self.`,
+      );
+    }
+    assert.ok(
+      !/## \d+\. Compact-byte Ratio \(Measured\)/.test(md),
+      `${siem} prints a measured compact ratio it may not be able to deliver`,
     );
   }
 });
@@ -137,7 +163,7 @@ test('the measured-ratio section is gated by the same predicate as the prose', (
     const hasSection = /## \d+\. Compact-byte Ratio \(Measured\)/.test(md);
     assert.equal(
       hasSection,
-      compactsInPlace(siem),
+      getAllowedActionsForDestination(siem).includes('compact'),
       `${siem}: measured compact-ratio section rendered=${hasSection} but ` +
         `compactsInPlace=${compactsInPlace(siem)}. The section that proves the claim and the ` +
         `prose that makes it must agree.`,

@@ -1476,7 +1476,13 @@ export function renderPocReport(input: RenderInput): RenderResult {
   // Section 6: Compact-byte ratio (measured, only where the engine
   // emitted encoded lines and only for SIEMs that ingest forwarder-
   // compacted streams).
-  const compactionApplies = compactsInPlace(input.siem);
+  // AVAILABILITY, not mechanism — the same rule the lossless-lever list above
+  // already follows. compactsInPlace() answers "does the encode mechanism land
+  // on this destination's billed measure", which is true for Elasticsearch
+  // generally; whether the customer can RUN the expander depends on their
+  // deployment (the l1es plugin needs self-managed). A measured ratio printed
+  // for a platform that cannot expand reads as an offer we cannot keep.
+  const compactionApplies = getAllowedActionsForDestination(input.siem).includes('compact');
   if (compactionApplies) {
     const measured = patterns.filter((p) => (p.encodedBytes ?? 0) > 0).slice(0, 8);
     lines.push(sec('Compact-byte Ratio (Measured)'));

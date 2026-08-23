@@ -318,3 +318,65 @@ test('skeleton passes through from source pattern to planned row', () => {
   assert.equal(r.skeleton, 'Transaction complete order=$ amount=$');
   assert.ok(pl.planned.filter((x) => x.hash !== 'p1').every((x) => x.skeleton === undefined));
 });
+
+// ── Lever availability: what a platform can actually do ─────────────
+
+test('serverless cannot compact: no plugin surface, so the confirmed tier is used', () => {
+  const pl = solvePlan(estate(), { destination: 'elastic-serverless', retrieverInstalled: true, targetPct: 40 });
+  assert.ok(pl.planned.every((r) => r.action !== 'compact'),
+    'compact must never appear on a platform with nowhere to install the expander');
+  assert.equal(pl.keepEverythingLever, 'tier_down');
+  assert.ok(pl.prerequisites.some((x) => /cost-efficient tier/i.test(x)), pl.prerequisites.join(' | '));
+});
+
+test('generic elasticsearch prices only deployment-independent levers', () => {
+  const pl = solvePlan(estate(), { destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40 });
+  assert.equal(pl.keepEverythingLever, 'tier_down',
+    'without knowing the deployment, the platform feature holds and our plugin does not');
+  assert.ok(pl.planned.every((r) => r.action !== 'compact'));
+  assert.ok(pl.prerequisites.some((x) => /searchable snapshots/i.test(x)), pl.prerequisites.join(' | '));
+});
+
+test('a CONFIRMED self-managed cluster unlocks compact, and says what it needs', () => {
+  const pl = solvePlan(estate(), {
+    destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+  });
+  assert.equal(pl.keepEverythingLever, 'compact');
+  assert.ok(pl.prerequisites.some((x) => /l1es plugin/i.test(x) && /8\.17\.0/.test(x)),
+    'the plugin prerequisite must carry its version constraint: ' + pl.prerequisites.join(' | '));
+});
+
+test('managed, or unstated, never unlocks compact — silence is not consent', () => {
+  for (const opts of [{}, { selfManaged: false }]) {
+    const pl = solvePlan(estate(), {
+      destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40, ...opts,
+    });
+    assert.equal(pl.keepEverythingLever, 'tier_down');
+    assert.ok(pl.planned.every((r) => r.action !== 'compact'));
+  }
+});
+
+test('self-managed does NOT resurrect compact on serverless — there is no plugin surface', () => {
+  const pl = solvePlan(estate(), {
+    destination: 'elastic-serverless', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+  });
+  assert.equal(pl.keepEverythingLever, 'tier_down');
+  assert.ok(pl.planned.every((r) => r.action !== 'compact'));
+});
+
+test('prerequisites cover only the levers a plan actually uses', () => {
+  const noRetr = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: false, targetPct: 30 });
+  assert.ok(noRetr.prerequisites.some((x) => /Splunk app/i.test(x)));
+  assert.ok(!noRetr.prerequisites.some((x) => /retriever/i.test(x)), 'no offload row, no retriever prerequisite');
+  const deep = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 95, allowLossy: true });
+  if (deep.planned.some((r) => r.action === 'offload')) {
+    assert.ok(deep.prerequisites.some((x) => /retriever/i.test(x)));
+  }
+});
+
+test('an unmodeled destination fails loudly instead of crashing on a rate read', () => {
+  assert.throws(
+    () => solvePlan(estate(), { destination: 'loki' as never, retrieverInstalled: true, targetPct: 30 }),
+    /No cost model for destination "loki"/,
+  );
+});

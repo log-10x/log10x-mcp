@@ -31,6 +31,7 @@
 
 import {
   getAllowedActionsForDestination,
+  getAvailableActions,
   getDestinationCostModel,
   compactsInPlace,
   projectAction,
@@ -118,6 +119,14 @@ export interface SolveOpts {
    */
   pinnedHashes?: string[];
   /**
+   * Whether the customer runs this destination themselves. Decides whether
+   * compaction is available on the Elasticsearch/OpenSearch family: the
+   * expander is the l1es PLUGIN, installable on your own nodes and nowhere
+   * else. Absent = unknown, and unknown prices only the levers that hold on
+   * any deployment. Never inferred.
+   */
+  selfManaged?: boolean;
+  /**
    * Specific pattern hashes the user EXPLICITLY unpinned from the severity
    * floor — a warn-level retry storm they chose to act on. Bypasses ONLY the
    * severity protection for the listed hashes; pinnedHashes and
@@ -173,6 +182,13 @@ export interface Plan {
   /** Whose dollars these are: the destination list-price model, or the
    *  customer's supplied blended rate scaled over the list structure. */
   rateSource: 'list_price' | 'customer_supplied';
+  /**
+   * What the levers this plan actually uses REQUIRE — the app, plugin, tier,
+   * or licence, with its platform and version constraint. Only for levers the
+   * plan uses. A priced lever with an unstated prerequisite is a lever we are
+   * guessing at, so the render states these before the user agrees.
+   */
+  prerequisites: string[];
   /** Echo of the supplied blended rate when rateSource is customer_supplied. */
   customerRatePerGb?: number;
   /** Total scoped bytes/mo behind the bill — the reconciliation multiplicand:
@@ -201,8 +217,9 @@ export interface Plan {
 export function keepEverythingLever(
   destination: SiemId,
   retrieverInstalled: boolean,
+  opts?: { selfManaged?: boolean },
 ): Action | null {
-  const allowed = new Set(getAllowedActionsForDestination(destination));
+  const allowed = new Set(getAvailableActions(destination, opts));
   // in-SIEM rungs, in ladder order, gated by whether compact is real here
   for (const lever of ['compact', 'tier_down'] as Action[]) {
     if (!allowed.has(lever)) continue;
@@ -313,7 +330,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
 
   const scopeSet =
     opts.scope && opts.scope !== 'all' ? new Set(opts.scope) : null;
-  const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled);
+  const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled, {
+    selfManaged: opts.selfManaged,
+  });
 
   // Scope: keep patterns touching a scoped service; weight by scoped bytes.
   const exceptions = new Set(
@@ -373,7 +392,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       ? saveUsd(action, bytes, opts.destination, avg) * dollarScale
       : saveBytes(action, bytes, opts.destination, avg);
 
-  const allowed = new Set(getAllowedActionsForDestination(opts.destination));
+  const allowed = new Set(getAvailableActions(opts.destination, { selfManaged: opts.selfManaged }));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
   // The in-SIEM keep-everything lever (compact/tier_down), separate from offload
   // so the two can be applied as an escalation, not an either/or. For a VOLUME
@@ -564,6 +583,15 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       `compact assumed ${Math.round(model.compact_ratio_low * 100)}-${Math.round(model.compact_ratio_high * 100)}% of original size`,
     );
   }
+  // Prerequisites for the levers this plan actually uses — not the menu.
+  const usedActions = new Set(planned.map((r) => r.action));
+  const prerequisites: string[] = [];
+  if (usedActions.has('compact') && model.compact_requires) prerequisites.push(model.compact_requires);
+  if (usedActions.has('tier_down') && model.tier_down_requires) prerequisites.push(model.tier_down_requires);
+  if (usedActions.has('offload')) {
+    prerequisites.push('the S3 retriever installed, so offloaded events stay recoverable');
+  }
+
   const rateSource: 'list_price' | 'customer_supplied' = dollarScale !== 1 ? 'customer_supplied' : 'list_price';
   let rateBasis: string;
   if (rateSource === 'customer_supplied') {
@@ -593,6 +621,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     totalSavedUsd,
     rateBasis,
     rateSource,
+    prerequisites,
     ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
     bytesInMonthly: bytesIn,
     landsAtUsd,

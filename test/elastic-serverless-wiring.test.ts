@@ -55,16 +55,26 @@ test('elastic-serverless bills on ingest, self-hosted on indexed volume', () => 
   assert.equal(COST_MODEL_BY_DESTINATION.elasticsearch.billing_basis, 'indexed-uncompressed');
 });
 
-test('compact AND tier_down are offered on serverless; ladder puts tier before offload', () => {
-  // Corrected 2026-08-19 with product: Elastic Serverless DOES have a cheaper
-  // searchable tier, so tier_down is a real lever there, and the ladder rule is
-  // always tier_down/compact (in-SIEM) before offload (out of SIEM).
+test('serverless offers tier_down, never compact: there is nowhere to install the expander', () => {
+  // 2026-08-19 with product: Serverless DOES have a cheaper searchable tier,
+  // so tier_down is real and comes before offload.
+  // 2026-08-23, corrected again: this entry ALSO claimed compact, inherited
+  // from the Elasticsearch row. It cannot hold. Compacted events are expanded
+  // by the l1es ELASTICSEARCH PLUGIN, installed with
+  // `bin/elasticsearch-plugin install` or baked into a node image, and Elastic
+  // Serverless has no plugin surface at all. The bytes would shrink and the
+  // customer would be left reading `~hash,val,val`.
   const actions = getAllowedActionsForDestination('elastic-serverless');
-  assert.ok(actions.includes('compact'), 'index-pruned compact is real here and lands on the ingest line');
   assert.ok(actions.includes('tier_down'), 'the Serverless cost-efficient tier is a real tier_down target');
+  assert.ok(!actions.includes('compact'), 'no plugin surface on Serverless — compact must not be offered');
   assert.ok(
     actions.indexOf('tier_down') < actions.indexOf('offload'),
-    'in-SIEM levers come before offload'
+    'the in-SIEM lever comes before offload'
+  );
+  assert.equal(
+    COST_MODEL_BY_DESTINATION['elastic-serverless'].compact_mode,
+    'no-op',
+    'the model must price compact at zero here, not at the inherited 65%',
   );
 });
 

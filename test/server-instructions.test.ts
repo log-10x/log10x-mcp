@@ -101,6 +101,18 @@ test('instructions carry the review riders: window, ceiling gloss, audit-first, 
   assert.match(SERVER_INSTRUCTIONS, /skeleton IS the message type made visible/);
 });
 
+test('instructions make lever availability a platform fact, not an assumption', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  // every priced lever states what it needs
+  assert.match(SERVER_INSTRUCTIONS, /\*\*Requires:\*\*/);
+  assert.match(SERVER_INSTRUCTIONS, /plan\.prerequisites/);
+  assert.match(SERVER_INSTRUCTIONS, /never soften a version\s+or licence constraint/);
+  // deployment decides whether our expander can even be installed
+  assert.match(SERVER_INSTRUCTIONS, /DEPLOYMENT DECIDES THE LEVERS/);
+  assert.match(SERVER_INSTRUCTIONS, /deployment: "self_managed"/);
+  assert.match(SERVER_INSTRUCTIONS, /Never infer self-managed from silence/);
+});
+
 test('instructions carry the budget-target grammar (denomination discipline)', async () => {
   const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
   assert.match(SERVER_INSTRUCTIONS, /BUDGET TARGETS/);
