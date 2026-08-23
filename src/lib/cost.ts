@@ -92,7 +92,7 @@ export type BillingBasis =
  * How (or whether) compaction lands at this destination.
  *  - no-op:          destination cannot accept encoded events (Datadog &
  *                    friends). compact_ratio fixed at 1.0; caller warns.
- *  - envelope:       Splunk-style encode-in-event; query-time decode.
+ *  - envelope:       Splunk-style encode-in-event; query-time expand.
  *  - dict-udf-view:  ClickHouse dictionary + UDF + view path.
  *  - index-pruned:   ES with `_source.excludes` of compactable fields.
  *  - index-unpruned: ES without pruning (savings come from value-level
@@ -341,7 +341,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.1,
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
-    compact_requires: 'the 10x Splunk app installed (it decodes compacted events at search time)',
+    compact_requires: 'the 10x Splunk app installed (it auto-expands compacted events at search time)',
     compact_ratio_low: 0.08,
     compact_ratio_high: 0.15,
     small_event_floor_bytes: 100,
@@ -379,11 +379,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // footprint ES bills on). Whether it is AVAILABLE depends on the
     // deployment: the l1es plugin installs on self-managed nodes only, and is
     // built against specific versions. So this generic key does not offer
-    // compact — `elasticsearch_self` does. Ask which deployment before
-    // pricing compact on Elasticsearch.
+    // compact — a confirmed `deployment: 'self_managed'` does. Ask which
+    // deployment before pricing compact on Elasticsearch.
     compact_mode: 'index-pruned',
     compact_requires:
-      'the l1es plugin installed on your nodes (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0) — pass destination=elasticsearch_self once confirmed',
+      'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0)',
     tier_down_requires:
       'frozen searchable snapshots — an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
     compact_ratio_low: 0.3,
@@ -467,7 +467,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.023,
     billing_basis: 'stored-month',
     compact_mode: 'dict-udf-view',
-    compact_requires: 'the 10x ClickHouse dictionary + UDF + view installed',
+    compact_requires: 'the 10x ClickHouse dictionary + UDF + view installed (it auto-expands them inside a view)',
     compact_ratio_low: 0.22,
     compact_ratio_high: 0.3,
     small_event_floor_bytes: 80,
@@ -632,7 +632,8 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // Cloud Hosted; the recipe states that as a prerequisite.
   // Deployment unknown: tier_down is a PLATFORM feature (frozen searchable
   // snapshots, licence-gated) so it holds either way; compact needs OUR plugin
-  // and therefore self-managed, which only `elasticsearch_self` asserts.
+  // and therefore self-managed, which only a confirmed deployment asserts
+  // (see getAvailableActions).
   elasticsearch: ['tier_down', 'offload'],
   // Serverless: the cheaper searchable tier is confirmed with product; compact
   // is not offered (no plugin surface for the expander — see the model entry).
