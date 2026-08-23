@@ -380,3 +380,19 @@ test('an unmodeled destination fails loudly instead of crashing on a rate read',
     /No cost model for destination "loki"/,
   );
 });
+
+test('prerequisite copy uses the compact/expand pair and never names a rejected path', async () => {
+  const { COST_MODEL_BY_DESTINATION } = await import('../src/lib/cost.js');
+  const strings = Object.values(COST_MODEL_BY_DESTINATION as Record<string, { compact_requires?: string; tier_down_requires?: string }>)
+    .flatMap((m) => [m.compact_requires, m.tier_down_requires])
+    .filter((x): x is string => typeof x === 'string');
+  assert.ok(strings.length > 0);
+  for (const t of strings) {
+    // "expand" is the established counterpart of compact, and the plugin's own
+    // word. "decode" is a third vocabulary for the same act.
+    assert.ok(!/\bdecode/i.test(t), `prerequisite says "decode" instead of expand: ${t}`);
+    // A prerequisite must never instruct the agent toward an argument value the
+    // schema rejects — that turns guidance into a validation error.
+    assert.ok(!/destination=/.test(t), `prerequisite names a destination path: ${t}`);
+  }
+});
