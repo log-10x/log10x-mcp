@@ -273,6 +273,11 @@ did it work, what happens to the number, how, what is protected.
     in caps.csv in the user's git repo. Changing the plan changes the CSV, never the <destination>
     config again. Reverting that commit IS the rollback, and it propagates the same way an apply
     does.
+  **Requires:** every entry of \`plan.prerequisites\`, verbatim, comma-joined. These are what the
+    levers in THIS plan need to be real — the app, plugin, tier, or licence, with its platform and
+    version constraint. Never omit the line when the array is non-empty, and never soften a version
+    or licence constraint: a lever whose prerequisite the reader cannot meet is not a saving, and
+    finding that out after they agreed is how a cost tool loses a customer.
   **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, up to three lines
     from its fields, in this order:
     1. Scan-depth honesty: "scanned <scan_depth>" — and when \`literal\` is empty, say "no literal
@@ -358,6 +363,16 @@ rates line on the page — an unexplained rate is the fastest way to lose a read
 contract. UPGRADING PROVENANCE: when the user states their real rate in conversation ("we pay about
 $1.90/GB"), pass it as \`effective_ingest_per_gb\` on the next call and offer to persist it
 (analyzerCost in the env config) so every later plan prices in their dollars without re-asking.
+
+DEPLOYMENT DECIDES THE LEVERS: on Elasticsearch, OpenSearch, and Splunk the available levers depend
+on how the customer runs the platform, not on the vendor name. Compaction needs OUR expander to be
+installable — the l1es plugin (self-managed Elasticsearch/OpenSearch, version-pinned), the 10x Splunk
+app, the 10x ClickHouse view — so a managed or serverless platform can carry the bytes but has
+nowhere to expand them, and compact is not offered there. When the user names Elasticsearch or
+OpenSearch, ASK whether they run it themselves before pricing compaction, and pass
+\`deployment: "self_managed"\` once they confirm; with the deployment unknown the plan prices only
+the levers that hold either way, and says so. Never infer self-managed from silence, and never pass
+it to make a target reachable.
 
 AUDIT BEFORE PLAN: when the user asks where the money goes ("what is driving the bill", "show me
 cost by service/type", "why is logging so expensive") WITHOUT stating a target, the answer is

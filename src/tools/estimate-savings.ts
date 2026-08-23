@@ -203,6 +203,17 @@ export const estimateSavingsSchema = {
         'Default false: the plan stops at the keep-everything ceiling and reports the gap instead of ' +
         'silently discarding events. Only set after the user explicitly chooses loss.'
     ),
+  deployment: z
+    .enum(['self_managed', 'managed'])
+    .optional()
+    .describe(
+      'How the customer RUNS the destination, which decides whether compaction is available at all: '
+        + 'the expander is software they install (the l1es Elasticsearch/OpenSearch plugin, the 10x '
+        + 'Splunk app), so a managed or serverless platform can carry compacted bytes but has nowhere '
+        + 'to expand them. Set only from what the user actually said — absent means unknown, and an '
+        + 'unknown deployment prices only the levers that hold either way. Irrelevant on destinations '
+        + 'whose levers do not depend on it (Datadog, CloudWatch, Azure, Coralogix).'
+    ),
   exception_services: z
     .array(z.string())
     .optional()
@@ -831,6 +842,7 @@ export interface RunForecastArgs {
   default_action?: Action;
   retriever_installed?: boolean;
   allow_lossy?: boolean;
+  deployment?: 'self_managed' | 'managed';
   exception_services?: string[];
   unprotect_patterns?: string[];
   check_dependencies?: boolean;
@@ -1233,6 +1245,7 @@ export async function runEstimateForecast(
       allowLossy: args.allow_lossy ?? false,
       ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
       ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
+      ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
     });
     // Blast radius, two tiers (persona reviews' top blocker): batch-match the
     // vendor's object inventory against EVERY planned type. Literal hits are
@@ -1260,6 +1273,7 @@ export async function runEstimateForecast(
           allowLossy: args.allow_lossy ?? false,
           ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
           ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
+          ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
         }, planDeps);
         ladderPlan = res.plan;
         planDeps = { ...planDeps, excluded: res.excluded };
@@ -2304,6 +2318,7 @@ export async function executeEstimateSavings(
           default_action: args.default_action,
           retriever_installed: args.retriever_installed,
           allow_lossy: args.allow_lossy,
+          deployment: args.deployment,
           exception_services: args.exception_services,
           unprotect_patterns: args.unprotect_patterns,
           check_dependencies: args.check_dependencies,

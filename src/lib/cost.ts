@@ -136,6 +136,22 @@ export interface DestinationCostModel {
   billing_basis: BillingBasis;
   compact_mode: CompactMode;
   /**
+   * What the customer must have for compact to be real here — the app, plugin,
+   * or view that expands compacted events again, with its platform and version
+   * constraint. Rendered on any plan that prices compact: a lever whose
+   * prerequisite is unstated is a lever we are guessing at.
+   */
+  compact_requires?: string;
+  /** Same contract for tier_down: the tier, and what enables it. */
+  tier_down_requires?: string;
+  /**
+   * Why compact is not offered here, when the reason is NOT "the destination
+   * cannot accept encoded events". Serverless-style platforms accept them
+   * happily and have nowhere to install an expander, which would leave the
+   * customer with unreadable events — not a keep-everything lever.
+   */
+  compact_unavailable_reason?: string;
+  /**
    * Ratio of POST-compact bytes / PRE-compact bytes for the destination's
    * billed measure. Lower = better savings. Range describes uncertainty.
    */
@@ -325,6 +341,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.1,
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
+    compact_requires: 'the 10x Splunk app installed (it decodes compacted events at search time)',
     compact_ratio_low: 0.08,
     compact_ratio_high: 0.15,
     small_event_floor_bytes: 100,
@@ -358,7 +375,17 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch,
     storage_per_gb_month: 0.05,
     billing_basis: 'indexed-uncompressed',
+    // compact_mode describes the MECHANISM (encoded events shrink the _source
+    // footprint ES bills on). Whether it is AVAILABLE depends on the
+    // deployment: the l1es plugin installs on self-managed nodes only, and is
+    // built against specific versions. So this generic key does not offer
+    // compact — `elasticsearch_self` does. Ask which deployment before
+    // pricing compact on Elasticsearch.
     compact_mode: 'index-pruned',
+    compact_requires:
+      'the l1es plugin installed on your nodes (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0) — pass destination=elasticsearch_self once confirmed',
+    tier_down_requires:
+      'frozen searchable snapshots — an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
     compact_ratio_low: 0.3,
     compact_ratio_high: 0.4,
     small_event_floor_bytes: 100,
@@ -408,10 +435,22 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB['elastic-serverless'],
     storage_per_gb_month: 0.017,
     billing_basis: 'uncompressed-ingest',
-    compact_mode: 'index-pruned',
-    compact_ratio_low: 0.3,
-    compact_ratio_high: 0.4,
+    // COMPACT IS NOT A LEVER ON SERVERLESS. The bytes would shrink, but the
+    // expander is an Elasticsearch PLUGIN (l1es, installed with
+    // `bin/elasticsearch-plugin install` or baked into a node image) and
+    // Serverless has no plugin surface at all. Shipping encoded events with
+    // nothing to expand them leaves the customer reading `~hash,val,val`,
+    // which is not a keep-everything lever whatever the byte number says.
+    // This entry previously inherited ES's index-pruned mode and priced a
+    // 65% saving the platform cannot deliver.
+    compact_mode: 'no-op',
+    compact_unavailable_reason:
+      'the l1es expander is an Elasticsearch plugin and Elastic Serverless has no plugin surface — compacted events would arrive unreadable',
+    compact_ratio_low: 1.0,
+    compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
+    tier_down_requires:
+      'the Serverless cost-efficient tier (rate below is derived, not quoted — confirm against your live Serverless price)',
     // Elastic Serverless DOES offer a cheaper searchable tier (confirmed with
     // product): tier_down routes there, and per the ladder it is taken before
     // offload. Rate is the conservative 0.60 cost-delta on the ingest floor
@@ -428,6 +467,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.023,
     billing_basis: 'stored-month',
     compact_mode: 'dict-udf-view',
+    compact_requires: 'the 10x ClickHouse dictionary + UDF + view installed',
     compact_ratio_low: 0.22,
     compact_ratio_high: 0.3,
     small_event_floor_bytes: 80,
@@ -584,14 +624,19 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
   splunk: ['compact', 'offload'],
   splunk_cloud: ['compact', 'offload'],
-  // Self-hosted ES/OS can run the 10x plugin; managed offerings cannot.
+  // Self-hosted ES/OS can run the l1es plugin (built for ES 8.17.0 /
+  // OpenSearch 2.19.0); managed offerings cannot, and Serverless has no plugin
+  // surface at all.
   // tier_down works via a frozen searchable snapshot (identity
   // survives). Needs an Enterprise licence self-managed, or Gold+ on Elastic
   // Cloud Hosted; the recipe states that as a prerequisite.
-  elasticsearch: ['tier_down', 'offload', 'compact'],
-  // Same actions as self-hosted, different rates. tier_down is absent on
-  // purpose: Serverless retention is already near object-storage cost.
-  'elastic-serverless': ['tier_down', 'compact', 'offload'],
+  // Deployment unknown: tier_down is a PLATFORM feature (frozen searchable
+  // snapshots, licence-gated) so it holds either way; compact needs OUR plugin
+  // and therefore self-managed, which only `elasticsearch_self` asserts.
+  elasticsearch: ['tier_down', 'offload'],
+  // Serverless: the cheaper searchable tier is confirmed with product; compact
+  // is not offered (no plugin surface for the expander — see the model entry).
+  'elastic-serverless': ['tier_down', 'offload'],
   elasticsearch_self: ['compact', 'offload'],
   elasticsearch_managed: ['offload'],
   opensearch_self: ['compact', 'offload'],
@@ -661,8 +706,46 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  * numbering jumps 5 to 7. `test/compaction-claim-drift.test.ts` fails if
  * a rival notion appears.
  */
+/**
+ * The actions available on a destination GIVEN THE DEPLOYMENT — the single
+ * source of truth for availability, so the lever choice and the plan's action
+ * set can never disagree.
+ *
+ * The base list omits compaction on the Elasticsearch/OpenSearch family
+ * because the expander is the l1es plugin, installable only on nodes the
+ * customer controls. A CONFIRMED self-managed deployment adds it back.
+ * Serverless never qualifies: its compact_mode is 'no-op' precisely because
+ * there is no plugin surface, so the guard below refuses it there too.
+ */
+export function getAvailableActions(
+  destination: SiemId,
+  opts?: { selfManaged?: boolean },
+): Action[] {
+  const base = getAllowedActionsForDestination(destination);
+  const d = String(destination);
+  const pluginFamily = d.startsWith('elasticsearch') || d.startsWith('opensearch');
+  if (
+    opts?.selfManaged === true &&
+    pluginFamily &&
+    !base.includes('compact') &&
+    compactsInPlace(destination)
+  ) {
+    return [...base, 'compact'];
+  }
+  return base;
+}
+
 export function compactsInPlace(destination: string): boolean {
-  const model = COST_MODEL_BY_DESTINATION[destination as SiemId];
+  // Alias-aware: a deployment variant (elasticsearch_self, splunk_cloud …)
+  // has no model of its own but compacts exactly like its base. Reading the
+  // raw table here made every variant silently non-compacting, which sent the
+  // solver past a real lever to offload.
+  let model: DestinationCostModel | undefined;
+  try {
+    model = getDestinationCostModel(destination as SiemId);
+  } catch {
+    return false; // unmodeled destination: no compact claim
+  }
   if (!model) return false;
   return model.compact_mode !== 'no-op';
 }
@@ -678,11 +761,43 @@ export function compactsInPlace(destination: string): boolean {
  * @param opts      esPruned: when destination is 'elasticsearch' and this
  *                  is explicitly false, the unpruned ratio band is used.
  */
+/**
+ * Deployment variants that share a modeled sibling's economics. The variant
+ * exists to assert a different LEVER SET (self-managed can run our plugin,
+ * managed cannot), not different rates — so it resolves to the base model.
+ * Without this, every variant key returned `undefined` and the first read of
+ * a rate crashed inside projectAction with a bare TypeError.
+ */
+const COST_MODEL_ALIAS: Partial<Record<string, SiemId>> = {
+  splunk_cloud: 'splunk',
+  elasticsearch_self: 'elasticsearch',
+  elasticsearch_managed: 'elasticsearch',
+  opensearch_self: 'elasticsearch',
+  opensearch_managed: 'elasticsearch',
+};
+
 export function getDestinationCostModel(
   dest: SiemId,
   opts?: { esPruned?: boolean }
 ): DestinationCostModel {
+  const aliased = COST_MODEL_ALIAS[dest as string];
+  if (aliased) {
+    const model = getDestinationCostModel(aliased, opts);
+    // Keep the caller's destination on the returned model so disclosure lines
+    // name what the user actually asked about, not the sibling we priced from.
+    return { ...model, destination: dest };
+  }
   const base = COST_MODEL_BY_DESTINATION[dest];
+  if (!base) {
+    // Offload-only destinations (loki, honeycomb, newrelic, grafana, generic)
+    // have no rate model. Say so instead of handing back undefined and letting
+    // the first property read explode three frames deeper.
+    throw new Error(
+      `No cost model for destination "${dest}". Modeled destinations: ` +
+        `${Object.keys(COST_MODEL_BY_DESTINATION).join(', ')}. ` +
+        `Pass effective_ingest_per_gb to price an unmodeled destination, or pick a modeled one.`,
+    );
+  }
   if (dest === 'elasticsearch' && opts?.esPruned === false) {
     return {
       ...base,
