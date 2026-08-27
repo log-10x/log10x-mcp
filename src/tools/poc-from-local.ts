@@ -44,10 +44,25 @@ import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/bu
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
+import { isFenced } from '../lib/fenced.js';
 
 const MCP_VERSION = readClientVersion();
 
 export const REPORT_FILE_NAME = 'log10x-poc-report.html';
+
+/**
+ * Markdown copy of the plan, written alongside the HTML report in the fenced
+ * profile only.
+ *
+ * The fenced profile's honest residual is that the ANSWER leaves the fence —
+ * any tool that answers leaks its answer, and the plan is read by a human in
+ * a chat window that is not inside the container. Nothing can change that.
+ * What can change is where the detail lives: the full plan lands on the
+ * mounted output directory as a file the user controls, so the chat transcript
+ * does not have to be the only copy, and a user who wants to keep pattern
+ * bodies off a hosted model's context has somewhere to read them instead.
+ */
+export const PLAN_FILE_NAME = 'plan.md';
 
 const SIEM_IDS = [
   'cloudwatch', 'datadog', 'sumo', 'gcp-logging', 'elasticsearch',
@@ -381,6 +396,13 @@ interface PocFromLocalInner {
   source: 'kubectl' | 'file';
   /** Absolute path of the written report.html deliverable. */
   report_path?: string;
+  /**
+   * Absolute path of the markdown plan, written in the fenced profile only.
+   * See PLAN_FILE_NAME: the fence cannot stop the answer from reaching the
+   * human who asked for it, so it puts the full detail on the user's own
+   * mounted directory rather than leaving the transcript as the only copy.
+   */
+  plan_path?: string;
   /** Absolute path of the caps CSV the report's apply commands reference. */
   report_caps_path?: string;
   /** Honest note when report generation was skipped or degraded. */
@@ -809,6 +831,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   // is never silently rendered around; any other report failure
   // degrades to a note — the chat envelope still ships.
   let report_path: string | undefined;
+  let plan_path: string | undefined;
   let report_caps_path: string | undefined;
   let report_note: string | undefined;
   try {
@@ -870,6 +893,10 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     const html = renderReportHtml(built.data);
     report_path = nodePath.resolve(process.cwd(), REPORT_FILE_NAME);
     await fs.writeFile(report_path, html, 'utf8');
+    if (isFenced()) {
+      plan_path = nodePath.resolve(process.cwd(), PLAN_FILE_NAME);
+      await fs.writeFile(plan_path, lines.join('\n') + '\n', 'utf8');
+    }
     if (built.capsCsv !== null) {
       report_caps_path = nodePath.resolve(process.cwd(), CAPS_FILE_NAME);
       await fs.writeFile(report_caps_path, built.capsCsv, 'utf8');
@@ -877,6 +904,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   } catch (e) {
     if (e instanceof ReportRefusal) throw e;
     report_path = undefined;
+    plan_path = undefined;
     report_caps_path = undefined;
     report_note = `report.html generation failed: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -885,6 +913,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     ok: true,
     source,
     report_path,
+    plan_path,
     report_caps_path,
     report_note,
     namespace: namespaceOut,

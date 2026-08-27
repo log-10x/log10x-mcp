@@ -21,6 +21,19 @@ import type {
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
 import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
+/**
+ * Stratified-sampling bucket count for Elasticsearch / OpenSearch pulls.
+ * Exported for the offline export-plan emitter, which must draw the same
+ * sample this connector draws. See CLOUDWATCH_BUCKET_COUNT.
+ */
+export const ELASTICSEARCH_BUCKET_COUNT = 24;
+
+/** `size` used per `_search` page inside one bucket. */
+export const ELASTICSEARCH_PAGE_SIZE = 1000;
+
+/** Default index pattern when the caller gives no scope. */
+export const ELASTICSEARCH_DEFAULT_INDEX = 'logs-*';
+
 interface Conn {
   url: string;
   apiKey?: string;
@@ -89,7 +102,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   const windowMs = parseWindowMs(opts.window);
   const toMs = Date.now();
   const fromMs = toMs - windowMs;
-  const indexPattern = opts.scope || 'logs-*';
+  const indexPattern = opts.scope || ELASTICSEARCH_DEFAULT_INDEX;
 
   const events: unknown[] = [];
   const notes: string[] = [];
@@ -98,10 +111,10 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // Stratified random sampling: 24 child sub-windows scattered across
   // the parent window with per-run RNG. Each bucket is its own
   // search_after pagination scope, capped at perBucketCap.
-  const BUCKET_COUNT = 24;
+  const BUCKET_COUNT = ELASTICSEARCH_BUCKET_COUNT;
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
-  const pageSize = 1000;
+  const pageSize = ELASTICSEARCH_PAGE_SIZE;
 
   bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
@@ -221,7 +234,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       ? { auth: { username: conn.username, password: conn.password } }
       : {}),
   });
-  const indexPattern = opts.scope || 'logs-*';
+  const indexPattern = opts.scope || ELASTICSEARCH_DEFAULT_INDEX;
   try {
     const statsResp = (await client.indices.stats({
       index: indexPattern,

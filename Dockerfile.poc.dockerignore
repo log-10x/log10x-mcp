@@ -1,0 +1,20 @@
+# Build context for Dockerfile.poc (BuildKit reads <dockerfile>.dockerignore
+# in preference to .dockerignore).
+#
+# Differs from .dockerignore in one line that matters: `assets/` is NOT
+# excluded. The hosted demo image never runs an engine, so it does not need
+# the packaged pipeline configs; the fenced image spawns the engine as a child
+# process and dev-cli resolves `assets/tenx-mcp-file.config.yaml` relative to
+# the package root. Without it the engine starts and dies on "no app config
+# specified", three layers away from the missing file.
+.git
+node_modules
+build
+test-build
+eval
+docs
+scripts
+.github
+*.md
+*.log
+poc

@@ -95,6 +95,8 @@ import {
   executePocStatus,
 } from './tools/poc-from-siem.js';
 import { pocFromLocalSchema, executePocFromLocal } from './tools/poc-from-local.js';
+import { emitSamplePlanSchema, executeEmitSamplePlan } from './tools/emit-sample-plan.js';
+import { isFenced, fencedSignal } from './lib/fenced.js';
 import { discoverEnvSchema, executeDiscoverEnv } from './tools/discover-env.js';
 import { adviseRetrieverSchema, executeAdviseRetriever } from './tools/advise-retriever.js';
 import { adviseInstallSchema, executeAdviseInstall } from './tools/advise-install.js';
@@ -1517,6 +1519,33 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
   )
 );
 
+// ── Tool: log10x_emit_sample_plan (fenced POC, step 2) ──
+//
+// Renders the shell script that exports a log sample out of the user's own
+// analyzer, with the user's own credentials, OUTSIDE any container this
+// server runs in. It is the half of the fenced POC that needs network, and
+// it deliberately is not ours to run: in the fenced profile this process has
+// none, and the guarantee that sells the profile is exactly that no code
+// which sees log data also holds a socket.
+//
+// Registered in every mode. A customer already deployed on 10x may still be
+// the party who has to hand a sample across an air gap, and the tool renders
+// text — it reads no backend and has nothing to be out of mode about.
+
+registerLog10xTool('log10x_emit_sample_plan', emitSamplePlanSchema, (args) =>
+  wrap('log10x_emit_sample_plan', () =>
+    executeEmitSamplePlan({
+      siem: args.siem,
+      window: args.window,
+      target_event_count: args.target_event_count,
+      scope: args.scope,
+      query: args.query,
+      output_dir: args.output_dir,
+      write_script: args.write_script,
+    })
+  )
+);
+
 // ── Tool: log10x_discover_env (install advisor) ──
 
 registerLog10xTool('log10x_discover_env', discoverEnvSchema, (args) =>
@@ -1735,6 +1764,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, analyze, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs or files/globs (no SIEM credentials needed; file source covers serverless estates); industry-pricing matrix instead of bill prediction' },
+  { name: 'log10x_emit_sample_plan', intent: 'Render a read-only shell script that exports a log sample from the user\'s own analyzer, run by the user outside the container; step 2 of the fenced POC' },
   { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
   { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },
@@ -1977,8 +2007,38 @@ function startHttpServer(
 
 // ── Start ──
 
+/**
+ * Fenced boot: stop the server from reaching for a network it does not have.
+ *
+ * Every call below already degrades gracefully when the network is gone —
+ * offline env loading, a manifest that falls back to package defaults, a mode
+ * probe that lands in POC. What they do not do is skip the attempt, and in a
+ * `--network none` container each attempt is a DNS failure the user waits on
+ * for no reason, plus a line in the log that reads like a leak to anyone
+ * reading `strace` to check our claims.
+ *
+ * So the fence declares the answers up front, through the switches that
+ * already exist: no remote manifest, no demo-dataset fallback, POC mode. Then
+ * `main()` skips gateway env loading outright. Nothing here is a new code
+ * path; it is the existing offline behaviour, chosen instead of discovered.
+ */
+function applyFencedBootDefaults(): void {
+  if (!isFenced()) return;
+  process.env.LOG10X_MANIFEST_DISABLED = '1';
+  process.env.LOG10X_DEMO_FALLBACK = 'off';
+  if (!process.env.LOG10X_MCP_FORCE_MODE) process.env.LOG10X_MCP_FORCE_MODE = 'poc';
+  // eslint-disable-next-line no-console
+  console.error(
+    `[log10x-mcp] Fenced profile (${fencedSignal()} is set): this server makes no outbound ` +
+      `connections. No licence is minted here — set TENX_LICENSE_KEY from a mint you ran ` +
+      `yourself. The log sample is exported by you, outside this process, with ` +
+      `log10x_emit_sample_plan.`,
+  );
+}
+
 async function main() {
   if (await handleCliFlags()) return;
+  applyFencedBootDefaults();
   // G7: initialize OTel SDK if OTEL_EXPORTER_OTLP_ENDPOINT is set.
   // No-op otherwise. Must run before envs init so the very first network
   // call (env validation against the gateway) lands inside a trace too.
@@ -1989,7 +2049,15 @@ async function main() {
   // structured error instead of crashing on the first tool call from
   // the model, which is much harder to debug from a Claude Desktop log.
   try {
-    await initEnvs();
+    // Fenced: the gateway is unreachable by construction, so skip the probe
+    // rather than time out on it. `offlineEnvironments()` is the same empty
+    // state the catch-block below lands in, and every tool already models it.
+    if (isFenced()) {
+      envs = offlineEnvironments();
+      recordEnvsProvider(() => envs);
+    } else {
+      await initEnvs();
+    }
   } catch (e) {
     if (e instanceof EnvironmentValidationError) {
       // An unreachable gateway is an environment fact, not a misconfiguration.

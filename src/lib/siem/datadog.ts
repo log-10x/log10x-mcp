@@ -25,6 +25,16 @@ import type {
 import { retryWithBackoff, shouldStop, parseWindowMs } from './_retry.js';
 import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
+/**
+ * Stratified-sampling bucket count for Datadog pulls. Exported for the
+ * offline export-plan emitter, which must draw the same sample this
+ * connector draws. See CLOUDWATCH_BUCKET_COUNT.
+ */
+export const DATADOG_BUCKET_COUNT = 24;
+
+/** Page size per cursor step. Datadog's own ceiling on this endpoint is 5000. */
+export const DATADOG_PAGE_LIMIT = 1000;
+
 function getKeys(): { apiKey?: string; appKey?: string; site?: string } {
   return {
     apiKey: process.env.DD_API_KEY || process.env.DATADOG_API_KEY,
@@ -93,10 +103,10 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // same window draw non-overlapping samples (sample-overlap ≈ 0%
   // instead of the prior 100%). Per-bucket event cap keeps any single
   // bucket from monopolizing the global target.
-  const BUCKET_COUNT = 24;
+  const BUCKET_COUNT = DATADOG_BUCKET_COUNT;
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
-  const pageLimit = Math.min(1000, bucketCap); // Datadog caps at 5000.
+  const pageLimit = Math.min(DATADOG_PAGE_LIMIT, bucketCap);
 
   bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {
