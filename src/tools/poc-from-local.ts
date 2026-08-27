@@ -44,7 +44,7 @@ import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/bu
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
-import { isFenced } from '../lib/fenced.js';
+import { isFenced, fencedOffer, fencedVerification } from '../lib/fenced.js';
 
 const MCP_VERSION = readClientVersion();
 
@@ -365,7 +365,13 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     summary: { headline },
     data: { ...inner, ...buildUnifiedFields({ status: hasData ? 'success' : 'no_signal', telemetry, humanSummary: human_summary }), human_summary },
     actions: hasData
-      ? [{ tool: 'log10x_resolve_batch', args: { source: 'text', text: '...' }, reason: 'run the same sample through resolve_batch for per-pattern variable concentration + next actions' }]
+      ? [
+          { tool: 'log10x_resolve_batch', args: { source: 'text', text: '...' }, reason: 'run the same sample through resolve_batch for per-pattern variable concentration + next actions' },
+          // The fenced alternative rides along on every run that had network,
+          // as an `alternative` rather than a `recommended-next`: the POC is
+          // finished, and an agent told to do this next would go and redo it.
+          ...(inner.fenced_offer ? [inner.fenced_offer.action] : []),
+        ]
       : [],
   });
 }
@@ -403,6 +409,23 @@ interface PocFromLocalInner {
    * mounted directory rather than leaving the transcript as the only copy.
    */
   plan_path?: string;
+  /**
+   * True when this POC ran inside the fenced profile. Present on every run so
+   * an agent can say which mode produced the numbers without inferring it.
+   */
+  fenced_profile?: boolean;
+  /** The fenced run's own proof: the inspect one-liner, its expected output, the Wi-Fi check. */
+  fenced_verification?: { inspect_command: string; inspect_expected: string; wifi_check: string; markdown: string };
+  /**
+   * The offer a non-fenced run makes. Built once, inside the run that knows
+   * which analyzer and window it used, and reused verbatim as the `actions[]`
+   * entry — so the sentence the user reads and the call the agent would make
+   * cannot describe different things.
+   */
+  fenced_offer?: {
+    disclosure: string;
+    action: { tool: string; args: Record<string, unknown>; reason: string; role: 'alternative' };
+  };
   /** Absolute path of the caps CSV the report's apply commands reference. */
   report_caps_path?: string;
   /** Honest note when report generation was skipped or degraded. */
@@ -824,6 +847,33 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
+  // ── The mode this ran in, disclosed on the way out ──
+  //
+  // Surface 3 of the offer: a fenced run hands back its own proof, at the
+  // moment the reader is looking at the result rather than only in a doc they
+  // may never open. Surface 2 is the mirror image — a run that had network
+  // says so in one sentence and names the alternative.
+  //
+  // `poc_from_local` reads local files either way, so the unfenced disclosure
+  // names what is actually true of it: the FILES did not travel, but the
+  // process holding them had a socket the whole time. Claiming it "read the
+  // analyzer over the network" would be the easy sentence and a false one.
+  // Reached only with a non-empty sample: the zero-line case returned above.
+  let fenced_verification: ReturnType<typeof fencedVerification> | undefined;
+  let fenced_offer: ReturnType<typeof fencedOffer> | undefined;
+  if (isFenced()) {
+    fenced_verification = fencedVerification();
+    lines.push('');
+    lines.push(fenced_verification.markdown);
+  } else {
+    fenced_offer = fencedOffer({
+      read: 'local files, but this server had network access throughout',
+      planArgs: { siem: args.siem ?? 'cloudwatch', window: opts.window ?? '1h' },
+    });
+    lines.push('');
+    lines.push(fenced_offer.markdown);
+  }
+
   // ── report.html — the durable POC deliverable ──
   // Fixed UX: report.html = render(template_v1, data). The agent's
   // only inputs are report_annotations (validated fail-closed inside
@@ -932,6 +982,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     rate_source: 'list_price',
     notes: sample.notes,
     markdown: lines.join('\n'),
+    fenced_profile: fenced_verification !== undefined,
+    ...(fenced_verification ? { fenced_verification } : {}),
+    ...(fenced_offer ? { fenced_offer: { disclosure: fenced_offer.disclosure, action: fenced_offer.action } } : {}),
     feasibility,
     ...(plan ? { plan } : {}),
     commitment_artifact,

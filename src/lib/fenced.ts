@@ -119,3 +119,134 @@ export class FencedEgressRefusedError extends Error {
 export function assertNotFenced(operation: string, detail?: string): void {
   if (isFenced()) throw new FencedEgressRefusedError(operation, detail);
 }
+
+// ── Offering the mode, and proving it ────────────────────────────────────
+//
+// A profile nobody is told about is not a choice the product offers. These
+// three exports are the runtime half of that: the sentence a NETWORKED POC
+// ends with, the action that carries the alternative, and the verification a
+// FENCED run hands back with its own result.
+//
+// The shape is an OFFER, never an interrogation. No pre-flight question and
+// no modal choice — choosing is the agent's dialogue with its user, and a
+// tool that stops to ask has taken that away from both of them. Tools
+// disclose; agents choose.
+
+/**
+ * The image tag the documented run line uses. Local-only for now: there is no
+ * publish pipeline, and `--pull=never` in the run line keeps a fenced start on
+ * the image the user built and inspected rather than one fetched at boot.
+ */
+export const FENCED_IMAGE_REF = 'log10x/poc:local';
+
+/**
+ * The one-line proof, and the exact output it must print.
+ *
+ * Kept here rather than only in the docs so a fenced run can hand back its own
+ * verification at the moment of relevance. A test pins this string against
+ * `docs/fenced-poc.md`: a proof that has drifted from the documented proof is
+ * worse than no proof, because the reader checks it, sees a mismatch, and has
+ * no way to tell which half is wrong.
+ */
+export const FENCED_INSPECT_COMMAND =
+  `docker inspect --format 'network={{.HostConfig.NetworkMode}} cap_add={{.HostConfig.CapAdd}} ` +
+  `cap_drop={{.HostConfig.CapDrop}} privileged={{.HostConfig.Privileged}} ` +
+  `security_opt={{.HostConfig.SecurityOpt}} mounts=[{{range .Mounts}}{{.Destination}}:` +
+  `{{if .RW}}rw{{else}}ro{{end}} {{end}}]' "$(docker ps -q --filter ancestor=${FENCED_IMAGE_REF})"`;
+
+export const FENCED_INSPECT_EXPECTED =
+  'network=none cap_add=[] cap_drop=[ALL] privileged=false ' +
+  'security_opt=[no-new-privileges] mounts=[/data:ro /out:rw ]';
+
+/**
+ * The check that settles it. `docker inspect` reads a configuration; this
+ * reads the world. Nothing about the result depends on a network, so nothing
+ * about the result can have left over one.
+ */
+export const FENCED_WIFI_SENTENCE = 'Turn Wi-Fi off and the analysis still completes.';
+
+export interface FencedVerification {
+  inspect_command: string;
+  inspect_expected: string;
+  wifi_check: string;
+  markdown: string;
+}
+
+/** The verification block a fenced run appends to its own output. */
+export function fencedVerification(): FencedVerification {
+  return {
+    inspect_command: FENCED_INSPECT_COMMAND,
+    inspect_expected: FENCED_INSPECT_EXPECTED,
+    wifi_check: FENCED_WIFI_SENTENCE,
+    markdown: [
+      '## Verify the fence',
+      '',
+      'This POC ran with no network. Check it against the container, not against this text:',
+      '',
+      '```sh',
+      FENCED_INSPECT_COMMAND,
+      '```',
+      '',
+      'Expected, exactly:',
+      '',
+      '```',
+      FENCED_INSPECT_EXPECTED,
+      '```',
+      '',
+      `Two mounts, \`/data\` read-only, every capability dropped, network mode \`none\`. ${FENCED_WIFI_SENTENCE}`,
+    ].join('\n'),
+  };
+}
+
+export interface FencedOfferArgs {
+  /** What the POC read, for the first half of the disclosure. */
+  read: string;
+  /** Args to pre-fill on `log10x_emit_sample_plan`, so the agent need not remember the submit call. */
+  planArgs: Record<string, unknown>;
+}
+
+export interface FencedOffer {
+  disclosure: string;
+  action: {
+    tool: string;
+    args: Record<string, unknown>;
+    reason: string;
+    role: 'alternative';
+  };
+  markdown: string;
+}
+
+/**
+ * The disclosure a POC that had network ends with, plus the action carrying
+ * the alternative.
+ *
+ * `role: 'alternative'` and not `'recommended-next'`. The POC just finished;
+ * telling an agent the recommended next step is to export a second sample
+ * would send it off to redo work nobody asked for. `alternative` is the
+ * envelope's own word for "one of several paths the user might pick" — which
+ * is exactly what this is, and exactly what an offer means.
+ *
+ * One sentence of disclosure and one of alternative. No security lecture: a
+ * user who wants the reasoning can read the docs, and a user who does not
+ * should not have to scroll past it to reach their cost numbers.
+ */
+export function fencedOffer(opts: FencedOfferArgs): FencedOffer {
+  const disclosure = `This POC read ${opts.read} over the network. The same POC runs with no network at all.`;
+  return {
+    disclosure,
+    action: {
+      tool: 'log10x_emit_sample_plan',
+      args: opts.planArgs,
+      reason:
+        'Same POC, fenced: this renders a read-only export script the user runs themselves, ' +
+        'then the analysis runs in a container started with --network none. Offer it; do not ' +
+        'run it unless the user asks.',
+      role: 'alternative',
+    },
+    markdown: [
+      '---',
+      '',
+      `_${disclosure} See \`actions[]\` for \`log10x_emit_sample_plan\`, or \`docs/fenced-poc.md\`._`,
+    ].join('\n'),
+  };
+}

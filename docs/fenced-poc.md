@@ -195,9 +195,7 @@ plan still comes back in the tool result.
 One line, against the running container:
 
 ```sh
-docker inspect --format \
-  'network={{.HostConfig.NetworkMode}} cap_add={{.HostConfig.CapAdd}} cap_drop={{.HostConfig.CapDrop}} privileged={{.HostConfig.Privileged}} security_opt={{.HostConfig.SecurityOpt}} mounts=[{{range .Mounts}}{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}} {{end}}]' \
-  "$(docker ps -q --filter ancestor=log10x/poc:local)"
+docker inspect --format 'network={{.HostConfig.NetworkMode}} cap_add={{.HostConfig.CapAdd}} cap_drop={{.HostConfig.CapDrop}} privileged={{.HostConfig.Privileged}} security_opt={{.HostConfig.SecurityOpt}} mounts=[{{range .Mounts}}{{.Destination}}:{{if .RW}}rw{{else}}ro{{end}} {{end}}]' "$(docker ps -q --filter ancestor=log10x/poc:local)"
 ```
 
 Expected, exactly:
@@ -214,6 +212,31 @@ It completes. Nothing about the result depends on a network, so nothing about
 the result can have left over one.
 
 ---
+
+## The mode is offered, not hidden
+
+A profile nobody is told about is not a choice the product offers, so the
+runtime says so in three places:
+
+- **Both POC tool descriptions name the other mode**, one sentence each. That
+  is what an agent reads, and it is what makes the agent explain the
+  difference when the user's phrasing invites it.
+- **A POC that used the network ends with one sentence saying so** and carries
+  `log10x_emit_sample_plan` in `actions[]` with the arguments that run
+  actually used — same analyzer, same window, same scope and filter. The role
+  is `alternative`, not `recommended-next`: the POC has finished, and an agent
+  told this is the next step would go and redo the work.
+- **A fenced run hands back its own proof** — the `docker inspect` line above
+  and the Wi-Fi sentence — in its output, at the moment you are reading the
+  result rather than only here.
+
+It is an offer, never an interrogation. No pre-flight question, no modal
+choice: choosing is the agent's conversation with you, and a tool that stops
+to ask has taken that away from both of you.
+
+An analyzer with no export emitter yet is not offered the mode. Telling a Sumo
+Logic customer "the same POC runs with no network" and then refusing the
+export would sell the same thing twice.
 
 ## Honest residuals
 
