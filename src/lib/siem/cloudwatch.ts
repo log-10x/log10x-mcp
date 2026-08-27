@@ -39,6 +39,21 @@ import type {
 import { shouldStop, sleep, retryWithBackoff, parseWindowMs } from './_retry.js';
 import { randomTimeBuckets, perBucketCap } from './_sampling.js';
 
+/**
+ * Default stratified-sampling bucket count for CloudWatch pulls.
+ *
+ * Exported because the offline export-plan emitter
+ * (`lib/siem/export-plan/cloudwatch.ts`) renders a shell script that must
+ * draw the SAME sample this connector draws — same bucket count, same
+ * per-bucket cap — or a fenced POC and a live POC over the same window
+ * would report different pattern mixes for reasons that have nothing to do
+ * with the logs. One constant, two callers.
+ */
+export const CLOUDWATCH_BUCKET_COUNT = 24;
+
+/** Per-request event ceiling CloudWatch's FilterLogEvents accepts. */
+export const CLOUDWATCH_PAGE_LIMIT = 10_000;
+
 async function discoverCredentials(): Promise<CredentialDiscovery> {
   const hasExplicitKey = Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY);
   const hasProfile = Boolean(process.env.AWS_PROFILE);
@@ -178,7 +193,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // Bucket count is caller-tunable. Default 24 for time-representative
   // sampling; a low value (e.g. 1) collapses to a fast recent-window
   // pull for callers that just need a quick sample (top_patterns).
-  const BUCKET_COUNT = Math.max(1, opts.buckets ?? 24);
+  const BUCKET_COUNT = Math.max(1, opts.buckets ?? CLOUDWATCH_BUCKET_COUNT);
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const queryUsed = `${logGroups.join(',')}${filterPattern ? ` | ${filterPattern}` : ''}`;
@@ -210,7 +225,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
                 startTime: bucket.fromMs,
                 endTime: bucket.toMs,
                 filterPattern,
-                limit: 10000,
+                limit: CLOUDWATCH_PAGE_LIMIT,
                 nextToken,
               })
             )

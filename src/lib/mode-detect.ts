@@ -435,6 +435,12 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   log10x_dev_restart: ['always'],
 
   // ── POC (prospect-only) ──
+  // Every mode: the tool renders a shell script and reads no backend. A
+  // customer already deployed on 10x can still be the party who has to carry
+  // a sample across an air gap, and gating this to `poc` would take the
+  // fenced evaluation away from exactly the security-conscious accounts it
+  // was built for the moment they became customers.
+  log10x_emit_sample_plan: ['always'],
   log10x_poc_from_siem_submit: ['poc'],
   log10x_poc_from_siem_status: ['poc'],
   log10x_poc_from_local: ['poc'],

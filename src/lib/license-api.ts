@@ -40,6 +40,7 @@ import './auth-model.js';
 import { readCredentials, writeCredentials, type Credentials } from './credentials.js';
 import { refreshAuth0AccessToken } from './auth0-device-flow.js';
 import { readDemoLicense, writeDemoLicense, isDemoLicenseExpired } from './demo-license.js';
+import { isFenced, assertNotFenced, fencedPreMintInstructions, FencedEgressRefusedError } from './fenced.js';
 
 // The control-plane host. license.log10x.com's functions (license issuance,
 // signin, whoami) are the PERMANENT tenants of the SaaS gateway; the
@@ -80,6 +81,11 @@ export interface LicenseResult {
  * that's been asked to produce an install plan.
  */
 export async function fetchDemoLicense(): Promise<LicenseResult> {
+  // The fenced profile never mints. See lib/fenced.ts: a container started
+  // with `--network none` cannot reach the gateway, and trying is the exact
+  // behaviour the fence exists to rule out. Refuse with the one command the
+  // user runs OUTSIDE the fence, before any log data is in scope.
+  assertNotFenced('mint a demo licence', fencedPreMintInstructions('missing'));
   const url = new URL('/api/v1/license/demo', getBase()).toString();
   let res: Response;
   try {
@@ -118,6 +124,18 @@ export async function getOrMintDemoLicense(): Promise<LicenseResult> {
       licenseId: existing.licenseId,
     };
   }
+  // Fenced: a licence that was baked into the image or seeded into the
+  // environment is still fine (the branch above already returned it, and
+  // resolveEngineCredentials() honours an explicit TENX_LICENSE_KEY before
+  // reaching here). What is refused is the fetch that would replace it.
+  // Distinguish the two states so the message is accurate: a cached licence
+  // that has run out reads "expired", an absent one reads "missing".
+  if (isFenced()) {
+    throw new FencedEgressRefusedError(
+      'mint a demo licence',
+      fencedPreMintInstructions(existing ? 'expired' : 'missing'),
+    );
+  }
   const fresh = await fetchDemoLicense();
   await writeDemoLicense(fresh).catch((e) => {
     log.warn('demo_license.persist_failed', { msg: (e as Error).message });
@@ -134,6 +152,7 @@ export async function getOrMintDemoLicense(): Promise<LicenseResult> {
  * within the trial window.
  */
 export async function fetchUserLicense(auth0AccessToken: string): Promise<LicenseResult> {
+  assertNotFenced('mint a user licence', fencedPreMintInstructions('missing'));
   const url = new URL('/api/v1/license', getBase()).toString();
   let res: Response;
   try {

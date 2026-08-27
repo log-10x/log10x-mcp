@@ -100,6 +100,37 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 
 The server runs locally as a subprocess of your AI client. Only pre-aggregated metric queries (per-pattern volume and cost) leave the machine, never raw log content. Local triage with `log10x_resolve_batch` runs entirely on your machine over stdin and stdout. Connections to your own log platform use read-only credentials. Set `LOG10X_MCP_READ_ONLY=true` to refuse every mutating tool regardless of mode.
 
+## The fenced POC — provably offline
+
+For an evaluation that has to be checkable rather than promised: MCP server and
+log engine in one container started with `--network none`, over a log sample
+you exported yourself with your own credentials.
+
+```
+docker run -i --rm --pull=never --network none --hostname localhost \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -v "$PWD/poc/logs:/data:ro" -v "$PWD/poc/out:/out" \
+  -e TENX_LICENSE_KEY -e TENX_AIRGAPPED=true log10x/poc:local
+```
+
+There is no `npx` variant of this line, and that is not an oversight. `npx`
+resolves and executes a package at run time, and a package's postinstall
+script is unconfined code running with whatever network the host has — the
+exact thing the fence exists to rule out. Everything in the image is baked at
+build time; nothing is installed when the container starts.
+
+The licence is minted by you, with one visible `curl`, before any log data is
+in scope — in this profile the server never mints, and a missing licence fails
+with those instructions rather than with a fetch. The log sample is exported
+by you: `log10x_emit_sample_plan` renders a read-only shell script per
+analyzer that you read once and run outside the container.
+
+Verify it with one `docker inspect` line, then settle it by turning Wi-Fi off
+and running the analysis again.
+
+Full walkthrough, including what to check in the export script and the
+residuals we do not paper over: [docs/fenced-poc.md](docs/fenced-poc.md).
+
 ## Open source and license
 
 MIT. Published on npm as `log10x-mcp` (Node 20+). The source is public so the behavior behind every tool can be read directly. Account-scoped tools require a Log10x product license (API key); the public demo dataset needs none.

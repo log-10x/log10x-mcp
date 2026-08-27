@@ -41,6 +41,7 @@ import { fileURLToPath } from 'url';
 
 import { tenxAvailabilityHint } from './install-hints.js';
 import { resolveRuntimeImage } from './runtime-image.js';
+import { isFenced, fencedPreMintInstructions } from './fenced.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -315,6 +316,16 @@ export async function resolveEngineCredentials(): Promise<EngineCredentials> {
   const explicit = process.env.TENX_LICENSE_KEY?.trim();
   if (explicit) {
     return { licenseKey: explicit, apiKey };
+  }
+
+  // Fenced profile: stop before the mint path rather than after it. The
+  // generic message below tells the caller a mint "needs one call to the
+  // log10x gateway" and offers TENX_LICENSE_KEY as the fallback — accurate
+  // everywhere else, and exactly backwards here, where the mint is the thing
+  // the profile forbids and the licence is the thing the user was told to
+  // bring. Fail with the pre-mint instructions, which are the whole answer.
+  if (isFenced()) {
+    throw new DevCliConfigMissingError('TENX_LICENSE_KEY', fencedPreMintInstructions('missing'));
   }
 
   try {

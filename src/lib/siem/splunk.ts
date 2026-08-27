@@ -23,6 +23,19 @@ import type {
 
 import { retryWithBackoff, shouldStop, sleep, parseWindowMs } from './_retry.js';
 import { randomTimeBuckets, perBucketCap } from './_sampling.js';
+
+/**
+ * Stratified-sampling bucket count for Splunk pulls. Lower than the other
+ * connectors on purpose: Splunk dispatches one search job per bucket and the
+ * search head's default per-user concurrency cap is 6.
+ *
+ * Exported for the offline export-plan emitter, which must draw the same
+ * sample this connector draws. See CLOUDWATCH_BUCKET_COUNT.
+ */
+export const SPLUNK_BUCKET_COUNT = 12;
+
+/** Results page size used against `search/jobs/{sid}/results`. */
+export const SPLUNK_PAGE_SIZE = 1000;
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
@@ -151,10 +164,10 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // the parent window with per-run RNG. Splunk dispatches one search
   // job per bucket sequentially — concurrent dispatches risk hitting
   // the search head's per-user concurrency cap (default 6).
-  const BUCKET_COUNT = 12;
+  const BUCKET_COUNT = SPLUNK_BUCKET_COUNT;
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
-  const pageSize = 1000;
+  const pageSize = SPLUNK_PAGE_SIZE;
 
   bucketLoop: for (const bucket of buckets) {
     if (shouldStop(deadline, events.length, opts.targetEventCount)) {

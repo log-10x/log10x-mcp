@@ -1,0 +1,144 @@
+# syntax=docker/dockerfile:1
+#
+# log10x/poc — the fenced evaluation image.
+#
+# MCP server and log engine in ONE container, started with `--network none`,
+# reading a log sample the user exported themselves. "Cannot exfiltrate" is
+# then a kernel fact the user checks with `docker inspect`, not a claim we
+# make about our own code.
+#
+# Three properties this file exists to hold:
+#
+#   1. **No docker.sock, ever.** The normal run path spawns the engine as a
+#      sibling container, which needs the daemon socket mounted — and the
+#      daemon socket is root-equivalent on the host and a one-line bypass of
+#      every restriction on this container. Here the engine binary lives
+#      INSIDE the image and the MCP spawns it as a child process
+#      (LOG10X_TENX_MODE=local, LOG10X_TENX_PATH), so there is nothing to
+#      mount and nothing to escape through.
+#
+#   2. **Nothing is installed at container start.** Dependencies are baked at
+#      build time. `npx` is banned in this profile: it resolves and executes a
+#      package at run time, and a package's postinstall script is unconfined
+#      vendor code running with whatever network the host has — the exact
+#      thing the fence is built to rule out. `npm` is never invoked by the
+#      runtime stage's CMD.
+#
+#   3. **Only two mounts, and one of them is read-only.** /data carries the
+#      exported sample in, /out carries the report and the plan back out.
+#      The documented `docker run` line adds no others, and the verification
+#      step checks that with one `docker inspect`.
+#
+# Build (locally; there is deliberately no publish pipeline yet):
+#   docker build -f Dockerfile.poc -t log10x/poc:local .
+#
+# Run — the line the documentation prints, and the line `docker inspect` is
+# checked against:
+#   docker run -i --rm --pull=never --network none --hostname localhost \
+#     --cap-drop ALL --security-opt no-new-privileges \
+#     -v "$PWD/poc/logs:/data:ro" -v "$PWD/poc/out:/out" \
+#     -e TENX_LICENSE_KEY -e TENX_AIRGAPPED=true log10x/poc:local
+#
+# `--hostname localhost` is not decoration. log4j resolves the container's
+# own hostname while it configures itself, and with `--network none` docker
+# writes no /etc/hosts entry for a random hostname, so every engine run opens
+# with a 30-line UnknownHostException before it works anyway. `localhost` is
+# already in /etc/hosts, resolves on the loopback interface that exists even
+# with no network, and costs nothing.
+
+# ── engine stage: the native runtime, taken from the published edge image ──
+# Pinned by tag AND digest at build time via --build-arg; the default tag is
+# mutable and a mutable tag does not identify a build.
+ARG ENGINE_IMAGE=log10x/edge-10x:latest
+FROM ${ENGINE_IMAGE} AS engine
+
+# ── build stage: compile TypeScript ──
+FROM node:20-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json ./
+COPY vendor ./vendor
+COPY src ./src
+COPY assets ./assets
+COPY default-manifest.json ./
+# Product Q&A docs. Not vendored in this repo (only config/mksite/docs/.gitkeep
+# is), so a bare local build yields an empty corpus and log10x_product_qa says
+# so. Stage the mksite docs into config/mksite/docs before building to ship
+# them. The loader reads build/product-kb/docs at run time.
+COPY config/mksite/docs ./config/mksite/docs
+# Equivalent to `npm run build`, minus the brace expansion in that script:
+# Debian's /bin/sh is dash, which would not expand {promql.js,package.json}.
+RUN npx tsc \
+ && mkdir -p build/vendor/promql-parser \
+ && cp -r vendor/promql-parser/promql.js vendor/promql-parser/package.json build/vendor/promql-parser/ \
+ && mkdir -p build/product-kb/docs \
+ && cp -R config/mksite/docs/. build/product-kb/docs/ \
+ && chmod +x build/index.js
+
+# ── runtime stage ──
+FROM node:20-slim AS runtime
+# The app lives in /app. /out is a MOUNT POINT: anything installed there would
+# be shadowed the moment the run line binds a host directory over it.
+WORKDIR /app
+ENV NODE_ENV=production
+
+ARG GIT_SHA=unknown
+ARG BUILD_TIME=unknown
+ENV LOG10X_MCP_BUILD_SHA=$GIT_SHA
+ENV LOG10X_MCP_BUILD_TIME=$BUILD_TIME
+
+# The MCP's own production dependencies, resolved at build time from the
+# lockfile. Nothing resolves anything at run time.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/build ./build
+COPY --from=build /app/assets ./assets
+COPY default-manifest.json ./
+
+# The engine: a single GraalVM-native binary plus its modules, pipeline
+# configs and symbol library. No JVM, no second container, no daemon socket.
+COPY --from=engine /opt/tenx-edge /opt/tenx-edge
+COPY --from=engine /etc/tenx /etc/tenx
+
+# Engine paths, matching the edge image's own environment.
+ENV TENX_HOME=/opt/tenx-edge \
+    TENX_BIN=/opt/tenx-edge/bin/tenx-edge \
+    TENX_MODULES=/opt/tenx-edge/lib/app/modules \
+    TENX_CONFIG=/etc/tenx/config \
+    TENX_SYMBOLS_PATH=/etc/tenx/symbols \
+    TENX_LOG_APPENDER=tenxConsoleAppender
+
+# Run the engine as a CHILD PROCESS of the MCP, not as a sibling container.
+# This is what removes the need for /var/run/docker.sock.
+ENV LOG10X_TENX_MODE=local \
+    LOG10X_TENX_PATH=/opt/tenx-edge/bin/tenx-edge
+
+# The fenced profile. `TENX_AIRGAPPED` is read by BOTH layers: the engine
+# treats it as its airgap switch, and the MCP reads it (lib/fenced.ts) as
+# "make no outbound connection, and refuse to mint a licence — fail with the
+# pre-mint instructions instead". Baked here so the profile holds even when
+# the run line forgets it; the run line sets it anyway, because a reader of
+# that line should be able to see the declaration without reading a Dockerfile.
+ENV TENX_AIRGAPPED=true \
+    LOG10X_MANIFEST_DISABLED=1 \
+    LOG10X_DEMO_FALLBACK=off
+
+# /data is where the exported sample is mounted read-only; /out is where the
+# report and the plan are written. Created here with open permissions so the
+# non-root user can write /out whatever uid the host directory belongs to.
+RUN mkdir -p /data /out && chmod 0777 /out
+
+# Non-root, no new privileges (the run line drops every capability too).
+USER node
+
+# The working directory is /out, not /app: `log10x_poc_from_local` writes its
+# report and — in the fenced profile — its markdown plan relative to the
+# process's cwd, and /out is the half of the mount pair that goes back to the
+# user. On Linux the host directory has to be writable by uid 1000; when it is
+# not, the write fails, the reply says so, and the plan still comes back in
+# the tool result. `mkdir -p poc/out && chmod 777 poc/out` avoids it.
+WORKDIR /out
+
+# stdio transport: the MCP host talks to this over `docker run -i`.
+CMD ["node", "/app/build/index.js"]

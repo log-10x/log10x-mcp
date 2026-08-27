@@ -48,6 +48,8 @@ import { checkDeps, DEP_CHECK_VENDORS } from '../lib/siem/deps/index.js';
 import { buildPocEnvelopeV2 } from '../lib/poc-envelope-v2.js';
 import { _enrichForEnvelope } from '../lib/poc-report-renderer.js';
 import { enrichWithHostAgent } from '../lib/poc-host-agent-enricher.js';
+import { fencedOffer } from '../lib/fenced.js';
+import { hasExportPlan } from '../lib/siem/export-plan/index.js';
 
 const MCP_VERSION = readClientVersion();
 
@@ -324,9 +326,32 @@ interface Snapshot {
    * Per-pattern action overrides (pin_patterns).
    */
   pinPatterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
+  /**
+   * What this POC actually read. Carried so the completed envelope can offer
+   * the fenced re-run with MATCHING arguments — same analyzer, same window,
+   * same scope and filter — instead of handing the agent an empty form and
+   * hoping it remembers the submit call it made twenty minutes ago.
+   */
+  pull?: {
+    siem: SiemId;
+    window: string;
+    scope?: string;
+    query?: string;
+    targetEventCount: number;
+  };
 }
 
 const SNAPSHOTS = new Map<string, Snapshot>();
+
+/**
+ * Test-only seam, same convention as `_internals` in `lib/siem/datadog.ts`.
+ *
+ * The snapshot store is process-local and only ever populated by a real pull,
+ * so without this there is no way to assert what a COMPLETE run puts in its
+ * envelope short of holding real analyzer credentials in CI. Nothing in the
+ * product reads it.
+ */
+export const _internals = { SNAPSHOTS };
 
 // Max retained snapshots — prevent long-lived servers from leaking memory.
 const MAX_RETAINED = 50;
@@ -466,6 +491,13 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     exceptionServices: args.exception_services,
     pinServices: args.pin_services,
     pinPatterns: args.pin_patterns,
+    pull: {
+      siem: connector.id,
+      window: args.window,
+      scope: args.scope,
+      query: args.query,
+      targetEventCount: args.target_event_count,
+    },
   };
   retain(snapshot);
 
@@ -546,6 +578,28 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       },
     });
   }
+  // Surface 2 of the offer: a POC that read the analyzer over the network says
+  // so, once, and names the alternative. Built only on a COMPLETE run — an
+  // in-flight snapshot has no result to disclose anything about, and a failed
+  // one has a retry to talk about instead.
+  //
+  // Gated on `hasExportPlan` because an offer the user cannot act on is worse
+  // than silence: a Sumo Logic customer told "the same POC runs with no
+  // network" and then handed a refusal has been sold something twice.
+  const offer =
+    s.status === 'complete' && s.pull && hasExportPlan(s.pull.siem)
+      ? fencedOffer({
+          read: SIEM_DISPLAY_NAMES[s.pull.siem] ?? s.pull.siem,
+          planArgs: {
+            siem: s.pull.siem,
+            window: s.pull.window,
+            target_event_count: s.pull.targetEventCount,
+            ...(s.pull.scope ? { scope: s.pull.scope } : {}),
+            ...(s.pull.query ? { query: s.pull.query } : {}),
+          },
+        })
+      : undefined;
+
   let md: string;
   try {
     md = await executePocStatusInner(args);
@@ -571,6 +625,10 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       },
     });
   }
+  // Every markdown view of a completed networked POC ends with the same
+  // sentence the summary envelope carries, so a reader who never looks at
+  // `actions[]` still learns the mode exists.
+  if (offer) md = `${md}\n${offer.markdown}\n`;
   if (envView === 'markdown') {
     return __bme({
       tool: 'log10x_poc_from_siem_status',
@@ -684,9 +742,14 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       // under `envelope_status` so the field name disambiguates.
       envelope_status: unifiedStatus,
       ...(unifiedError ? { envelope_error: unifiedError } : {}),
+      // What mode produced these numbers, said rather than inferred.
+      fenced_profile: false,
+      ...(offer ? { fenced_offer: { disclosure: offer.disclosure } } : {}),
     },
     actions: s.status === 'complete'
-      ? []
+      ? offer
+        ? [offer.action]
+        : []
       : s.status === 'failed'
         ? [{ tool: 'log10x_poc_from_siem_submit', args: {}, reason: 'POC failed — resubmit with adjusted args' }]
         : [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: s.id }, reason: 'continue polling every ~30s until status=complete' }],
