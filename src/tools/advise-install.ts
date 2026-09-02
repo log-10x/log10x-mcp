@@ -115,7 +115,7 @@ export const adviseInstallSchema = {
     .array(z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]))
     .optional()
     .describe(
-      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (Log10x-managed Prometheus — recommended; no infra to run), **datadog**, **elastic**, **cloudwatch**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
+      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (optional Log10x-hosted backend, for evaluation), **datadog**, **elastic**, **cloudwatch**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
     ),
   airgapped: z
     .boolean()
@@ -1597,7 +1597,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
           return {
             value: b,
             label: detected ? `${BACKEND_LABEL[b as MetricsBackendKind]} (detected in your cluster)` : BACKEND_LABEL[b as MetricsBackendKind],
-            recommended: b === 'log10x' || detected,
+            recommended: detected,
             details: detail,
           };
         }),
@@ -1823,7 +1823,7 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   for (const kind of SUPPORTED_BACKENDS) {
     const label = BACKEND_LABEL[kind];
     const annotations: string[] = [];
-    if (kind === 'log10x') annotations.push('Log10x-managed Prometheus — recommended, no infra to run');
+    if (kind === 'log10x') annotations.push('optional Log10x-hosted backend, for evaluation');
     if (detectedSet.has(kind)) annotations.push('detected in your cluster');
     const suffix = annotations.length > 0 ? ` — ${annotations.join(', ')}` : '';
     lines.push(`- **${label}** (\`${kind}\`)${suffix}`);
