@@ -7,7 +7,12 @@
  *
  * The same builder serves both apps. The current chart format unifies
  * around a single Receiver workload with two opt-in feature flags:
- *   - `optimize`: losslessly compact events (~50-80% reduction; per-destination, lossless only on Splunk / self-hosted ES / ClickHouse).
+ *   - `optimize`: compact events (~50-80% reduction, per-destination). The
+ *     losslessness is not a property of the encoding alone: it holds only
+ *     where the DESTINATION has the 10x expander installed to expand events
+ *     again at read time — the Splunk app, the l1es Elasticsearch/OpenSearch
+ *     plugin, the ClickHouse view. Destinations with no expander (Datadog,
+ *     CloudWatch) cannot use the flag at all. See `./compaction-support.ts`.
  *   - `readOnly` — emit metrics, do NOT write events back through the
  *     forwarder (passive observation).
  * The flags are mutually exclusive at the chart level. AdvisorApp keeps
@@ -24,6 +29,10 @@ import type {
   BackendCredentialConfig,
 } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
+import {
+  compactionSupport,
+  EXPANDER_PREREQUISITE_GENERAL,
+} from './compaction-support.js';
 import {
   RECEIVER_FORWARDER_SPECS,
   STANDALONE_SPEC,
@@ -88,6 +97,10 @@ export interface ReporterAdviseArgs {
    * blocks when app='reporter' (Reporter has no write-back path to
    * encode events on). Maps to `tenx.optimize: true` in every
    * supported chart's values.yaml.
+   *
+   * Reading those events back needs the destination's 10x expander, so a plan
+   * that compacts states that prerequisite in preflight, and a destination
+   * with no expander to install blocks the flag outright.
    */
   optimize?: boolean;
   /**
@@ -211,6 +224,17 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
       'optimize=true is a no-op when mode=readonly. Compact encoding only matters when events are written back through the forwarder; in read-only mode the receiver emits metrics only. Pick one: optimize=true OR mode=readonly.'
     );
   }
+  // Compaction is lossless only where the destination expands the encoded
+  // events again. Where no expander can be installed, the events arrive
+  // permanently unreadable AND there is nothing to trade for it — the cost
+  // model pins compact_ratio at 1.0 on those destinations. Not a lever to
+  // warn about; a combination to refuse.
+  const compaction = compactionSupport(destination);
+  if (effectiveOptimize && compaction.kind === 'unsupported') {
+    blockers.push(
+      `optimize=true cannot be used with destination=${destination}. ${compaction.displayName} has no 10x expander, so compacted events would land there unreadable and stay that way, and compaction saves nothing on a destination billed this way. Drop \`optimize\`, or price tier_down/offload instead with \`log10x_estimate_savings\`.`
+    );
+  }
   // logstash receiver path is supported via the upstream elastic/logstash
   // chart + sidecar overlay (extraContainers as a pipe-string, secretMounts
   // for the license, logstashConfig + logstashPipeline for the two-pipeline
@@ -242,6 +266,47 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     app,
     installMode
   );
+
+  // The expander installs on the DESTINATION, not in this cluster, and is
+  // usually a different team's change — so it belongs in preflight, ahead of
+  // the helm commands, rather than inline among them. Status is 'unknown':
+  // the advisor never connects to the destination and cannot tell whether the
+  // app or plugin is already there.
+  //
+  // Emitted for every plan that can compact. That is broader than
+  // `optimize === true`, because a receiver plan carries the compactReceiver
+  // section telling the customer to turn compaction on later — the plan makes
+  // the recommendation, so the plan owes the prerequisite. A read-only
+  // receiver never writes events back and a Reporter has no write-back path
+  // at all; neither can compact, and neither mentions it.
+  const canCompact = app === 'receiver' && !effectiveReadOnly;
+  if (canCompact) {
+    if (compaction.kind === 'expander-required') {
+      preflight.push({
+        name: 'destination-expander',
+        status: 'unknown',
+        detail:
+          `Compaction needs ${compaction.requires}. Confirm it is installed before compacting anything you search on` +
+          (compaction.docsUrl ? ` — ${compaction.docsUrl}` : '') +
+          '.',
+      });
+    } else if (compaction.kind === 'unsupported') {
+      preflight.push({
+        name: 'destination-expander',
+        status: 'fail',
+        detail:
+          `${compaction.displayName} has no 10x expander, so compaction is not available on this destination — ` +
+          'compacted events would arrive unreadable. Reduce spend here with tier_down or offload instead ' +
+          '(`log10x_estimate_savings`).',
+      });
+    } else {
+      preflight.push({
+        name: 'destination-expander',
+        status: 'unknown',
+        detail: EXPANDER_PREREQUISITE_GENERAL,
+      });
+    }
+  }
 
   const notes: string[] = [];
   const appTitle = app === 'reporter' ? 'Reporter' : 'Receiver';
@@ -423,7 +488,7 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, typically 50-80% smaller where the destination is compaction-capable) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, typically 50-80% smaller on a destination whose 10x expander is installed — see the prerequisite below) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
@@ -432,7 +497,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
     whenToSkip: [
       opts.optimize
         ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC containers OUT of compaction (audit/compliance).'
-        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-container decisions needed.',
+        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-container decisions needed. Install the destination expander first (see the prerequisite below).',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
@@ -454,6 +519,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
         'log10x_configure_engine \\\n  gitops_repo=your-org/your-config-repo \\\n  service=payment-service \\\n  target_percent=30 \\\n  destination=datadog',
     },
     caveats: [
+      EXPANDER_PREREQUISITE_GENERAL,
       'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/receive/compact/*` (Gap A — env override is being wired up).',
       'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
       'Hot-reload requires in-place writes (the gitops pattern). Do not source the cap-file via a Kubernetes ConfigMap mount — CM swaps the file via a symlink rename, which the engine\'s stat-based watcher will not see.',
