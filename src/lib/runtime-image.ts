@@ -42,6 +42,32 @@ export const DEFAULT_RUNTIME_IMAGE = 'log10x/pipeline-10x:latest';
 /** What the `native` / `runtime` alias resolves to. */
 export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
 
+/**
+ * The tag written into MANIFESTS WE HAND THE USER, which is a different problem
+ * from the two constants above and is why it is pinned when they are not.
+ *
+ * The run-path defaults keep `:latest` deliberately: they name what THIS server
+ * pulls on the user's own machine, changing one silently changes what every
+ * existing install downloads, and the run path already compensates by probing
+ * the container and reporting `docker:<image> (<engine version>)` so a moving
+ * tag cannot hide which build actually ran.
+ *
+ * A manifest is the opposite case. It is an artifact the user applies into
+ * their cluster with `helm upgrade` and keeps, there is no probe on their side,
+ * and nothing records which build got installed. Two applies a week apart can
+ * install different software with no signal. The documentation says exactly
+ * this — `apps/receiver/deploy.md` sends the reader to Image tags "for why a
+ * deployed manifest should never carry `:latest`" — so emitting one that did
+ * contradicted our own advice.
+ *
+ * Bump this when cutting a release, once the images for that version are
+ * actually PUSHED. A GitHub release is not enough on its own: 1.1.75 was
+ * released 2026-09-03 and no images were published for it, so 1.1.74 is the
+ * newest tag that exists on Docker Hub for edge-10x, compiler-10x and
+ * pipeline-10x alike. Pin to what is pullable, not to what is tagged in git.
+ */
+export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.74';
+
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
 

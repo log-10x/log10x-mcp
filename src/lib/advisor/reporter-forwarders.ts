@@ -42,6 +42,7 @@ import type {
   MetricsBackendKind,
   BackendCredentialConfig,
 } from '../discovery/types.js';
+import { EDGE_MANIFEST_IMAGE } from '../runtime-image.js';
 
 export type OutputDestination = 'mock' | 'elasticsearch' | 'splunk' | 'datadog' | 'cloudwatch';
 
@@ -583,7 +584,7 @@ function renderLog10xSidecar(opts: {
   envLines.push(...renderPolicyPullEnvLines('      '));
   return `extraContainers:
   - name: log10x
-    image: log10x/edge-10x:latest
+    image: ${EDGE_MANIFEST_IMAGE}
     imagePullPolicy: IfNotPresent
     args:
 ${argLines.join('\n')}
@@ -963,7 +964,7 @@ spec:
     spec:
       containers:
         - name: log10x
-          image: log10x/edge-10x:latest
+          image: ${EDGE_MANIFEST_IMAGE}
           imagePullPolicy: IfNotPresent
           args:
 ${argLines.join('\n')}
@@ -1292,7 +1293,7 @@ ${envLines.join('\n')}
 # elastic/logstash quirk: extraContainers is a YAML pipe-string, not a list.
 extraContainers: |
   - name: log10x
-    image: log10x/edge-10x:latest
+    image: ${EDGE_MANIFEST_IMAGE}
     imagePullPolicy: IfNotPresent
     args:
 ${argLines.join('\n')}
