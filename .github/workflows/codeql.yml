@@ -1,0 +1,59 @@
+name: CodeQL
+
+# Static analysis. Until this workflow existed the repository had none: the
+# code-scanning API reported "no analysis found" and default setup was
+# not-configured, so nothing had ever examined the code the company writes.
+# Dependabot covers dependencies; this covers what we wrote ourselves.
+#
+# This repository is public, so CodeQL is free here. That is also why this is
+# the right place to start rather than the private repositories, where it needs
+# a paid GitHub Advanced Security seat and is a budget decision rather than a
+# workflow change.
+#
+# `actions` is included alongside the TypeScript analysis deliberately: this
+# repository publishes to npm on merge to main, so a compromised or careless
+# workflow is a supply-chain path to every customer that installs the package.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published query catches existing code rather than
+    # waiting for someone to touch the file it affects.
+    - cron: '0 4 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['javascript-typescript', 'actions']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      # No custom build step. This is a TypeScript project and CodeQL's
+      # autobuild handles it; adding `npm ci && npm run build` here would make
+      # the scan depend on the build succeeding, which couples a security
+      # control to an unrelated failure.
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
