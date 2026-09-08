@@ -37,6 +37,7 @@ import {
   parseCompileResults,
   type CompileJobRecord,
   type CompileResultsDoc,
+  type CompilePhase,
   type ScanHealth,
   type LinkReport,
 } from '../lib/compile-jobs.js';
@@ -239,34 +240,17 @@ export async function executeCompileStatus(
   const elapsedMs = (record.ended_at ?? Date.now()) - record.started_at;
   const library = scanned.libraries[0];
 
-  let jobStatus: JobStatus;
-  let chassisStatus: ChassisStatus;
-  if (!terminal) {
-    jobStatus = 'running';
-    chassisStatus = 'partial';
-  } else if (timedOut) {
-    jobStatus = 'timed_out';
-    chassisStatus = 'error';
-  } else {
-    // Docker gives a true exit code; local can't read one post-hoc, so fall
-    // back to the engine's own success flag (printResults), then to whether
-    // any symbols were produced.
-    const ok =
-      record.mode === 'docker' ? exitCode === 0 : (results?.success ?? producedSymbols);
-    if (ok && producedSymbols) {
-      jobStatus = 'completed';
-      chassisStatus = 'success';
-    } else if (ok && !producedSymbols) {
-      jobStatus = 'completed';
-      chassisStatus = 'no_signal';
-    } else if (!ok && producedSymbols) {
-      jobStatus = 'failed';
-      chassisStatus = 'partial';
-    } else {
-      jobStatus = 'failed';
-      chassisStatus = 'error';
-    }
-  }
+  const { jobStatus, chassisStatus } = deriveOutcome({
+    terminal,
+    timedOut,
+    kind: record.kind,
+    mode: record.mode,
+    exitCode,
+    engineSuccess: results?.success,
+    phases: results?.phases,
+    producedSymbols,
+    hasLibrary: scanned.libraries.some((l) => l.bytes > 0),
+  });
 
   const headline = buildHeadline(record, jobStatus, scanned, library, elapsedMs, diagnostics);
   const human_summary = buildHumanSummary(record, jobStatus, scanned, library, elapsedMs, diagnostics, exitCode);
@@ -322,6 +306,49 @@ export async function executeCompileStatus(
   });
 }
 
+/**
+ * Derive the job + chassis status from a terminal (or not) run's evidence.
+ *
+ * A LINK job's truth is its Link phase, not the process exit: over a large
+ * units tree the scan-state traversal can time out (engine success:false,
+ * non-zero exit) while Link still completes and writes a perfect library —
+ * measured on a 570k-unit tree, where keying on the aggregate flag reported
+ * `partial` for a flawless tar. When the parsed report shows Link Completed
+ * with zero errors and a non-empty library exists, the link succeeded
+ * regardless of the aggregate. Compile (scan) jobs keep the original
+ * derivation: docker trusts the exit code, local falls back to the engine's
+ * own success flag, then to whether any symbols were produced.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function deriveOutcome(p: {
+  terminal: boolean;
+  timedOut: boolean;
+  kind: CompileJobRecord['kind'];
+  mode: CompileJobRecord['mode'];
+  exitCode: number | null;
+  engineSuccess: boolean | undefined;
+  phases: CompilePhase[] | undefined;
+  producedSymbols: boolean;
+  hasLibrary: boolean;
+}): { jobStatus: JobStatus; chassisStatus: ChassisStatus } {
+  if (!p.terminal) return { jobStatus: 'running', chassisStatus: 'partial' };
+  if (p.timedOut) return { jobStatus: 'timed_out', chassisStatus: 'error' };
+  const linkPhaseOk =
+    p.kind === 'link' &&
+    p.hasLibrary &&
+    (p.phases ?? []).some(
+      (ph) => ph.operation === 'Link' && ph.status === 'Completed' && (ph.errors ?? 0) === 0,
+    );
+  const ok =
+    linkPhaseOk ||
+    (p.mode === 'docker' ? p.exitCode === 0 : (p.engineSuccess ?? p.producedSymbols));
+  if (ok && p.producedSymbols) return { jobStatus: 'completed', chassisStatus: 'success' };
+  if (ok && !p.producedSymbols) return { jobStatus: 'completed', chassisStatus: 'no_signal' };
+  if (!ok && p.producedSymbols) return { jobStatus: 'failed', chassisStatus: 'partial' };
+  return { jobStatus: 'failed', chassisStatus: 'error' };
+}
+
 function buildHeadline(
   record: CompileJobRecord,
   jobStatus: JobStatus,
@@ -375,7 +402,11 @@ function buildHumanSummary(
     parts.push(
       scanned.unitCount > 0
         ? `${noun} job ${record.job_id} completed via ${record.mode} in ${humanDuration(elapsedMs)}: ${scanned.unitCount} symbol unit${scanned.unitCount === 1 ? '' : 's'}${library ? `, linked to ${library.path} (${humanByteSize(library.bytes)})` : ', no library file'}.`
-        : `${noun} job ${record.job_id} ran to completion via ${record.mode} but found no symbols in ${record.sources}. Confirm the sources hold supported source/binary files (extracted .class, not .jar).`,
+        : `${noun} job ${record.job_id} ran to completion via ${record.mode} but found no symbols in ${record.sources}. Confirm the sources hold supported source/binary files (extracted .class, not .jar).${
+            record.sources.includes('GitHub')
+              ? ' For GitHub sources, also verify github_branch names a real BRANCH or commit sha: a nonexistent ref (a tag, a typo) pulls zero files and the engine still reports success.'
+              : ''
+          }`,
     );
   } else if (jobStatus === 'timed_out') {
     parts.push(
