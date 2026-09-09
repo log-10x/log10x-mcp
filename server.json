@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.log-10x/log10x-mcp",
+  "title": "Log10x MCP",
+  "description": "Tools to rank log patterns by volume and cost and to compact, tier down or offload each pattern",
+  "repository": {
+    "url": "https://github.com/log-10x/log10x-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://doc.log10x.com/apps/mcp/",
+  "version": "1.30.6",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "log10x-mcp",
+      "version": "1.30.6",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LOG10X_API_KEY",
+          "description": "Log10x API key. Without it the server boots read-only against the public demo dataset.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
