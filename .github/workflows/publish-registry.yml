@@ -1,0 +1,87 @@
+name: Publish to MCP Registry
+
+# Lists log10x-mcp in the official MCP registry at registry.modelcontextprotocol.io.
+#
+# Why OIDC and not the interactive login: `mcp-publisher login github` uses the
+# registry's own GitHub App ("MCP Registry Login (Prod)", client Iv23liUydBbI7Z2Q9bOZ),
+# which is PRIVATE. A private GitHub App cannot be installed on another account, and
+# a GitHub App never sees an organization it is not installed on. The registry grants
+# an org namespace by reading GET /user/memberships/orgs and requiring role=admin, so
+# with that app the token only ever carries io.github.<user>/*. Publishing as
+# io.github.log-10x/* is therefore impossible by device flow, regardless of org role
+# or public membership. Verified 2026-09-11 against 403:
+#   "You have permission to publish: io.github.talwgx/*"
+#
+# OIDC has no such problem: the registry derives the namespace from the OIDC
+# `repository_owner` claim and grants io.github.<owner>/* directly
+# (internal/api/handlers/v0/auth/github_oidc.go, buildPermissions). This repo is
+# owned by log-10x, so it gets io.github.log-10x/*. No app, no login, no browser.
+#
+# Chained to the npm publish rather than to `push`, because the registry requires
+# the npm version to already carry the matching `mcpName` before it will accept the
+# server. Running before npm has the version fails validation.
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Publish to npm"]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write   # required: the OIDC token is the whole auth model
+
+concurrency:
+  group: publish-registry
+  cancel-in-progress: false
+
+env:
+  MCP_PUBLISHER_VERSION: 1.8.1
+
+jobs:
+  publish:
+    # A dispatch is always deliberate. A chained run only proceeds if npm actually shipped.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # server.json pins its own version and the npm package version. If they drift,
+      # the registry lists a version npm does not have. Fail loudly rather than list a lie.
+      - name: server.json and package.json must agree on the version
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          srv=$(node -p "require('./server.json').version")
+          pkgs=$(node -p "require('./server.json').packages[0].version")
+          echo "package.json=$pkg server.json=$srv server.json/packages[0]=$pkgs"
+          if [ "$pkg" != "$srv" ] || [ "$pkg" != "$pkgs" ]; then
+            echo "::error::version mismatch: bump server.json (both fields) with package.json"
+            exit 1
+          fi
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sSLf "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Log in with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
+
+      - name: Verify the listing is live
+        run: |
+          for i in 1 2 3 4 5 6; do
+            n=$(curl -sS "https://registry.modelcontextprotocol.io/v0/servers?search=log10x" \
+                 | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const j=JSON.parse(s);console.log((j.servers||j.data||[]).length)})")
+            echo "attempt $i: $n result(s)"
+            [ "$n" != "0" ] && exit 0
+            sleep 10
+          done
+          echo "::error::published but the registry search still returns 0"
+          exit 1
