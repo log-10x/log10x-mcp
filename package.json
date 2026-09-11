@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.30.6",
+  "version": "1.30.7",
   "description": "Rank log patterns by cost, then compact, tier down or offload them. No log data reaches log10x.",
   "mcpName": "io.github.log-10x/log10x-mcp",
   "type": "module",
