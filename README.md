@@ -137,6 +137,13 @@ MIT. Published on npm as `log10x-mcp` (Node 20+). The source is public so the be
 
 MCP clients run the server as a long-lived child process. After upgrading the package, restart the client so the new version takes effect.
 
+## Reporting a run
+
+Optional, and there is nothing to sign up for. If you point this at your own
+logs, open an issue with the platform it read, what the run showed or where it
+stopped, and whether you want a reply. Say if you do not, and you will not get
+one.
+
 ## Documentation
 
 https://doc.log10x.com/apps/mcp/
