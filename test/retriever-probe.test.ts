@@ -32,7 +32,7 @@ function nowIso(offsetMs = 0): string {
 function happyDeps(overrides: Partial<ProbeDeps> = {}): ProbeDeps {
   let pickHashCalls = 0;
   return {
-    s3ListObjects: async (bucket, prefix) => {
+    listObjects: async (bucket, prefix) => {
       // offload bucket: return a recent object so the recent-data assert passes
       if (prefix === '') {
         return [
@@ -113,7 +113,7 @@ test('probe: all asserts pass → verdict green', async () => {
 
 test('probe: offload bucket empty → broken at offload_bucket_has_recent_data', async () => {
   const deps = happyDeps({
-    s3ListObjects: async (_bucket, prefix) => {
+    listObjects: async (_bucket, prefix) => {
       if (prefix === '') return []; // no offload data
       if (prefix.includes('/qr/')) {
         return [{ Key: `${prefix}worker-1.jsonl`, LastModified: nowIso(), Size: 1 }];
