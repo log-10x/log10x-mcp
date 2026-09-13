@@ -1915,7 +1915,11 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   }
 
   // Emit infra-provision context as notes when terraform/cli mode was used.
-  if (session.infraMode && session.infraMode !== 'existing') {
+  // The azure path has its own provisioning note (the chart's
+  // provision-retriever.sh), so this AWS one is suppressed there: emitting
+  // both put "Infra provisioned via aws CLI commands" directly above "Retriever
+  // infra on Azure ... is provisioned by the chart's own script".
+  if (session.infraMode && session.infraMode !== 'existing' && session.storageProvider !== 'azure') {
     plan.notes.unshift(
       `Infra provisioned via ${session.infraMode === 'terraform' ? 'Terraform module (terraform-aws-tenx-retriever-lambda)' : 'aws CLI commands'}. AWS infra lifecycle is Terraform-owned — the wizard does not manage it.`
     );

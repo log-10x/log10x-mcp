@@ -146,6 +146,24 @@ function requireAccount(target: ObjectStoreTarget): string {
   return target.storageAccount;
 }
 
+/**
+ * Strip a credential value out of an `execFile` failure. Node builds the
+ * error message from the whole argv, so a failed
+ * `az ... --account-key <key>` carries the key in `error.message`, and that
+ * message is what every caller below renders into an operator-facing string.
+ * Seen live: a denied download on a key-authenticated account printed the
+ * account key back in the thrown error.
+ */
+function redactSecret(e: unknown, secret: string): unknown {
+  if (!secret) return e;
+  const err = e as { message?: string; stderr?: string };
+  const scrub = (s: string | undefined): string | undefined =>
+    typeof s === 'string' ? s.split(secret).join('<redacted>') : s;
+  err.message = scrub(err.message) ?? err.message;
+  err.stderr = scrub(err.stderr) ?? err.stderr;
+  return e;
+}
+
 /** Run `az`, once under `--auth-mode login` and once more with an explicit credential. */
 async function runAz(baseArgs: string[], maxBuffer: number, timeout: number): Promise<string> {
   try {
@@ -157,13 +175,26 @@ async function runAz(baseArgs: string[], maxBuffer: number, timeout: number): Pr
   } catch (loginErr) {
     const credential = azureCredentialArgs();
     if (!credential) throw loginErr;
-    const { stdout } = await execFileP('az', [...baseArgs, ...credential], { maxBuffer, timeout });
-    return stdout;
+    try {
+      const { stdout } = await execFileP('az', [...baseArgs, ...credential], { maxBuffer, timeout });
+      return stdout;
+    } catch (credentialErr) {
+      throw redactSecret(credentialErr, credential[1]!);
+    }
   }
 }
 
+/**
+ * The operator-facing text for a failed `az` call. `stderr` first, because
+ * that is where the CLI writes its own diagnosis. It falls through on an
+ * EMPTY stderr, not just an absent one: a timed-out or signalled child is
+ * killed before the CLI prints anything, and `stderr ?? message` would then
+ * render "az storage blob list failed:" with nothing after the colon. The
+ * message is the argv, which `redactSecret` has already scrubbed.
+ */
 function azStderr(e: unknown): string {
-  return ((e as { stderr?: string; message?: string }).stderr ?? (e as Error).message ?? '').trim();
+  const err = e as { stderr?: string; message?: string };
+  return (err.stderr ?? '').trim() || (err.message ?? '').trim();
 }
 
 /** One entry as `az storage blob list --output json` returns it. */
@@ -253,6 +284,15 @@ export async function listStoreObjects(
 export async function getStoreObject(target: ObjectStoreTarget, key: string): Promise<string> {
   if (target.kind === 'azure_blob') {
     const account = requireAccount(target);
+    // No `--file`. The CLI's own contract for this command is: "Path of file
+    // to write out to. If not specified, stdout will be used and
+    // max_connections will be set to 1." Naming `/dev/stdout` as the file
+    // instead fails on EVERY call made from this process: the SDK's
+    // `StorageStreamDownloader.readinto` requires a seekable target, and
+    // `/dev/stdout` under `execFile` is a pipe, so the CLI raises
+    // `ValueError: Target stream handle must be seekable`. Run live against a
+    // real storage account 2026-09-13; the failure is total, not intermittent.
+    //
     // `--output none` keeps the CLI's own property JSON off stdout, so the
     // only bytes on the stream are the blob body.
     return runAz(
@@ -261,7 +301,6 @@ export async function getStoreObject(target: ObjectStoreTarget, key: string): Pr
         '--account-name', account,
         '--container-name', target.container,
         '--name', key,
-        '--file', '/dev/stdout',
         '--no-progress',
         '--only-show-errors',
         '--output', 'none',

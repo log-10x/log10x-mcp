@@ -531,3 +531,120 @@ test('offload_add refuses an azure_blob destination with no storage_account', as
     'nothing unreadable is persisted',
   );
 });
+
+// ── the `az` argv the read path actually runs ──────────────────────────────
+//
+// Everything above injects `listObjects` / `getObject`, so the argv handed to
+// the CLI was never asserted and never run. It was wrong: the download named
+// `--file /dev/stdout`, and under `execFile` stdout is a pipe, so the CLI's
+// own SDK raised `ValueError: Target stream handle must be seekable` on EVERY
+// call. The verifier swallowed that into `unverified`, which doctor maps to
+// warn, so a real copy-everything leak on a blob sink read as a warning
+// instead of a failure. These cases pin the argv by putting a recording `az`
+// on PATH.
+
+async function withFakeAz<T>(
+  body: string,
+  fn: (argvFile: string) => Promise<T>,
+): Promise<T> {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'fake-az-'));
+  const argvFile = join(dir, 'argv.txt');
+  writeFileSync(
+    join(dir, 'az'),
+    `#!/bin/sh\nprintf '%s\\n' "$@" >> ${argvFile}\n${body}\n`,
+  );
+  chmodSync(join(dir, 'az'), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${dir}:${savedPath ?? ''}`;
+  try {
+    return await fn(argvFile);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the blob download never names a --file: stdout under execFile is not seekable', async () => {
+  const { getStoreObject } = await import('../src/lib/object-store.js');
+  const { readFileSync } = await import('node:fs');
+  const body = await withFakeAz('printf \'{"routeState":"offload"}\\n\'', async (argvFile) => {
+    const out = await getStoreObject(BLOB, 'app/part-0.jsonl');
+    const argv = readFileSync(argvFile, 'utf8').split('\n');
+    assert.ok(argv.includes('download'), 'the download subcommand ran');
+    assert.ok(
+      !argv.includes('--file'),
+      `--file is fatal here: the CLI writes through a seekable handle and execFile gives it a pipe. argv: ${argv.join(' ')}`,
+    );
+    assert.ok(argv.includes('--auth-mode') && argv.includes('login'), 'login auth is tried first');
+    assert.ok(argv.includes(ACCOUNT) && argv.includes(CONTAINER));
+    return out;
+  });
+  assert.equal(body.trim(), '{"routeState":"offload"}', 'stdout carries the blob body only');
+});
+
+test('an explicit credential is redacted out of a failed az call', async () => {
+  const { getStoreObject } = await import('../src/lib/object-store.js');
+  const KEY = 'k3y-that-must-not-travel';
+  const saved = process.env.AZURE_STORAGE_KEY;
+  process.env.AZURE_STORAGE_KEY = KEY;
+  try {
+    await withFakeAz('echo "denied" >&2; exit 1', async () => {
+      await assert.rejects(
+        () => getStoreObject(BLOB, 'app/part-0.jsonl'),
+        (e: Error) => {
+          // execFile builds its message from the whole argv, credential included.
+          assert.ok(!e.message.includes(KEY), `the account key travelled in: ${e.message}`);
+          return true;
+        },
+      );
+    });
+  } finally {
+    if (saved === undefined) delete process.env.AZURE_STORAGE_KEY;
+    else process.env.AZURE_STORAGE_KEY = saved;
+  }
+});
+
+test('a killed az call still says something: empty stderr falls through to the argv', async () => {
+  const { listStoreObjects } = await import('../src/lib/object-store.js');
+  await withFakeAz('exit 1', async () => {
+    await assert.rejects(
+      () => listStoreObjects(BLOB, 'app/'),
+      (e: Error) => {
+        assert.ok(e.message.length > 'az storage blob list failed: '.length, e.message);
+        return true;
+      },
+    );
+  });
+});
+
+// ── the azure plan's preflight speaks Azure ────────────────────────────────
+
+test('an azure plan preflight names blob controls, never IRSA or SQS', async () => {
+  const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
+  const names = plan.preflight.map((c) => c.name);
+  for (const forbidden of ['IRSA role', 'AWS access', 'input S3 bucket', 'index S3 prefix']) {
+    assert.ok(!names.includes(forbidden), `azure preflight still carries the row "${forbidden}"`);
+  }
+  assert.ok(!names.some((n) => n.startsWith('SQS ')), 'azure preflight still lists SQS queues');
+  for (const expected of ['storage account', 'input blob container', 'workload identity']) {
+    assert.ok(names.includes(expected), `azure preflight is missing the row "${expected}"`);
+  }
+  assert.ok(names.some((n) => n.startsWith('Storage Queue ')), 'the four Storage Queues are checked');
+  assertNoIamVocabulary(
+    plan.preflight.map((c) => `${c.name}: ${c.detail}`).join('\n'),
+    'azure preflight',
+  );
+});
+
+test('an azure INSTALL plan does not tell the operator the release must already exist', async () => {
+  const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
+  const names = plan.preflight.map((c) => c.name);
+  assert.ok(
+    !names.includes('release exists'),
+    'the release-exists row belongs to verify/teardown; an install plan renders it as a FAIL it can never clear',
+  );
+  assert.ok(names.includes('release collision'), 'an install plan checks for a collision instead');
+});

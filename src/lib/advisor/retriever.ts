@@ -245,7 +245,16 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     indexBucket,
     irsaRoleArn,
     sqsUrls,
-    skipInstall: args.skipInstall || isAzure,
+    // `args.skipInstall` alone. An earlier `|| isAzure` here flipped the
+    // release check on EVERY azure plan, so a first install rendered
+    // "release exists: FAIL - install first before running verify or
+    // teardown" directly above its own install steps. Seen live.
+    skipInstall: args.skipInstall,
+    storageProvider,
+    ...(args.storageAccount !== undefined ? { storageAccount: args.storageAccount } : {}),
+    ...(args.azureClientId !== undefined ? { azureClientId: args.azureClientId } : {}),
+    ...(args.azureTenantId !== undefined ? { azureTenantId: args.azureTenantId } : {}),
+    azureQueues,
   });
 
   const notes: string[] = [];
@@ -488,6 +497,17 @@ async function runPreflight(
      * blocker (install). Derived from `args.skipInstall` in the caller.
      */
     skipInstall?: boolean;
+    /**
+     * Which object store this plan targets. The cloud-specific rows below
+     * branch on it: an Azure operator has no IRSA role, no SQS queue and no
+     * `aws` CLI, so naming them is a control they cannot act on. Default
+     * `aws` keeps every existing caller unchanged.
+     */
+    storageProvider?: RetrieverStorageProvider;
+    storageAccount?: string;
+    azureClientId?: string;
+    azureTenantId?: string;
+    azureQueues?: Record<'index' | 'query' | 'subquery' | 'stream', string>;
   }
 ): Promise<PreflightCheck[]> {
   const checks: PreflightCheck[] = [];
@@ -535,42 +555,94 @@ async function runPreflight(
     });
   }
 
-  checks.push({
-    name: 'AWS access',
-    status: snapshot.aws.available ? 'ok' : 'warn',
-    detail: snapshot.aws.available
-      ? `account \`${snapshot.aws.callerIdentity?.account ?? '?'}\`, region \`${snapshot.aws.region ?? '?'}\``
-      : 'AWS CLI not usable; you must pass infra params explicitly',
-  });
+  const isAzurePlan = infra.storageProvider === 'azure';
 
-  checks.push({
-    name: 'input S3 bucket',
-    status: infra.inputBucket ? 'ok' : 'fail',
-    detail: infra.inputBucket
-      ? `\`${infra.inputBucket}\``
-      : 'no input bucket detected — pass `input_bucket` explicitly',
-  });
-
-  checks.push({
-    name: 'index S3 prefix',
-    status: infra.indexBucket ? 'ok' : 'warn',
-    detail: infra.indexBucket ?? 'no index prefix — defaults to `<inputBucket>/indexing-results/`',
-  });
-
-  checks.push({
-    name: 'IRSA role',
-    status: infra.irsaRoleArn ? 'ok' : 'fail',
-    detail: infra.irsaRoleArn
-      ? `\`${infra.irsaRoleArn}\``
-      : 'no retriever IRSA role detected — pass `irsa_role_arn` explicitly',
-  });
-
-  for (const key of ['index', 'query', 'subquery', 'stream'] as const) {
+  if (isAzurePlan) {
     checks.push({
-      name: `SQS ${key} queue`,
-      status: infra.sqsUrls[key] ? 'ok' : 'fail',
-      detail: infra.sqsUrls[key] ? `\`${infra.sqsUrls[key]}\`` : `missing — pass \`sqs_urls.${key}\` explicitly`,
+      name: 'Azure CLI access',
+      status: snapshot.azure?.available ? 'ok' : 'warn',
+      detail: snapshot.azure?.available
+        ? `subscription \`${snapshot.azure.subscriptionId ?? '?'}\``
+        : 'az CLI not usable; you must pass the account, containers and identity ids explicitly',
     });
+
+    checks.push({
+      name: 'storage account',
+      status: infra.storageAccount ? 'ok' : 'fail',
+      detail: infra.storageAccount
+        ? `\`${infra.storageAccount}\` (flat namespace only; a hierarchical-namespace account is refused at construction)`
+        : 'no storage account supplied. Pass `storage_account` explicitly',
+    });
+
+    checks.push({
+      name: 'input blob container',
+      status: infra.inputBucket ? 'ok' : 'fail',
+      detail: infra.inputBucket
+        ? `\`${infra.inputBucket}\``
+        : 'no input container supplied. Pass `input_container` explicitly',
+    });
+
+    checks.push({
+      name: 'index blob container',
+      status: infra.indexBucket ? 'ok' : 'warn',
+      detail: infra.indexBucket ?? 'no index container supplied. Defaults to `tenx-index`',
+    });
+
+    checks.push({
+      name: 'workload identity',
+      status: infra.azureClientId && infra.azureTenantId ? 'ok' : 'fail',
+      detail:
+        infra.azureClientId && infra.azureTenantId
+          ? `client id \`${infra.azureClientId}\`, tenant \`${infra.azureTenantId}\``
+          : 'no federated managed identity supplied. Run the provisioning script in step 1, then pass `azure_client_id` and `azure_tenant_id` from what it prints',
+    });
+
+    for (const key of ['index', 'query', 'subquery', 'stream'] as const) {
+      const name = infra.azureQueues?.[key];
+      checks.push({
+        name: `Storage Queue ${key}`,
+        status: name ? 'ok' : 'fail',
+        detail: name ? `\`${name}\`` : `missing. Pass \`azure_queues.${key}\` explicitly`,
+      });
+    }
+  } else {
+    checks.push({
+      name: 'AWS access',
+      status: snapshot.aws.available ? 'ok' : 'warn',
+      detail: snapshot.aws.available
+        ? `account \`${snapshot.aws.callerIdentity?.account ?? '?'}\`, region \`${snapshot.aws.region ?? '?'}\``
+        : 'AWS CLI not usable; you must pass infra params explicitly',
+    });
+
+    checks.push({
+      name: 'input S3 bucket',
+      status: infra.inputBucket ? 'ok' : 'fail',
+      detail: infra.inputBucket
+        ? `\`${infra.inputBucket}\``
+        : 'no input bucket detected — pass `input_bucket` explicitly',
+    });
+
+    checks.push({
+      name: 'index S3 prefix',
+      status: infra.indexBucket ? 'ok' : 'warn',
+      detail: infra.indexBucket ?? 'no index prefix — defaults to `<inputBucket>/indexing-results/`',
+    });
+
+    checks.push({
+      name: 'IRSA role',
+      status: infra.irsaRoleArn ? 'ok' : 'fail',
+      detail: infra.irsaRoleArn
+        ? `\`${infra.irsaRoleArn}\``
+        : 'no retriever IRSA role detected — pass `irsa_role_arn` explicitly',
+    });
+
+    for (const key of ['index', 'query', 'subquery', 'stream'] as const) {
+      checks.push({
+        name: `SQS ${key} queue`,
+        status: infra.sqsUrls[key] ? 'ok' : 'fail',
+        detail: infra.sqsUrls[key] ? `\`${infra.sqsUrls[key]}\`` : `missing — pass \`sqs_urls.${key}\` explicitly`,
+      });
+    }
   }
 
   // Chart availability is NOT live-probed with `helm search repo` here
@@ -582,7 +654,11 @@ async function runPreflight(
 
   // queryLogGroup preflight: per-query CW observability.
   // This is a warn (not fail) so install paths don't block on it.
-  {
+  // Skipped on an azure plan: `queryLogGroup` names a CloudWatch log group
+  // and the remedy grants `logs:*` on an IRSA role, neither of which an AKS
+  // operator has. There is no Azure equivalent wired today, so the honest
+  // rendering is no row rather than an AWS row.
+  if (!isAzurePlan) {
     let queryLogGroup: string | undefined;
     try {
       const helmResult = await run(
