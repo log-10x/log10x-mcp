@@ -13,6 +13,7 @@
 
 import { z } from 'zod';
 import { runRetrieverProbe, type ProbeArgs, type ProbeResult } from '../lib/retriever-probe.js';
+import type { ObjectStoreKind } from '../lib/object-store.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { validateStrictArgs } from '../lib/strict-args.js';
 import { getRetrieverState } from '../lib/retriever-state.js';
@@ -111,12 +112,21 @@ export async function executeRetrieverProbe(args: {
 
   let offloadBucket = args.offload_bucket;
   let offloadBucketSource: ResolvedSource = args.offload_bucket ? 'explicit_arg' : 'none';
+  // Destination type of the resolved sink. The probe lists an `azure_blob`
+  // destination with `az storage blob list` instead of `aws s3api`, so the
+  // type and the storage account have to travel with the container name.
+  let storeKind: ObjectStoreKind = 's3';
+  let storageAccount: string | undefined;
   if (!offloadBucket) {
     if (resolved) {
       const active = pickActiveOffload(resolved.config);
       if (active?.bucket) {
         offloadBucket = active.bucket;
         offloadBucketSource = 'on_prem_store';
+        if (active.type === 'azure_blob') {
+          storeKind = 'azure_blob';
+          storageAccount = active.storage_account;
+        }
         const stale = detectStaleOffloadEnvVar(active.bucket);
         if (stale) warnings.push(stale);
       }
@@ -211,6 +221,20 @@ export async function executeRetrieverProbe(args: {
     });
   }
 
+  if (storeKind === 's3' && process.env.LOG10X_OFFLOAD_TYPE === 'azure_blob') {
+    // Env-var bridge path: no env-config document, but LOG10X_OFFLOAD_TYPE
+    // names the destination type and LOG10X_OFFLOAD_STORAGE_ACCOUNT the
+    // account. Without this the bridge's own destination reads as S3.
+    storeKind = 'azure_blob';
+    storageAccount = storageAccount ?? process.env.LOG10X_OFFLOAD_STORAGE_ACCOUNT;
+  }
+  if (storeKind === 'azure_blob' && !storageAccount) {
+    warnings.push(
+      'offload destination type is azure_blob but no storage_account is set. Add it with ' +
+        'log10x_offload_add, or export LOG10X_OFFLOAD_STORAGE_ACCOUNT, so the blob container can be listed.',
+    );
+  }
+
   const probeArgs: ProbeArgs = {
     namespace: args.namespace ?? 'log10x',
     offload_bucket: offloadBucket,
@@ -218,6 +242,8 @@ export async function executeRetrieverProbe(args: {
     query_log_group: args.query_log_group ?? 'log10x-retriever-query-events',
     target_hash: args.target_hash,
     window_minutes: args.window_minutes ?? 5,
+    store_kind: storeKind,
+    ...(storageAccount !== undefined ? { storage_account: storageAccount } : {}),
   };
   const result = await runRetrieverProbe(probeArgs);
   const callerProvidedTargetHash = Boolean(args.target_hash);

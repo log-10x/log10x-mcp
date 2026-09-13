@@ -17,6 +17,14 @@
  *   - Provide verify probes that prove indexing + querying work.
  *   - Provide teardown (helm uninstall only — leaves AWS infra alone;
  *     infra lifecycle is a Terraform concern).
+ *
+ * Two storage providers. `aws` is the historical path: S3 buckets, four SQS
+ * queues, an IRSA role. `azure` targets AKS with Azure Blob Storage and Azure
+ * Storage Queues behind the chart's `storage.provider: azure` block, with AKS
+ * workload identity in place of IRSA. The Azure path is read and index side
+ * only: the Retriever indexes and queries blobs already in the container, and
+ * the forwarder offload recipes stay S3-shaped, so the offload markdown says
+ * so rather than emitting a sink that writes elsewhere.
  */
 
 import type { DiscoverySnapshot } from '../discovery/types.js';
@@ -66,6 +74,29 @@ export interface RetrieverAdviseArgs {
   indexBucket?: string;
   /** Override: IRSA role ARN for the retriever SA. Default: from snapshot. */
   irsaRoleArn?: string;
+  /**
+   * Which object store the Retriever reads. `aws` (default) is S3 + SQS +
+   * IRSA; `azure` is Azure Blob + Azure Storage Queues + AKS workload
+   * identity, behind the chart's `storage.provider` key.
+   */
+  storageProvider?: RetrieverStorageProvider;
+  /** Azure storage account holding the containers. Required when storageProvider is `azure`. */
+  storageAccount?: string;
+  /** Azure resource group, for the provisioning command in the plan. */
+  resourceGroup?: string;
+  /** Azure region for the provisioning command (e.g. `eastus`). */
+  location?: string;
+  /** Client id of the user-assigned managed identity federated to the release ServiceAccount. */
+  azureClientId?: string;
+  /** Entra tenant id. */
+  azureTenantId?: string;
+  /** Azure Storage Queue names, in place of the four SQS URLs. */
+  azureQueues?: {
+    index?: string;
+    query?: string;
+    subquery?: string;
+    stream?: string;
+  };
   /** Override: SQS queue URLs. Default: from snapshot.recommendations.retrieverSqsUrls. */
   sqsUrls?: {
     index?: string;
@@ -88,6 +119,27 @@ export interface RetrieverAdviseArgs {
    */
   destination?: string;
 }
+
+/** Object store behind the Retriever. */
+export type RetrieverStorageProvider = 'aws' | 'azure';
+
+/** Default Azure Storage Queue names, matching the provisioning script's own. */
+const AZURE_DEFAULT_QUEUES = {
+  index: 'tenx-index',
+  query: 'tenx-query',
+  subquery: 'tenx-subquery',
+  stream: 'tenx-stream',
+} as const;
+
+/**
+ * The provisioning script that ships with the retriever chart. One run creates
+ * the account, the two containers, the four queues, the managed identity and
+ * its two blob/queue data roles, the Event Grid system topic and its
+ * BlobCreated subscription onto the index queue, and the federated credential
+ * binding the identity to the release ServiceAccount, then writes a values
+ * file.
+ */
+const AZURE_PROVISION_SCRIPT = 'charts/retriever/scripts/azure/provision-retriever.sh';
 
 const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
 const RETRIEVER_CHART_ALIAS = 'log10x';
@@ -115,7 +167,15 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     ? await resolveInstalledBucket(releaseName, installedNamespace)
     : undefined;
   const inputBucket = args.inputBucket ?? installedBucket ?? snapshot.recommendations.retrieverS3Bucket;
-  const indexBucket = args.indexBucket ?? (inputBucket ? `${inputBucket}/indexing-results/` : undefined);
+  const indexBucket =
+    args.indexBucket ??
+    (args.storageProvider === 'azure'
+      ? args.storageAccount
+        ? `${args.storageAccount}/tenx-index/tenx`
+        : undefined
+      : inputBucket
+        ? `${inputBucket}/indexing-results/`
+        : undefined);
   const irsaRoleArn =
     args.irsaRoleArn ??
     snapshot.kubectl.serviceAccountIrsa.find((sa) =>
@@ -130,13 +190,38 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     stream: args.sqsUrls?.stream ?? detectedQueues.stream,
   };
 
+  const storageProvider: RetrieverStorageProvider = args.storageProvider ?? 'aws';
+  const isAzure = storageProvider === 'azure';
+  const azureQueues = {
+    index: args.azureQueues?.index ?? AZURE_DEFAULT_QUEUES.index,
+    query: args.azureQueues?.query ?? AZURE_DEFAULT_QUEUES.query,
+    subquery: args.azureQueues?.subquery ?? AZURE_DEFAULT_QUEUES.subquery,
+    stream: args.azureQueues?.stream ?? AZURE_DEFAULT_QUEUES.stream,
+  };
+
   const blockers: string[] = [];
   if (!args.licenseJwt && !args.skipInstall) {
     blockers.push(
       'Log10x license JWT is required for an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token). Verify and teardown plans work without it.'
     );
   }
-  if (!args.skipInstall) {
+  if (isAzure && !args.skipInstall) {
+    if (!inputBucket) {
+      blockers.push(
+        'No input blob container supplied. The Retriever reads source logs from an Azure Blob container. Pass `input_container`.'
+      );
+    }
+    if (!args.storageAccount) {
+      blockers.push(
+        'No Azure storage account supplied. Pass `storage_account` (the account name holding the input and index containers).'
+      );
+    }
+    if (!args.azureClientId || !args.azureTenantId) {
+      blockers.push(
+        'AKS workload identity needs both `azure_client_id` (the user-assigned managed identity federated to the release ServiceAccount) and `azure_tenant_id`. Run the provisioning script below to create them, then re-run with the values it prints.'
+      );
+    }
+  } else if (!args.skipInstall) {
     if (!inputBucket) {
       blockers.push(
         'No input S3 bucket detected in the discovery snapshot and none supplied via `input_bucket`. The Retriever reads source logs from S3 — provide a bucket.'
@@ -160,7 +245,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     indexBucket,
     irsaRoleArn,
     sqsUrls,
-    skipInstall: args.skipInstall,
+    skipInstall: args.skipInstall || isAzure,
   });
 
   const notes: string[] = [];
@@ -182,8 +267,15 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     );
   }
   notes.push(
-    'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
+    isAzure
+      ? 'Retriever infra on Azure (storage account, blob containers, Storage Queues, managed identity and its blob/queue data roles, the Event Grid BlobCreated subscription, and the federated credential) is provisioned by the chart\'s own script, NOT by this advisor. Step 1 below runs it.'
+      : 'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
   );
+  if (isAzure) {
+    notes.push(
+      'Azure support is read and index side. The Retriever indexes and queries blobs in the input container, and hierarchical-namespace accounts are refused at construction, so the account must be flat namespace. Writing the offload slice into Blob is a separate feature: log10x emits forwarder offload recipes for S3 and S3-compatible buckets. A diagnostic export that already lands in the container is queryable as soon as the indexer is up.'
+    );
+  }
 
   // Fix 88 — surface Receiver outputOffload requirement proactively.
   // If the Receiver is installed, warn that the rate-only regulator config
@@ -214,15 +306,29 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
 
   if (!args.skipInstall && blockers.length === 0) {
     install.push(
-      ...buildInstallSteps({
-        releaseName,
-        namespace,
-        licenseJwt: args.licenseJwt!,
-        inputBucket: inputBucket!,
-        indexBucket: indexBucket!,
-        irsaRoleArn: irsaRoleArn!,
-        sqsUrls: sqsUrls as Record<'index' | 'query' | 'subquery' | 'stream', string>,
-      })
+      ...(isAzure
+        ? buildAzureInstallSteps({
+            releaseName,
+            namespace,
+            licenseJwt: args.licenseJwt!,
+            storageAccount: args.storageAccount!,
+            inputContainer: inputBucket!,
+            indexContainer: indexBucket!,
+            clientId: args.azureClientId!,
+            tenantId: args.azureTenantId!,
+            queues: azureQueues,
+            ...(args.resourceGroup !== undefined ? { resourceGroup: args.resourceGroup } : {}),
+            ...(args.location !== undefined ? { location: args.location } : {}),
+          })
+        : buildInstallSteps({
+            releaseName,
+            namespace,
+            licenseJwt: args.licenseJwt!,
+            inputBucket: inputBucket!,
+            indexBucket: indexBucket!,
+            irsaRoleArn: irsaRoleArn!,
+            sqsUrls: sqsUrls as Record<'index' | 'query' | 'subquery' | 'stream', string>,
+          }))
     );
   }
   if (!args.skipVerify) {
@@ -242,8 +348,23 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   // customer's own S3 (the bucket the Retriever reads) + SIEM down-tier
   // alternatives. Emitted only when the bucket + region are known.
   const region = snapshot.aws?.region;
-  const offloadMarkdown =
-    inputBucket && region
+  // On Azure the section states that offload delivery to Blob has no recipe,
+  // and it renders without an AWS region because there is none to print.
+  const offloadMarkdown = isAzure
+    ? inputBucket
+      ? renderOffloadSection(
+          {
+            bucket: inputBucket,
+            region: args.location ?? '',
+            prefix: 'app',
+            destinationType: 'azure_blob',
+            ...(args.storageAccount !== undefined ? { storageAccount: args.storageAccount } : {}),
+          },
+          mapForwarderToOffload(snapshot.kubectl.forwarders),
+          args.destination
+        )
+      : undefined
+    : inputBucket && region
       ? renderOffloadSection(
           { bucket: inputBucket, region, prefix: 'app' },
           mapForwarderToOffload(snapshot.kubectl.forwarders),
@@ -609,6 +730,148 @@ indexQueueUrl: "${opts.sqsUrls.index}"
 queryQueueUrl: "${opts.sqsUrls.query}"
 subQueryQueueUrl: "${opts.sqsUrls.subquery}"
 streamQueueUrl: "${opts.sqsUrls.stream}"
+`;
+}
+
+/**
+ * AKS + Azure Blob install steps.
+ *
+ * Step 1 runs the chart's provisioning script, which creates every Azure
+ * resource the Retriever needs and emits a values file. Steps 2 to 5 mirror
+ * the AWS path: add the repo, create the namespace, write the values, install,
+ * wait. The values block is the chart's `storage.provider: azure` shape, so
+ * the emitted file and the script's own output describe the same install.
+ */
+function buildAzureInstallSteps(opts: {
+  releaseName: string;
+  namespace: string;
+  licenseJwt: string;
+  storageAccount: string;
+  inputContainer: string;
+  indexContainer: string;
+  clientId: string;
+  tenantId: string;
+  queues: { index: string; query: string; subquery: string; stream: string };
+  resourceGroup?: string;
+  location?: string;
+}): PlanStep[] {
+  const steps: PlanStep[] = [];
+  const valuesFile = `${opts.releaseName}-azure-values.yaml`;
+  const rg = opts.resourceGroup ?? '<resource-group>';
+  const loc = opts.location ?? '<location>';
+
+  steps.push({
+    title: 'Provision the Azure resources',
+    rationale:
+      'Creates the storage account (flat namespace), the input and index containers, the four Storage Queues, ' +
+      'the user-assigned managed identity with "Storage Blob Data Contributor" and "Storage Queue Data Contributor" ' +
+      'on the account, the Event Grid system topic with a BlobCreated subscription onto the index queue, and the ' +
+      'federated credential binding the identity to this release\'s ServiceAccount. Ends by writing a values file.',
+    commands: [
+      `${AZURE_PROVISION_SCRIPT} \\\n  --resource-group ${rg} \\\n  --location ${loc} \\\n  --account ${opts.storageAccount} \\\n  --create-aks <aks-cluster-name> \\\n  --namespace ${opts.namespace} \\\n  --release ${opts.releaseName} \\\n  --values-out ${valuesFile}`,
+    ],
+    expectDurationSec: 900,
+  });
+
+  steps.push({
+    title: 'Add Retriever Helm repo',
+    rationale: `Makes the ${RETRIEVER_CHART_REF} chart available to \`helm install\`.`,
+    commands: [
+      `helm repo add ${RETRIEVER_CHART_ALIAS} ${RETRIEVER_CHART_REPO}`,
+      `helm repo update`,
+      `helm search repo ${RETRIEVER_CHART_REF}`,
+    ],
+  });
+
+  steps.push({
+    title: 'Create target namespace',
+    rationale: `The Retriever installs into \`${opts.namespace}\`.`,
+    commands: [
+      `kubectl create namespace ${opts.namespace} --dry-run=client -o yaml | kubectl apply -f -`,
+    ],
+  });
+
+  steps.push({
+    title: 'Write Helm values',
+    rationale:
+      'Wires the tenx block and the chart\'s `storage.provider: azure` block: the account, both containers, ' +
+      'the four Storage Queue names, and workload-identity auth. Compare against the file the provisioning ' +
+      'script wrote and keep whichever the operator edited.',
+    file: {
+      path: valuesFile,
+      contents: renderAzureRetrieverValues(opts),
+      language: 'yaml',
+    },
+    commands: [],
+  });
+
+  steps.push({
+    title: 'Install via Helm',
+    rationale: 'Deploys the indexer + query-handler + stream-worker against Blob and the Storage Queues.',
+    commands: [
+      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
+    ],
+  });
+
+  steps.push({
+    title: 'Wait for rollout',
+    rationale: 'Blocks until indexer + query-handler + stream-worker report Ready.',
+    commands: [
+      `kubectl -n ${opts.namespace} rollout status deployment -l app.kubernetes.io/instance=${opts.releaseName} --timeout=10m || true`,
+    ],
+    expectDurationSec: 600,
+  });
+
+  return steps;
+}
+
+function renderAzureRetrieverValues(opts: {
+  releaseName: string;
+  licenseJwt: string;
+  storageAccount: string;
+  inputContainer: string;
+  indexContainer: string;
+  clientId: string;
+  tenantId: string;
+  queues: { index: string; query: string; subquery: string; stream: string };
+}): string {
+  // `invoke: queue` is the Azure equivalent of the AWS `sqs` fan-out: the
+  // pipeline hands the next stage to an Azure Storage Queue. `scheduledQueries`
+  // is off because the CronJob shells `aws sqs send-message` from an aws-cli
+  // image, which has no Azure equivalent in the chart today.
+  return `log10xApiKey: "${opts.licenseJwt}"
+
+tenx:
+  enabled: true
+  apiKey: "${opts.licenseJwt}"
+  runtimeName: "${opts.releaseName}"
+  gitToken: "public-repo-no-token-needed"
+  config:
+    git:
+      enabled: true
+      url: "https://github.com/log-10x/config.git"
+
+storage:
+  provider: azure
+  azure:
+    account: "${opts.storageAccount}"
+    indexContainer: "${opts.indexContainer}"
+    inputContainer: "${opts.inputContainer}"
+    invoke: queue
+
+    queues:
+      index: "${opts.queues.index}"
+      query: "${opts.queues.query}"
+      subquery: "${opts.queues.subquery}"
+      stream: "${opts.queues.stream}"
+
+    auth:
+      method: workloadIdentity
+      clientId: "${opts.clientId}"
+      tenantId: "${opts.tenantId}"
+
+scheduledQueries:
+  enabled: false
 `;
 }
 

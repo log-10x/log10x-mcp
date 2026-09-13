@@ -33,7 +33,10 @@ import {
   getWizardSession,
   updateWizardSession,
 } from '../lib/discovery/snapshot-store.js';
-import { buildRetrieverPlan } from '../lib/advisor/retriever.js';
+import {
+  buildRetrieverPlan,
+  type RetrieverStorageProvider,
+} from '../lib/advisor/retriever.js';
 import { buildPlanSummary } from '../lib/advisor/envelope.js';
 import { renderPlan } from '../lib/advisor/render.js';
 import { acquireLicenseForWizard, LicenseFetchError } from '../lib/license-api.js';
@@ -107,6 +110,61 @@ export const adviseRetrieverSchema = {
     .string()
     .optional()
     .describe('SQS URL for stream operations (module output: stream_queue_url). Auto-detected from snapshot.'),
+  // Azure Blob path (AKS). Selected by `storage_provider: "azure"`, or
+  // automatically when the resolved env-config offload destination is
+  // `azure_blob`. Storage-provider selection is engine-side handler config on
+  // the pod, set through helm values, so it never rides on a query body.
+  storage_provider: z
+    .enum(['aws', 'azure'])
+    .optional()
+    .describe(
+      'Which object store the Retriever reads. **aws** (default) = S3 buckets, four SQS queues, IRSA. **azure** = Azure Blob containers, four Azure Storage Queues, AKS workload identity, behind the chart\'s `storage.provider: azure` block. Auto-selected as "azure" when the resolved env-config offload destination has type `azure_blob`. Azure is read and index side: the Retriever indexes and queries blobs already in the container, and forwarder offload recipes stay S3-shaped.'
+    ),
+  storage_account: z
+    .string()
+    .optional()
+    .describe(
+      'Azure storage account holding the input and index containers (azure only). Flat namespace only: a hierarchical-namespace account reorders listings and is refused by the engine at construction.'
+    ),
+  input_container: z
+    .string()
+    .optional()
+    .describe('Azure Blob container holding source logs (azure only). Bare container name, e.g. `logs`.'),
+  index_container: z
+    .string()
+    .optional()
+    .describe(
+      'Blob path for indexed results (azure only), as `account/container/path`. Default: `<storage_account>/tenx-index/tenx`.'
+    ),
+  resource_group: z
+    .string()
+    .optional()
+    .describe('Azure resource group for the provisioning command (azure only).'),
+  location: z
+    .string()
+    .optional()
+    .describe('Azure region for the provisioning command, e.g. `eastus` (azure only).'),
+  azure_client_id: z
+    .string()
+    .optional()
+    .describe(
+      'Client id of the user-assigned managed identity federated to the release ServiceAccount (azure only). The provisioning script prints it.'
+    ),
+  azure_tenant_id: z
+    .string()
+    .optional()
+    .describe('Entra tenant id (azure only). The provisioning script prints it.'),
+  azure_queues: z
+    .object({
+      index: z.string().optional(),
+      query: z.string().optional(),
+      subquery: z.string().optional(),
+      stream: z.string().optional(),
+    })
+    .optional()
+    .describe(
+      'Azure Storage Queue names on the storage account (azure only). Default: tenx-index / tenx-query / tenx-subquery / tenx-stream, matching the provisioning script.'
+    ),
   // License fields — same pattern as advise_install.
   license_source: z
     .enum(['signin', 'demo', 'paste'])
@@ -169,6 +227,15 @@ export interface RetrieverWizardSession {
   /** Release/namespace overrides. */
   releaseName?: string;
   namespace?: string;
+  /** Azure Blob path: storage provider and the four answers the AKS plan needs. */
+  storageProvider?: 'aws' | 'azure';
+  storageAccount?: string;
+  inputContainer?: string;
+  indexContainer?: string;
+  resourceGroup?: string;
+  location?: string;
+  azureClientId?: string;
+  azureTenantId?: string;
   updatedAt: string;
 }
 
@@ -280,7 +347,10 @@ type RetrieverQuestionId =
   | 'input-bucket'
   | 'sqs-urls'
   | 'irsa-role'
-  | 'license-paste';
+  | 'license-paste'
+  | 'azure-storage-account'
+  | 'azure-input-container'
+  | 'azure-workload-identity';
 
 type RetrieverQuestionChoice = { value: string; label: string; recommended?: boolean; details?: string };
 
@@ -333,6 +403,18 @@ const QUESTION_META: Record<RetrieverQuestionId, { headline: string; answer_fiel
   'license-paste': {
     headline: 'Step 6 — Paste the license JWT you already have.',
     answer_field: 'license_jwt_paste',
+  },
+  'azure-storage-account': {
+    headline: 'Azure step 1: name the storage account holding the input and index containers.',
+    answer_field: 'storage_account',
+  },
+  'azure-input-container': {
+    headline: 'Azure step 2: name the blob container holding the source logs.',
+    answer_field: 'input_container',
+  },
+  'azure-workload-identity': {
+    headline: 'Azure step 3: supply the managed-identity client id and the Entra tenant id.',
+    answer_field: 'azure_client_id',
   },
 };
 
@@ -656,11 +738,140 @@ async function detectKubectlRole(_clusterName: string): Promise<string | null> {
  * an input bucket that disagrees, the caller is responsible for surfacing
  * the precedence-mismatch warning at plan-emission time.
  */
+/**
+ * The three answers an AKS + Azure Blob install needs: the storage account,
+ * the input container, and the workload-identity pair the provisioning script
+ * prints. Every other value has a default that matches the script's own.
+ */
+function nextAzureQuestion(
+  session: RetrieverWizardSession,
+  resolvedStorageAccount?: string
+): RetrieverNextStep {
+  const account = resolvedStorageAccount ?? session.storageAccount;
+  const provisionCommand = [
+    'charts/retriever/scripts/azure/provision-retriever.sh \\',
+    `  --resource-group ${session.resourceGroup ?? '<resource-group>'} \\`,
+    `  --location ${session.location ?? '<location>'} \\`,
+    `  --account ${account ?? '<storage-account>'} \\`,
+    '  --create-aks <aks-cluster-name> \\',
+    `  --namespace ${session.namespace ?? '<namespace>'} \\`,
+    `  --release ${session.releaseName ?? 'my-retriever'} \\`,
+    '  --values-out retriever-azure-values.yaml',
+  ].join('\n');
+
+  if (!account) {
+    return {
+      kind: 'ask',
+      markdown: [
+        '# Retriever on AKS: which storage account?',
+        '',
+        'The Retriever reads source logs from a blob container and writes its index to a second one. ' +
+          'Both live on one storage account.',
+        '',
+        'The account must be **flat namespace**. A hierarchical-namespace account reorders listings, ' +
+          'and the engine refuses one at construction.',
+        '',
+        'Provisioning the whole set in one run:',
+        '',
+        '```bash',
+        provisionCommand,
+        '```',
+        '',
+        'The script creates the account, both containers, the four Storage Queues, the managed identity ' +
+          'with its blob and queue data roles, the Event Grid BlobCreated subscription onto the index queue, ' +
+          'and the federated credential bound to the release ServiceAccount. Re-invoke with the account name ' +
+          'once it exists.',
+      ].join('\n'),
+      questionId: 'azure-storage-account',
+      shape: {
+        type: 'string',
+        answer_field: 'storage_account',
+        description: 'Azure storage account name holding the input and index containers. Flat namespace only.',
+        example: 'tenxlogs',
+      },
+    };
+  }
+
+  if (!session.inputContainer) {
+    return {
+      kind: 'ask',
+      markdown: [
+        '# Retriever on AKS: which input container?',
+        '',
+        `Blob container on \`${account}\` holding the source logs the Retriever indexes. Bare container name, no path.`,
+        '',
+        'An Azure Monitor diagnostic export that already lands in a container is a valid answer: the Retriever ' +
+          'indexes and queries what is there, with no forwarder change.',
+      ].join('\n'),
+      questionId: 'azure-input-container',
+      shape: {
+        type: 'string',
+        answer_field: 'input_container',
+        description: 'Blob container holding source logs.',
+        example: 'logs',
+      },
+    };
+  }
+
+  if (!session.azureClientId || !session.azureTenantId) {
+    return {
+      kind: 'ask',
+      markdown: [
+        '# Retriever on AKS: workload identity',
+        '',
+        'Pods reach Blob and the Storage Queues as a user-assigned managed identity, federated to the ' +
+          "ServiceAccount this release creates. No secret is mounted: the webhook injects the token.",
+        '',
+        'The provisioning script creates the identity, grants it "Storage Blob Data Contributor" and ' +
+          '"Storage Queue Data Contributor" on the account, and prints both ids:',
+        '',
+        '```bash',
+        provisionCommand,
+        '```',
+      ].join('\n'),
+      questionId: 'azure-workload-identity',
+      shape: {
+        type: 'form',
+        description:
+          'Both ids are required for `auth.method: workloadIdentity`. The provisioning script prints them on completion.',
+        fields: [
+          {
+            name: 'azure_client_id',
+            type: 'string',
+            description: 'Client id of the user-assigned managed identity.',
+            required: !session.azureClientId,
+            ...(session.azureClientId !== undefined ? { default: session.azureClientId } : {}),
+            example: '00000000-0000-0000-0000-000000000000',
+          },
+          {
+            name: 'azure_tenant_id',
+            type: 'string',
+            description: 'Entra tenant id.',
+            required: !session.azureTenantId,
+            ...(session.azureTenantId !== undefined ? { default: session.azureTenantId } : {}),
+            example: '00000000-0000-0000-0000-000000000000',
+          },
+        ],
+      },
+    };
+  }
+
+  return { kind: 'render' };
+}
+
 async function nextQuestion(
   snapshot: DiscoverySnapshot,
   session: RetrieverWizardSession,
-  envCfgBucket?: string
+  envCfgBucket?: string,
+  azureContext?: { storageProvider: 'aws' | 'azure'; storageAccount?: string }
 ): Promise<RetrieverNextStep> {
+
+  // Azure branch. The AWS questions below ask for an EKS OIDC provider, an
+  // IRSA role and four SQS URLs, none of which exist on AKS, so an Azure
+  // install takes its own three questions and never reaches them.
+  if (azureContext?.storageProvider === 'azure') {
+    return nextAzureQuestion(session, azureContext.storageAccount);
+  }
 
   // Step 1 — OIDC provider check.
   // We surface this once (when infraMode is unknown and we haven't yet
@@ -1450,6 +1661,14 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     licenseJwt: args.license_jwt_paste,
     releaseName: args.release_name,
     namespace: args.namespace,
+    storageProvider: args.storage_provider,
+    storageAccount: args.storage_account,
+    inputContainer: args.input_container,
+    indexContainer: args.index_container,
+    resourceGroup: args.resource_group,
+    location: args.location,
+    azureClientId: args.azure_client_id,
+    azureTenantId: args.azure_tenant_id,
   });
 
   // Auto-detect 'existing' when all infra is in the snapshot and none
@@ -1496,8 +1715,25 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     if (!envConfigWarnings.includes(msg)) envConfigWarnings.push(msg);
   }
 
+  // Storage provider. An explicit arg wins; otherwise the resolved env-config
+  // offload destination decides, so an operator whose env-config already says
+  // `azure_blob` gets the AKS plan without naming the provider twice.
+  const storageProvider: RetrieverStorageProvider =
+    args.storage_provider ??
+    session.storageProvider ??
+    (envCfgActiveOffload?.type === 'azure_blob' ? 'azure' : 'aws');
+  const isAzurePlan = storageProvider === 'azure';
+  const azureStorageAccount =
+    args.storage_account ??
+    session.storageAccount ??
+    (envCfgActiveOffload?.type === 'azure_blob' ? envCfgActiveOffload.storage_account : undefined) ??
+    process.env.LOG10X_OFFLOAD_STORAGE_ACCOUNT;
+
   // Question routing.
-  const next = await nextQuestion(snapshot, session, envCfgActiveOffload?.bucket);
+  const next = await nextQuestion(snapshot, session, envCfgActiveOffload?.bucket, {
+    storageProvider,
+    ...(azureStorageAccount !== undefined ? { storageAccount: azureStorageAccount } : {}),
+  });
   if (next.kind === 'ask') {
     return wizardReturn(
       {
@@ -1641,13 +1877,17 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   }
 
   const action = args.action ?? 'all';
+  const azureInputContainer = args.input_container ?? session.inputContainer ?? resolvedInputBucket;
+
   const plan = await buildRetrieverPlan({
     snapshot,
     releaseName: session.releaseName ?? args.release_name,
     namespace: session.namespace ?? args.namespace,
     licenseJwt: session.licenseJwt,
-    inputBucket: resolvedInputBucket,
-    indexBucket: session.indexBucket ?? args.index_bucket,
+    inputBucket: isAzurePlan ? azureInputContainer : resolvedInputBucket,
+    indexBucket: isAzurePlan
+      ? session.indexContainer ?? args.index_bucket
+      : session.indexBucket ?? args.index_bucket,
     irsaRoleArn: resolvedIrsaRoleArn,
     sqsUrls: {
       index: resolvedSqsUrls.index,
@@ -1655,6 +1895,13 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
       subquery: resolvedSqsUrls.subquery,
       stream: resolvedSqsUrls.stream,
     },
+    storageProvider,
+    ...(azureStorageAccount !== undefined ? { storageAccount: azureStorageAccount } : {}),
+    ...(session.resourceGroup !== undefined ? { resourceGroup: session.resourceGroup } : {}),
+    ...(session.location !== undefined ? { location: session.location } : {}),
+    ...(session.azureClientId !== undefined ? { azureClientId: session.azureClientId } : {}),
+    ...(session.azureTenantId !== undefined ? { azureTenantId: session.azureTenantId } : {}),
+    ...(args.azure_queues !== undefined ? { azureQueues: args.azure_queues } : {}),
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',

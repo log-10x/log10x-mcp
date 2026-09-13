@@ -17,9 +17,16 @@
  *   - IRSA s3:PutObject misconfigured: s3_qr_jsonl_written fails.
  *   - MCP input_bucket misaligned with engine write location: mcp_events_returned fails.
  *
+ * The offload sink is not always S3. When the resolved destination type is
+ * `azure_blob`, the two storage asserts list the blob container through
+ * `az storage blob list` and report container facts: what the listing
+ * returned and which blob-data role is missing. Neither one mentions IAM,
+ * because an Azure operator has no IAM to fix.
+ *
  * Dependencies are injectable via a `ProbeDeps` parameter so the test suite
  * can replace AWS / kubectl / metric-backend / submitQuery wholesale without
  * touching the production code paths. The default deps wire up:
+ *   - the object store lister for the destination type (aws or az CLI)
  *   - aws CLI (via execFile)
  *   - kubectl (via execFile)
  *   - customer metric backend (resolveBackend → queryInstant)
@@ -33,6 +40,13 @@ import { promisify } from 'node:util';
 // import introduces no cycle. The rest of this file imports retriever-api lazily
 // inside the submit helper.
 import { buildArchiveHashSearch } from './retriever-api.js';
+import {
+  listStoreObjects,
+  storeUri,
+  storeReadAccessRemedy,
+  type ObjectStoreKind,
+  type ObjectStoreTarget,
+} from './object-store.js';
 
 const execFileP = promisify(execFile);
 
@@ -41,10 +55,14 @@ const execFileP = promisify(execFile);
 export interface ProbeArgs {
   /** Kubernetes namespace where the retriever pod runs (e.g. 'log10x'). */
   namespace: string;
-  /** S3 bucket where the receiver offloads data (where the indexer reads from). */
+  /** Bucket or blob container where the receiver offloads data (where the indexer reads from). */
   offload_bucket: string;
-  /** S3 bucket where the retriever writes qr/<id>/*.jsonl result objects. */
+  /** Bucket or blob container where the retriever writes qr/<id>/*.jsonl result objects. */
   input_bucket: string;
+  /** Destination type of both containers. Default `s3`. */
+  store_kind?: ObjectStoreKind;
+  /** Azure storage account holding them. Read when `store_kind` is `azure_blob`. */
+  storage_account?: string;
   /** CloudWatch log group the retriever writes per-query execution events to. */
   query_log_group: string;
   /** Label selector for the retriever pod. Default: 'app=retriever-10x'. */
@@ -102,11 +120,32 @@ export const REMEDIES: Record<string, string> = {
     'results were written to cold storage but the read path could not find them, so log10x_retriever_query returns zero events. Check that the input_bucket arg matches the actual write location.',
 };
 
+/**
+ * Remedies for the two storage asserts when the sink is a blob container.
+ * The S3 wording sends an Azure operator to an IAM policy they do not have;
+ * these name the blob-data role instead. Every other assert is store-neutral
+ * and keeps its entry in REMEDIES.
+ */
+export const AZURE_BLOB_REMEDIES: Record<string, string> = {
+  offload_bucket_has_recent_data:
+    'the agent that ships logs from your environment to log10x cold storage is not running or is misconfigured, so no new blobs are landing in the container. Check the shipping agent in your cluster, or run log10x_advise_retriever for setup guidance.',
+  s3_qr_jsonl_written:
+    'the log10x worker ran but could not write results back to cold storage, so queries complete on the engine side but return no data. Check that the identity holds "Storage Blob Data Contributor" on the storage account and that the write-container env var matches the container in use.',
+};
+
+/** The remedy for one assert on one store kind. */
+function remedyFor(assertName: string, kind: ObjectStoreKind): string {
+  if (kind === 'azure_blob' && AZURE_BLOB_REMEDIES[assertName]) {
+    return AZURE_BLOB_REMEDIES[assertName];
+  }
+  return REMEDIES[assertName];
+}
+
 // ── Injectable dependency surface ───────────────────────────────────────────
 
 export interface ProbeDeps {
-  /** List S3 objects under prefix; returns the array of objects with LastModified. */
-  s3ListObjects: (
+  /** List objects under prefix; returns the array of objects with LastModified. */
+  listObjects: (
     bucket: string,
     prefix: string,
   ) => Promise<Array<{ Key: string; LastModified?: string; Size?: number }>>;
@@ -151,9 +190,10 @@ export interface ProbeDeps {
 
 // ── Default deps (wire to real shell / SDK calls) ──────────────────────────
 
-function defaultDeps(): ProbeDeps {
+function defaultDeps(store?: ObjectStoreTarget): ProbeDeps {
   return {
-    s3ListObjects: defaultS3ListObjects,
+    listObjects: (container, prefix) =>
+      listStoreObjects(store ? { ...store, container } : { kind: 's3', container }, prefix),
     kubectlLogs: defaultKubectlLogs,
     sqsDepths: defaultSqsDepths,
     sqsListQueues: defaultSqsListQueues,
@@ -162,30 +202,6 @@ function defaultDeps(): ProbeDeps {
     pickTopHash: defaultPickTopHash,
     submitRetrieverQuery: defaultSubmitRetrieverQuery,
   };
-}
-
-async function defaultS3ListObjects(
-  bucket: string,
-  prefix: string,
-): Promise<Array<{ Key: string; LastModified?: string; Size?: number }>> {
-  try {
-    const { stdout } = await execFileP(
-      'aws',
-      ['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', prefix, '--output', 'json'],
-      { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 },
-    );
-    if (!stdout.trim()) return [];
-    const parsed = JSON.parse(stdout) as {
-      Contents?: Array<{ Key: string; LastModified?: string; Size?: number }>;
-    };
-    return parsed.Contents ?? [];
-  } catch (e) {
-    const stderr = (e as { stderr?: string }).stderr ?? '';
-    if (stderr.includes('NoSuchBucket')) {
-      throw new Error(`bucket does not exist: ${bucket}`);
-    }
-    return [];
-  }
 }
 
 async function defaultKubectlLogs(
@@ -425,16 +441,25 @@ async function defaultSubmitRetrieverQuery(req: {
  */
 export async function runRetrieverProbe(
   args: ProbeArgs,
-  deps: ProbeDeps = defaultDeps(),
+  deps?: ProbeDeps,
 ): Promise<ProbeResult> {
   const t0 = Date.now();
   const windowMinutes = args.window_minutes ?? 5;
   const podLabelSelector = args.pod_label_selector ?? 'app=retriever-10x';
+  // The store target is per-run, so the default deps are built from the args
+  // rather than from a parameter default: an `azure_blob` destination must
+  // reach the lister before the first assert runs.
+  const store: ObjectStoreTarget = {
+    kind: args.store_kind ?? 's3',
+    container: args.offload_bucket,
+    ...(args.storage_account !== undefined ? { storageAccount: args.storage_account } : {}),
+  };
+  const probeDeps = deps ?? defaultDeps(store);
 
   // Stage 1 — pick target hash (skipped if args.target_hash).
   let pickedHash = args.target_hash;
   if (!pickedHash) {
-    const pick = await deps.pickTopHash();
+    const pick = await probeDeps.pickTopHash();
     if (pick.status === 'no_backend') {
       return {
         verdict: 'unknown',
@@ -458,10 +483,10 @@ export async function runRetrieverProbe(
 
   // Stage 2 — pre-flight asserts, all in parallel.
   const preflight = await Promise.all([
-    assertOffloadHasRecentData(args.offload_bucket, deps),
-    assertIndexerPipelineRunning(args.namespace, podLabelSelector, deps),
-    assertSqsQueuesDrained(deps),
-    assertRetrieverPodReady(args.namespace, podLabelSelector, deps),
+    assertOffloadHasRecentData(store, probeDeps),
+    assertIndexerPipelineRunning(args.namespace, podLabelSelector, probeDeps),
+    assertSqsQueuesDrained(probeDeps),
+    assertRetrieverPodReady(args.namespace, podLabelSelector, probeDeps),
   ]);
 
   // If any pre-flight assert fails, still attempt the query so we collect
@@ -482,7 +507,7 @@ export async function runRetrieverProbe(
   let submitOk = false;
   let submitErr = '';
   try {
-    const resp = await deps.submitRetrieverQuery({
+    const resp = await probeDeps.submitRetrieverQuery({
       // pickedHash comes from the METRICS backend (top-volume hash), which is a
       // different identity space from the archive's re-derived `tenx_hash`. A field
       // equality made this probe report a broken chain on a healthy one. See
@@ -530,9 +555,9 @@ export async function runRetrieverProbe(
 
   // Stage 4 — post-query asserts (sequential, depend on queryId).
   const postQuery: ProbeAssert[] = [];
-  postQuery.push(await assertCwScanMatch(queryId!, args.query_log_group, t0, deps));
-  postQuery.push(await assertCwStreamFetch(queryId!, args.query_log_group, t0, deps));
-  postQuery.push(await assertS3QrJsonlWritten(queryId!, args.input_bucket, deps));
+  postQuery.push(await assertCwScanMatch(queryId!, args.query_log_group, t0, probeDeps));
+  postQuery.push(await assertCwStreamFetch(queryId!, args.query_log_group, t0, probeDeps));
+  postQuery.push(await assertS3QrJsonlWritten(queryId!, { ...store, container: args.input_bucket }, probeDeps));
   postQuery.push(assertMcpEventsReturned(eventsMatched, eventsReturned));
 
   return assembleVerdict([...preflight, ...postQuery], pickedHash, queryId, t0);
@@ -541,19 +566,21 @@ export async function runRetrieverProbe(
 // ── Per-assert helpers ──────────────────────────────────────────────────────
 
 async function assertOffloadHasRecentData(
-  bucket: string,
+  store: ObjectStoreTarget,
   deps: ProbeDeps,
 ): Promise<ProbeAssert> {
   const fiveMinAgo = Date.now() - 5 * 60_000;
+  const uri = storeUri(store);
+  const noun = store.kind === 'azure_blob' ? 'blob' : 'object';
   let objects: Array<{ Key: string; LastModified?: string; Size?: number }>;
   try {
-    objects = await deps.s3ListObjects(bucket, '');
+    objects = await deps.listObjects(store.container, '');
   } catch (e) {
     return {
       name: 'offload_bucket_has_recent_data',
       pass: false,
-      observed: `list-objects error: ${(e as Error).message.slice(0, 200)}`,
-      remedy: REMEDIES.offload_bucket_has_recent_data,
+      observed: `list error on ${uri}: ${(e as Error).message.slice(0, 200)}. ${storeReadAccessRemedy(store)}`,
+      remedy: remedyFor('offload_bucket_has_recent_data', store.kind),
     };
   }
   const recent = objects.filter((o) => {
@@ -565,14 +592,14 @@ async function assertOffloadHasRecentData(
     return {
       name: 'offload_bucket_has_recent_data',
       pass: true,
-      observed: `${recent.length} object(s) modified in last 5 min in s3://${bucket}/`,
+      observed: `${recent.length} ${noun}(s) modified in last 5 min in ${uri}`,
     };
   }
   return {
     name: 'offload_bucket_has_recent_data',
     pass: false,
-    observed: `0 objects modified in last 5 min in s3://${bucket}/ (total objects scanned: ${objects.length})`,
-    remedy: REMEDIES.offload_bucket_has_recent_data,
+    observed: `0 ${noun}s modified in last 5 min in ${uri} (total ${noun}s scanned: ${objects.length})`,
+    remedy: remedyFor('offload_bucket_has_recent_data', store.kind),
   };
 }
 
@@ -764,19 +791,21 @@ async function assertCwStreamFetch(
 
 async function assertS3QrJsonlWritten(
   queryId: string,
-  inputBucket: string,
+  inputStore: ObjectStoreTarget,
   deps: ProbeDeps,
 ): Promise<ProbeAssert> {
   const prefix = `indexing-results/tenx/app/qr/${queryId}/`;
+  const uri = storeUri(inputStore, prefix);
+  const noun = inputStore.kind === 'azure_blob' ? 'blob' : 'object';
   let objects: Array<{ Key: string }>;
   try {
-    objects = await deps.s3ListObjects(inputBucket, prefix);
+    objects = await deps.listObjects(inputStore.container, prefix);
   } catch (e) {
     return {
       name: 's3_qr_jsonl_written',
       pass: false,
-      observed: `list-objects error: ${(e as Error).message.slice(0, 200)}`,
-      remedy: REMEDIES.s3_qr_jsonl_written,
+      observed: `list error on ${uri}: ${(e as Error).message.slice(0, 200)}. ${storeReadAccessRemedy(inputStore)}`,
+      remedy: remedyFor('s3_qr_jsonl_written', inputStore.kind),
     };
   }
   const jsonl = objects.filter((o) => o.Key.endsWith('.jsonl'));
@@ -784,14 +813,14 @@ async function assertS3QrJsonlWritten(
     return {
       name: 's3_qr_jsonl_written',
       pass: true,
-      observed: `${jsonl.length} jsonl file(s) under s3://${inputBucket}/${prefix}`,
+      observed: `${jsonl.length} jsonl file(s) under ${uri}`,
     };
   }
   return {
     name: 's3_qr_jsonl_written',
     pass: false,
-    observed: `0 jsonl files under s3://${inputBucket}/${prefix} (${objects.length} total objects)`,
-    remedy: REMEDIES.s3_qr_jsonl_written,
+    observed: `0 jsonl files under ${uri} (${objects.length} total ${noun}s)`,
+    remedy: remedyFor('s3_qr_jsonl_written', inputStore.kind),
   };
 }
 

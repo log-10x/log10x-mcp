@@ -44,6 +44,11 @@ import {
   defaultOffloadDeliveryDeps,
   type OffloadDeliveryVerdict,
 } from '../lib/offload-delivery.js';
+import {
+  storeReadAccessRemedy,
+  type ObjectStoreKind,
+  type ObjectStoreTarget,
+} from '../lib/object-store.js';
 import { verifyConfigGeneration } from '../lib/config-generation.js';
 import { findNewestConfigMapTarget } from './commitment-report.js';
 
@@ -1253,6 +1258,33 @@ async function addConfigLiveCheck(
 }
 
 /**
+ * Remedy text for each offload_delivery verdict, in the store's own
+ * vocabulary. The Azure branch names blob-data roles and the `az` CLI: an
+ * Azure operator has no IAM policy to grant, and an IAM remedy sends them
+ * looking for a control their account does not have. Exported so the suite
+ * can assert both branches without driving a live doctor run.
+ */
+export function offloadDeliveryFixes(
+  store: ObjectStoreTarget,
+): Record<string, string | undefined> {
+  const isBlob = store.kind === 'azure_blob';
+  return {
+    silent_loss: isBlob
+      ? 'The engine is stamping offload but blobs are not landing in the container. Log10x emits forwarder offload recipes for S3 and S3-compatible buckets, so a blob sink is wired by hand today: check the forwarder routeState routing (does it route routeState=="offload" to this container?), the azure_blob output plugin, the account and container names, and that the forwarder identity holds "Storage Blob Data Contributor".'
+      : 'The engine is stamping offload but bytes are not landing in the sink. Check the forwarder routeState routing (does it route routeState=="offload" to this bucket?), the s3 output plugin, the bucket name/region, and s3:PutObject on the forwarder role.',
+    leak: isBlob
+      ? 'The forwarder is shipping more than the offload slice to the container (copy-everything). Restrict it to route ONLY routeState=="offload" to the offload container, and keep pass/compact on the SIEM path. Until fixed, offload savings are overstated.'
+      : 'The forwarder is shipping more than the offload slice to the sink (copy-everything). Restrict it to route ONLY routeState=="offload" to the offload bucket, and keep pass/compact on the SIEM path. Until fixed, offload savings are overstated.',
+    unverified: isBlob
+      ? `Could not read the offload container. ${storeReadAccessRemedy(store)}`
+      : `Could not read the offload bucket. ${storeReadAccessRemedy(store)}`,
+    stale: isBlob
+      ? 'Blobs exist but none are recent and nothing is being stamped now, so offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.'
+      : 'Offload objects exist but none are recent and nothing is being stamped now — offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.',
+  };
+}
+
+/**
  * offload_delivery — close the loop between the engine's `routeState=offload`
  * STAMP and what actually landed in the customer's offload sink (S3).
  *
@@ -1278,6 +1310,12 @@ async function addOffloadDeliveryCheck(
   // configured for this install; nothing to verify, skip silently.
   let bucket: string | undefined;
   let prefix: string | undefined;
+  // Destination type drives which CLI reads the sink and which vocabulary the
+  // findings use. An `azure_blob` destination read through `aws s3api` fails
+  // and reports a missing IAM policy, which is a control an Azure operator
+  // cannot grant.
+  let storeKind: ObjectStoreKind = 's3';
+  let storageAccount: string | undefined;
   try {
     // Bind resolution to THIS env (a multi-env doctor run calls one check per
     // env); fall back to the default resolution when the per-env identity does
@@ -1288,6 +1326,10 @@ async function addOffloadDeliveryCheck(
       const active = pickActiveOffload(resolved.config);
       bucket = active?.bucket;
       prefix = active?.prefix;
+      if (active?.type === 'azure_blob') {
+        storeKind = 'azure_blob';
+        storageAccount = active.storage_account;
+      }
     }
   } catch {
     // Resolution failure is already surfaced by env_config_resolution; skip.
@@ -1295,6 +1337,15 @@ async function addOffloadDeliveryCheck(
   }
   if (!bucket) bucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET || undefined;
   if (!bucket) return;
+  if (storeKind === 's3' && process.env.LOG10X_OFFLOAD_TYPE === 'azure_blob') {
+    storeKind = 'azure_blob';
+    storageAccount = storageAccount ?? process.env.LOG10X_OFFLOAD_STORAGE_ACCOUNT;
+  }
+  const store: ObjectStoreTarget = {
+    kind: storeKind,
+    container: bucket,
+    ...(storageAccount !== undefined ? { storageAccount } : {}),
+  };
 
   // Stamped side: engine-classified offload bytes in the last hour. Null on
   // any query failure so the verifier degrades to liveness + purity and never
@@ -1316,20 +1367,18 @@ async function addOffloadDeliveryCheck(
   };
 
   const result = await verifyOffloadDelivery(
-    { bucket, prefix: prefix || 'app/', recencyMinutes: 60, sampleObjects: 3 },
-    defaultOffloadDeliveryDeps(stampedFn),
+    {
+      bucket,
+      prefix: prefix || 'app/',
+      recencyMinutes: 60,
+      sampleObjects: 3,
+      storeKind,
+      ...(storageAccount !== undefined ? { storageAccount } : {}),
+    },
+    defaultOffloadDeliveryDeps(stampedFn, store),
   );
 
-  const FIX: Record<string, string | undefined> = {
-    silent_loss:
-      'The engine is stamping offload but bytes are not landing in the sink. Check the forwarder routeState routing (does it route routeState=="offload" to this bucket?), the s3 output plugin, the bucket name/region, and s3:PutObject on the forwarder role.',
-    leak:
-      'The forwarder is shipping more than the offload slice to the sink (copy-everything). Restrict it to route ONLY routeState=="offload" to the offload bucket, and keep pass/compact on the SIEM path. Until fixed, offload savings are overstated.',
-    unverified:
-      'Could not read the offload bucket. Grant AWS credentials with s3:ListBucket + s3:GetObject on the bucket so doctor can confirm delivery, or verify manually with `aws s3 ls s3://<bucket>/<prefix>`.',
-    stale:
-      'Offload objects exist but none are recent and nothing is being stamped now — offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.',
-  };
+  const FIX = offloadDeliveryFixes(store);
 
   // Exhaustive map (compile-time check: adding a verdict without a status
   // here is a type error, rather than silently defaulting to 'pass').

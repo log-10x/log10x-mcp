@@ -79,6 +79,15 @@ export interface OffloadRecipe {
 export interface OffloadParams {
   /** The Retriever input bucket (snapshot.recommendations.retrieverS3Bucket). */
   bucket: string;
+  /**
+   * Destination type of the offload sink. Every generator below emits an S3
+   * sink, so `azure_blob` and `gcs` have no recipe: the render path returns
+   * the state of play instead of a config that would write to the wrong
+   * store. Defaults to `s3`.
+   */
+  destinationType?: 's3' | 'gcs' | 'azure_blob' | 'file';
+  /** Azure storage account holding the container. Read when `destinationType` is `azure_blob`. */
+  storageAccount?: string;
   /** Key prefix == the Retriever `target` (default `app`). Objects land at
    * `{bucket}/{prefix}/...`; the indexer's S3->SQS notification picks them up. */
   prefix?: string;
@@ -596,6 +605,43 @@ const RECIPE_GENERATORS: Record<OffloadForwarderId, (p: OffloadParams) => Offloa
   logstash: recipeLogstash,
   cribl: recipeCribl,
 };
+
+/**
+ * The state of Azure Blob as an offload sink, as one markdown block.
+ *
+ * Offload delivery to Azure Blob is not available. Every generator in this
+ * file emits an `aws_s3` sink, and no Blob writer exists behind them, so a
+ * recipe here would hand the operator a config that writes somewhere other
+ * than the container they named. S3 and S3-compatible buckets (MinIO, Ceph)
+ * carry the write path today. The Retriever reads Blob either way: it
+ * indexes and queries blobs that are already in the container, so an Azure
+ * Monitor diagnostic export into Blob is queryable now.
+ *
+ * Writing this as a block rather than a caveat under a recipe is the point.
+ * A generated `aws_s3` sink with a warning above it is still a generated
+ * `aws_s3` sink, and the operator applies it.
+ */
+export function azureBlobOffloadUnavailable(params: OffloadParams): string {
+  const container = params.bucket;
+  const account = params.storageAccount ?? '<storage-account>';
+  return [
+    '**Offload delivery to Azure Blob is not available.** log10x emits forwarder offload ' +
+      'recipes for S3 and S3-compatible buckets (MinIO, Ceph, and any endpoint speaking the ' +
+      'S3 API). Blob speaks its own API and has no recipe here, so this destination has no ' +
+      'config to paste.',
+    '',
+    'What holds today:',
+    '',
+    `- The Retriever indexes and queries blobs already in \`https://${account}.blob.core.windows.net/${container}/\`. ` +
+      'An Azure Monitor diagnostic export that lands in the container is queryable by stamped ' +
+      'identity, with no forwarder change.',
+    '- For a new offload path, point the forwarder at an S3 or S3-compatible bucket and re-run ' +
+      '`log10x_advise_retriever` with that destination to get the recipe.',
+    '- `log10x_doctor` and `log10x_retriever_probe` read the blob container directly, so delivery ' +
+      'into Blob by any other route is still verified.',
+    '',
+  ].join('\n');
+}
 
 /** Return the two-route offload recipe for the given forwarder. */
 export function offloadRecipe(forwarder: OffloadForwarderId, params: OffloadParams): OffloadRecipe {
@@ -1374,6 +1420,13 @@ export function renderOffloadSection(
     : undefined;
   const prefix = params.prefix ?? DEFAULT_PREFIX;
   const lines: string[] = [];
+
+  // An azure_blob destination gets the state of play, not a recipe. Every
+  // generator emits an S3 sink, so rendering one here would tell the operator
+  // to write the offload slice to a bucket they did not ask for.
+  if (params.destinationType === 'azure_blob') {
+    return azureBlobOffloadUnavailable(params);
+  }
 
   lines.push(
     'Route the slice 10x marks low-value (`routeState == "drop"`) to the customer\'s ' +

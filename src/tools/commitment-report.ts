@@ -65,6 +65,7 @@ import {
   verifyOffloadDelivery,
   defaultOffloadDeliveryDeps,
 } from '../lib/offload-delivery.js';
+import type { ObjectStoreKind, ObjectStoreTarget } from '../lib/object-store.js';
 import { LABELS, KEPT_STATES_RE } from '../lib/promql.js';
 import { buildSourceDisclosureFromEnv } from '../lib/source-disclosure.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
@@ -2331,18 +2332,30 @@ export async function executeCommitmentReport(
   try {
     let offloadBucket: string | undefined;
     let offloadPrefix: string | undefined;
+    // The sink may be a blob container. Read it with the matching CLI so an
+    // Azure install gets a delivery verdict instead of an AWS CLI failure.
+    let offloadStoreKind: ObjectStoreKind = 's3';
+    let offloadStorageAccount: string | undefined;
     try {
       const resolvedCfg = await resolveClusterConfig();
       if (resolvedCfg.ok) {
         const activeOffload = pickActiveOffload(resolvedCfg.config);
         offloadBucket = activeOffload?.bucket;
         offloadPrefix = activeOffload?.prefix;
+        if (activeOffload?.type === 'azure_blob') {
+          offloadStoreKind = 'azure_blob';
+          offloadStorageAccount = activeOffload.storage_account;
+        }
       }
     } catch {
     // resolution failure: fall through to env-var fallback / skip.
     }
     if (!offloadBucket) {
       offloadBucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET || undefined;
+    }
+    if (offloadStoreKind === 's3' && process.env.LOG10X_OFFLOAD_TYPE === 'azure_blob') {
+      offloadStoreKind = 'azure_blob';
+      offloadStorageAccount = offloadStorageAccount ?? process.env.LOG10X_OFFLOAD_STORAGE_ACCOUNT;
     }
     if (offloadBucket) {
       const stampedFn = async (): Promise<number | null> => {
@@ -2370,9 +2383,21 @@ export async function executeCommitmentReport(
           return null;
         }
       };
+      const offloadStore: ObjectStoreTarget = {
+        kind: offloadStoreKind,
+        container: offloadBucket,
+        ...(offloadStorageAccount !== undefined ? { storageAccount: offloadStorageAccount } : {}),
+      };
       const dv = await verifyOffloadDelivery(
-        { bucket: offloadBucket, prefix: offloadPrefix || 'app/', recencyMinutes: 60, sampleObjects: 3 },
-        defaultOffloadDeliveryDeps(stampedFn),
+        {
+          bucket: offloadBucket,
+          prefix: offloadPrefix || 'app/',
+          recencyMinutes: 60,
+          sampleObjects: 3,
+          storeKind: offloadStoreKind,
+          ...(offloadStorageAccount !== undefined ? { storageAccount: offloadStorageAccount } : {}),
+        },
+        defaultOffloadDeliveryDeps(stampedFn, offloadStore),
       );
       if (dv.verdict === 'leak') {
         caveats.push(
@@ -2380,7 +2405,11 @@ export async function executeCommitmentReport(
         );
       } else if (dv.verdict === 'silent_loss') {
         caveats.push(
-          `Offload delivery PHANTOM (silent loss) — ${dv.message} The bytes never reached the offload sink at all, so the offload portion of these savings is NOT realized. Check the forwarder S3 output plugin, the bucket/region, and s3:PutObject on the forwarder role.`
+          `Offload delivery PHANTOM (silent loss) — ${dv.message} The bytes never reached the offload sink at all, so the offload portion of these savings is NOT realized. ${
+            offloadStoreKind === 'azure_blob'
+              ? 'Check the forwarder azure_blob output, the account and container names, and that the forwarder identity holds "Storage Blob Data Contributor".'
+              : 'Check the forwarder S3 output plugin, the bucket/region, and s3:PutObject on the forwarder role.'
+          }`
         );
       } else if (dv.verdict === 'unverified') {
         caveats.push(

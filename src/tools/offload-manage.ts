@@ -74,12 +74,20 @@ export const offloadAddSchema = {
       'Human-readable label for this destination (e.g. "primary", "regional_us", "legacy_streamer"). Must be unique within the env\'s offload_destinations list — adding a destination with a nickname already in use is refused (use log10x_offload_archive on the old one first if you want to recycle the label).'
     ),
   type: offloadTypeSchema.describe(
-    'Destination kind. `s3` / `gcs` / `azure_blob` are object stores; `file` is a local-path drop used for dev / on-prem appliances.'
+    'Destination kind. `s3` / `gcs` / `azure_blob` are object stores; `file` is a local-path drop used for dev / on-prem appliances. `azure_blob` is a READ-side destination today: the Retriever indexes and queries blobs that are already in the container (Azure Monitor diagnostic exports, for example), and log10x_advise_retriever emits forwarder offload recipes for S3 and S3-compatible buckets only.'
   ),
   bucket: z
     .string()
     .optional()
-    .describe('Bucket name (required for s3 / gcs / azure_blob).'),
+    .describe(
+      'Bucket name for s3 / gcs. For azure_blob this is the blob CONTAINER name, and `storage_account` names the account holding it.'
+    ),
+  storage_account: z
+    .string()
+    .optional()
+    .describe(
+      'Azure storage account name (azure_blob only), without a URL or a suffix. The read path (log10x_doctor offload_delivery, log10x_retriever_probe) lists the container at `https://<storage_account>.blob.core.windows.net/<bucket>/` through `az storage blob list`, so a destination without it cannot be read back.'
+    ),
   prefix: z
     .string()
     .optional()
@@ -90,10 +98,14 @@ export const offloadAddSchema = {
     .string()
     .optional()
     .describe('AWS / Azure region (s3 / azure_blob).'),
+  note: z
+    .string()
+    .optional()
+    .describe('Free-form note stored on the destination entry and surfaced in later reads.'),
   auth: offloadAuthSchema
     .optional()
     .describe(
-      'How the Receiver authenticates to the destination. Omit to defer to the cloud-default identity (IRSA on EKS, workload identity on GKE, managed identity on AKS, ambient credentials elsewhere).'
+      'How the Receiver authenticates to the destination. Omit to defer to the cloud-default identity (IRSA on EKS, workload identity on GKE, workload identity on AKS, ambient credentials elsewhere). On `azure_blob` this records intent for the read path and for the operator: the forwarder write half is wired by hand, since log10x emits offload recipes for S3 sinks only.'
     ),
   status: offloadStatusSchema
     .optional()
@@ -136,8 +148,10 @@ interface OffloadAddArgs {
   nickname: string;
   type: 's3' | 'gcs' | 'azure_blob' | 'file';
   bucket?: string;
+  storage_account?: string;
   prefix?: string;
   region?: string;
+  note?: string;
   auth?: z.infer<typeof offloadAuthSchema>;
   status?: 'active' | 'draining' | 'archived' | 'failed';
 }
@@ -334,11 +348,29 @@ async function executeOffloadAddInner(
     type: args.type,
     status: args.status ?? 'active',
     ...(args.bucket !== undefined ? { bucket: args.bucket } : {}),
+    ...(args.storage_account !== undefined ? { storage_account: args.storage_account } : {}),
     ...(args.prefix !== undefined ? { prefix: args.prefix } : {}),
     ...(args.region !== undefined ? { region: args.region } : {}),
+    ...(args.note !== undefined ? { note: args.note } : {}),
     ...(args.auth ? { auth: args.auth } : {}),
     first_used_at: nowIso(),
   };
+
+  // An azure_blob destination with no storage_account is unreadable: the
+  // probe, the delivery verifier and doctor all address the container as
+  // <account>.blob.core.windows.net/<container>. Refuse at write time rather
+  // than store a destination that reads back as a CLI failure later.
+  if (draft.type === 'azure_blob' && !draft.storage_account) {
+    return {
+      ok: false,
+      env_id: config.env_id,
+      nickname: args.nickname,
+      store_kind: store.kind,
+      error:
+        'An azure_blob destination needs `storage_account` (the storage account name holding the container). Pass it and retry.',
+      error_code: 'missing_storage_account',
+    };
+  }
 
   // Validate the destination shape early — schema-level type rules (e.g.
   // bucket required for s3/gcs/azure_blob? — not enforced by zod today, but
