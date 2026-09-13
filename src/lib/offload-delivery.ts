@@ -30,12 +30,22 @@
  *
  * Dependencies are injectable so the suite drives every verdict without AWS
  * or a metric backend (mirrors the `retriever-probe.ts` ProbeDeps pattern).
+ *
+ * The sink is not always S3. An env-config destination of type `azure_blob`
+ * is read through `az storage blob list`, and every message names the blob
+ * container and the blob-level role rather than a bucket and an IAM policy.
+ * `src/lib/object-store.ts` owns that dispatch; this file stays store-neutral
+ * and renders whichever URI the target carries.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileP = promisify(execFile);
+import {
+  listStoreObjects,
+  getStoreObject,
+  storeUri,
+  storeReadAccessRemedy,
+  type ObjectStoreKind,
+  type ObjectStoreTarget,
+} from './object-store.js';
 
 /**
  * The honest end states. Mapped to doctor pass/warn/fail by the caller:
@@ -103,6 +113,10 @@ export interface OffloadDeliveryDeps {
 export interface OffloadDeliveryArgs {
   bucket?: string;
   prefix?: string;
+  /** Destination type of the offload sink. Default `s3`. */
+  storeKind?: ObjectStoreKind;
+  /** Azure storage account holding the container. Read when `storeKind` is `azure_blob`. */
+  storageAccount?: string;
   /** Recency window in minutes for "recent" + stale detection. Default 30. */
   recencyMinutes?: number;
   /** How many newest objects to sample for the purity check. Default 3. */
@@ -159,12 +173,23 @@ export async function verifyOffloadDelivery(
   const recencyMin = args.recencyMinutes ?? 30;
   const sampleN = Math.max(1, args.sampleObjects ?? 3);
   const now = args.nowMs ?? Date.now();
+  const kind: ObjectStoreKind = args.storeKind ?? 's3';
 
   if (!bucket) {
     return empty('not_configured', {
       message: 'No active offload destination configured; offload delivery is not verifiable.',
     });
   }
+
+  // The address every message below prints. An `azure_blob` destination
+  // renders its blob endpoint, so an operator never sees an s3:// URI for a
+  // container that lives on a storage account.
+  const target: ObjectStoreTarget = {
+    kind,
+    container: bucket,
+    ...(args.storageAccount !== undefined ? { storageAccount: args.storageAccount } : {}),
+  };
+  const uri = storeUri(target, prefix);
 
   // Stamped side (engine) — may be null if no metric backend.
   let stamped: number | null = null;
@@ -185,8 +210,8 @@ export async function verifyOffloadDelivery(
       prefix,
       stamped_offload_bytes: stamped,
       message:
-        `Could not list s3://${bucket}/${prefix} (${trunc(e)}). Offload delivery is UNVERIFIED — ` +
-        `check AWS credentials and s3:ListBucket on the offload bucket.`,
+        `Could not list ${uri} (${trunc(e)}). Offload delivery is UNVERIFIED. ` +
+        storeReadAccessRemedy(target),
     });
   }
 
@@ -214,7 +239,7 @@ export async function verifyOffloadDelivery(
         newest_object_age_sec: newestAgeSec,
         stamped_offload_bytes: stamped,
         message:
-          `Engine stamped ${fmtBytes(stamped!)} as offload in the window, but s3://${bucket}/${prefix} ` +
+          `Engine stamped ${fmtBytes(stamped!)} as offload in the window, but ${uri} ` +
           `has no objects in the last ${recencyMin}m (newest ${ageStr(newestAgeSec)}). Offload is NOT reaching ` +
           `the sink — the forwarder routeState routing is missing, misconfigured, or pointed at the wrong bucket. ` +
           `Any saving claimed for these bytes is phantom.`,
@@ -228,7 +253,7 @@ export async function verifyOffloadDelivery(
         newest_object_age_sec: newestAgeSec,
         stamped_offload_bytes: stamped,
         message:
-          `s3://${bucket}/${prefix} has objects but none in the last ${recencyMin}m (newest ${ageStr(newestAgeSec)}), ` +
+          `${uri} has objects but none in the last ${recencyMin}m (newest ${ageStr(newestAgeSec)}), ` +
           `and no offload bytes are being stamped now. Offload appears idle/stopped, not actively delivering.`,
       });
     }
@@ -237,7 +262,7 @@ export async function verifyOffloadDelivery(
       prefix,
       stamped_offload_bytes: stamped,
       message:
-        `No offload bytes stamped and no objects in s3://${bucket}/${prefix}. Offload is configured but not in use.` +
+        `No offload bytes stamped and no objects in ${uri}. Offload is configured but not in use.` +
         (stamped === null
           ? ' (No metric backend available, so a silent delivery loss cannot be fully ruled out here.)'
           : ''),
@@ -305,9 +330,9 @@ export async function verifyOffloadDelivery(
       delivered_bytes_recent: deliveredBytesRecent,
       stamped_offload_bytes: stamped,
       message: fetchErr
-        ? `s3://${bucket}/${prefix} has ${recent.length} recent object(s) but they could not be read for the ` +
-          `purity check (s3:GetObject denied or fetch error). Delivery is live but UNVERIFIED for leaks.`
-        : `s3://${bucket}/${prefix} has ${recent.length} recent object(s) but none contained a parseable ` +
+        ? `${uri} has ${recent.length} recent object(s) but they could not be read for the ` +
+          `purity check (read denied or fetch error). Delivery is live but UNVERIFIED for leaks.`
+        : `${uri} has ${recent.length} recent object(s) but none contained a parseable ` +
           `routeState event (empty/binary/compressed objects). Delivery is live but UNVERIFIED — the offload ` +
           `slice cannot be confirmed.`,
     });
@@ -330,7 +355,7 @@ export async function verifyOffloadDelivery(
       sampled_routestates: tally,
       leak_routestates: leakStates,
       message:
-        `s3://${bucket}/${prefix} carries non-offload events (${leakN}/${sampled} sampled are ` +
+        `${uri} carries non-offload events (${leakN}/${sampled} sampled are ` +
         `${leakStates.join('/')}, not offload). The forwarder is routing more than the offload slice ` +
         `(copy-everything): those bytes also remain in the SIEM, so the offload saving is overclaimed. ` +
         `Fix the forwarder to route only routeState=="offload" to this sink.`,
@@ -349,7 +374,7 @@ export async function verifyOffloadDelivery(
     sampled_events: sampled,
     sampled_routestates: tally,
     message:
-      `Offload delivery verified: ${recent.length} recent object(s) in s3://${bucket}/${prefix} ` +
+      `Offload delivery verified: ${recent.length} recent object(s) in ${uri} ` +
       `(newest ${ageStr(newestAgeSec)}), and ${sampled}/${sampled} sampled events are routeState=offload (no leak)` +
       `${stamped !== null
         ? `. Engine stamped ${fmtBytes(stamped)} offload in the window; the sink received ${fmtBytes(deliveredBytesRecent)} of raw objects ` +
@@ -358,51 +383,27 @@ export async function verifyOffloadDelivery(
   });
 }
 
-// ── Default deps (real aws CLI) ─────────────────────────────────────────────
-
-async function defaultListObjects(bucket: string, prefix: string): Promise<S3ObjectMeta[]> {
-  try {
-    // `aws s3api list-objects-v2` AUTO-PAGINATES (the CLI follows
-    // NextContinuationToken internally and merges all pages, tested past 54k
-    // keys on a single call). Do NOT add a manual token loop. The ceiling
-    // is maxBuffer (~150 bytes/key JSON → 32 MB covers ~200k keys).
-    const { stdout } = await execFileP(
-      'aws',
-      ['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', prefix, '--output', 'json'],
-      { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 },
-    );
-    if (!stdout.trim()) return [];
-    const parsed = JSON.parse(stdout) as { Contents?: S3ObjectMeta[] };
-    return parsed.Contents ?? [];
-  } catch (e) {
-    const stderr = (e as { stderr?: string; message?: string }).stderr ?? (e as Error).message ?? '';
-    if (stderr.includes('NoSuchBucket')) throw new Error(`offload bucket does not exist: ${bucket}`);
-    throw new Error(`aws s3api list-objects-v2 failed: ${stderr.slice(0, 300)}`);
-  }
-}
-
-async function defaultGetObject(bucket: string, key: string): Promise<string> {
-  // Sampled in parallel by verifyOffloadDelivery, so this per-object 10s bound
-  // is the worst-case latency the purity probe adds, not 10s × sampleObjects.
-  const { stdout } = await execFileP('aws', ['s3', 'cp', `s3://${bucket}/${key}`, '-'], {
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 10_000,
-  });
-  return stdout;
-}
+// ── Default deps (vendor CLI, dispatched on destination type) ──────────────
 
 /**
- * Build default deps. `stampedOffloadBytes` has no AWS-free default — the
- * caller (doctor / commitment_report) wires it to a PromQL query because it
- * needs the EnvConfig + executor. Without it, pass `() => Promise.resolve(null)`
- * and the verifier runs on liveness + purity alone.
+ * Build default deps for one store target. `stampedOffloadBytes` has no
+ * store-free default: the caller (doctor / commitment_report) wires it to a
+ * PromQL query because it needs the EnvConfig + executor. Without it, pass
+ * `() => Promise.resolve(null)` and the verifier runs on liveness + purity
+ * alone.
+ *
+ * `target` names the store. Omitting it keeps the historical S3 behaviour, so
+ * a caller that has not been taught about destination types is unchanged.
  */
 export function defaultOffloadDeliveryDeps(
   stampedOffloadBytes: () => Promise<number | null> = async () => null,
+  target?: ObjectStoreTarget,
 ): OffloadDeliveryDeps {
+  const resolve = (bucket: string): ObjectStoreTarget =>
+    target ?? { kind: 's3', container: bucket };
   return {
-    listObjects: defaultListObjects,
-    getObject: defaultGetObject,
+    listObjects: (bucket, prefix) => listStoreObjects(resolve(bucket), prefix),
+    getObject: (bucket, key) => getStoreObject(resolve(bucket), key),
     stampedOffloadBytes,
   };
 }
