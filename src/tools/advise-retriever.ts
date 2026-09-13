@@ -39,6 +39,7 @@ import {
   AZURE_API_KEY_NOTE,
   AZURE_OPERATOR_ROLES_NOTE,
   AZURE_RESULTS_NOTE,
+  AZURE_NODE_SIZE_NOTE,
   RETRIEVER_IMAGE_TAG,
   type RetrieverStorageProvider,
 } from '../lib/advisor/retriever.js';
@@ -144,21 +145,29 @@ export const adviseRetrieverSchema = {
   resource_group: z
     .string()
     .optional()
-    .describe('Azure resource group for the provisioning command (azure only).'),
+    .describe('Azure resource group for the provisioning command and the teardown (azure only).'),
   location: z
     .string()
     .optional()
     .describe('Azure region for the provisioning command, e.g. `eastus` (azure only).'),
+  aks_cluster_name: z
+    .string()
+    .optional()
+    .describe(
+      'AKS cluster the release installs into (azure only). Used by the provisioning command (`--create-aks` for a new cluster) and by the `az aks get-credentials` step that points kubectl at it.'
+    ),
   azure_client_id: z
     .string()
     .optional()
     .describe(
-      'Client id of the user-assigned managed identity federated to the release ServiceAccount (azure only). The provisioning script prints it.'
+      'Client id of the user-assigned managed identity federated to the release ServiceAccount (azure only). The provisioning script writes it into the values file it produces, under `storage.azure.auth.clientId`.'
     ),
   azure_tenant_id: z
     .string()
     .optional()
-    .describe('Entra tenant id (azure only). The provisioning script prints it.'),
+    .describe(
+      'Entra tenant id (azure only). The provisioning script writes it into the values file it produces, under `storage.azure.auth.tenantId`.'
+    ),
   azure_queues: z
     .object({
       index: z.string().optional(),
@@ -226,6 +235,12 @@ export interface RetrieverWizardSession {
   sqsStreamUrl?: string;
   /** License fields — same as WizardSession. */
   licenseJwt?: string;
+  /**
+   * Whether the licence in `licenseJwt` came from the caller (`license_source:
+   * "paste"`) rather than being minted by the wizard. Only a caller-supplied
+   * licence is written into an emitted values file.
+   */
+  licenseSupplied?: boolean;
   isDemoLicense?: boolean;
   licenseSource?: 'signin' | 'demo' | 'paste';
   licenseReason?: WizardSession['licenseReason'];
@@ -239,6 +254,7 @@ export interface RetrieverWizardSession {
   indexContainer?: string;
   resourceGroup?: string;
   location?: string;
+  aksClusterName?: string;
   azureClientId?: string;
   azureTenantId?: string;
   updatedAt: string;
@@ -353,6 +369,7 @@ type RetrieverQuestionId =
   | 'sqs-urls'
   | 'irsa-role'
   | 'license-paste'
+  | 'azure-placement'
   | 'azure-storage-account'
   | 'azure-input-container'
   | 'azure-workload-identity';
@@ -409,16 +426,21 @@ const QUESTION_META: Record<RetrieverQuestionId, { headline: string; answer_fiel
     headline: 'Step 6 — Paste the license JWT you already have.',
     answer_field: 'license_jwt_paste',
   },
+  'azure-placement': {
+    headline:
+      'Azure step 1: name the resource group, the region and the AKS cluster the release installs into.',
+    answer_field: 'resource_group',
+  },
   'azure-storage-account': {
-    headline: 'Azure step 1: name the storage account holding the input and index containers.',
+    headline: 'Azure step 2: name the storage account holding the input and index containers.',
     answer_field: 'storage_account',
   },
   'azure-input-container': {
-    headline: 'Azure step 2: name the blob container holding the source logs.',
+    headline: 'Azure step 3: name the blob container holding the source logs.',
     answer_field: 'input_container',
   },
   'azure-workload-identity': {
-    headline: 'Azure step 3: supply the managed-identity client id and the Entra tenant id.',
+    headline: 'Azure step 4: supply the managed-identity client id and the Entra tenant id.',
     answer_field: 'azure_client_id',
   },
 };
@@ -457,6 +479,9 @@ const ARG_SYNONYMS: ReadonlyMap<string, string> = new Map([
   ['release', 'release_name'],
   ['name', 'release_name'],
   ['snapshot', 'snapshot_id'],
+  ['aks_cluster', 'aks_cluster_name'],
+  ['aks_name', 'aks_cluster_name'],
+  ['cluster_name', 'aks_cluster_name'],
   ['snapshotId', 'snapshot_id'],
 ]);
 
@@ -744,24 +769,87 @@ async function detectKubectlRole(_clusterName: string): Promise<string | null> {
  * the precedence-mismatch warning at plan-emission time.
  */
 /**
- * The three answers an AKS + Azure Blob install needs: the storage account,
- * the input container, and the workload-identity pair the provisioning script
- * prints. Every other value has a default that matches the script's own.
+ * The answers an AKS + Azure Blob install needs: where the resources live
+ * (resource group, region, AKS cluster), the storage account, the input
+ * container, and the workload-identity pair the provisioning script writes
+ * into its values file. Every other value has a default that matches the
+ * script's own.
+ *
+ * Placement comes first because the provisioning command printed under every
+ * later question carries it. Asked last, the command an operator copies out of
+ * question two still says `<resource-group>`.
  */
 function nextAzureQuestion(
   session: RetrieverWizardSession,
   resolvedStorageAccount?: string
 ): RetrieverNextStep {
   const account = resolvedStorageAccount ?? session.storageAccount;
+  const releaseName = session.releaseName ?? 'my-retriever';
   const provisionCommand = buildAzureProvisionCommands({
     resourceGroup: session.resourceGroup ?? '<resource-group>',
     location: session.location ?? '<location>',
     account: account ?? '<storage-account>',
-    aksCluster: '<aks-cluster-name>',
+    aksCluster: session.aksClusterName ?? '<aks-cluster-name>',
     namespace: session.namespace ?? '<namespace>',
-    releaseName: session.releaseName ?? 'my-retriever',
-    valuesOut: 'retriever-azure-values.yaml',
+    releaseName,
+    valuesOut: `${releaseName}-azure-provisioned.yaml`,
   }).join('\n');
+
+  if (!session.resourceGroup || !session.location || !session.aksClusterName) {
+    return {
+      kind: 'ask',
+      markdown: [
+        '# Retriever on AKS: where do the resources go?',
+        '',
+        'One resource group holds the storage account, the four Storage Queues, the managed identity and the ' +
+          'AKS cluster. Naming it now makes the provisioning command runnable as printed, and it is the one ' +
+          'argument teardown needs later.',
+        '',
+        'The AKS cluster name is passed as `--create-aks` to create a cluster with the OIDC issuer and workload ' +
+          'identity enabled. An existing cluster is used instead by re-running the script with `--aks`, which ' +
+          'verifies both are on rather than creating anything.',
+        '',
+        '```bash',
+        provisionCommand,
+        '```',
+        '',
+        AZURE_NODE_SIZE_NOTE,
+      ].join('\n'),
+      questionId: 'azure-placement',
+      shape: {
+        type: 'form',
+        description:
+          'Resource group, region and AKS cluster name. All three appear in the provisioning command, and the ' +
+          'resource group is what teardown deletes.',
+        fields: [
+          {
+            name: 'resource_group',
+            type: 'string',
+            description: 'Resource group to create or converge.',
+            required: !session.resourceGroup,
+            ...(session.resourceGroup !== undefined ? { default: session.resourceGroup } : {}),
+            example: 'tenx-retriever-rg',
+          },
+          {
+            name: 'location',
+            type: 'string',
+            description: 'Azure region, for example eastus.',
+            required: !session.location,
+            ...(session.location !== undefined ? { default: session.location } : {}),
+            example: 'eastus',
+          },
+          {
+            name: 'aks_cluster_name',
+            type: 'string',
+            description: 'AKS cluster the release installs into.',
+            required: !session.aksClusterName,
+            ...(session.aksClusterName !== undefined ? { default: session.aksClusterName } : {}),
+            example: 'tenx-retriever-aks',
+          },
+        ],
+      },
+    };
+  }
 
   if (!account) {
     return {
@@ -837,11 +925,18 @@ function nextAzureQuestion(
         'Pods reach Blob and the Storage Queues as a user-assigned managed identity, federated to the ' +
           "ServiceAccount this release creates. No secret is mounted: the webhook injects the token.",
         '',
-        'The provisioning script creates the identity, grants it "Storage Blob Data Contributor" and ' +
-          '"Storage Queue Data Contributor" on the account, and prints both ids:',
+        'The provisioning script creates the identity and grants it "Storage Blob Data Contributor" and ' +
+          '"Storage Queue Data Contributor" on the account:',
         '',
         '```bash',
         provisionCommand,
+        '```',
+        '',
+        'Neither id is printed. Both are written into the values file the script produces at `--values-out`, ' +
+          `\`${releaseName}-azure-provisioned.yaml\`, under \`storage.azure.auth\`. Read them from there:`,
+        '',
+        '```bash',
+        `grep -E 'clientId|tenantId' ${releaseName}-azure-provisioned.yaml`,
         '```',
         '',
         AZURE_OPERATOR_ROLES_NOTE,
@@ -850,7 +945,8 @@ function nextAzureQuestion(
       shape: {
         type: 'form',
         description:
-          'Both ids are required for `auth.method: workloadIdentity`. The provisioning script prints them on completion.',
+          'Both ids are required for `auth.method: workloadIdentity`. The provisioning script writes them into ' +
+          'its values file under `storage.azure.auth`, as `clientId` and `tenantId`.',
         fields: [
           {
             name: 'azure_client_id',
@@ -1676,6 +1772,9 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     sqsStreamUrl: args.stream_queue_url,
     licenseSource: args.license_source,
     licenseJwt: args.license_jwt_paste,
+    // A pasted licence is the caller's own. Anything the wizard mints below
+    // sets this false, and a file the plan emits then carries no key.
+    licenseSupplied: args.license_jwt_paste ? true : undefined,
     releaseName: args.release_name,
     namespace: args.namespace,
     storageProvider: args.storage_provider,
@@ -1684,6 +1783,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     indexContainer: args.index_container,
     resourceGroup: args.resource_group,
     location: args.location,
+    aksClusterName: args.aks_cluster_name,
     azureClientId: args.azure_client_id,
     azureTenantId: args.azure_tenant_id,
   });
@@ -1803,9 +1903,13 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         licenseJwt: lic.jwt,
         isDemoLicense: lic.isDemoLicense,
         licenseReason: lic.reason,
+        // Minted here, not handed over. It reaches the engine through
+        // --set-string at install time, never through an emitted file.
+        licenseSupplied: false,
       });
       session.licenseJwt = lic.jwt;
       session.isDemoLicense = lic.isDemoLicense;
+      session.licenseSupplied = false;
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
       const md = [
@@ -1901,6 +2005,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     releaseName: session.releaseName ?? args.release_name,
     namespace: session.namespace ?? args.namespace,
     licenseJwt: session.licenseJwt,
+    licenseSupplied: session.licenseSupplied === true,
     inputBucket: isAzurePlan ? azureInputContainer : resolvedInputBucket,
     indexBucket: isAzurePlan
       ? session.indexContainer ?? args.index_bucket
@@ -1916,6 +2021,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     ...(azureStorageAccount !== undefined ? { storageAccount: azureStorageAccount } : {}),
     ...(session.resourceGroup !== undefined ? { resourceGroup: session.resourceGroup } : {}),
     ...(session.location !== undefined ? { location: session.location } : {}),
+    ...(session.aksClusterName !== undefined ? { aksCluster: session.aksClusterName } : {}),
     ...(session.azureClientId !== undefined ? { azureClientId: session.azureClientId } : {}),
     ...(session.azureTenantId !== undefined ? { azureTenantId: session.azureTenantId } : {}),
     ...(args.azure_queues !== undefined ? { azureQueues: args.azure_queues } : {}),
@@ -1936,7 +2042,11 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // provision-retriever.sh), so this AWS one is suppressed there: emitting
   // both put "Infra provisioned via aws CLI commands" directly above "Retriever
   // infra on Azure ... is provisioned by the chart's own script".
-  if (session.infraMode && session.infraMode !== 'existing' && session.storageProvider !== 'azure') {
+  // Gated on the RESOLVED provider. `session.storageProvider` is empty when
+  // azure was resolved from an explicit arg or from the env-config offload
+  // destination, and an Azure plan then carried "AWS infra lifecycle is
+  // Terraform-owned" at the top of its notes.
+  if (session.infraMode && session.infraMode !== 'existing' && !isAzurePlan) {
     plan.notes.unshift(
       `Infra provisioned via ${session.infraMode === 'terraform' ? 'Terraform module (terraform-aws-tenx-retriever-lambda)' : 'aws CLI commands'}. AWS infra lifecycle is Terraform-owned — the wizard does not manage it.`
     );

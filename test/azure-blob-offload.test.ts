@@ -392,8 +392,10 @@ test('azure plan pulls the chart and runs the script from the tarball path', asy
     `--account ${ACCOUNT}`,
     '--create-aks',
     // The Azure CLI default node size is refused on subscriptions without
-    // that family, so the size is always passed.
-    '--node-size Standard_D2s_v5',
+    // that family, so the size is always passed. The value tracks the
+    // provisioning script's own default: Standard_D2s_v5 was refused on the
+    // subscription the Azure path was proved against.
+    '--node-size Standard_D2s_v7',
     '--namespace log10x',
     '--release my-retriever',
     '--values-out',
