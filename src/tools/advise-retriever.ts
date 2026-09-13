@@ -35,6 +35,11 @@ import {
 } from '../lib/discovery/snapshot-store.js';
 import {
   buildRetrieverPlan,
+  buildAzureProvisionCommands,
+  AZURE_API_KEY_NOTE,
+  AZURE_OPERATOR_ROLES_NOTE,
+  AZURE_RESULTS_NOTE,
+  RETRIEVER_IMAGE_TAG,
   type RetrieverStorageProvider,
 } from '../lib/advisor/retriever.js';
 import { buildPlanSummary } from '../lib/advisor/envelope.js';
@@ -748,16 +753,15 @@ function nextAzureQuestion(
   resolvedStorageAccount?: string
 ): RetrieverNextStep {
   const account = resolvedStorageAccount ?? session.storageAccount;
-  const provisionCommand = [
-    'charts/retriever/scripts/azure/provision-retriever.sh \\',
-    `  --resource-group ${session.resourceGroup ?? '<resource-group>'} \\`,
-    `  --location ${session.location ?? '<location>'} \\`,
-    `  --account ${account ?? '<storage-account>'} \\`,
-    '  --create-aks <aks-cluster-name> \\',
-    `  --namespace ${session.namespace ?? '<namespace>'} \\`,
-    `  --release ${session.releaseName ?? 'my-retriever'} \\`,
-    '  --values-out retriever-azure-values.yaml',
-  ].join('\n');
+  const provisionCommand = buildAzureProvisionCommands({
+    resourceGroup: session.resourceGroup ?? '<resource-group>',
+    location: session.location ?? '<location>',
+    account: account ?? '<storage-account>',
+    aksCluster: '<aks-cluster-name>',
+    namespace: session.namespace ?? '<namespace>',
+    releaseName: session.releaseName ?? 'my-retriever',
+    valuesOut: 'retriever-azure-values.yaml',
+  }).join('\n');
 
   if (!account) {
     return {
@@ -771,7 +775,8 @@ function nextAzureQuestion(
         'The account must be **flat namespace**. A hierarchical-namespace account reorders listings, ' +
           'and the engine refuses one at construction.',
         '',
-        'Provisioning the whole set in one run:',
+        'Provisioning the whole set in one run. The script ships inside the chart tarball, so the pull ' +
+          'comes first:',
         '',
         '```bash',
         provisionCommand,
@@ -781,6 +786,12 @@ function nextAzureQuestion(
           'with its blob and queue data roles, the Event Grid BlobCreated subscription onto the index queue, ' +
           'and the federated credential bound to the release ServiceAccount. Re-invoke with the account name ' +
           'once it exists.',
+        '',
+        AZURE_OPERATOR_ROLES_NOTE,
+        '',
+        `The values file it writes pins engine image tag \`${RETRIEVER_IMAGE_TAG}\`. ${AZURE_API_KEY_NOTE}`,
+        '',
+        AZURE_RESULTS_NOTE,
       ].join('\n'),
       questionId: 'azure-storage-account',
       shape: {
@@ -802,6 +813,10 @@ function nextAzureQuestion(
         '',
         'An Azure Monitor diagnostic export that already lands in a container is a valid answer: the Retriever ' +
           'indexes and queries what is there, with no forwarder change.',
+        '',
+        'Blob names carry the app. The first path segment of a blob (`app/test.log` gives `app`) is what a ' +
+          "query's `name` field must equal, and it is the `<app>` segment the results are written under. A " +
+          'query naming anything else returns silence rather than an error.',
       ].join('\n'),
       questionId: 'azure-input-container',
       shape: {
@@ -828,6 +843,8 @@ function nextAzureQuestion(
         '```bash',
         provisionCommand,
         '```',
+        '',
+        AZURE_OPERATOR_ROLES_NOTE,
       ].join('\n'),
       questionId: 'azure-workload-identity',
       shape: {

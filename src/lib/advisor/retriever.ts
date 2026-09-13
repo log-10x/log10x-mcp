@@ -5,7 +5,7 @@
  * Retriever is a standalone set of workloads (indexer + query-handler
  * + stream-worker + filter CronJobs) that read from S3 via SQS and
  * serve an HTTP query endpoint. No forwarder choice — just one chart
- * (`log10x/retriever` or the log10x-hosted variant) with AWS infra
+ * (`log10x/retriever-10x` or the log10x-hosted variant) with AWS infra
  * pointers.
  *
  * The advisor's job is to:
@@ -131,6 +131,25 @@ const AZURE_DEFAULT_QUEUES = {
   stream: 'tenx-stream',
 } as const;
 
+const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
+const RETRIEVER_CHART_ALIAS = 'log10x';
+/** Chart name as published in the Helm repo index. There is no `log10x/retriever`. */
+const RETRIEVER_CHART_NAME = 'retriever-10x';
+const RETRIEVER_CHART_REF = `${RETRIEVER_CHART_ALIAS}/${RETRIEVER_CHART_NAME}`;
+
+/** Chart version carrying the Azure provisioning script this advisor quotes. */
+export const RETRIEVER_CHART_VERSION = '1.0.23';
+
+/** Engine image the Azure path documents and the provisioning script pins. */
+export const RETRIEVER_IMAGE_TAG = '1.1.78';
+
+/**
+ * Node size for a cluster the script creates. The Azure CLI default
+ * (`Standard_D4d_v4`) is refused on subscriptions that do not carry that
+ * family, which stops a first install dead, so the size is always passed.
+ */
+export const AKS_NODE_SIZE = 'Standard_D2s_v5';
+
 /**
  * The provisioning script that ships with the retriever chart. One run creates
  * the account, the two containers, the four queues, the managed identity and
@@ -138,12 +157,74 @@ const AZURE_DEFAULT_QUEUES = {
  * BlobCreated subscription onto the index queue, and the federated credential
  * binding the identity to the release ServiceAccount, then writes a values
  * file.
+ *
+ * The path is the one inside the untarred chart tarball, which is the only
+ * copy a customer has. `charts/retriever/scripts/azure/...` is a path in the
+ * chart source repo and exists in nothing a customer downloads.
  */
-const AZURE_PROVISION_SCRIPT = 'charts/retriever/scripts/azure/provision-retriever.sh';
+export const AZURE_PROVISION_SCRIPT = `${RETRIEVER_CHART_NAME}/scripts/azure/provision-retriever.sh`;
 
-const RETRIEVER_CHART_REPO = 'https://log-10x.github.io/helm-charts';
-const RETRIEVER_CHART_ALIAS = 'log10x';
-const RETRIEVER_CHART_REF = 'log10x/retriever';
+/**
+ * Where a query's results land, and the shape of the path. `<index-path>` is
+ * the script's `--index-path` (default `tenx`); the literal `tenx` segment
+ * after it is the engine's own, and `<app>` is the first path segment of the
+ * indexed blob, which is also what the query's `name` field must equal.
+ */
+export const AZURE_RESULT_PATH = '<index-container>/<index-path>/tenx/<app>/qr/<queryId>/*.jsonl';
+
+/**
+ * Two facts a first install needs and neither the chart nor the script states:
+ * the operator's own data-plane access, and what `_DONE.json` is not.
+ */
+export const AZURE_OPERATOR_ROLES_NOTE =
+  'The script grants "Storage Blob Data Contributor" and "Storage Queue Data Contributor" to the managed ' +
+  'identity AND to the operator running it, so `az storage blob upload` and `az storage message put` work ' +
+  'with `--auth-mode login` from the same shell. On a subscription where role assignment is not yours to ' +
+  'make, pass `--account-key` on those commands instead.';
+
+export const AZURE_RESULTS_NOTE =
+  `Results land as JSONL under \`${AZURE_RESULT_PATH}\`. ` +
+  '`_DONE.json` is a dispatch marker, not a completion signal: it is written before the workers finish, and ' +
+  'its scanned / matched / streamRequests counters read 0 on a run that goes on to write results. Poll the ' +
+  '`qr/<queryId>/` prefix for objects, and treat an empty prefix as "not yet", never as "no matches".';
+
+export const AZURE_API_KEY_NOTE =
+  '`log10xApiKey` is optional. Left empty, the engine runs on its built-in evaluation licence and says so in ' +
+  'the pod log. Set it only when you hold a Log10x licence key.';
+
+/**
+ * The provisioning commands, in the order a customer runs them: add the repo,
+ * pull and untar the chart, then run the script from the untarred directory.
+ * `helm repo add` on a repo that is already present skips without refreshing
+ * the index, so `helm repo update` runs before the pull or `--version` can
+ * miss a freshly published chart.
+ */
+export function buildAzureProvisionCommands(opts: {
+  resourceGroup: string;
+  location: string;
+  account: string;
+  aksCluster: string;
+  namespace: string;
+  releaseName: string;
+  valuesOut: string;
+}): string[] {
+  return [
+    `helm repo add ${RETRIEVER_CHART_ALIAS} ${RETRIEVER_CHART_REPO}`,
+    'helm repo update',
+    `helm pull ${RETRIEVER_CHART_REF} --version ${RETRIEVER_CHART_VERSION} --untar`,
+    [
+      `${AZURE_PROVISION_SCRIPT} \\`,
+      `  --resource-group ${opts.resourceGroup} \\`,
+      `  --location ${opts.location} \\`,
+      `  --account ${opts.account} \\`,
+      `  --create-aks ${opts.aksCluster} \\`,
+      `  --node-size ${AKS_NODE_SIZE} \\`,
+      `  --namespace ${opts.namespace} \\`,
+      `  --release ${opts.releaseName} \\`,
+      `  --values-out ${opts.valuesOut}`,
+    ].join('\n'),
+  ];
+}
 
 export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<AdvisePlan> {
   const snapshot = args.snapshot;
@@ -277,10 +358,16 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   }
   notes.push(
     isAzure
-      ? 'Retriever infra on Azure (storage account, blob containers, Storage Queues, managed identity and its blob/queue data roles, the Event Grid BlobCreated subscription, and the federated credential) is provisioned by the chart\'s own script, NOT by this advisor. Step 1 below runs it.'
+      ? `Retriever infra on Azure (storage account, blob containers, Storage Queues, managed identity and its blob/queue data roles, the Event Grid BlobCreated subscription, and the federated credential) is provisioned by the chart's own script, NOT by this advisor. The script ships inside the chart tarball at \`${AZURE_PROVISION_SCRIPT}\`, reached with \`helm pull ${RETRIEVER_CHART_REF} --version ${RETRIEVER_CHART_VERSION} --untar\`. Step 1 below does both.`
       : 'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
   );
   if (isAzure) {
+    notes.push(AZURE_RESULTS_NOTE);
+    notes.push(AZURE_OPERATOR_ROLES_NOTE);
+    notes.push(AZURE_API_KEY_NOTE);
+    notes.push(
+      `The plan pins engine image tag \`${RETRIEVER_IMAGE_TAG}\`. The chart's own appVersion trails the released engine, so an unpinned install runs an older image than the one this path is tested against.`
+    );
     notes.push(
       'Azure support is read and index side. The Retriever indexes and queries blobs in the input container, and hierarchical-namespace accounts are refused at construction, so the account must be flat namespace. Writing the offload slice into Blob is a separate feature: log10x emits forwarder offload recipes for S3 and S3-compatible buckets. A diagnostic export that already lands in the container is queryable as soon as the indexer is up.'
     );
@@ -462,7 +549,7 @@ function buildRetrieverExternalAccessMarkdown(
     'Apply with:',
     '',
     '```bash',
-    `helm upgrade ${releaseName} log10x/retriever -n ${namespace} -f retriever-values-lb.yaml`,
+    `helm upgrade ${releaseName} ${RETRIEVER_CHART_REF} -n ${namespace} -f retriever-values-lb.yaml`,
     '```',
     '',
     'After the LoadBalancer is provisioned, run `kubectl -n ' +
@@ -812,11 +899,12 @@ streamQueueUrl: "${opts.sqsUrls.stream}"
 /**
  * AKS + Azure Blob install steps.
  *
- * Step 1 runs the chart's provisioning script, which creates every Azure
- * resource the Retriever needs and emits a values file. Steps 2 to 5 mirror
- * the AWS path: add the repo, create the namespace, write the values, install,
- * wait. The values block is the chart's `storage.provider: azure` shape, so
- * the emitted file and the script's own output describe the same install.
+ * Step 1 pulls the chart and runs the provisioning script that ships inside
+ * it, which creates every Azure resource the Retriever needs and emits a
+ * values file. Steps 2 to 5 mirror the AWS path: create the namespace, write
+ * the values, install, wait. The values block is the chart's
+ * `storage.provider: azure` shape, so the emitted file and the script's own
+ * output describe the same install.
  */
 function buildAzureInstallSteps(opts: {
   releaseName: string;
@@ -837,26 +925,24 @@ function buildAzureInstallSteps(opts: {
   const loc = opts.location ?? '<location>';
 
   steps.push({
-    title: 'Provision the Azure resources',
+    title: 'Pull the chart and provision the Azure resources',
     rationale:
-      'Creates the storage account (flat namespace), the input and index containers, the four Storage Queues, ' +
-      'the user-assigned managed identity with "Storage Blob Data Contributor" and "Storage Queue Data Contributor" ' +
-      'on the account, the Event Grid system topic with a BlobCreated subscription onto the index queue, and the ' +
-      'federated credential binding the identity to this release\'s ServiceAccount. Ends by writing a values file.',
-    commands: [
-      `${AZURE_PROVISION_SCRIPT} \\\n  --resource-group ${rg} \\\n  --location ${loc} \\\n  --account ${opts.storageAccount} \\\n  --create-aks <aks-cluster-name> \\\n  --namespace ${opts.namespace} \\\n  --release ${opts.releaseName} \\\n  --values-out ${valuesFile}`,
-    ],
+      `The script lives inside the chart tarball, at \`${AZURE_PROVISION_SCRIPT}\`, so the pull comes first. ` +
+      'One run creates the storage account (flat namespace), the input and index containers, the four Storage ' +
+      'Queues, the user-assigned managed identity with "Storage Blob Data Contributor" and "Storage Queue Data ' +
+      'Contributor" on the account, the Event Grid system topic with a BlobCreated subscription onto the index ' +
+      'queue, and the federated credential binding the identity to this release\'s ServiceAccount. It ends by ' +
+      `writing a values file pinning image tag \`${RETRIEVER_IMAGE_TAG}\`. ${AZURE_OPERATOR_ROLES_NOTE}`,
+    commands: buildAzureProvisionCommands({
+      resourceGroup: rg,
+      location: loc,
+      account: opts.storageAccount,
+      aksCluster: '<aks-cluster-name>',
+      namespace: opts.namespace,
+      releaseName: opts.releaseName,
+      valuesOut: valuesFile,
+    }),
     expectDurationSec: 900,
-  });
-
-  steps.push({
-    title: 'Add Retriever Helm repo',
-    rationale: `Makes the ${RETRIEVER_CHART_REF} chart available to \`helm install\`.`,
-    commands: [
-      `helm repo add ${RETRIEVER_CHART_ALIAS} ${RETRIEVER_CHART_REPO}`,
-      `helm repo update`,
-      `helm search repo ${RETRIEVER_CHART_REF}`,
-    ],
   });
 
   steps.push({
@@ -883,9 +969,11 @@ function buildAzureInstallSteps(opts: {
 
   steps.push({
     title: 'Install via Helm',
-    rationale: 'Deploys the indexer + query-handler + stream-worker against Blob and the Storage Queues.',
+    rationale:
+      'Deploys the indexer + query-handler + stream-worker against Blob and the Storage Queues. ' +
+      AZURE_API_KEY_NOTE,
     commands: [
-      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
+      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  --version ${RETRIEVER_CHART_VERSION} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
     ],
   });
 
@@ -894,8 +982,24 @@ function buildAzureInstallSteps(opts: {
     rationale: 'Blocks until indexer + query-handler + stream-worker report Ready.',
     commands: [
       `kubectl -n ${opts.namespace} rollout status deployment -l app.kubernetes.io/instance=${opts.releaseName} --timeout=10m || true`,
+      `kubectl -n ${opts.namespace} logs -l app.kubernetes.io/instance=${opts.releaseName} --tail=50`,
     ],
     expectDurationSec: 600,
+  });
+
+  // `indexContainer` arrives as `<account>/<container>/<index-path>`, the shape
+  // the chart's `storage.azure.indexContainer` takes and the shape the script
+  // writes. The results prefix is the index path, then the engine's own `tenx`
+  // segment, then the app.
+  const indexParts = opts.indexContainer.split('/');
+  const indexContainerName = indexParts[1] ?? 'tenx-index';
+  const indexPath = indexParts[2] ?? 'tenx';
+  steps.push({
+    title: 'Read the results',
+    rationale: AZURE_RESULTS_NOTE,
+    commands: [
+      `az storage blob list --account-name ${opts.storageAccount} \\\n  --container-name ${indexContainerName} \\\n  --prefix "${indexPath}/tenx/<app>/qr/<queryId>/" \\\n  --auth-mode login -o table`,
+    ],
   });
 
   return steps;
@@ -915,7 +1019,14 @@ function renderAzureRetrieverValues(opts: {
   // pipeline hands the next stage to an Azure Storage Queue. `scheduledQueries`
   // is off because the CronJob shells `aws sqs send-message` from an aws-cli
   // image, which has no Azure equivalent in the chart today.
-  return `log10xApiKey: "${opts.licenseJwt}"
+  //
+  // `image.tag` is pinned rather than left to the chart's appVersion, which
+  // trails the released engine.
+  return `# log10xApiKey is optional: empty means the built-in evaluation licence.
+log10xApiKey: "${opts.licenseJwt}"
+
+image:
+  tag: "${RETRIEVER_IMAGE_TAG}"
 
 tenx:
   enabled: true

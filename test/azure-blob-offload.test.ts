@@ -360,24 +360,90 @@ const AZURE_PLAN_ARGS = {
   namespace: 'log10x',
 };
 
-test('azure plan runs the provisioning script with every flag it needs', async () => {
+test('azure plan pulls the chart and runs the script from the tarball path', async () => {
   const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
   assert.deepEqual(plan.blockers, [], `unexpected blockers: ${plan.blockers.join(' | ')}`);
   const provision = plan.install[0];
   assert.ok(provision, 'a provisioning step leads the plan');
   const cmd = provision!.commands.join('\n');
-  assert.ok(cmd.includes('charts/retriever/scripts/azure/provision-retriever.sh'));
+
+  // The script exists only inside the published chart tarball. The repo path
+  // `charts/retriever/scripts/...` is in nothing a customer downloads.
+  assert.ok(
+    cmd.includes('retriever-10x/scripts/azure/provision-retriever.sh'),
+    'the script path is the one inside the untarred chart',
+  );
+  assert.ok(
+    !cmd.includes('charts/retriever/scripts'),
+    'the chart-source repo path is never quoted at a customer',
+  );
+  assert.ok(
+    cmd.includes('helm repo add log10x https://log-10x.github.io/helm-charts'),
+    'the repo is added before the pull',
+  );
+  assert.ok(
+    cmd.includes('helm pull log10x/retriever-10x --version 1.0.23 --untar'),
+    'the pinned chart is pulled and untarred',
+  );
+
   for (const flag of [
     '--resource-group tenx-rg',
     '--location eastus',
     `--account ${ACCOUNT}`,
     '--create-aks',
+    // The Azure CLI default node size is refused on subscriptions without
+    // that family, so the size is always passed.
+    '--node-size Standard_D2s_v5',
     '--namespace log10x',
     '--release my-retriever',
     '--values-out',
   ]) {
     assert.ok(cmd.includes(flag), `provision command missing ${flag}`);
   }
+});
+
+test('azure plan pins the engine image tag in the values it writes', async () => {
+  const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
+  const valuesStep = plan.install.find((s) => s.file?.language === 'yaml');
+  assert.ok(valuesStep, 'a values step is emitted');
+  assert.ok(
+    valuesStep!.file!.contents.includes('image:\n  tag: "1.1.78"'),
+    'image tag 1.1.78 is pinned rather than left to the chart appVersion',
+  );
+  assert.ok(
+    plan.notes.some((n) => n.includes('1.1.78')),
+    'the pinned image tag is stated in the notes',
+  );
+});
+
+test('azure plan states where results land and that _DONE.json is not completion', async () => {
+  const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
+  const text = [...plan.notes, ...plan.install.map((s) => s.rationale)].join('\n');
+  assert.ok(
+    text.includes('<index-container>/<index-path>/tenx/<app>/qr/<queryId>/*.jsonl'),
+    'the result path is stated in full',
+  );
+  assert.ok(
+    text.includes('_DONE.json') && text.includes('not a completion signal'),
+    '_DONE.json is called out as a dispatch marker, not a completion signal',
+  );
+});
+
+test('azure plan says the operator gets the storage data roles and the api key is optional', async () => {
+  const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
+  const text = [...plan.notes, ...plan.install.map((s) => s.rationale)].join('\n');
+  assert.ok(
+    text.includes('AND to the operator running it'),
+    'the operator role grant is stated',
+  );
+  assert.ok(
+    text.includes('`log10xApiKey` is optional'),
+    'the api key is documented as optional',
+  );
+  assert.ok(
+    text.includes('built-in evaluation licence'),
+    'the empty-key behaviour is named',
+  );
 });
 
 test('azure plan emits storage.provider: azure values, never IRSA or SQS', async () => {
