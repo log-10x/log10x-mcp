@@ -41,6 +41,8 @@ import {
   AZURE_RESULTS_NOTE,
   AZURE_NODE_SIZE_NOTE,
   AZURE_STORAGE_ACCOUNT_UNIQUE_NOTE,
+  AZURE_SCRIPT_INPUT_CONTAINER,
+  AZURE_SCRIPT_INDEX_CONTAINER,
   RETRIEVER_IMAGE_TAG,
   type RetrieverStorageProvider,
 } from '../lib/advisor/retriever.js';
@@ -437,7 +439,10 @@ const QUESTION_META: Record<RetrieverQuestionId, { headline: string; answer_fiel
     answer_field: 'storage_account',
   },
   'azure-input-container': {
-    headline: 'Azure step 3: name the blob container holding the source logs.',
+    headline:
+      `Azure step 3: name the blob container holding the source logs. The provisioning script created ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` and \`${AZURE_SCRIPT_INDEX_CONTAINER}\`; another name has to be ` +
+      'created first.',
     answer_field: 'input_container',
   },
   'azure-workload-identity': {
@@ -898,10 +903,11 @@ function nextAzureQuestion(
         provisionCommand,
         '```',
         '',
-        'The script creates the account, both containers, the four Storage Queues, the managed identity ' +
-          'with its blob and queue data roles, the Event Grid BlobCreated subscription onto the index queue, ' +
-          'and the federated credential bound to the release ServiceAccount. Re-invoke with the account name ' +
-          'once it exists.',
+        `The script creates the account, the two blob containers \`${AZURE_SCRIPT_INPUT_CONTAINER}\` for the ` +
+          `source logs and \`${AZURE_SCRIPT_INDEX_CONTAINER}\` for the index, the four Storage Queues, the ` +
+          'managed identity with its blob and queue data roles, the Event Grid BlobCreated subscription onto ' +
+          'the index queue, and the federated credential bound to the release ServiceAccount. Re-invoke with ' +
+          'the account name once it exists.',
         '',
         AZURE_OPERATOR_ROLES_NOTE,
         '',
@@ -930,8 +936,18 @@ function nextAzureQuestion(
         '',
         `Blob container on \`${account}\` holding the source logs the Retriever indexes. Bare container name, no path.`,
         '',
-        'An Azure Monitor diagnostic export that already lands in a container is a valid answer: the Retriever ' +
-          'indexes and queries what is there, with no forwarder change.',
+        `The provisioning command above has already created two containers on this account: ` +
+          `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` for the source logs and \`${AZURE_SCRIPT_INDEX_CONTAINER}\` for ` +
+          `the index. Answering \`${AZURE_SCRIPT_INPUT_CONTAINER}\` uploads into the container that exists and ` +
+          'that the BlobCreated subscription is filtered to.',
+        '',
+        'Any other answer names a container the script never created. Create that container first, and re-run ' +
+          `the provisioning command with \`--input-container <name>\` so the BlobCreated subscription covers ` +
+          'it: an upload into a container outside the filter raises no event, and the indexer never hears ' +
+          'about the blob.',
+        '',
+        'An Azure Monitor diagnostic export that already lands in a container is a valid answer, on the same ' +
+          'terms: the Retriever indexes and queries what is there, with no forwarder change.',
         '',
         'Blob names carry the app. The first path segment of a blob (`app/test.log` gives `app`) is what a ' +
           "query's `name` field must equal, and it is the `<app>` segment the results are written under. A " +
@@ -941,8 +957,11 @@ function nextAzureQuestion(
       shape: {
         type: 'string',
         answer_field: 'input_container',
-        description: 'Blob container holding source logs.',
-        example: 'logs',
+        description:
+          `Blob container holding source logs. The provisioning script created \`${AZURE_SCRIPT_INPUT_CONTAINER}\` ` +
+          `and \`${AZURE_SCRIPT_INDEX_CONTAINER}\`; any other name has to be created first, with the ` +
+          'BlobCreated subscription re-pointed at it.',
+        example: AZURE_SCRIPT_INPUT_CONTAINER,
       },
     };
   }

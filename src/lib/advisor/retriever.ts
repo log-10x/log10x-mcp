@@ -143,6 +143,23 @@ export interface RetrieverAdviseArgs {
 /** Object store behind the Retriever. */
 export type RetrieverStorageProvider = 'aws' | 'azure';
 
+/**
+ * Blob containers the provisioning script creates, and the names it creates
+ * them under when the plan passes neither `--input-container` nor
+ * `--index-container` (which it does not). Read off
+ * `scripts/azure/provision-retriever.sh` in chart 1.0.24: the defaults are
+ * `logs` and `tenx-index`, and the BlobCreated event subscription the same run
+ * creates is filtered to `--subject-begins-with
+ * /blobServices/default/containers/<input container>/`.
+ *
+ * Both facts matter to the caller: a container name other than `logs` names
+ * something the script never created, and even once created by hand it carries
+ * no event subscription, so an upload into it raises no BlobCreated event and
+ * the indexer never hears about the blob.
+ */
+export const AZURE_SCRIPT_INPUT_CONTAINER = 'logs';
+export const AZURE_SCRIPT_INDEX_CONTAINER = 'tenx-index';
+
 /** Default Azure Storage Queue names, matching the provisioning script's own. */
 const AZURE_DEFAULT_QUEUES = {
   index: 'tenx-index',
@@ -1219,7 +1236,9 @@ function buildAzureInstallSteps(opts: {
     title: 'Pull the chart and provision the Azure resources',
     rationale:
       `The script lives inside the chart tarball, at \`${AZURE_PROVISION_SCRIPT}\`, so the pull comes first. ` +
-      'One run creates the storage account (flat namespace), the input and index containers, the four Storage ' +
+      `One run creates the storage account (flat namespace), the two blob containers ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` for the source logs and \`${AZURE_SCRIPT_INDEX_CONTAINER}\` for the ` +
+      'index, the four Storage ' +
       'Queues, the user-assigned managed identity with "Storage Blob Data Contributor" and "Storage Queue Data ' +
       'Contributor" on the account, the Event Grid system topic with a BlobCreated subscription onto the index ' +
       'queue, and the federated credential binding the identity to this release\'s ServiceAccount. It ends by ' +
@@ -1302,13 +1321,27 @@ function buildAzureInstallSteps(opts: {
     expectDurationSec: 600,
   });
 
+  // The upload lands in whatever container the wizard was told about. The
+  // provisioning script created `logs` and filtered the BlobCreated
+  // subscription to it, so any other name needs both the container and the
+  // subscription before this step can index anything.
+  const inputContainerIsScriptDefault = opts.inputContainer === AZURE_SCRIPT_INPUT_CONTAINER;
+  const uploadContainerNote = inputContainerIsScriptDefault
+    ? `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` is the container step 1 created, and the BlobCreated subscription ` +
+      'the same run created is filtered to it.'
+    : `\`${opts.inputContainer}\` is not the container step 1 created. The script creates ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` and filters the BlobCreated subscription to it, so this upload ` +
+      `raises no event the indexer hears. Re-run the provisioning command in step 1 with ` +
+      `\`--input-container ${opts.inputContainer}\` before this step, or upload into ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` instead.`;
+
   steps.push({
     title: 'Upload a log to the input container',
     rationale:
       `The first path segment of the blob name is the application name, so \`app/test.log\` indexes under ` +
       '`app` and the query below has to carry the same name. Event Grid delivers the BlobCreated event to ' +
       `\`${opts.queues.index}\` and the pod writes the index. A query naming anything else returns silence ` +
-      `rather than an error. ${AZURE_EVENT_TIME_NOTE}`,
+      `rather than an error. ${uploadContainerNote} ${AZURE_EVENT_TIME_NOTE}`,
     commands: [
       AZURE_SAMPLE_LOG_COMMAND,
       `az storage blob upload \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  -c ${opts.inputContainer} \\\n  -n app/test.log \\\n  -f ./test.log \\\n  -o none`,
@@ -1463,24 +1496,65 @@ function buildVerifyProbes(opts: {
     timeoutSec: 600,
   });
 
-  probes.push({
-    name: 'indexer-healthy',
-    question: isAzure
-      ? 'Has the indexer written an index object? A healthy run prints one `index written` line per index ' +
-        'object and no AADSTS token refusal. Empty output means nothing has been indexed yet.'
-      : 'Is the indexer processing messages from the index queue?',
-    // `grep -iE 'index'` matched class names such as `IndexQueryWriter`, so
-    // the probe printed lines whether or not a single blob had been indexed.
-    // `index written` is the line the indexer logs per index object.
-    commands: isAzure
-      ? [
-          `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=200 | grep -E 'index written|AADSTS' | head -20`,
-        ]
-      : [
-          `kubectl -n ${namespace} logs -l ${podSelector},app.kubernetes.io/component=indexer --tail=200 | grep -iE 'index|processed|bloom' | head -20`,
-        ],
-    timeoutSec: 120,
-  });
+  if (isAzure) {
+    // Two failures, two probes.
+    //
+    // 1. `grep -iE 'index'` matched class names such as `IndexQueryWriter`, so
+    //    the probe printed lines whether or not a single blob had been
+    //    indexed. `index written` is the line the indexer logs per index
+    //    object.
+    // 2. `--tail=200` then hid that line. The marker is written once per index
+    //    object, and the query the operator ran to prove the install pushed it
+    //    out of the tail: a live pod held 1164 lines with exactly one `index
+    //    written` at line 120, so the probe printed nothing and reported a
+    //    healthy indexer as one that had indexed nothing. `--tail=-1` is
+    //    kubectl's "every retained line", and it has to be passed explicitly
+    //    because a label selector drops the default to 10. The bound that
+    //    matters for output size is `head -20`, which stays. `--since` was the
+    //    other candidate and carries the same defect on a different axis: an
+    //    install verified an hour after the upload has the marker outside any
+    //    window short enough to be worth writing down.
+    //
+    // The `AADSTS` half moves to a probe of its own. One grep over both
+    // patterns answers two questions at once, and `expectOutput` cannot say
+    // "the first pattern, not the second". Split, the index probe grades on
+    // `expectOutput`, so an empty run fails rather than passing on the exit 0
+    // that `head` hands back whatever grep matched.
+    probes.push({
+      name: 'indexer-healthy',
+      question:
+        'Has the indexer written an index object? A healthy run prints one `index written` line per index ' +
+        'object. The command reads every retained line of the pod log, so empty output means the pod has ' +
+        'written no index object since its log last rotated.',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -E 'index written' | head -20`,
+      ],
+      expectOutput: 'index written',
+      timeoutSec: 120,
+    });
+
+    probes.push({
+      name: 'indexer-token-refusals',
+      question:
+        'How many AADSTS token refusals does the pod log carry? The count runs over every retained line ' +
+        'rather than a bounded tail, which reports zero once the refusals scroll past the window. A healthy ' +
+        'install answers 0.',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -c AADSTS || true`,
+      ],
+      expectOutput: '^0$',
+      timeoutSec: 120,
+    });
+  } else {
+    probes.push({
+      name: 'indexer-healthy',
+      question: 'Is the indexer processing messages from the index queue?',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector},app.kubernetes.io/component=indexer --tail=200 | grep -iE 'index|processed|bloom' | head -20`,
+      ],
+      timeoutSec: 120,
+    });
+  }
 
   if (isAzure) {
     // The failure this probe exists for: the ServiceAccount name has to equal
@@ -1489,12 +1563,15 @@ function buildVerifyProbes(opts: {
     probes.push({
       name: 'workload-identity-binding',
       question:
-        `Does the ServiceAccount \`${releaseName}\` carry the managed-identity client id, and is the pod log ` +
-        'free of AADSTS700213? The first command prints the client id, the second counts the token refusals, ' +
-        'and a healthy install answers with an id and a zero.',
+        `Does the ServiceAccount \`${releaseName}\` carry the managed-identity client id, and how many ` +
+        'AADSTS700213 refusals does the pod log carry? The first command prints the client id, the second ' +
+        'counts the refusals over every retained line, and a healthy install answers with an id and a zero.',
       commands: [
         `kubectl -n ${namespace} get sa ${releaseName} -o jsonpath='{.metadata.annotations.azure\\.workload\\.identity/client-id}{"\\n"}'`,
-        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=200 | grep -c AADSTS700213 || true`,
+        // Same bounded-tail defect as the indexer probe, pointing the other
+        // way: a `--tail=200` count reports 0 once the refusals scroll past
+        // the window, which reads as a pass.
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -c AADSTS700213 || true`,
       ],
     });
   }

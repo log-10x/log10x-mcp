@@ -332,3 +332,80 @@ test('aks_cluster_name is a known argument', async () => {
 
   assert.notEqual(data(out).mode, 'unknown_args');
 });
+
+// ── R2: the input-container question names what already exists ──────────────
+//
+// The question's only example was `logs`, which is also what the provisioning
+// script creates. A caller who guessed it sailed through; a caller who
+// answered anything else got a plan whose upload step targeted a container
+// nobody had created, inside no BlobCreated subscription.
+
+test('the input-container question names both containers the script already created', async () => {
+  const id = freshId();
+  putSnapshot(aksSnap(id));
+
+  await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_provider: 'azure',
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+  await executeAdviseRetriever({
+    snapshot_id: id,
+    ...PLACEMENT,
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+  const out = await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_account: STORAGE.storage_account,
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const d = data(out);
+  assert.equal(d.question_id, 'azure-input-container');
+  const md = d.markdown as string;
+  assert.ok(md.includes('`logs`'), `the question never names the container that exists:\n${md}`);
+  assert.ok(md.includes('`tenx-index`'), `the question never names the index container:\n${md}`);
+  assert.ok(
+    /Create that container first/.test(md),
+    `the question never says a different answer needs a container created first:\n${md}`,
+  );
+  assert.ok(
+    md.includes('--input-container'),
+    `the question never says how the event subscription follows a different container:\n${md}`,
+  );
+  const shape = d.shape as { description: string; example: string };
+  assert.equal(shape.example, 'logs');
+  assert.ok(
+    shape.description.includes('logs') && shape.description.includes('tenx-index'),
+    `the answer shape names neither container: ${shape.description}`,
+  );
+});
+
+test('the storage-account question names the containers the script creates', async () => {
+  const id = freshId();
+  putSnapshot(aksSnap(id));
+
+  await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_provider: 'azure',
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+  const out = await executeAdviseRetriever({
+    snapshot_id: id,
+    ...PLACEMENT,
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const d = data(out);
+  assert.equal(d.question_id, 'azure-storage-account');
+  const md = d.markdown as string;
+  assert.ok(
+    md.includes('`logs`') && md.includes('`tenx-index`'),
+    `"both containers" is still anonymous:\n${md}`,
+  );
+});

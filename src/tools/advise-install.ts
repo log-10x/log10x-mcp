@@ -96,9 +96,17 @@ const SUPPORTED_BACKENDS: MetricsBackendKind[] = [
 ];
 
 export const adviseInstallSchema = {
+  // Required in substance, optional in the schema on purpose: a first call
+  // with `{}` then reaches the handler, which answers with the
+  // `missing_snapshot_id` envelope and the discover_env call that fixes it,
+  // rather than dying in the Zod parse with a bare validation error.
   snapshot_id: z
     .string()
-    .describe('ID returned by `log10x_discover_env`. The snapshot is cached for 30 min.'),
+    .optional()
+    .describe(
+      'ID returned by `log10x_discover_env`, and the one arg the wizard cannot infer. The snapshot is cached ' +
+        'for 30 min. Call `log10x_discover_env` first when there is no snapshot yet.'
+    ),
   app: z
     .enum(['reporter', 'receiver'])
     .optional()
@@ -185,6 +193,9 @@ export type AdviseInstallArgs = z.infer<typeof schemaObj>;
  * mode-specific fields instead.
  */
 type WizardData =
+  // No snapshot_id supplied at all, which is a different failure from one
+  // that expired: nothing has been discovered yet.
+  | { mode: 'missing_snapshot_id'; ok: false; markdown: string }
   | { mode: 'missing_snapshot'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'session_error'; ok: false; snapshot_id: string; markdown: string }
   | { mode: 'cancelled'; ok: false; snapshot_id: string; markdown: string }
@@ -436,6 +447,8 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
     }
     case 'next_question':
       return `Install wizard needs an answer to question "${data.question_id}" before it can emit a plan. Re-invoke log10x_advise_install with the answer in tool args and the same snapshot_id. Answers already given are remembered.`;
+    case 'missing_snapshot_id':
+      return `Install wizard needs a snapshot_id and none was supplied. Run log10x_discover_env (no args) to mint one, then re-invoke log10x_advise_install with it. The wizard asks for app, forwarder, backends and licence one question at a time from there.`;
     case 'missing_snapshot':
       return `Install wizard refused: snapshot ${data.snapshot_id} is missing or expired (snapshots live 30 minutes). Run log10x_discover_env again and re-invoke with the new snapshot_id.`;
     case 'session_error':
@@ -664,6 +677,27 @@ function wizardEnvelopeMeta(data: WizardData): {
   warnings: string[];
 } {
   switch (data.mode) {
+    case 'missing_snapshot_id':
+      return {
+        headline:
+          'The install wizard needs a `snapshot_id`, and `log10x_discover_env` mints one. Run that first, ' +
+          'then re-invoke with the id it returns.',
+        actions: [
+          {
+            tool: 'log10x_discover_env',
+            args: {},
+            reason: 'mint the snapshot the wizard reads the cluster from; it lives 30 min',
+            role: 'required-next',
+          },
+          {
+            tool: 'log10x_advise_install',
+            args: { snapshot_id: '<id from log10x_discover_env>' },
+            reason: 'start the wizard once the snapshot exists; every later answer is a separate re-invoke',
+            role: 'recommended-next',
+          },
+        ],
+        warnings: [],
+      };
     case 'missing_snapshot':
       return {
         headline: `Snapshot \`${data.snapshot_id}\` expired or not found (30-min TTL). Re-discover the cluster first.`,
@@ -910,19 +944,50 @@ export async function executeAdviseInstall(
     });
   }
 
-  const snapshot = getSnapshot(args.snapshot_id);
+  // `snapshot_id` is the one arg the wizard cannot infer, and the tool list
+  // tells an agent to call this tool first. Left required in the schema, a
+  // first call with `{}` died in the Zod parse and the agent saw a validation
+  // error naming the field and nothing else: no tool to call, no order to call
+  // it in. Optional in the schema, the miss lands here instead and answers
+  // with the same shape every other refusal in this file uses, pointing at
+  // `log10x_discover_env`.
+  if (typeof args.snapshot_id !== 'string' || args.snapshot_id.trim() === '') {
+    const md = [
+      '# Install wizard: no snapshot yet',
+      '',
+      '`snapshot_id` is required, and one call mints it.',
+      '',
+      'Run `log10x_discover_env` (no args) against the cluster. The call returns a `snapshot_id` that lives ' +
+        '30 minutes, then re-invoke `log10x_advise_install` with it:',
+      '',
+      '```json',
+      '{ "snapshot_id": "<id from log10x_discover_env>" }',
+      '```',
+      '',
+      'The wizard asks for app, forwarder, backends and licence one question at a time from there, so the ' +
+        'first call carries the snapshot_id alone.',
+    ].join('\n');
+    return wizardReturn({
+      mode: 'missing_snapshot_id',
+      ok: false,
+      markdown: md,
+    });
+  }
+
+  const snapshotId = args.snapshot_id;
+  const snapshot = getSnapshot(snapshotId);
   if (!snapshot) {
     const md = [
       `# Install wizard — snapshot not found`,
       ``,
-      `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
+      `Snapshot \`${snapshotId}\` is missing or expired (snapshots live 30 min).`,
       ``,
       `Run \`log10x_discover_env\` again and pass the new snapshot_id.`,
     ].join('\n');
     return wizardReturn({
       mode: 'missing_snapshot',
       ok: false,
-      snapshot_id: args.snapshot_id,
+      snapshot_id: snapshotId,
       markdown: md,
     });
   }
@@ -943,14 +1008,14 @@ export async function executeAdviseInstall(
   // For `backendCredentials`, merge per-backend entries with whatever's
   // already there rather than replacing the whole map — the user might
   // answer credentials for one backend at a time across multiple turns.
-  const prior = getWizardSession(args.snapshot_id);
+  const prior = getWizardSession(snapshotId);
   const mergedBackendCredentials = args.backend_credentials
     ? {
         ...(prior?.backendCredentials ?? {}),
         ...(args.backend_credentials as Partial<Record<MetricsBackendKind, BackendCredentialConfig>>),
       }
     : undefined;
-  const session = updateWizardSession(args.snapshot_id, {
+  const session = updateWizardSession(snapshotId, {
     app: args.app,
     forwarder: args.forwarder as ForwarderKind | undefined,
     backends: args.backends as MetricsBackendKind[] | undefined,
@@ -969,7 +1034,7 @@ export async function executeAdviseInstall(
     return wizardReturn({
       mode: 'session_error',
       ok: false,
-      snapshot_id: args.snapshot_id,
+      snapshot_id: snapshotId,
       markdown: '# Install wizard — internal error\n\nWizard session could not be created.',
     });
   }
@@ -997,13 +1062,13 @@ export async function executeAdviseInstall(
     // clients without elicitation already do. Clients whose forms work
     // never reach here, so their behaviour is unchanged.
     if (elicitOutcome.kind === 'cancelled' || elicitOutcome.kind === 'failed') {
-      updateWizardSession(args.snapshot_id, { formsDismissed: true });
+      updateWizardSession(snapshotId, { formsDismissed: true });
       const next = nextQuestion(snapshot, session);
       if (next.kind === 'ask') {
         return wizardReturn({
           mode: 'next_question',
           ok: false,
-          snapshot_id: args.snapshot_id,
+          snapshot_id: snapshotId,
           question_id: next.questionId,
           markdown: next.markdown,
           shape: next.shape,
@@ -1020,7 +1085,7 @@ export async function executeAdviseInstall(
       return wizardReturn({
         mode: 'next_question',
         ok: false,
-        snapshot_id: args.snapshot_id,
+        snapshot_id: snapshotId,
         question_id: next.questionId,
         markdown: next.markdown,
         shape: next.shape,
@@ -1063,15 +1128,15 @@ export async function executeAdviseInstall(
         // Persist the reason so the demo+airgapped warning (if reached
         // on a future turn through 'demo' or 'paste') can branch on the
         // same taxonomy. Not strictly needed for this path, but cheap.
-        updateWizardSession(args.snapshot_id, { licenseReason: lic.reason });
+        updateWizardSession(snapshotId, { licenseReason: lic.reason });
         return wizardReturn({
           mode: 'signin_required',
           ok: false,
-          snapshot_id: args.snapshot_id,
+          snapshot_id: snapshotId,
           markdown: md,
         });
       }
-      updateWizardSession(args.snapshot_id, {
+      updateWizardSession(snapshotId, {
         licenseJwt: lic.jwt,
         isDemoLicense: lic.isDemoLicense,
         licenseReason: lic.reason,
@@ -1096,7 +1161,7 @@ export async function executeAdviseInstall(
       return wizardReturn({
         mode: 'license_error',
         ok: false,
-        snapshot_id: args.snapshot_id,
+        snapshot_id: snapshotId,
         error_message: msg,
         markdown: md,
       });
@@ -1139,7 +1204,7 @@ export async function executeAdviseInstall(
     return wizardReturn({
       mode: 'demo_airgapped_warning',
       ok: false,
-      snapshot_id: args.snapshot_id,
+      snapshot_id: snapshotId,
       is_signed_in: isSignedIn,
       markdown: md,
     });

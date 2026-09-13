@@ -692,10 +692,15 @@ test('the indexer probe matches the line the indexer writes, not a class name', 
   // that had indexed nothing.
   assert.ok(!cmd.includes("grep -iE 'index|"), `the probe still greps for bare "index": ${cmd}`);
   assert.ok(cmd.includes('index written'), `the probe should match "index written"; got: ${cmd}`);
-  assert.ok(cmd.includes('AADSTS'), 'the token refusal stays in the same probe');
+  // The AADSTS half moved to `indexer-token-refusals` in round 3: one grep
+  // over both patterns answers two questions at once, and `expectOutput`
+  // cannot say "the first pattern, not the second".
+  const refusals = plan.verify.find((p) => p.name === 'indexer-token-refusals');
+  assert.ok(refusals, `the token-refusal probe is missing; got: ${plan.verify.map((p) => p.name).join(', ')}`);
+  assert.ok(refusals!.commands.join('\n').includes('AADSTS'), 'the token refusal probe greps AADSTS');
   assert.ok(
-    /Empty output means nothing has been indexed yet/.test(probe!.question),
-    'the probe never says how to read empty output',
+    /empty output means the pod has written no index object/i.test(probe!.question),
+    `the probe never says how to read empty output: ${probe!.question}`,
   );
 });
 
@@ -716,4 +721,81 @@ test('the results path names the slice level the workers write under', async () 
   for (const cmd of allCommands(plan).filter((c) => c.includes('az storage blob list'))) {
     assert.ok(cmd.includes('--prefix '), `a blob list with no prefix: ${cmd}`);
   }
+});
+
+// ── R1: the bounded tail that hid the marker ────────────────────────────────
+//
+// Observed live: after a query had run, the pod log held 1164 lines with
+// exactly one `index written` at line 120. `--tail=200` cut the marker off,
+// grep matched nothing, `head` handed back exit 0, and the probe reported a
+// healthy indexing install as one that had indexed nothing. Reproduced against
+// a fixture of that shape before the fix, both shapes quoted in the PR.
+
+test('the indexer probe reads the whole retained log, so a single marker cannot be tailed away', async () => {
+  const plan = await azurePlan();
+  const probe = plan.verify.find((p) => p.name === 'indexer-healthy')!;
+  const cmd = probe.commands.join('\n');
+  // The invariant: no POSITIVE --tail bound on a probe that hunts one marker.
+  // `--tail=-1` is kubectl's "every retained line", and it has to be passed
+  // explicitly because a label selector drops the default to 10.
+  assert.ok(
+    !/--tail=\d+/.test(cmd),
+    `a bounded tail can hide the one marker this probe looks for: ${cmd}`,
+  );
+  assert.ok(cmd.includes('--tail=-1'), `the probe has to ask for every retained line: ${cmd}`);
+  // grep | head exits 0 whether or not grep matched, so exit code alone
+  // cannot grade this probe.
+  assert.equal(probe.expectOutput, 'index written', 'the probe grades on the marker, not on exit 0');
+});
+
+test('the AADSTS counters count over the whole retained log', async () => {
+  const plan = await azurePlan();
+  for (const name of ['indexer-token-refusals', 'workload-identity-binding']) {
+    const probe = plan.verify.find((p) => p.name === name)!;
+    assert.ok(probe, `${name} is missing`);
+    const counting = probe.commands.filter((c) => c.includes('grep -c'));
+    assert.ok(counting.length > 0, `${name} no longer counts anything`);
+    for (const cmd of counting) {
+      assert.ok(
+        !/--tail=\d+/.test(cmd),
+        `${name} counts over a bounded tail, which reports 0 once the refusals scroll past: ${cmd}`,
+      );
+    }
+  }
+  const refusals = plan.verify.find((p) => p.name === 'indexer-token-refusals')!;
+  assert.equal(refusals.expectOutput, '^0$', 'a healthy install answers 0 refusals');
+});
+
+// ── R2: the containers the provisioning script created ──────────────────────
+
+test('the install prose names both containers the script creates', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  assert.ok(text.includes('`logs`'), 'the input container the script creates is never named');
+  assert.ok(text.includes('`tenx-index`'), 'the index container the script creates is never named');
+});
+
+test('an input container the script never created is called out at the upload step', async () => {
+  const plan = await azurePlan({ inputBucket: 'mylogs' });
+  const upload = plan.install.find((s) => s.title.includes('Upload a log'))!;
+  assert.ok(upload, 'the upload step is missing');
+  assert.ok(
+    upload.rationale.includes('is not the container step 1 created'),
+    `the upload step targets a container that does not exist and says nothing: ${upload.rationale}`,
+  );
+  assert.ok(
+    upload.rationale.includes('--input-container mylogs'),
+    'the way to make the container and its event subscription exist is missing',
+  );
+  // The default answer stays clean: no warning where none is due.
+  const defaultPlan = await azurePlan();
+  const defaultUpload = defaultPlan.install.find((s) => s.title.includes('Upload a log'))!;
+  assert.ok(
+    !defaultUpload.rationale.includes('is not the container step 1 created'),
+    'the container the script creates is warned about anyway',
+  );
+  assert.ok(
+    defaultUpload.rationale.includes('the BlobCreated subscription'),
+    'the upload step never ties the container to the event subscription',
+  );
 });
