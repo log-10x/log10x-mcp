@@ -85,6 +85,7 @@ const PLACEMENT = {
   resource_group: 'tenx-rg',
   location: 'eastus',
   aks_cluster_name: 'tenx-aks',
+  namespace: NAMESPACE,
 };
 
 const STORAGE = {
@@ -123,9 +124,93 @@ test('azure wizard asks where the resources go before anything else', async () =
   const shape = d.shape as { type: string; fields: Array<{ name: string; required: boolean }> };
   assert.equal(shape.type, 'form');
   const fields = shape.fields.map((f) => f.name);
-  for (const expected of ['resource_group', 'location', 'aks_cluster_name']) {
+  for (const expected of ['resource_group', 'location', 'aks_cluster_name', 'namespace']) {
     assert.ok(fields.includes(expected), `placement form missing ${expected}; got: ${fields.join(', ')}`);
   }
+});
+
+// ── P3: the namespace the provisioning command carries is asked for ─────────
+
+test('the placement form asks for the namespace the provisioning command needs', async () => {
+  const id = freshId();
+  putSnapshot(aksSnap(id));
+
+  const out = await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_provider: 'azure',
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const d = data(out);
+  assert.equal(d.question_id, 'azure-placement');
+  const shape = d.shape as {
+    fields: Array<{ name: string; required: boolean; default?: string; example?: string }>;
+  };
+  const ns = shape.fields.find((f) => f.name === 'namespace');
+  assert.ok(ns, 'the placement form carries a namespace field');
+  assert.equal(ns!.required, true, 'the namespace is required, not inferred silently');
+  // The snapshot suggests one, so the field arrives pre-filled rather than blank.
+  assert.equal(ns!.default, NAMESPACE, 'the suggested namespace is offered as the default');
+  // The acceptance run had to run a command carrying a literal placeholder to
+  // get the answer to the next question.
+  const md = d.markdown as string;
+  assert.ok(md.includes('--namespace <namespace>'), 'the command still shows the gap being asked about');
+  assert.ok(
+    md.includes('system:serviceaccount:<namespace>:<release>'),
+    'the question says what the namespace binds to',
+  );
+});
+
+test('the placement answer removes the namespace placeholder from every later command', async () => {
+  const id = freshId();
+  putSnapshot(aksSnap(id));
+
+  await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_provider: 'azure',
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const out = await executeAdviseRetriever({
+    snapshot_id: id,
+    ...PLACEMENT,
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const md = data(out).markdown as string;
+  assert.ok(!md.includes('<namespace>'), `a namespace placeholder is still printed:\n${md}`);
+  assert.ok(md.includes(`--namespace ${NAMESPACE}`), 'the answered namespace is in the command');
+});
+
+// ── P6: storage account names are globally unique ───────────────────────────
+
+test('the storage-account question says the name is global and how to test it', async () => {
+  const id = freshId();
+  putSnapshot(aksSnap(id));
+
+  const out = await executeAdviseRetriever({
+    snapshot_id: id,
+    storage_provider: 'azure',
+    ...PLACEMENT,
+    license_source: 'paste',
+    license_jwt_paste: PASTED_JWT,
+  } as Parameters<typeof executeAdviseRetriever>[0]);
+
+  const d = data(out);
+  assert.equal(d.question_id, 'azure-storage-account');
+  const md = d.markdown as string;
+  assert.ok(/globally unique/i.test(md), `the question never says the name is global:\n${md}`);
+  assert.ok(
+    md.includes('az storage account check-name'),
+    'the question gives the command that tests a candidate name',
+  );
+  const shape = d.shape as { example?: string; description?: string };
+  // `tenxlogs` is the name the acceptance run tried first, and it collided.
+  assert.notEqual(shape.example, 'tenxlogs', 'the example is no longer a name anyone would collide on');
+  assert.ok(/globally unique/i.test(shape.description ?? ''), 'the shape description says so too');
 });
 
 test('azure wizard moves to the storage account once placement is answered', async () => {

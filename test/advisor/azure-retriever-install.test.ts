@@ -36,6 +36,8 @@ import {
   RETRIEVER_POD_SELECTOR,
   RETRIEVER_CONTAINER,
   AKS_NODE_SIZE,
+  AZURE_RESULT_POLL_ATTEMPTS,
+  AZURE_RESULT_POLL_INTERVAL_SEC,
 } from '../../src/lib/advisor/retriever.js';
 import { buildPlanSummary } from '../../src/lib/advisor/envelope.js';
 import { getPackageDefaultTool } from '../../src/lib/manifest.js';
@@ -509,4 +511,209 @@ test('an S3 bucket from discovery never becomes the azure input container', asyn
     !plan.verify.some((p) => p.name === 'blob-input'),
     'with no container supplied there is nothing to list',
   );
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Second acceptance round. The install worked; the proof needed two
+// inventions, and three more items slowed it down.
+// ───────────────────────────────────────────────────────────────────────────
+
+// ── P1: the sample line has to match the sample query's own window ──────────
+
+test('the sample log line is stamped at run time, not baked into the plan', async () => {
+  const plan = await azurePlan();
+  const printf = allCommands(plan).find((c) => c.startsWith('printf '));
+  assert.ok(printf, 'the plan writes a sample log line');
+  assert.ok(
+    printf!.includes('date -u +%Y-%m-%dT%H:%M:%SZ'),
+    `the line carries no run-time timestamp; got: ${printf}`,
+  );
+  // Indexing keys on the parsed event timestamp, so a literal hour in the
+  // emitted command matches `now("-1h")` only during that hour. The whole
+  // plan is checked, commands and prose alike.
+  const fixedTimestamp = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/;
+  for (const cmd of allCommands(plan)) {
+    assert.ok(
+      !fixedTimestamp.test(cmd),
+      `a fixed timestamp is still emitted in a command: ${cmd}`,
+    );
+  }
+});
+
+test('the plan says the query window is read off the timestamp inside the line', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  assert.ok(
+    /window is evaluated against the timestamp parsed out of the log line/.test(text),
+    'the plan never states what the query window is evaluated against',
+  );
+  assert.ok(text.includes('now(\\"-1h\\")'), 'the window the sample query asks for is named');
+});
+
+// ── P2: polling the results prefix terminates ───────────────────────────────
+
+test('the polling instruction bounds itself and names the marker that answers an empty prefix', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  // Round one told an agent to treat an empty prefix as "not yet", never as
+  // "no matches", which is an instruction with no exit.
+  assert.ok(
+    !/never as "no matches"/.test(text),
+    'the unbounded polling instruction is still in the plan',
+  );
+  assert.ok(text.includes('_DONE.json'), 'the marker that ends the wait is named');
+  assert.ok(
+    text.includes(`at most ${AZURE_RESULT_POLL_ATTEMPTS} times`),
+    `the poll count is not stated; expected ${AZURE_RESULT_POLL_ATTEMPTS}`,
+  );
+  assert.ok(
+    text.includes(`${AZURE_RESULT_POLL_INTERVAL_SEC} seconds apart`),
+    'the poll interval is not stated',
+  );
+});
+
+test('the marker fields quoted are the fields the writer writes', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  // IndexQueryWriter.writeDoneMarker, in pipeline-extensions cloud-extensions:
+  // queryId, completedAt, elapsedMs, reason, scanned, matched, skippedSearch,
+  // skippedTemplate, streamRequests, streamBlobs, submittedTasks,
+  // expectedMarkers.
+  for (const field of [
+    'queryId',
+    'completedAt',
+    'elapsedMs',
+    'reason',
+    'scanned',
+    'matched',
+    'submittedTasks',
+    'expectedMarkers',
+  ]) {
+    assert.ok(text.includes(`\`${field}\``), `the marker field \`${field}\` is not named`);
+  }
+  // The two classifications close()'s classifier can produce on the queue
+  // path, and what each one means for the operator.
+  assert.ok(text.includes('empty-range'), 'the dispatched-nothing reason is named');
+  assert.ok(text.includes('dispatched'), 'the dispatched-something reason is named');
+});
+
+test('the plan says a second run is a new dispatch under a new queryId', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  assert.ok(
+    /mints a NEW queryId/.test(text),
+    'the plan never says a re-run leaves the first prefix as it was',
+  );
+});
+
+// ── P5: an Azure plan consumes no AWS-derived snapshot field ────────────────
+
+test('no AWS value in the snapshot reaches an azure plan', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  const snap = aksSnapshot();
+  const awsDerived = [
+    snap.recommendations.retrieverS3Bucket!,
+    snap.recommendations.retrieverSqsUrls!.index!,
+    snap.recommendations.retrieverSqsUrls!.query!,
+    snap.recommendations.retrieverSqsUrls!.subquery!,
+    snap.recommendations.retrieverSqsUrls!.stream!,
+    '351939435334',
+  ];
+  for (const value of awsDerived) {
+    assert.ok(!text.includes(value), `an AWS-derived snapshot value reached the azure plan: ${value}`);
+  }
+  // The Receiver in the snapshot pulls in an S3 offload recipe on the AWS
+  // path. Blob has no forwarder offload recipe, so the note has no counterpart.
+  assert.ok(
+    !plan.notes.some((n) => n.includes('outputOffload')),
+    'the S3 offload recipe note is still emitted on an azure plan',
+  );
+});
+
+test('an azure plan says the discovery snapshot covers AWS only', async () => {
+  const plan = await azurePlan();
+  const scope = plan.notes.find((n) => n.includes('runs no Azure'));
+  assert.ok(scope, `no snapshot-scope note; got:\n${plan.notes.join('\n---\n')}`);
+  assert.ok(
+    /covers kubectl and AWS/.test(scope!),
+    'the note does not say what the snapshot covers',
+  );
+  assert.ok(
+    /no\s+AWS-derived snapshot field is read on this path/.test(scope!),
+    'the note does not say what an azure plan reads instead',
+  );
+});
+
+test('the aws plan still reads the snapshot it was always allowed to read', async () => {
+  const plan = await buildRetrieverPlan({
+    snapshot: aksSnapshot(),
+    licenseJwt: 'jwt-value',
+    irsaRoleArn: 'arn:aws:iam::111:role/tenx',
+    sqsUrls: { index: 'i', query: 'q', subquery: 's', stream: 'st' },
+  });
+  // With no input_bucket supplied, the AWS path still falls back to the
+  // bucket discovery pattern-matched. Only the azure path stopped doing that.
+  const bucketRow = plan.preflight.find((c) => c.name === 'input S3 bucket');
+  assert.equal(bucketRow?.status, 'ok');
+  assert.ok(
+    bucketRow!.detail.includes('tenx-demo-cloud-retriever-351939435334'),
+    `the aws fallback was removed too; got: ${bucketRow!.detail}`,
+  );
+  assert.ok(
+    plan.notes.some((n) => n.includes('outputOffload')),
+    'the Receiver offload note stays on the aws path',
+  );
+});
+
+// ── P7: the 403 every index run logs ────────────────────────────────────────
+
+test('the plan accounts for the flat-namespace 403 the pod logs on every run', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  assert.ok(
+    text.includes('could not read account information for'),
+    'the log line an operator reads as a failure is never mentioned',
+  );
+  assert.ok(
+    /assuming a flat \\nnamespace|assuming a flat namespace/.test(text),
+    'the fallback the engine takes is not quoted',
+  );
+});
+
+// ── P8: the indexer probe answers the question it asks ──────────────────────
+
+test('the indexer probe matches the line the indexer writes, not a class name', async () => {
+  const plan = await azurePlan();
+  const probe = plan.verify.find((p) => p.name === 'indexer-healthy');
+  assert.ok(probe, 'the indexer probe is present');
+  const cmd = probe!.commands.join('\n');
+  // `grep -iE 'index'` matched `IndexQueryWriter` and printed output on a pod
+  // that had indexed nothing.
+  assert.ok(!cmd.includes("grep -iE 'index|"), `the probe still greps for bare "index": ${cmd}`);
+  assert.ok(cmd.includes('index written'), `the probe should match "index written"; got: ${cmd}`);
+  assert.ok(cmd.includes('AADSTS'), 'the token refusal stays in the same probe');
+  assert.ok(
+    /Empty output means nothing has been indexed yet/.test(probe!.question),
+    'the probe never says how to read empty output',
+  );
+});
+
+// ── P9: the results path has one more level than the notes claimed ──────────
+
+test('the results path names the slice level the workers write under', async () => {
+  const plan = await azurePlan();
+  const text = planText(plan);
+  assert.ok(
+    text.includes('<sliceFromMs>_<sliceToMs>'),
+    'the slice segment between the queryId and the object is missing',
+  );
+  assert.ok(
+    !text.includes('qr/<queryId>/*.jsonl'),
+    'the one-level-short path is still quoted',
+  );
+  // Step 9 already listed recursively, and every list in the plan has to.
+  for (const cmd of allCommands(plan).filter((c) => c.includes('az storage blob list'))) {
+    assert.ok(cmd.includes('--prefix '), `a blob list with no prefix: ${cmd}`);
+  }
 });

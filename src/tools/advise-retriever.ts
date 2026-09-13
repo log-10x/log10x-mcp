@@ -40,6 +40,7 @@ import {
   AZURE_OPERATOR_ROLES_NOTE,
   AZURE_RESULTS_NOTE,
   AZURE_NODE_SIZE_NOTE,
+  AZURE_STORAGE_ACCOUNT_UNIQUE_NOTE,
   RETRIEVER_IMAGE_TAG,
   type RetrieverStorageProvider,
 } from '../lib/advisor/retriever.js';
@@ -781,7 +782,8 @@ async function detectKubectlRole(_clusterName: string): Promise<string | null> {
  */
 function nextAzureQuestion(
   session: RetrieverWizardSession,
-  resolvedStorageAccount?: string
+  resolvedStorageAccount?: string,
+  suggestedNamespace?: string
 ): RetrieverNextStep {
   const account = resolvedStorageAccount ?? session.storageAccount;
   const releaseName = session.releaseName ?? 'my-retriever';
@@ -795,7 +797,12 @@ function nextAzureQuestion(
     valuesOut: `${releaseName}-azure-provisioned.yaml`,
   }).join('\n');
 
-  if (!session.resourceGroup || !session.location || !session.aksClusterName) {
+  if (
+    !session.resourceGroup ||
+    !session.location ||
+    !session.aksClusterName ||
+    !session.namespace
+  ) {
     return {
       kind: 'ask',
       markdown: [
@@ -809,6 +816,11 @@ function nextAzureQuestion(
           'identity enabled. An existing cluster is used instead by re-running the script with `--aks`, which ' +
           'verifies both are on rather than creating anything.',
         '',
+        'The Kubernetes namespace is asked for here because the provisioning command below carries it as ' +
+          '`--namespace`, and that command has to run before the next question can be answered. The federated ' +
+          'credential the script creates binds `system:serviceaccount:<namespace>:<release>`, so the namespace ' +
+          'picked here is the namespace the release installs into.',
+        '',
         '```bash',
         provisionCommand,
         '```',
@@ -819,8 +831,8 @@ function nextAzureQuestion(
       shape: {
         type: 'form',
         description:
-          'Resource group, region and AKS cluster name. All three appear in the provisioning command, and the ' +
-          'resource group is what teardown deletes.',
+          'Resource group, region, AKS cluster name and Kubernetes namespace. All four appear in the ' +
+          'provisioning command, and the resource group is what teardown deletes.',
         fields: [
           {
             name: 'resource_group',
@@ -846,6 +858,20 @@ function nextAzureQuestion(
             ...(session.aksClusterName !== undefined ? { default: session.aksClusterName } : {}),
             example: 'tenx-retriever-aks',
           },
+          {
+            name: 'namespace',
+            type: 'string',
+            description:
+              'Kubernetes namespace for the release. Passed to the provisioning script as `--namespace` and ' +
+              'used in the federated credential subject.',
+            required: !session.namespace,
+            ...(session.namespace !== undefined
+              ? { default: session.namespace }
+              : suggestedNamespace !== undefined
+                ? { default: suggestedNamespace }
+                : {}),
+            example: suggestedNamespace ?? 'logging',
+          },
         ],
       },
     };
@@ -862,6 +888,8 @@ function nextAzureQuestion(
         '',
         'The account must be **flat namespace**. A hierarchical-namespace account reorders listings, ' +
           'and the engine refuses one at construction.',
+        '',
+        AZURE_STORAGE_ACCOUNT_UNIQUE_NOTE,
         '',
         'Provisioning the whole set in one run. The script ships inside the chart tarball, so the pull ' +
           'comes first:',
@@ -885,8 +913,11 @@ function nextAzureQuestion(
       shape: {
         type: 'string',
         answer_field: 'storage_account',
-        description: 'Azure storage account name holding the input and index containers. Flat namespace only.',
-        example: 'tenxlogs',
+        description:
+          'Azure storage account name holding the input and index containers. Flat namespace only, and ' +
+          'globally unique across Azure: 3 to 24 characters, lowercase letters and digits, with a suffix of ' +
+          'this tenant\'s own so the name is free.',
+        example: 'tenxlogs7f3a',
       },
     };
   }
@@ -983,7 +1014,11 @@ async function nextQuestion(
   // IRSA role and four SQS URLs, none of which exist on AKS, so an Azure
   // install takes its own three questions and never reaches them.
   if (azureContext?.storageProvider === 'azure') {
-    return nextAzureQuestion(session, azureContext.storageAccount);
+    return nextAzureQuestion(
+      session,
+      azureContext.storageAccount,
+      snapshot.recommendations.suggestedNamespace
+    );
   }
 
   // Step 1 — OIDC provider check.
@@ -1011,7 +1046,17 @@ async function nextQuestion(
             },
             {
               args: { snapshot_id: session.snapshotId, infra_mode: 'existing' },
-              description: 'OIDC is already enabled — I\'ll supply ARNs / URLs manually',
+              description: 'OIDC is already enabled, and I\'ll supply ARNs / URLs manually',
+            },
+            // P4, second acceptance round: every resolution above assumes EKS.
+            // An operator on AKS reached this question from the discover_env
+            // required-next action and had to read the tool input schema to
+            // learn that `storage_provider: "azure"` exists.
+            {
+              args: { snapshot_id: session.snapshotId, storage_provider: 'azure' },
+              description:
+                'This cluster is AKS, not EKS: switch to the Azure path (Blob containers, Storage Queues and ' +
+                'workload identity in place of S3, SQS and IRSA)',
             },
           ],
         },
@@ -1329,6 +1374,18 @@ function renderOidcCheck(clusterName: string, region?: string): string {
     '```',
     '',
     'Re-invoke with `infra_mode: "terraform"`, `"cli"`, or `"existing"` to continue.',
+    '',
+    '## On AKS instead',
+    '',
+    'Everything above is EKS and IRSA. A cluster on AKS takes the Azure path, which has its own four ' +
+      'questions and reaches none of this:',
+    '',
+    '```json',
+    '{ "storage_provider": "azure" }',
+    '```',
+    '',
+    'That path installs against Azure Blob containers, four Azure Storage Queues and AKS workload identity, ' +
+      'and the chart\'s own `provision-retriever.sh` creates them.',
   ].join('\n');
 }
 
