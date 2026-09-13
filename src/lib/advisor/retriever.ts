@@ -11,12 +11,19 @@
  * The advisor's job is to:
  *   - Surface the AWS infra the Retriever expects (S3 input bucket,
  *     index bucket, 4 SQS queues, IRSA role).
- *   - Preflight-fail if any of the required AWS resources is missing
- *     from the discovery snapshot.
+ *   - List in `blockers` every input a complete plan is still missing,
+ *     and emit no steps while that list is non-empty. The preflight
+ *     table is the state report beside it: a `fail` row there is
+ *     reported (and counted in the envelope's `preflight_summary`),
+ *     not a gate, because the conditions it reads (kubectl unusable,
+ *     a release already installed) are not answered by re-invoking
+ *     with a different argument.
  *   - Emit a values.yaml that wires the infra into the chart.
- *   - Provide verify probes that prove indexing + querying work.
- *   - Provide teardown (helm uninstall only — leaves AWS infra alone;
- *     infra lifecycle is a Terraform concern).
+ *   - Provide verify probes that prove indexing + querying work,
+ *     each gated on the storage provider they belong to.
+ *   - Provide teardown. On AWS, helm uninstall only: infra lifecycle is
+ *     a Terraform concern. On Azure, the provisioning script's own
+ *     `--destroy`, which deletes the resource group it created.
  *
  * Two storage providers. `aws` is the historical path: S3 buckets, four SQS
  * queues, an IRSA role. `azure` targets AKS with Azure Blob Storage and Azure
@@ -68,6 +75,13 @@ export interface RetrieverAdviseArgs {
    * install plan renders the JWT into the `apiKey` slot.
    */
   licenseJwt?: string;
+  /**
+   * Whether `licenseJwt` came from the caller. A JWT the wizard minted on the
+   * caller's behalf is used for nothing that lands on disk: `false` keeps the
+   * key out of every emitted values file. Defaults to `true`, so a direct
+   * caller that passes `licenseJwt` still gets it wired.
+   */
+  licenseSupplied?: boolean;
   /** Override: input S3 bucket name. Default: from snapshot. */
   inputBucket?: string;
   /** Override: index bucket (with prefix). Default: `<inputBucket>/indexing-results/`. */
@@ -82,8 +96,14 @@ export interface RetrieverAdviseArgs {
   storageProvider?: RetrieverStorageProvider;
   /** Azure storage account holding the containers. Required when storageProvider is `azure`. */
   storageAccount?: string;
-  /** Azure resource group, for the provisioning command in the plan. */
+  /** Azure resource group, for the provisioning command and the teardown in the plan. */
   resourceGroup?: string;
+  /**
+   * AKS cluster the release installs into. Used both by the provisioning
+   * command and by the `az aks get-credentials` step that points kubectl at
+   * the cluster before any kubectl command runs.
+   */
+  aksCluster?: string;
   /** Azure region for the provisioning command (e.g. `eastus`). */
   location?: string;
   /** Client id of the user-assigned managed identity federated to the release ServiceAccount. */
@@ -123,6 +143,23 @@ export interface RetrieverAdviseArgs {
 /** Object store behind the Retriever. */
 export type RetrieverStorageProvider = 'aws' | 'azure';
 
+/**
+ * Blob containers the provisioning script creates, and the names it creates
+ * them under when the plan passes neither `--input-container` nor
+ * `--index-container` (which it does not). Read off
+ * `scripts/azure/provision-retriever.sh` in chart 1.0.24: the defaults are
+ * `logs` and `tenx-index`, and the BlobCreated event subscription the same run
+ * creates is filtered to `--subject-begins-with
+ * /blobServices/default/containers/<input container>/`.
+ *
+ * Both facts matter to the caller: a container name other than `logs` names
+ * something the script never created, and even once created by hand it carries
+ * no event subscription, so an upload into it raises no BlobCreated event and
+ * the indexer never hears about the blob.
+ */
+export const AZURE_SCRIPT_INPUT_CONTAINER = 'logs';
+export const AZURE_SCRIPT_INDEX_CONTAINER = 'tenx-index';
+
 /** Default Azure Storage Queue names, matching the provisioning script's own. */
 const AZURE_DEFAULT_QUEUES = {
   index: 'tenx-index',
@@ -147,8 +184,29 @@ export const RETRIEVER_IMAGE_TAG = '1.1.78';
  * Node size for a cluster the script creates. The Azure CLI default
  * (`Standard_D4d_v4`) is refused on subscriptions that do not carry that
  * family, which stops a first install dead, so the size is always passed.
+ *
+ * The value matches the provisioning script's own default. `Standard_D2s_v5`
+ * was refused on the subscription the Azure path was proved against, and the
+ * script moved to v7; an advisor that keeps passing v5 overrides the working
+ * default with the refused one.
  */
-export const AKS_NODE_SIZE = 'Standard_D2s_v5';
+export const AKS_NODE_SIZE = 'Standard_D2s_v7';
+
+/**
+ * What the chart labels a retriever pod, and what it names the container.
+ *
+ * From `retriever-10x` 1.0.24: `templates/deployment.yaml` stamps
+ * `app: {{ chart name }}` and `cluster: {{ cluster.name }}` on the pod, and
+ * names the container `{{ chart name }}-{{ cluster.name }}`. The default
+ * cluster in `values.yaml` is `all-in-one`. Nothing in the chart sets
+ * `app.kubernetes.io/instance`, so a selector on that key matches no pod and
+ * every probe built on it reports "No resources found" instead of the state
+ * it was asked about.
+ */
+export const RETRIEVER_POD_SELECTOR = 'app=retriever-10x';
+export const RETRIEVER_CONTAINER = 'retriever-10x-all-in-one';
+/** Cluster entry the chart ships, and the suffix on every per-cluster object. */
+export const RETRIEVER_CLUSTER_NAME = 'all-in-one';
 
 /**
  * The provisioning script that ships with the retriever chart. One run creates
@@ -169,8 +227,24 @@ export const AZURE_PROVISION_SCRIPT = `${RETRIEVER_CHART_NAME}/scripts/azure/pro
  * the script's `--index-path` (default `tenx`); the literal `tenx` segment
  * after it is the engine's own, and `<app>` is the first path segment of the
  * indexed blob, which is also what the query's `name` field must equal.
+ *
+ * One level below the queryId comes a slice segment, `<sliceFromMs>_<sliceToMs>`,
+ * because each scan task writes under the time slice it was dispatched for
+ * (`IndexObjectQueryResultsWriter`: `{queryId}/{sliceFrom}_{sliceTo}/{worker}.jsonl`).
+ * A listing that stops at the queryId prefix sees folders rather than objects,
+ * so every list in this plan is recursive.
  */
-export const AZURE_RESULT_PATH = '<index-container>/<index-path>/tenx/<app>/qr/<queryId>/*.jsonl';
+export const AZURE_RESULT_PATH =
+  '<index-container>/<index-path>/tenx/<app>/qr/<queryId>/<sliceFromMs>_<sliceToMs>/<hash>.jsonl';
+
+/**
+ * How long a bounded poll of the results prefix runs before the answer comes
+ * from `_DONE.json` instead. Ten polls fifteen seconds apart is two and a half
+ * minutes, which covers a one-hour window sliced a minute at a time on a
+ * single-node cluster.
+ */
+export const AZURE_RESULT_POLL_ATTEMPTS = 10;
+export const AZURE_RESULT_POLL_INTERVAL_SEC = 15;
 
 /**
  * Two facts a first install needs and neither the chart nor the script states:
@@ -183,14 +257,121 @@ export const AZURE_OPERATOR_ROLES_NOTE =
   'make, pass `--account-key` on those commands instead.';
 
 export const AZURE_RESULTS_NOTE =
-  `Results land as JSONL under \`${AZURE_RESULT_PATH}\`. ` +
-  '`_DONE.json` is a dispatch marker, not a completion signal: it is written before the workers finish, and ' +
-  'its scanned / matched / streamRequests counters read 0 on a run that goes on to write results. Poll the ' +
-  '`qr/<queryId>/` prefix for objects, and treat an empty prefix as "not yet", never as "no matches".';
+  `Results land as JSONL under \`${AZURE_RESULT_PATH}\`. Poll the \`qr/<queryId>/\` prefix at most ` +
+  `${AZURE_RESULT_POLL_ATTEMPTS} times, ${AZURE_RESULT_POLL_INTERVAL_SEC} seconds apart, and then stop. ` +
+  'A prefix still empty at the end of those polls is answered by `_DONE.json` under that same prefix, which ' +
+  'the coordinator writes seconds after the query message is picked up, once every scan task has gone out. ' +
+  'Its fields are `queryId`, `completedAt`, `elapsedMs`, `reason`, `scanned`, `matched`, `skippedSearch`, ' +
+  '`skippedTemplate`, `streamRequests`, `streamBlobs`, `submittedTasks` and `expectedMarkers`. ' +
+  '`reason: "empty-range"` with `submittedTasks: 0` says the coordinator saw no index objects in the window ' +
+  'and dispatched nothing. `reason: "dispatched"` with `submittedTasks` above zero says that many scan tasks ' +
+  'reached the queue, so an empty prefix at the end of the polls above is this dispatch reporting no matches. ' +
+  'A marker that is still absent puts the question on the query handler and the query queue rather than on ' +
+  'the result: the message has yet to be picked up. ' +
+  'The `scanned`, `matched`, `streamRequests` and `expectedMarkers` counters read 0 in the marker on this ' +
+  'path whatever the workers go on to write, because the scan and stream workers run in processes of their ' +
+  'own and the coordinator exits after dispatch. The `.jsonl` objects under the prefix are what carry the ' +
+  'matches. ' +
+  'Running the query again mints a NEW queryId and a new prefix. The first prefix stays as it was, so a ' +
+  'second attempt means listing the new id.';
+
+/**
+ * P1 from the second acceptance round. Indexing keys on the timestamp parsed
+ * out of the event, and the sample query asks for `now("-1h")` to `now()`, so
+ * a sample line stamped with a fixed hour matches its own query only during
+ * that hour. The line is therefore generated by the command, at the moment the
+ * operator runs it.
+ */
+export const AZURE_SAMPLE_LOG_COMMAND =
+  `printf '%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ) ERROR checkout failed for order ORD-DEMO-1" > ./test.log`;
+
+export const AZURE_EVENT_TIME_NOTE =
+  'The query window is evaluated against the timestamp parsed out of the log line rather than the time the ' +
+  'blob was written, so the sample line the upload step writes carries the current time at the moment the ' +
+  'command runs. A line stamped with a fixed hour falls outside the `now("-1h")` window the sample query ' +
+  'asks for once that hour has passed, and the query then dispatches its scan tasks and writes no results.';
+
+/**
+ * P7 from the second acceptance round. Every index run logs a 403 that reads
+ * as a failure and is the expected state on this path.
+ */
+export const AZURE_FLAT_NAMESPACE_403_NOTE =
+  'Every index run logs `could not read account information for <account>, status 403; assuming a flat ' +
+  'namespace`. The managed identity holds the two data-plane roles and no management-plane read, so the ' +
+  'engine has no way to ask the account whether hierarchical namespace is on and falls back to the ' +
+  'flat-namespace assumption. The provisioning script creates flat-namespace accounts, so the assumption ' +
+  'holds and the line belongs to a healthy install.';
+
+/**
+ * P6 from the second acceptance round. Storage account names live in one
+ * global namespace, which neither the question nor its example said.
+ */
+export const AZURE_STORAGE_ACCOUNT_UNIQUE_NOTE =
+  'Storage account names are globally unique across Azure, so a short generic name is usually taken by ' +
+  'another subscription already and account creation stops with a name-unavailable error. Pick one carrying ' +
+  'a suffix of this tenant\'s own, such as `tenxlogs7f3a`, and test a candidate first with ' +
+  '`az storage account check-name --name <name>`. 3 to 24 characters, lowercase letters and digits only.';
+
+/**
+ * P5 from the second acceptance round. `log10x_discover_env` probes kubectl
+ * and AWS. On the machine the acceptance run used it enumerated an unrelated
+ * AWS estate and stamped `estate=serverless` into a snapshot that then backed
+ * an Azure plan.
+ */
+export const AZURE_SNAPSHOT_SCOPE_NOTE =
+  'The discovery snapshot behind this plan covers kubectl and AWS. `log10x_discover_env` runs no Azure ' +
+  'probes today, so its buckets, queues, roles and estate verdict describe an AWS account reachable from ' +
+  'the machine that ran discovery and say nothing about the Azure subscription this plan installs into. ' +
+  'Every Azure value below came from the wizard answers or from the provisioning script, and no ' +
+  'AWS-derived snapshot field is read on this path.';
 
 export const AZURE_API_KEY_NOTE =
   '`log10xApiKey` is optional. Left empty, the engine runs on its built-in evaluation licence and says so in ' +
   'the pod log. Set it only when you hold a Log10x licence key.';
+
+/**
+ * A licence the caller did not hand over is never written into an emitted
+ * values file. The file stays on the operator's disk and the plan tells them
+ * to keep it, so a key put there without being asked for is a key leaked into
+ * a file nobody agreed to hold.
+ */
+export function licenseNotEmittedNote(storageProvider: RetrieverStorageProvider): string {
+  // The two paths write the key into different value slots, so the flag that
+  // replaces it differs as well.
+  const flag =
+    storageProvider === 'azure'
+      ? '`--set-string log10xApiKey="$LOG10X_API_KEY"`'
+      : '`--set-string tenx.apiKey="$LOG10X_API_KEY"`';
+  return (
+    'No licence key is written into the values file. The engine runs on its built-in evaluation licence until ' +
+    `a key is supplied, and a key is supplied at install time with ${flag} so it stays out of any file on disk.`
+  );
+}
+
+/** Node-size refusals stop a first install dead, so the retry path is stated up front. */
+export const AZURE_NODE_SIZE_NOTE =
+  `The provisioning command passes \`--node-size ${AKS_NODE_SIZE}\`. Subscriptions differ in which VM sizes they ` +
+  'allow. On a refusal the script prints the query that lists the sizes this subscription and region do allow ' +
+  '(`az vm list-skus --location <location> --resource-type virtualMachines`) and the exact re-run carrying ' +
+  '`--node-size <SIZE>`. Nothing is left half created: the re-run converges on what already exists.';
+
+/**
+ * Azure teardown. The resource group holds the storage account, the queues,
+ * the managed identity, the Event Grid subscription and the AKS cluster, and
+ * the script's `--destroy` deletes the group and everything in it. No
+ * Terraform state exists on this path.
+ */
+export function buildAzureTeardownCommand(resourceGroup: string): string {
+  return `bash ${AZURE_PROVISION_SCRIPT} --destroy --resource-group ${resourceGroup}`;
+}
+
+/**
+ * The query body the provisioning script prints in its own runbook. `name`
+ * has to equal the first path segment of the uploaded blob, which the upload
+ * step below makes `app`.
+ */
+export const AZURE_SAMPLE_QUERY_BODY =
+  '{"name":"app","from":"now(\\"-1h\\")","to":"now()","search":"severity_level==\\"ERROR\\"","writeResults":true}';
 
 /**
  * The provisioning commands, in the order a customer runs them: add the repo,
@@ -198,6 +379,11 @@ export const AZURE_API_KEY_NOTE =
  * `helm repo add` on a repo that is already present skips without refreshing
  * the index, so `helm repo update` runs before the pull or `--version` can
  * miss a freshly published chart.
+ *
+ * The script is invoked through `bash`. `helm package` writes every file in a
+ * chart tarball as mode 0644 whatever its mode in git, so the copy that comes
+ * out of `helm pull --untar` carries no exec bit and a direct invocation is
+ * refused with "permission denied".
  */
 export function buildAzureProvisionCommands(opts: {
   resourceGroup: string;
@@ -213,7 +399,7 @@ export function buildAzureProvisionCommands(opts: {
     'helm repo update',
     `helm pull ${RETRIEVER_CHART_REF} --version ${RETRIEVER_CHART_VERSION} --untar`,
     [
-      `${AZURE_PROVISION_SCRIPT} \\`,
+      `bash ${AZURE_PROVISION_SCRIPT} \\`,
       `  --resource-group ${opts.resourceGroup} \\`,
       `  --location ${opts.location} \\`,
       `  --account ${opts.account} \\`,
@@ -241,38 +427,60 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
       ? installedNamespace   // actual pod namespace from discover_env
       : snapshot.recommendations.suggestedNamespace ?? 'logging');
 
+  const storageProvider: RetrieverStorageProvider = args.storageProvider ?? 'aws';
+  const isAzure = storageProvider === 'azure';
+
   // Infra: prefer caller-supplied values; fall back to snapshot-derived.
   // Fix 82: for verify, also try to resolve the bucket from the installed
   // Helm release values if installedComponentsDetail.retriever is present.
-  const installedBucket = installedNamespace
-    ? await resolveInstalledBucket(releaseName, installedNamespace)
-    : undefined;
-  const inputBucket = args.inputBucket ?? installedBucket ?? snapshot.recommendations.retrieverS3Bucket;
+  //
+  // P5, second acceptance round: `log10x_discover_env` probes kubectl and AWS
+  // and has no Azure side. On the acceptance machine it enumerated an
+  // unrelated AWS account's S3 buckets and SQS queues and stamped
+  // `estate=serverless` into the snapshot an Azure plan was then built from.
+  // Every snapshot field below that describes AWS resources is therefore read
+  // only on an AWS plan; an Azure plan takes its values from the wizard
+  // answers and from the provisioning script, and says so in its notes.
+  const installedBucket =
+    !isAzure && installedNamespace
+      ? await resolveInstalledBucket(releaseName, installedNamespace)
+      : undefined;
+  // `snapshot.recommendations.retrieverS3Bucket` is an S3 bucket name that
+  // discovery pattern-matched out of the AWS estate. On an Azure plan it is
+  // not a blob container and never belongs in one: pasted into `az storage
+  // blob list -c`, it points every storage probe at a name that does not
+  // exist on the account. Only what the caller passed is used there.
+  const inputBucket = isAzure
+    ? args.inputBucket
+    : args.inputBucket ?? installedBucket ?? snapshot.recommendations.retrieverS3Bucket;
   const indexBucket =
     args.indexBucket ??
-    (args.storageProvider === 'azure'
+    (isAzure
       ? args.storageAccount
         ? `${args.storageAccount}/tenx-index/tenx`
         : undefined
       : inputBucket
         ? `${inputBucket}/indexing-results/`
         : undefined);
-  const irsaRoleArn =
-    args.irsaRoleArn ??
-    snapshot.kubectl.serviceAccountIrsa.find((sa) =>
-      sa.name.toLowerCase().includes('retriever') || sa.name.toLowerCase().includes('tenx-retriever')
-    )?.roleArn;
+  const irsaRoleArn = isAzure
+    ? undefined
+    : args.irsaRoleArn ??
+      snapshot.kubectl.serviceAccountIrsa.find((sa) =>
+        sa.name.toLowerCase().includes('retriever') || sa.name.toLowerCase().includes('tenx-retriever')
+      )?.roleArn;
 
-  const detectedQueues = snapshot.recommendations.retrieverSqsUrls ?? {};
-  const sqsUrls = {
-    index: args.sqsUrls?.index ?? detectedQueues.index,
-    query: args.sqsUrls?.query ?? detectedQueues.query,
-    subquery: args.sqsUrls?.subquery ?? detectedQueues.subquery,
-    stream: args.sqsUrls?.stream ?? detectedQueues.stream,
-  };
+  // An AKS install has no SQS queue. Reading the four detected URLs on an
+  // Azure plan put an unrelated account's queue behind a "pass" in round one.
+  const detectedQueues = isAzure ? {} : snapshot.recommendations.retrieverSqsUrls ?? {};
+  const sqsUrls = isAzure
+    ? { index: undefined, query: undefined, subquery: undefined, stream: undefined }
+    : {
+        index: args.sqsUrls?.index ?? detectedQueues.index,
+        query: args.sqsUrls?.query ?? detectedQueues.query,
+        subquery: args.sqsUrls?.subquery ?? detectedQueues.subquery,
+        stream: args.sqsUrls?.stream ?? detectedQueues.stream,
+      };
 
-  const storageProvider: RetrieverStorageProvider = args.storageProvider ?? 'aws';
-  const isAzure = storageProvider === 'azure';
   const azureQueues = {
     index: args.azureQueues?.index ?? AZURE_DEFAULT_QUEUES.index,
     query: args.azureQueues?.query ?? AZURE_DEFAULT_QUEUES.query,
@@ -341,11 +549,13 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   const notes: string[] = [];
   if (snapshot.recommendations.alreadyInstalled.retriever) {
     notes.push(
-      `A Retriever is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.retriever}\`. Installing a second release requires a separate set of SQS queues + IRSA role — running two retrievers against the same queues will race.`
+      isAzure
+        ? `A Retriever is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.retriever}\`. A second release needs its own four Storage Queues and its own managed identity: two releases polling one set of queues race each other for every message.`
+        : `A Retriever is already installed in namespace \`${snapshot.recommendations.alreadyInstalled.retriever}\`. Installing a second release requires a separate set of SQS queues + IRSA role, since running two retrievers against the same queues will race.`
     );
   }
   // Fix 81/82: audit trail for namespace + bucket resolution source.
-  if (installedNamespace) {
+  if (installedNamespace && !isAzure) {
     const bucketSource = args.inputBucket
       ? 'caller-supplied'
       : installedBucket
@@ -362,7 +572,11 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
       : 'Retriever infra (S3 buckets, SQS queues, IAM role + IRSA binding, CloudWatch log groups) is provisioned via the Terraform module, NOT by this advisor. The plan below assumes infra already exists.'
   );
   if (isAzure) {
+    notes.push(AZURE_SNAPSHOT_SCOPE_NOTE);
     notes.push(AZURE_RESULTS_NOTE);
+    notes.push(AZURE_EVENT_TIME_NOTE);
+    notes.push(AZURE_FLAT_NAMESPACE_403_NOTE);
+    notes.push(AZURE_STORAGE_ACCOUNT_UNIQUE_NOTE);
     notes.push(AZURE_OPERATOR_ROLES_NOTE);
     notes.push(AZURE_API_KEY_NOTE);
     notes.push(
@@ -380,7 +594,12 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   // nothing to index. The note appears above the preflight table so users
   // see it before running any commands. The verify probe (receiver-offload-
   // capability) will confirm the state after the Receiver config is updated.
-  const receiverDetail = snapshot.recommendations.installedComponentsDetail?.receiver;
+  // Gated off the Azure path: the recipe routes bytes to S3, and log10x
+  // emits no forwarder offload recipe for Blob today. The Azure note above
+  // states that instead.
+  const receiverDetail = isAzure
+    ? undefined
+    : snapshot.recommendations.installedComponentsDetail?.receiver;
   if (receiverDetail) {
     notes.push(
       `**Receiver config update required for S3 offload.** ` +
@@ -400,13 +619,17 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   const verify: VerifyProbe[] = [];
   const teardown: PlanStep[] = [];
 
+  // A licence the caller handed over is wired into the values file. One the
+  // wizard minted on their behalf is not: see LICENSE_NOT_EMITTED_NOTE.
+  const licenseSupplied = args.licenseSupplied !== false && !!args.licenseJwt;
   if (!args.skipInstall && blockers.length === 0) {
     install.push(
       ...(isAzure
         ? buildAzureInstallSteps({
             releaseName,
             namespace,
-            licenseJwt: args.licenseJwt!,
+            licenseSupplied,
+            ...(licenseSupplied ? { licenseJwt: args.licenseJwt! } : {}),
             storageAccount: args.storageAccount!,
             inputContainer: inputBucket!,
             indexContainer: indexBucket!,
@@ -415,11 +638,13 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
             queues: azureQueues,
             ...(args.resourceGroup !== undefined ? { resourceGroup: args.resourceGroup } : {}),
             ...(args.location !== undefined ? { location: args.location } : {}),
+            ...(args.aksCluster !== undefined ? { aksCluster: args.aksCluster } : {}),
           })
         : buildInstallSteps({
             releaseName,
             namespace,
-            licenseJwt: args.licenseJwt!,
+            licenseSupplied,
+            ...(licenseSupplied ? { licenseJwt: args.licenseJwt! } : {}),
             inputBucket: inputBucket!,
             indexBucket: indexBucket!,
             irsaRoleArn: irsaRoleArn!,
@@ -427,17 +652,33 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
           }))
     );
   }
+  if (!args.skipInstall && blockers.length === 0 && !licenseSupplied) {
+    notes.push(licenseNotEmittedNote(storageProvider));
+  }
   if (!args.skipVerify) {
     // Pass the Receiver namespace so the offload-capability probe can inspect
     // whether the Receiver ConfigMap has outputOffload wired (Fix 88).
-    const receiverNamespace =
-      snapshot.recommendations.installedComponentsDetail?.receiver?.namespace;
+    const receiverNamespace = isAzure
+      ? undefined
+      : snapshot.recommendations.installedComponentsDetail?.receiver?.namespace;
     verify.push(
-      ...buildVerifyProbes(releaseName, namespace, inputBucket, sqsUrls.index, receiverNamespace)
+      ...buildVerifyProbes({
+        releaseName,
+        namespace,
+        storageProvider,
+        ...(inputBucket !== undefined ? { inputBucket } : {}),
+        ...(sqsUrls.index !== undefined ? { indexQueueUrl: sqsUrls.index } : {}),
+        ...(receiverNamespace !== undefined ? { receiverNamespace } : {}),
+        ...(args.storageAccount !== undefined ? { storageAccount: args.storageAccount } : {}),
+        ...(indexBucket !== undefined ? { indexContainer: indexBucket } : {}),
+        azureQueues,
+      })
     );
   }
   if (!args.skipTeardown) {
-    teardown.push(...buildTeardownSteps(releaseName, namespace));
+    teardown.push(
+      ...buildTeardownSteps(releaseName, namespace, storageProvider, args.resourceGroup)
+    );
   }
 
   // Forwarder offload section: how to route the routeState="drop" slice to the
@@ -474,7 +715,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   // absence is a reliable signal of running outside the cluster.
   const runningInsideCluster = process.env['KUBERNETES_SERVICE_HOST'] !== undefined;
   const retrieverAccessMarkdown = !runningInsideCluster
-    ? buildRetrieverExternalAccessMarkdown(releaseName, namespace)
+    ? buildRetrieverExternalAccessMarkdown(releaseName, namespace, storageProvider)
     : undefined;
 
   return {
@@ -506,9 +747,39 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
  */
 function buildRetrieverExternalAccessMarkdown(
   releaseName: string,
-  namespace: string
+  namespace: string,
+  storageProvider: RetrieverStorageProvider = 'aws'
 ): string {
-  const svcName = `${releaseName}-retriever-10x-all-in-one`;
+  const isAzure = storageProvider === 'azure';
+  // The chart names every per-cluster object `<fullname>-<cluster>`. The Azure
+  // values file sets `fullnameOverride: <release>` so the ServiceAccount name
+  // matches the federated credential subject, which also shortens the Service
+  // to `<release>-all-in-one`. Without the override the fullname is
+  // `<release>-retriever-10x`, which is what the AWS path still gets.
+  const svcName = isAzure
+    ? `${releaseName}-${RETRIEVER_CLUSTER_NAME}`
+    : `${releaseName}-${RETRIEVER_CHART_NAME}-${RETRIEVER_CLUSTER_NAME}`;
+  const loadBalancerValues = isAzure
+    ? [
+        '```yaml',
+        '# retriever-values-lb.yaml',
+        'service:',
+        '  type: LoadBalancer',
+        '```',
+      ]
+    : [
+        '```yaml',
+        '# retriever-values-lb.yaml',
+        'retriever:',
+        '  service:',
+        '    type: LoadBalancer',
+        '    annotations:',
+        '      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"',
+        '```',
+      ];
+  const loadBalancerIntro = isAzure
+    ? 'Add to the values file and upgrade:'
+    : 'Add to your Terraform module call or values file:';
   return [
     '## How to query the Retriever from outside the cluster',
     '',
@@ -535,21 +806,16 @@ function buildRetrieverExternalAccessMarkdown(
     '',
     '### Option B — Migrate the Service to LoadBalancer (persistent)',
     '',
-    'Add to your Terraform module call or values file:',
+    loadBalancerIntro,
     '',
-    '```yaml',
-    '# retriever-values-lb.yaml',
-    'retriever:',
-    '  service:',
-    '    type: LoadBalancer',
-    '    annotations:',
-    '      service.beta.kubernetes.io/aws-load-balancer-type: "nlb"',
-    '```',
+    ...loadBalancerValues,
     '',
     'Apply with:',
     '',
     '```bash',
-    `helm upgrade ${releaseName} ${RETRIEVER_CHART_REF} -n ${namespace} -f retriever-values-lb.yaml`,
+    isAzure
+      ? `helm upgrade ${releaseName} ${RETRIEVER_CHART_REF} --version ${RETRIEVER_CHART_VERSION} \\\n  -n ${namespace} \\\n  -f ${releaseName}-azure-values.yaml \\\n  -f ${releaseName}-azure-provisioned.yaml \\\n  -f retriever-values-lb.yaml`
+      : `helm upgrade ${releaseName} ${RETRIEVER_CHART_REF} -n ${namespace} -f retriever-values-lb.yaml`,
     '```',
     '',
     'After the LoadBalancer is provisioned, run `kubectl -n ' +
@@ -801,7 +1067,8 @@ async function runPreflight(
 function buildInstallSteps(opts: {
   releaseName: string;
   namespace: string;
-  licenseJwt: string;
+  licenseJwt?: string;
+  licenseSupplied: boolean;
   inputBucket: string;
   indexBucket: string;
   irsaRoleArn: string;
@@ -861,7 +1128,8 @@ function buildInstallSteps(opts: {
 
 function renderRetrieverValues(opts: {
   releaseName: string;
-  licenseJwt: string;
+  licenseJwt?: string;
+  licenseSupplied: boolean;
   inputBucket: string;
   indexBucket: string;
   irsaRoleArn: string;
@@ -871,9 +1139,17 @@ function renderRetrieverValues(opts: {
   // `tenx.apiKey` slot rather than the Reporter chart's `log10xLicenseJwt`
   // convention, so the license JWT goes into that slot. The engine
   // validates the JWT regardless of which value-key it arrives through.
+  //
+  // The slot is filled only when the caller handed a licence over. Otherwise
+  // the line is a comment carrying the install-time flag, so no key lands in
+  // a file the plan tells the operator to keep.
+  const apiKeyLine =
+    opts.licenseSupplied && opts.licenseJwt
+      ? `  apiKey: "${opts.licenseJwt}"`
+      : '  # apiKey: pass at install time with --set-string tenx.apiKey="$LOG10X_API_KEY"';
   return `tenx:
   enabled: true
-  apiKey: "${opts.licenseJwt}"
+${apiKeyLine}
   runtimeName: "${opts.releaseName}"
   gitToken: "public-repo-no-token-needed"
   config:
@@ -897,19 +1173,41 @@ streamQueueUrl: "${opts.sqsUrls.stream}"
 }
 
 /**
+ * `indexContainer` arrives as `<account>/<container>/<index-path>`, the shape
+ * the chart's `storage.azure.indexContainer` takes and the shape the script
+ * writes. The results prefix is the index path, then the engine's own `tenx`
+ * segment, then the app.
+ */
+function splitAzureIndexContainer(indexContainer: string): {
+  container: string;
+  path: string;
+} {
+  const parts = indexContainer.split('/');
+  return { container: parts[1] ?? 'tenx-index', path: parts[2] ?? 'tenx' };
+}
+
+/**
  * AKS + Azure Blob install steps.
  *
  * Step 1 pulls the chart and runs the provisioning script that ships inside
  * it, which creates every Azure resource the Retriever needs and emits a
- * values file. Steps 2 to 5 mirror the AWS path: create the namespace, write
- * the values, install, wait. The values block is the chart's
- * `storage.provider: azure` shape, so the emitted file and the script's own
- * output describe the same install.
+ * values file. Step 2 points kubectl at the cluster, because every step after
+ * it is a kubectl or helm call and a fresh shell has no context for a cluster
+ * the script just created. Steps 3 to 6 create the namespace, write the
+ * values, install and wait, and steps 7 to 9 are the loop the provisioning
+ * script prints in its own runbook: upload a blob, put a query on the query
+ * queue, read the JSONL the workers wrote.
+ *
+ * The values file this step writes and the one the script writes carry
+ * different names, so neither overwrites the other. The install passes both,
+ * the script's second, so any key the script wrote from what it actually
+ * created wins over a default carried here.
  */
 function buildAzureInstallSteps(opts: {
   releaseName: string;
   namespace: string;
-  licenseJwt: string;
+  licenseJwt?: string;
+  licenseSupplied: boolean;
   storageAccount: string;
   inputContainer: string;
   indexContainer: string;
@@ -918,31 +1216,58 @@ function buildAzureInstallSteps(opts: {
   queues: { index: string; query: string; subquery: string; stream: string };
   resourceGroup?: string;
   location?: string;
+  aksCluster?: string;
 }): PlanStep[] {
   const steps: PlanStep[] = [];
+  // Two names, two files. The script owns `<release>-azure-provisioned.yaml`
+  // through `--values-out`; this plan owns `<release>-azure-values.yaml`.
+  const provisionedValuesFile = `${opts.releaseName}-azure-provisioned.yaml`;
   const valuesFile = `${opts.releaseName}-azure-values.yaml`;
   const rg = opts.resourceGroup ?? '<resource-group>';
   const loc = opts.location ?? '<location>';
+  const aks = opts.aksCluster ?? '<aks-cluster-name>';
+  const kubeconfigFile = `${aks}.kubeconfig`;
+  const { container: indexContainerName, path: indexPath } = splitAzureIndexContainer(
+    opts.indexContainer
+  );
+  const resultsPrefix = `${indexPath}/tenx/app/qr/`;
 
   steps.push({
     title: 'Pull the chart and provision the Azure resources',
     rationale:
       `The script lives inside the chart tarball, at \`${AZURE_PROVISION_SCRIPT}\`, so the pull comes first. ` +
-      'One run creates the storage account (flat namespace), the input and index containers, the four Storage ' +
+      `One run creates the storage account (flat namespace), the two blob containers ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` for the source logs and \`${AZURE_SCRIPT_INDEX_CONTAINER}\` for the ` +
+      'index, the four Storage ' +
       'Queues, the user-assigned managed identity with "Storage Blob Data Contributor" and "Storage Queue Data ' +
       'Contributor" on the account, the Event Grid system topic with a BlobCreated subscription onto the index ' +
       'queue, and the federated credential binding the identity to this release\'s ServiceAccount. It ends by ' +
-      `writing a values file pinning image tag \`${RETRIEVER_IMAGE_TAG}\`. ${AZURE_OPERATOR_ROLES_NOTE}`,
+      `writing \`${provisionedValuesFile}\`, pinning image tag \`${RETRIEVER_IMAGE_TAG}\`. ` +
+      `${AZURE_OPERATOR_ROLES_NOTE} ${AZURE_NODE_SIZE_NOTE}`,
     commands: buildAzureProvisionCommands({
       resourceGroup: rg,
       location: loc,
       account: opts.storageAccount,
-      aksCluster: '<aks-cluster-name>',
+      aksCluster: aks,
       namespace: opts.namespace,
       releaseName: opts.releaseName,
-      valuesOut: valuesFile,
+      valuesOut: provisionedValuesFile,
     }),
     expectDurationSec: 900,
+  });
+
+  steps.push({
+    title: 'Point kubectl at the cluster',
+    rationale:
+      `Every step below runs kubectl or helm against \`${aks}\`. A shell that has not fetched the credentials ` +
+      'has no context for a cluster the previous step just created, and `--overwrite-existing` keeps a stale ' +
+      'entry of the same name from winning. The write goes to a file of its own rather than into the default ' +
+      'kubeconfig, so nothing already in `~/.kube/config` is touched.',
+    commands: [
+      `az aks get-credentials --resource-group ${rg} --name ${aks} \\\n  --file ./${kubeconfigFile} --overwrite-existing`,
+      `export KUBECONFIG="$PWD/${kubeconfigFile}"`,
+      'kubectl get nodes',
+    ],
   });
 
   steps.push({
@@ -956,9 +1281,13 @@ function buildAzureInstallSteps(opts: {
   steps.push({
     title: 'Write Helm values',
     rationale:
-      'Wires the tenx block and the chart\'s `storage.provider: azure` block: the account, both containers, ' +
-      'the four Storage Queue names, and workload-identity auth. Compare against the file the provisioning ' +
-      'script wrote and keep whichever the operator edited.',
+      'Carries the chart\'s `storage.provider: azure` block: the account, both containers, the four Storage ' +
+      'Queue names, and workload-identity auth. `fullnameOverride` is the release name, which is what makes the ' +
+      `ServiceAccount \`${opts.releaseName}\` rather than \`${opts.releaseName}-${RETRIEVER_CHART_NAME}\`, the ` +
+      `name the federated credential subject \`system:serviceaccount:${opts.namespace}:${opts.releaseName}\` ` +
+      'binds to. Without it the pod reaches 2/2 Running and every queue poll comes back AADSTS700213, no ' +
+      'matching federated identity record for the presented subject. ' +
+      `The file sits beside \`${provisionedValuesFile}\` rather than on top of it.`,
     file: {
       path: valuesFile,
       contents: renderAzureRetrieverValues(opts),
@@ -970,35 +1299,80 @@ function buildAzureInstallSteps(opts: {
   steps.push({
     title: 'Install via Helm',
     rationale:
-      'Deploys the indexer + query-handler + stream-worker against Blob and the Storage Queues. ' +
+      'Deploys the indexer, the query handler and the stream worker against Blob and the Storage Queues. ' +
+      `Both values files are passed, \`${provisionedValuesFile}\` second, so what the script recorded about ` +
+      `what it created wins over any default in \`${valuesFile}\`. ` +
       AZURE_API_KEY_NOTE,
     commands: [
-      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  --version ${RETRIEVER_CHART_VERSION} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile}`,
+      `helm upgrade --install ${opts.releaseName} ${RETRIEVER_CHART_REF} \\\n  --version ${RETRIEVER_CHART_VERSION} \\\n  -n ${opts.namespace} --create-namespace \\\n  -f ${valuesFile} \\\n  -f ${provisionedValuesFile}`,
     ],
   });
 
   steps.push({
     title: 'Wait for rollout',
-    rationale: 'Blocks until indexer + query-handler + stream-worker report Ready.',
+    rationale:
+      `The chart labels the pod \`${RETRIEVER_POD_SELECTOR}\` and names the container ` +
+      `\`${RETRIEVER_CONTAINER}\`. A selector on \`app.kubernetes.io/instance\` matches nothing here, so it ` +
+      'reports "No resources found" whatever the pod is doing.',
     commands: [
-      `kubectl -n ${opts.namespace} rollout status deployment -l app.kubernetes.io/instance=${opts.releaseName} --timeout=10m || true`,
-      `kubectl -n ${opts.namespace} logs -l app.kubernetes.io/instance=${opts.releaseName} --tail=50`,
+      `kubectl -n ${opts.namespace} rollout status deployment/${opts.releaseName}-${RETRIEVER_CLUSTER_NAME} --timeout=10m || true`,
+      `kubectl -n ${opts.namespace} logs -l ${RETRIEVER_POD_SELECTOR} -c ${RETRIEVER_CONTAINER} --tail=50`,
     ],
     expectDurationSec: 600,
   });
 
-  // `indexContainer` arrives as `<account>/<container>/<index-path>`, the shape
-  // the chart's `storage.azure.indexContainer` takes and the shape the script
-  // writes. The results prefix is the index path, then the engine's own `tenx`
-  // segment, then the app.
-  const indexParts = opts.indexContainer.split('/');
-  const indexContainerName = indexParts[1] ?? 'tenx-index';
-  const indexPath = indexParts[2] ?? 'tenx';
+  // The upload lands in whatever container the wizard was told about. The
+  // provisioning script created `logs` and filtered the BlobCreated
+  // subscription to it, so any other name needs both the container and the
+  // subscription before this step can index anything.
+  const inputContainerIsScriptDefault = opts.inputContainer === AZURE_SCRIPT_INPUT_CONTAINER;
+  const uploadContainerNote = inputContainerIsScriptDefault
+    ? `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` is the container step 1 created, and the BlobCreated subscription ` +
+      'the same run created is filtered to it.'
+    : `\`${opts.inputContainer}\` is not the container step 1 created. The script creates ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` and filters the BlobCreated subscription to it, so this upload ` +
+      `raises no event the indexer hears. Re-run the provisioning command in step 1 with ` +
+      `\`--input-container ${opts.inputContainer}\` before this step, or upload into ` +
+      `\`${AZURE_SCRIPT_INPUT_CONTAINER}\` instead.`;
+
+  steps.push({
+    title: 'Upload a log to the input container',
+    rationale:
+      `The first path segment of the blob name is the application name, so \`app/test.log\` indexes under ` +
+      '`app` and the query below has to carry the same name. Event Grid delivers the BlobCreated event to ' +
+      `\`${opts.queues.index}\` and the pod writes the index. A query naming anything else returns silence ` +
+      `rather than an error. ${uploadContainerNote} ${AZURE_EVENT_TIME_NOTE}`,
+    commands: [
+      AZURE_SAMPLE_LOG_COMMAND,
+      `az storage blob upload \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  -c ${opts.inputContainer} \\\n  -n app/test.log \\\n  -f ./test.log \\\n  -o none`,
+    ],
+  });
+
+  steps.push({
+    title: 'Put a query on the query queue',
+    rationale:
+      `The query body names the app \`app\`, matching the blob uploaded above, and sets \`writeResults\` so the ` +
+      `workers write JSONL under \`${indexContainerName}/${resultsPrefix}<queryId>/<sliceFromMs>_<sliceToMs>/\`. ` +
+      'The window is `now("-1h")` to `now()`, evaluated against the timestamp inside each indexed line, which ' +
+      'is why the step above stamps the sample with the current time. The second command lists the results ' +
+      'prefix recursively, which is how the queryId becomes known: the engine mints it, rather than this plan.',
+    commands: [
+      `az storage message put \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  --queue-name ${opts.queues.query} \\\n  --content '${AZURE_SAMPLE_QUERY_BODY}' \\\n  -o none`,
+      `az storage blob list \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  -c ${indexContainerName} \\\n  --prefix ${resultsPrefix} \\\n  --query "[].name" -o tsv`,
+    ],
+  });
+
   steps.push({
     title: 'Read the results',
-    rationale: AZURE_RESULTS_NOTE,
+    rationale:
+      'The first command picks the most recently written `.jsonl` under the results prefix, the second ' +
+      `downloads it, the third prints it. One matched event per line. ${AZURE_RESULTS_NOTE}`,
+    expectDurationSec:
+      AZURE_RESULT_POLL_ATTEMPTS * AZURE_RESULT_POLL_INTERVAL_SEC,
     commands: [
-      `az storage blob list --account-name ${opts.storageAccount} \\\n  --container-name ${indexContainerName} \\\n  --prefix "${indexPath}/tenx/<app>/qr/<queryId>/" \\\n  --auth-mode login -o table`,
+      `blob="$(az storage blob list \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  -c ${indexContainerName} \\\n  --prefix ${resultsPrefix} \\\n  --query "sort_by([?ends_with(name, '.jsonl')], &properties.lastModified)[-1].name" \\\n  -o tsv)"`,
+      `az storage blob download \\\n  --account-name ${opts.storageAccount} \\\n  --auth-mode login \\\n  -c ${indexContainerName} \\\n  -n "$blob" \\\n  -f ./results.jsonl \\\n  -o none`,
+      'cat ./results.jsonl',
     ],
   });
 
@@ -1007,7 +1381,8 @@ function buildAzureInstallSteps(opts: {
 
 function renderAzureRetrieverValues(opts: {
   releaseName: string;
-  licenseJwt: string;
+  licenseJwt?: string;
+  licenseSupplied: boolean;
   storageAccount: string;
   inputContainer: string;
   indexContainer: string;
@@ -1017,26 +1392,36 @@ function renderAzureRetrieverValues(opts: {
 }): string {
   // `invoke: queue` is the Azure equivalent of the AWS `sqs` fan-out: the
   // pipeline hands the next stage to an Azure Storage Queue. `scheduledQueries`
-  // is off because the CronJob shells `aws sqs send-message` from an aws-cli
-  // image, which has no Azure equivalent in the chart today.
+  // is off because the CronJob shells an aws-cli image, which has no Azure
+  // equivalent in the chart today.
   //
   // `image.tag` is pinned rather than left to the chart's appVersion, which
   // trails the released engine.
+  //
+  // `fullnameOverride` is the release name. The chart names the ServiceAccount
+  // after the fullname, and the federated credential the provisioning script
+  // creates binds `system:serviceaccount:<namespace>:<release>`. Left out, the
+  // chart names it `<release>-retriever-10x`, the subject no longer matches,
+  // and every queue poll returns AADSTS700213 from a pod that is otherwise
+  // healthy.
+  //
+  // No `tenx:` block: the published chart carries no such key, so everything
+  // under it configures nothing. Its `apiKey` slot was the second copy of the
+  // licence in this file.
+  const apiKeyLines =
+    opts.licenseSupplied && opts.licenseJwt
+      ? [`log10xApiKey: "${opts.licenseJwt}"`]
+      : [
+          '# Supplied at install time so no key lands in this file:',
+          '#   --set-string log10xApiKey="$LOG10X_API_KEY"',
+        ];
   return `# log10xApiKey is optional: empty means the built-in evaluation licence.
-log10xApiKey: "${opts.licenseJwt}"
+${apiKeyLines.join('\n')}
+
+fullnameOverride: "${opts.releaseName}"
 
 image:
   tag: "${RETRIEVER_IMAGE_TAG}"
-
-tenx:
-  enabled: true
-  apiKey: "${opts.licenseJwt}"
-  runtimeName: "${opts.releaseName}"
-  gitToken: "public-repo-no-token-needed"
-  config:
-    git:
-      enabled: true
-      url: "https://github.com/log-10x/config.git"
 
 storage:
   provider: azure
@@ -1062,41 +1447,141 @@ scheduledQueries:
 `;
 }
 
-function buildVerifyProbes(
-  releaseName: string,
-  namespace: string,
-  inputBucket: string | undefined,
-  indexQueueUrl: string | undefined,
+/**
+ * Verify probes.
+ *
+ * Every AWS probe is gated on `storageProvider === 'aws'`. An Azure install
+ * has no S3 bucket and no SQS queue, and the AWS-shaped probes did not fail
+ * loudly on one: probe 5 pasted the blob container name into an `s3://` URL
+ * and returned AccessDenied, and the queue-depth probe polled an SQS URL
+ * scraped from an unrelated AWS estate and reported zero messages, which
+ * reads as a pass.
+ */
+function buildVerifyProbes(opts: {
+  releaseName: string;
+  namespace: string;
+  storageProvider: RetrieverStorageProvider;
+  inputBucket?: string;
+  indexQueueUrl?: string;
   /** Namespace where the Receiver DaemonSet runs (if installed). Used to probe outputOffload config. */
-  receiverNamespace?: string
-): VerifyProbe[] {
+  receiverNamespace?: string;
+  /** Azure storage account holding both containers. */
+  storageAccount?: string;
+  /** Azure index container, as `<account>/<container>/<path>`. */
+  indexContainer?: string;
+  /** Azure Storage Queue names. */
+  azureQueues?: { index: string; query: string; subquery: string; stream: string };
+}): VerifyProbe[] {
+  const { releaseName, namespace, storageProvider } = opts;
+  const isAzure = storageProvider === 'azure';
   const probes: VerifyProbe[] = [];
+  // On Azure the values file sets `fullnameOverride`, so the per-cluster
+  // objects are `<release>-all-in-one`. On AWS the chart derives the fullname
+  // and they are `<release>-retriever-10x-all-in-one`.
+  const workloadName = isAzure
+    ? `${releaseName}-${RETRIEVER_CLUSTER_NAME}`
+    : `${releaseName}-${RETRIEVER_CHART_NAME}-${RETRIEVER_CLUSTER_NAME}`;
+  // `app.kubernetes.io/instance` is set by nothing in the chart. The pod
+  // labels are `app=retriever-10x` and `cluster=all-in-one`.
+  const podSelector = isAzure ? RETRIEVER_POD_SELECTOR : `app.kubernetes.io/instance=${releaseName}`;
+  const containerFlag = isAzure ? ` -c ${RETRIEVER_CONTAINER}` : '';
 
   probes.push({
     name: 'pods-ready',
     question: 'Are indexer + query-handler + stream-worker pods Ready?',
     commands: [
-      `kubectl -n ${namespace} wait --for=condition=Ready pod -l app.kubernetes.io/instance=${releaseName} --timeout=10m`,
+      `kubectl -n ${namespace} wait --for=condition=Ready pod -l ${podSelector} --timeout=10m`,
     ],
     expectOutput: 'condition met',
     timeoutSec: 600,
   });
 
-  probes.push({
-    name: 'indexer-healthy',
-    question: 'Is the indexer processing messages from the index queue?',
-    commands: [
-      `kubectl -n ${namespace} logs -l app.kubernetes.io/instance=${releaseName},app.kubernetes.io/component=indexer --tail=200 | grep -iE 'index|processed|bloom' | head -20`,
-    ],
-    timeoutSec: 120,
-  });
+  if (isAzure) {
+    // Two failures, two probes.
+    //
+    // 1. `grep -iE 'index'` matched class names such as `IndexQueryWriter`, so
+    //    the probe printed lines whether or not a single blob had been
+    //    indexed. `index written` is the line the indexer logs per index
+    //    object.
+    // 2. `--tail=200` then hid that line. The marker is written once per index
+    //    object, and the query the operator ran to prove the install pushed it
+    //    out of the tail: a live pod held 1164 lines with exactly one `index
+    //    written` at line 120, so the probe printed nothing and reported a
+    //    healthy indexer as one that had indexed nothing. `--tail=-1` is
+    //    kubectl's "every retained line", and it has to be passed explicitly
+    //    because a label selector drops the default to 10. The bound that
+    //    matters for output size is `head -20`, which stays. `--since` was the
+    //    other candidate and carries the same defect on a different axis: an
+    //    install verified an hour after the upload has the marker outside any
+    //    window short enough to be worth writing down.
+    //
+    // The `AADSTS` half moves to a probe of its own. One grep over both
+    // patterns answers two questions at once, and `expectOutput` cannot say
+    // "the first pattern, not the second". Split, the index probe grades on
+    // `expectOutput`, so an empty run fails rather than passing on the exit 0
+    // that `head` hands back whatever grep matched.
+    probes.push({
+      name: 'indexer-healthy',
+      question:
+        'Has the indexer written an index object? A healthy run prints one `index written` line per index ' +
+        'object. The command reads every retained line of the pod log, so empty output means the pod has ' +
+        'written no index object since its log last rotated.',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -E 'index written' | head -20`,
+      ],
+      expectOutput: 'index written',
+      timeoutSec: 120,
+    });
+
+    probes.push({
+      name: 'indexer-token-refusals',
+      question:
+        'How many AADSTS token refusals does the pod log carry? The count runs over every retained line ' +
+        'rather than a bounded tail, which reports zero once the refusals scroll past the window. A healthy ' +
+        'install answers 0.',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -c AADSTS || true`,
+      ],
+      expectOutput: '^0$',
+      timeoutSec: 120,
+    });
+  } else {
+    probes.push({
+      name: 'indexer-healthy',
+      question: 'Is the indexer processing messages from the index queue?',
+      commands: [
+        `kubectl -n ${namespace} logs -l ${podSelector},app.kubernetes.io/component=indexer --tail=200 | grep -iE 'index|processed|bloom' | head -20`,
+      ],
+      timeoutSec: 120,
+    });
+  }
+
+  if (isAzure) {
+    // The failure this probe exists for: the ServiceAccount name has to equal
+    // the subject of the federated credential, or the pod runs and every call
+    // to Blob and the queues comes back AADSTS700213.
+    probes.push({
+      name: 'workload-identity-binding',
+      question:
+        `Does the ServiceAccount \`${releaseName}\` carry the managed-identity client id, and how many ` +
+        'AADSTS700213 refusals does the pod log carry? The first command prints the client id, the second ' +
+        'counts the refusals over every retained line, and a healthy install answers with an id and a zero.',
+      commands: [
+        `kubectl -n ${namespace} get sa ${releaseName} -o jsonpath='{.metadata.annotations.azure\\.workload\\.identity/client-id}{"\\n"}'`,
+        // Same bounded-tail defect as the indexer probe, pointing the other
+        // way: a `--tail=200` count reports 0 once the refusals scroll past
+        // the window, which reads as a pass.
+        `kubectl -n ${namespace} logs -l ${podSelector}${containerFlag} --tail=-1 | grep -c AADSTS700213 || true`,
+      ],
+    });
+  }
 
   probes.push({
     name: 'query-endpoint-healthy',
     question: 'Is the query endpoint responding?',
-    commands: [
-      `kubectl -n ${namespace} get ingress,svc -l app.kubernetes.io/instance=${releaseName}`,
-    ],
+    commands: isAzure
+      ? [`kubectl -n ${namespace} get svc ${workloadName}`]
+      : [`kubectl -n ${namespace} get ingress,svc -l app.kubernetes.io/instance=${releaseName}`],
   });
 
   // Retriever Service external-access probe.
@@ -1119,16 +1604,62 @@ function buildVerifyProbes(
   probes.push({
     name: 'retriever-service-accessibility',
     question: accessQuestion,
-    commands: [
-      // Use jq when available; fall back to plain kubectl wide output.
-      // The agent reads the type= field from the output to determine if
-      // external access guidance applies.
-      `kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o json 2>/dev/null` +
-        ` | jq -r '.items[] | "Service \\(.metadata.name): type=\\(.spec.type) port=\\(.spec.ports[0].port // "?")"'` +
-        ` 2>/dev/null` +
-        ` || kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o wide`,
-    ],
+    commands: isAzure
+      ? [
+          // The chart puts no `app` label on the Service object itself, only
+          // on the pods the Service selects, so the Service is addressed by
+          // name here rather than by label.
+          `kubectl -n ${namespace} get svc ${workloadName} -o json 2>/dev/null` +
+            ` | jq -r '"Service \\(.metadata.name): type=\\(.spec.type) port=\\(.spec.ports[0].port // "?")"'` +
+            ` 2>/dev/null` +
+            ` || kubectl -n ${namespace} get svc ${workloadName} -o wide`,
+        ]
+      : [
+          // Use jq when available; fall back to plain kubectl wide output.
+          // The agent reads the type= field from the output to determine if
+          // external access guidance applies.
+          `kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o json 2>/dev/null` +
+            ` | jq -r '.items[] | "Service \\(.metadata.name): type=\\(.spec.type) port=\\(.spec.ports[0].port // "?")"'` +
+            ` 2>/dev/null` +
+            ` || kubectl -n ${namespace} get svc -l app.kubernetes.io/instance=${releaseName} -o wide`,
+        ],
   });
+
+  if (isAzure) {
+    const account = opts.storageAccount ?? '<storage-account>';
+    const { container: indexContainerName, path: indexPath } = splitAzureIndexContainer(
+      opts.indexContainer ?? `${account}/tenx-index/tenx`
+    );
+    if (opts.inputBucket) {
+      probes.push({
+        name: 'blob-input',
+        question: 'Does the input container hold blobs under the app prefix?',
+        commands: [
+          `az storage blob list \\\n  --account-name ${account} \\\n  --auth-mode login \\\n  -c ${opts.inputBucket} \\\n  --prefix app/ \\\n  --query "[].name" -o tsv | head -5`,
+        ],
+      });
+    }
+    probes.push({
+      name: 'blob-index-written',
+      question: 'Is the indexer writing the index into the index container?',
+      commands: [
+        `az storage blob list \\\n  --account-name ${account} \\\n  --auth-mode login \\\n  -c ${indexContainerName} \\\n  --prefix ${indexPath}/ \\\n  --query "[].name" -o tsv | head -5`,
+      ],
+    });
+    if (opts.azureQueues) {
+      probes.push({
+        name: 'storage-queue-drainage',
+        question: 'Is the index queue being drained (messages not piling up)?',
+        commands: [
+          `az storage message peek \\\n  --account-name ${account} \\\n  --auth-mode login \\\n  --queue-name ${opts.azureQueues.index} \\\n  --num-messages 32 \\\n  --query "length(@)" -o tsv`,
+        ],
+      });
+    }
+  }
+
+  const inputBucket = isAzure ? undefined : opts.inputBucket;
+  const indexQueueUrl = isAzure ? undefined : opts.indexQueueUrl;
+  const receiverNamespace = isAzure ? undefined : opts.receiverNamespace;
 
   if (inputBucket) {
     // Write side of the loop, checked FIRST: is the forwarder actually
@@ -1162,7 +1693,9 @@ function buildVerifyProbes(
     });
   }
 
-  // Fix 88 — Receiver outputOffload capability probe.
+  // Fix 88 — Receiver outputOffload capability probe. AWS only: the recipe it
+  // points at writes to S3, and offload delivery into Blob has no recipe, so
+  // on Azure the probe would ask for a state no config can reach.
   // If a Receiver is installed, the user may be running it with the rate
   // regulator only (soft-drop / sample) rather than the outputOffload mode
   // that actually routes bytes to S3 for the Retriever to index. Without
@@ -1183,29 +1716,64 @@ function buildVerifyProbes(
   return probes;
 }
 
-function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] {
-  return [
+function buildTeardownSteps(
+  releaseName: string,
+  namespace: string,
+  storageProvider: RetrieverStorageProvider = 'aws',
+  resourceGroup?: string
+): PlanStep[] {
+  const isAzure = storageProvider === 'azure';
+  const selector = isAzure
+    ? RETRIEVER_POD_SELECTOR
+    : `app.kubernetes.io/instance=${releaseName}`;
+  const workloadName = isAzure
+    ? `${releaseName}-${RETRIEVER_CLUSTER_NAME}`
+    : `${releaseName}-${RETRIEVER_CHART_NAME}-${RETRIEVER_CLUSTER_NAME}`;
+  const steps: PlanStep[] = [
     {
       title: 'Uninstall the Helm release',
-      rationale:
-        'Removes indexer, query-handler, stream-worker deployments, filter CronJobs, ConfigMaps, and the chart-created ServiceAccount. LEAVES AWS infra (S3, SQS, IAM role) intact — that lifecycle belongs to Terraform.',
+      rationale: isAzure
+        ? 'Removes the Deployment, the Service, the ConfigMaps and the chart-created ServiceAccount. The ' +
+          'storage account, the containers, the queues, the managed identity and the AKS cluster stay: the ' +
+          'last step below is what deletes those.'
+        : 'Removes indexer, query-handler, stream-worker deployments, filter CronJobs, ConfigMaps, and the chart-created ServiceAccount. LEAVES AWS infra (S3, SQS, IAM role) intact — that lifecycle belongs to Terraform.',
       commands: [`helm -n ${namespace} uninstall ${releaseName}`],
     },
     {
       title: 'Clean up derived resources',
       rationale: 'Helm does not reap PVCs or Secrets created outside the release.',
-      commands: [
-        `kubectl -n ${namespace} delete pvc -l app.kubernetes.io/instance=${releaseName} --ignore-not-found`,
-      ],
+      commands: [`kubectl -n ${namespace} delete pvc -l ${selector} --ignore-not-found`],
     },
     {
       title: 'Verify nothing remains',
-      rationale: 'Confirm no workloads are lingering under the release label.',
-      commands: [
-        `kubectl -n ${namespace} get all,configmap,secret,pvc -l app.kubernetes.io/instance=${releaseName}`,
-      ],
+      rationale: isAzure
+        ? 'Confirms no workload is lingering. The pod label and the Service name are checked separately: the ' +
+          'chart labels the pods and names the Service, and the Service object carries no `app` label.'
+        : 'Confirm no workloads are lingering under the release label.',
+      commands: isAzure
+        ? [
+            `kubectl -n ${namespace} get all,configmap,secret,pvc -l ${selector}`,
+            `kubectl -n ${namespace} get svc ${workloadName} --ignore-not-found`,
+          ]
+        : [`kubectl -n ${namespace} get all,configmap,secret,pvc -l ${selector}`],
     },
-    {
+  ];
+
+  if (isAzure) {
+    // No Terraform state exists on this path. The provisioning script created
+    // the resource group and its own `--destroy` deletes it, which is the only
+    // command that stops the AKS cluster and the storage account billing.
+    steps.push({
+      title: 'Delete the Azure resources',
+      rationale:
+        'One command deletes the resource group and everything the provisioning script put in it: the storage ' +
+        'account with both containers, the four Storage Queues, the Event Grid subscription, the managed ' +
+        'identity and the AKS cluster. Skipping it leaves a running AKS cluster and a storage account billing.',
+      commands: [buildAzureTeardownCommand(resourceGroup ?? '<resource-group>')],
+      expectDurationSec: 600,
+    });
+  } else {
+    steps.push({
       title: '(Optional) teardown AWS infra',
       rationale:
         'If you\'re fully removing the Retriever, tear down the Terraform module that created the S3 buckets, SQS queues, and IAM role. Skipping this leaves empty AWS infra behind (zero-cost for SQS idle, pennies for S3 storage).',
@@ -1213,8 +1781,10 @@ function buildTeardownSteps(releaseName: string, namespace: string): PlanStep[] 
         `# From your terraform directory:`,
         `# terraform destroy -target=module.retriever_aws_infra`,
       ],
-    },
-  ];
+    });
+  }
+
+  return steps;
 }
 
 // ── Fix 82: resolve the input bucket from the installed Helm release values ──

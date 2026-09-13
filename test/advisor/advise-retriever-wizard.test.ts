@@ -190,6 +190,56 @@ test('wizard step 1: no OIDC + AWS available => oidc-check question', async () =
   );
 });
 
+// ── P4: the first question offers a way off the AWS path ────────────────────
+
+test('oidc-check offers an Azure resolution beside the three EKS ones', async () => {
+  _clearSnapshotStore();
+  const id = freshId();
+  const snap = baseSnap(id, {
+    aws: { available: true, region: 'us-east-1', s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
+    kubectl: { ...baseSnap(id).kubectl, serviceAccountIrsa: [] },
+  });
+  putSnapshot(snap);
+
+  const out = await call(id);
+  const d = data(out);
+  assert.equal(d.question_id, 'oidc-check');
+  const shape = d.shape as {
+    resolutions: Array<{ args: Record<string, unknown>; description: string }>;
+  };
+  // The acceptance run reached this question from discover_env's own
+  // required-next action on an AKS cluster. All three resolutions resolved
+  // to EKS, and `storage_provider: "azure"` was reachable only by reading
+  // the tool's input schema.
+  const azure = shape.resolutions.find((r) => r.args['storage_provider'] === 'azure');
+  assert.ok(
+    azure,
+    `no azure resolution; got: ${shape.resolutions.map((r) => r.description).join(' | ')}`,
+  );
+  assert.equal(azure!.args['snapshot_id'], id, 'the azure resolution carries the snapshot id');
+  assert.ok(/AKS/.test(azure!.description), 'the azure resolution says which cluster it is for');
+  assert.ok(
+    (d.markdown as string).includes('"storage_provider": "azure"'),
+    'the markdown never prints the argument that switches path',
+  );
+});
+
+test('answering oidc-check with the azure resolution reaches the azure questions', async () => {
+  _clearSnapshotStore();
+  const id = freshId();
+  const snap = baseSnap(id, {
+    aws: { available: true, region: 'us-east-1', s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
+    kubectl: { ...baseSnap(id).kubectl, serviceAccountIrsa: [] },
+  });
+  putSnapshot(snap);
+
+  await call(id);
+  const out = await call(id, { storage_provider: 'azure' });
+
+  const d = data(out);
+  assert.equal(d.question_id, 'azure-placement', `expected the azure branch; got ${String(d.question_id)}`);
+});
+
 // ── Step advancement (OIDC assumed enabled via IRSA entries) ─────────────────
 
 test('wizard step 2: OIDC enabled but no full infra => infra-review question', async () => {

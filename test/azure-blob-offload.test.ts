@@ -392,8 +392,10 @@ test('azure plan pulls the chart and runs the script from the tarball path', asy
     `--account ${ACCOUNT}`,
     '--create-aks',
     // The Azure CLI default node size is refused on subscriptions without
-    // that family, so the size is always passed.
-    '--node-size Standard_D2s_v5',
+    // that family, so the size is always passed. The value tracks the
+    // provisioning script's own default: Standard_D2s_v5 was refused on the
+    // subscription the Azure path was proved against.
+    '--node-size Standard_D2s_v7',
     '--namespace log10x',
     '--release my-retriever',
     '--values-out',
@@ -416,16 +418,24 @@ test('azure plan pins the engine image tag in the values it writes', async () =>
   );
 });
 
-test('azure plan states where results land and that _DONE.json is not completion', async () => {
+test('azure plan states where results land and how a poll of that prefix ends', async () => {
   const plan = await buildRetrieverPlan(AZURE_PLAN_ARGS);
   const text = [...plan.notes, ...plan.install.map((s) => s.rationale)].join('\n');
+  // Round two: the layout carries a slice level between the queryId and the
+  // object, so the round-one path was one level short.
   assert.ok(
-    text.includes('<index-container>/<index-path>/tenx/<app>/qr/<queryId>/*.jsonl'),
+    text.includes(
+      '<index-container>/<index-path>/tenx/<app>/qr/<queryId>/<sliceFromMs>_<sliceToMs>/<hash>.jsonl',
+    ),
     'the result path is stated in full',
   );
+  // Round two: round one told an agent to keep polling with no exit, so a
+  // dispatch that matched nothing polled forever.
+  assert.ok(text.includes('_DONE.json'), 'the marker that answers an empty prefix is named');
+  assert.ok(/at most \d+ times/.test(text), 'the poll is bounded by a count');
   assert.ok(
-    text.includes('_DONE.json') && text.includes('not a completion signal'),
-    '_DONE.json is called out as a dispatch marker, not a completion signal',
+    text.includes('mints a NEW queryId'),
+    'the plan says a second attempt is a new dispatch under a new id',
   );
 });
 
