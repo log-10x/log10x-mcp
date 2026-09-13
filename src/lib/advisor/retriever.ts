@@ -138,7 +138,7 @@ const RETRIEVER_CHART_NAME = 'retriever-10x';
 const RETRIEVER_CHART_REF = `${RETRIEVER_CHART_ALIAS}/${RETRIEVER_CHART_NAME}`;
 
 /** Chart version carrying the Azure provisioning script this advisor quotes. */
-export const RETRIEVER_CHART_VERSION = '1.0.23';
+export const RETRIEVER_CHART_VERSION = '1.0.24';
 
 /** Engine image the Azure path documents and the provisioning script pins. */
 export const RETRIEVER_IMAGE_TAG = '1.1.78';

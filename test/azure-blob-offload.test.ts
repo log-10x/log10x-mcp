@@ -382,7 +382,7 @@ test('azure plan pulls the chart and runs the script from the tarball path', asy
     'the repo is added before the pull',
   );
   assert.ok(
-    cmd.includes('helm pull log10x/retriever-10x --version 1.0.23 --untar'),
+    cmd.includes('helm pull log10x/retriever-10x --version 1.0.24 --untar'),
     'the pinned chart is pulled and untarred',
   );
 
