@@ -401,3 +401,21 @@ test('prerequisite copy uses the compact/expand pair and never names a rejected 
     assert.ok(!/destination=/.test(t), `prerequisite names a destination path: ${t}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// A plan's dollars have to say whose meter they came off
+// ---------------------------------------------------------------------------
+
+test('a clickhouse plan carries modeled, the note, and the cost model notes', () => {
+  const pl = solvePlan(estate(), { destination: 'clickhouse', retrieverInstalled: true, targetPct: 50 });
+  assert.equal(pl.modeled, true);
+  assert.match(pl.modeledNote!, /storage rate, not the bill/);
+  assert.match(pl.modeledNote!, /ASSUMED/);
+  assert.ok(pl.notes && pl.notes.some((n) => /modeled/i.test(n)), pl.notes?.join(' | '));
+});
+
+test('a splunk plan is not modeled and carries no modeled note', () => {
+  const pl = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
+  assert.equal(pl.modeled, false);
+  assert.equal(pl.modeledNote, undefined);
+});

@@ -564,8 +564,10 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     small_event_floor_bytes: 80,
     // COMPUTE TERM. Rows that never enter are the lever.
     //
-    // unit_usd_per_hour: ClickHouse Cloud Scale compute unit, 8 GiB / 2 vCPU,
-    // billed per minute. Documented pricing read 2026-09.
+    // unit_usd_per_hour 0.2985 is ASSUMED to be the customer's rate: it is the
+    // ClickHouse Cloud Scale compute unit (8 GiB / 2 vCPU, billed per minute)
+    // at documented list pricing read 2026-09. Nobody's contract is list, and
+    // a self-hosted cluster does not buy units at all. Treat it as a knob.
     //
     // min_units 12 is an ASSUMPTION: three replicas of four units, the
     // autoscaler's configured minimum on a Scale service sized for a log
@@ -583,6 +585,24 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     //   rows 49.32% -> CPU 35%   (bypattern_50)
     //   rows 23.88% -> CPU 15%   (bypattern_25)
     // Endpoints (0,0) and (1,1) close the curve. Between points, linear.
+    //
+    // THE 0.7285 POINT IS THE WEAK ONE, and the results file says so: it is
+    // the arm the run calls "the one arm that disagrees", at 83% of the CPU
+    // against its uniform twin's 63%. The file attributes that to what the two
+    // removed message types were, the OpenTelemetry collector's debug
+    // exporter, whose lines are long and highly repetitive, so taking them out
+    // leaves a residue that costs more per row to tokenise and compress.
+    // Fastest-of-three is kept here to match the other points and the
+    // published table; median-of-three would put it at 0.78 instead of 0.83.
+    // The shipped value is the more conservative of the two, and this segment
+    // is where the curve is LESS than proportional (see the crossover note
+    // below), so it understates the saving rather than overstating it.
+    //
+    // CROSSOVER: above rows-kept of about 0.63 the curve sits above the
+    // diagonal, meaning removing a small share of rows saves less than that
+    // share of compute. Below it the curve sits under the diagonal and removal
+    // saves more than proportionally. Only the second half is the product
+    // claim; the first half is the model being cautious about small cuts.
     compute: {
       basis: 'rows-inserted',
       unit_usd_per_hour: 0.2985,

@@ -183,6 +183,21 @@ export interface Plan {
    *  customer's supplied blended rate scaled over the list structure. */
   rateSource: 'list_price' | 'customer_supplied';
   /**
+   * True when this plan's dollars rest on a model rather than on the
+   * destination's own meter. ClickHouse only, today: the per-GB rate behind
+   * these figures is a storage rate and the bill is compute. Renderers must
+   * carry the word "modeled" wherever they print one of these dollars.
+   */
+  modeled: boolean;
+  /** Why the dollars are modeled, in one line. Present only when modeled. */
+  modeledNote?: string;
+  /**
+   * Notes the cost model attached to this plan's projections, deduplicated.
+   * The compute term's own sentences ride here, so a renderer that shows the
+   * plan can show why a ClickHouse dollar is what it is.
+   */
+  notes?: string[];
+  /**
    * What the levers this plan actually uses REQUIRE — the app, plugin, tier,
    * or licence, with its platform and version constraint. Only for levers the
    * plan uses. A priced lever with an unstated prerequisite is a lever we are
@@ -607,6 +622,22 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     rateBasis = basisParts.join(', ');
   }
 
+  // A compute-billed destination prices from a model, so the plan says so
+  // rather than handing a renderer a bare number. The notes come off a `pass`
+  // projection because that is the one projection every plan computes for
+  // every pattern, and the compute term attaches its sentences there too.
+  const modeledNotes = projectAction({
+    action: 'pass',
+    bytes_in: Math.max(1, bytesIn),
+    destination: opts.destination,
+  }).notes;
+  const planModeled = model.compute != null;
+  const planModeledNote = model.compute
+    ? `Modeled. On ${opts.destination} the per-GB rate above is a storage rate, not the bill: the bill is ` +
+      `compute, priced from a measured rows-to-CPU curve and a unit floor of ${model.compute.min_units} ` +
+      `that is ASSUMED.`
+    : undefined;
+
   return {
     destination: opts.destination,
     retrieverInstalled: opts.retrieverInstalled,
@@ -621,6 +652,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     totalSavedUsd,
     rateBasis,
     rateSource,
+    modeled: planModeled,
+    ...(planModeledNote ? { modeledNote: planModeledNote } : {}),
+    ...(modeledNotes && modeledNotes.length ? { notes: [...new Set(modeledNotes)] } : {}),
     prerequisites,
     ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
     bytesInMonthly: bytesIn,

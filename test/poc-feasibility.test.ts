@@ -280,3 +280,73 @@ test('no cap_csv when target_percent_reduction absent', () => {
   const envelope = buildPocEnvelopeV2(input, makePatterns(), [], [], 10);
   assert.equal(envelope.output.cap_csv, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// A pinned lever the destination does not have
+// ---------------------------------------------------------------------------
+
+test('pinning compact on clickhouse substitutes offload and says it substituted', () => {
+  // pin_services and pin_patterns are caller-supplied, so nothing upstream
+  // checks them against the destination. Unchecked, this priced a 30% compact
+  // saving and described the bytes as losslessly compacted, on a destination
+  // where compaction does not reach the billed measure at all.
+  const envelope = buildPocEnvelopeV2(
+    makeRenderInput('clickhouse'),
+    makePatterns(),
+    [],
+    [],
+    10,
+    { pinServices: { payments: 'compact' } },
+  );
+  const row = envelope.output.patterns.find((p) => p.service === 'payments')!;
+  assert.equal(row.actions.recommended_action, 'offload');
+  assert.match(row.actions.reason, /no-op on clickhouse/);
+  assert.match(row.actions.reason, /substituted offload/);
+  assert.ok(
+    !/losslessly compacted/.test(row.actions.consequence.destination_description),
+    `describeDestination still promises compaction: ${row.actions.consequence.destination_description}`,
+  );
+});
+
+test('pinning compact on splunk is honoured, because splunk compacts', () => {
+  const envelope = buildPocEnvelopeV2(
+    makeRenderInput('splunk'),
+    makePatterns(),
+    [],
+    [],
+    10,
+    { pinServices: { payments: 'compact' } },
+  );
+  const row = envelope.output.patterns.find((p) => p.service === 'payments')!;
+  assert.equal(row.actions.recommended_action, 'compact');
+  assert.ok(!/substituted/.test(row.actions.reason));
+});
+
+test('a clickhouse envelope marks its dollars modeled, structurally and in the markdown', () => {
+  const envelope = buildPocEnvelopeV2(
+    makeRenderInput('clickhouse'),
+    makePatterns(),
+    [],
+    [],
+    10,
+    { targetPercentReduction: 50 },
+  );
+  assert.equal(envelope.input.dollars_modeled, true);
+  assert.match(envelope.input.dollars_modeled_note!, /MODELED/);
+  assert.match(envelope.input.dollars_modeled_note!, /STORAGE rate/);
+  assert.match(envelope.output.commitment_artifact!.markdown, /MODELED/);
+});
+
+test('a splunk envelope marks nothing modeled', () => {
+  const envelope = buildPocEnvelopeV2(
+    makeRenderInput('splunk'),
+    makePatterns(),
+    [],
+    [],
+    10,
+    { targetPercentReduction: 50 },
+  );
+  assert.equal(envelope.input.dollars_modeled, false);
+  assert.equal(envelope.input.dollars_modeled_note, undefined);
+  assert.ok(!/MODELED/.test(envelope.output.commitment_artifact!.markdown));
+});

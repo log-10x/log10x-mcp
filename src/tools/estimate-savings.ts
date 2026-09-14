@@ -58,7 +58,9 @@ import {
   getDefaultActionForDestination,
   getAllowedActionsForDestination,
   annualizeDollars,
+  projectComputeSaving,
   type Action,
+  type ComputeSavingProjection,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { resolveRate } from '../lib/rate-resolution.js';
@@ -376,6 +378,13 @@ export interface ForecastRow {
   dollars_saved_low: number;
   dollars_saved_expected: number;
   dollars_saved_high: number;
+  /**
+   * True when this row's dollars rest on a model rather than on the
+   * destination's own meter. Set on every ClickHouse row: there the bill is
+   * compute, priced from a measured rows-to-CPU curve and an ASSUMED unit
+   * floor. A renderer that prints these figures must carry the word "modeled".
+   */
+  modeled?: boolean;
   notes?: string[];  siem_lens?: string;
 }
 
@@ -430,6 +439,24 @@ export interface ForecastResult {
     dollars_expected_monthly: number;
     dollars_high_monthly: number;
     annual_projection_expected: number;
+    /**
+     * True when these totals rest on a model rather than on the destination's
+     * own meter. ClickHouse only, today. Renderers must carry the word
+     * "modeled" wherever they print a dollar from a modeled total.
+     */
+    modeled: boolean;
+    /** Why the totals are modeled, in one line. Present only when modeled. */
+    modeled_note?: string;
+    /**
+     * The modeled compute saving for the WHOLE estate, on a compute-billed
+     * destination. Rows kept is `1 - (bytes removed by offload/drop/sample) /
+     * env bytes`, taken across every modeled pattern at once, because compute
+     * is a property of the insert stream rather than of any one pattern.
+     * Carries units before and after when the caller supplied
+     * `current_compute_units` or `monthly_compute_spend_usd`, and a fraction
+     * plus a note saying what to supply when it did not.
+     */
+    compute_saving?: ComputeSavingProjection;
     /**
      * Disclose the extrapolation method for annual_projection_expected so
      * consumers understand it's a naive monthly × 12, NOT a
@@ -868,6 +895,20 @@ export interface RunForecastArgs {
   /** Alias for `observation_window`. observation_window wins when both are set. */
   timeRange?: string;
   /**
+   * Compute-billed destinations only (ClickHouse). The service's CURRENT
+   * compute unit count. Supply it, or `monthly_compute_spend_usd`, to turn the
+   * modeled compute saving in `totals.compute_saving` from a fraction into
+   * dollars. No tool schema exposes this yet; the plumbing lands with the
+   * caller that collects it.
+   */
+  current_compute_units?: number;
+  /**
+   * Compute-billed destinations only. The service's current monthly compute
+   * spend in dollars, converted to units at the model's unit price when
+   * `current_compute_units` is absent.
+   */
+  monthly_compute_spend_usd?: number;
+  /**
    * Maximum per_pattern rows to return. Default 50 when service is omitted;
    * unlimited when service is set. Totals computed over full result before slice.
    */
@@ -1305,6 +1346,7 @@ export async function runEstimateForecast(
   const per_pattern: ForecastRow[] = [];
   let totalIn = 0;
   let totalSavedBytes = 0;
+  let rowsRemovedBytes = 0;
   let totalLow = 0;
   let totalExpected = 0;
   let totalHigh = 0;
@@ -1395,10 +1437,19 @@ export async function runEstimateForecast(
       dollars_saved_low: Math.max(0, dollarsLow),
       dollars_saved_expected: Math.max(0, dollarsExpected),
       dollars_saved_high: Math.max(0, dollarsHigh),
+      ...(actionRange.expected.modeled ? { modeled: true } : {}),
       notes: actionRange.expected.notes,
     });
     totalIn += monthlyBytes;
     totalSavedBytes += Math.max(0, savedBytes);
+    // Rows that never reach the cluster. Only these move compute; compact and
+    // tier_down leave every row in place. Accumulated at the ESTATE level
+    // deliberately: a compute saving is a property of the whole insert stream,
+    // and reading one off a single pattern would let an offload row alone
+    // resolve rows-kept to 0 and claim the entire compute bill.
+    if (row.action === 'offload' || row.action === 'drop' || row.action === 'sample') {
+      rowsRemovedBytes += Math.max(0, savedBytes);
+    }
     totalLow += Math.max(0, dollarsLow);
     totalExpected += Math.max(0, dollarsExpected);
     totalHigh += Math.max(0, dollarsHigh);
@@ -1514,6 +1565,14 @@ export async function runEstimateForecast(
   });
   const forecastRetentionMonths = 1; // matches projectActionRange default
   const customerSuppliedRate = forecastRateResolved.rate_per_gb;
+  // On a compute-billed destination the per-GB line is a storage rate, not the
+  // bill. The list-price disclosure already carries this sentence from
+  // rate-resolution; the customer-supplied branch below rebuilds the string
+  // from scratch, so without this it silently dropped it and quoted a $/GB
+  // figure as if it were what the platform charges.
+  const forecastComputeNote = forecastModel.compute
+    ? ' Compute billed separately, see modeled compute saving.'
+    : '';
   const forecast_rate_disclosure: string | null =
     forecastRateResolved.source === 'list_price' &&
     forecastModel.storage_per_gb_month > 0 &&
@@ -1529,8 +1588,24 @@ export async function runEstimateForecast(
         // computed from an undisclosed scalar. Surface the customer-supplied
         // rate string so a CFO can audit the math from the envelope alone,
         // matching the top_patterns rate_disclosure pattern.
-        ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}`
+        ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}${forecastComputeNote}`
         : forecastRateResolved.disclosure;
+
+  // Estate-level compute saving. The denominator is env-wide observed bytes
+  // when we have them, because rows this forecast did not model still arrive
+  // at the cluster and still cost compute to insert and merge.
+  const computeDenominator = totalObservedMonthly > 0 ? totalObservedMonthly : totalIn;
+  const estateComputeSaving =
+    forecastModel.compute && computeDenominator > 0
+      ? projectComputeSaving(
+          forecastModel.compute,
+          Math.max(0, 1 - rowsRemovedBytes / computeDenominator),
+          {
+            current_units: args.current_compute_units,
+            monthly_spend_usd: args.monthly_compute_spend_usd,
+          },
+        )
+      : undefined;
 
   const caveats: string[] = [];
   // A compute-billed destination (ClickHouse) is priced from a model, not from
@@ -1652,6 +1727,16 @@ export async function runEstimateForecast(
       dollars_expected_monthly: totalExpected,
       dollars_high_monthly: totalHigh,
       annual_projection_expected: totalExpected * 12,
+      modeled: forecastModel.compute != null,
+      ...(estateComputeSaving ? { compute_saving: estateComputeSaving } : {}),
+      ...(forecastModel.compute
+        ? {
+            modeled_note:
+              `Modeled. On ${args.destination} the per-GB figure behind these dollars is a storage rate, not the bill: ` +
+              `the bill is compute, priced from a measured rows-to-CPU curve and a unit floor of ` +
+              `${forecastModel.compute.min_units} that is ASSUMED. See per_pattern[].compute_saving.`,
+          }
+        : {}),
       projection_basis: {
         method: 'linear_extrapolation' as const,
         scale_factor: 12 as const,

@@ -13,6 +13,7 @@ import {
   getDefaultActionForDestination,
   getAllowedActionsForDestination,
   compactsInPlace,
+  getDestinationCostModel,
   type Action as CostAction,
   type DollarSource,
   type DisclosedDollarValue,
@@ -206,12 +207,38 @@ function fmtCostDisclosed(input: RenderInput, amount: number): string {
  */
 function disclosureFootnote(input: RenderInput): string | null {
   const source: DollarSource = input.rateSource ?? 'list_price';
-  if (source !== 'list_price') return null;
+  const modeled = modeledDollarFootnote(input);
+  if (source !== 'list_price') return modeled;
   const siemLabel = input.siemLabel ?? SIEM_DISPLAY_NAMES[input.siem] ?? 'the SIEM';
-  return (
+  const listNote =
     `_Figures marked "(list price)" use ${siemLabel} list price $${input.analyzerCostPerGb}/GB; ` +
     'your actual bill may differ with discounts, commits, or contract tier. Set `analyzerCost` ' +
-    'in your env config or pass `effective_ingest_per_gb` for your real rate._'
+    'in your env config or pass `effective_ingest_per_gb` for your real rate._';
+  return modeled ? `${listNote}\n\n${modeled}` : listNote;
+}
+
+/**
+ * The extra sentence a compute-billed destination needs beside any dollar.
+ *
+ * On ClickHouse the $/GB behind every figure in this report is a STORAGE rate.
+ * Ingest is zero and storage is a small share of what the cluster costs; the
+ * bill is compute. A report that prints dollars from the per-GB line without
+ * saying that is quoting the wrong meter, whatever the arithmetic.
+ */
+function modeledDollarFootnote(input: RenderInput): string | null {
+  let model;
+  try {
+    model = getDestinationCostModel(input.siem);
+  } catch {
+    return null;
+  }
+  if (!model.compute) return null;
+  const siemLabel = input.siemLabel ?? SIEM_DISPLAY_NAMES[input.siem] ?? 'the destination';
+  return (
+    `_MODELED. The per-GB figure behind every dollar here is a ${siemLabel} STORAGE rate, not the bill. ` +
+    'Ingest is $0 and storage is a small share of the cost; the bill is compute, and compute follows rows ' +
+    'inserted. The modeled compute saving comes from a measured rows-to-CPU curve and a unit floor of ' +
+    `${model.compute.min_units} that is ASSUMED. Treat every dollar in this report as modeled, not metered._`
   );
 }
 
@@ -1615,6 +1642,14 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push(
     '- **Cost model**: `bytes × analyzer_cost_per_gb` over the pulled window. Window cost is projected to weekly cost via `$/window × (168h / window_hours)`.'
   );
+  // On a compute-billed destination that cost model multiplies bytes by a
+  // STORAGE rate, so every dollar downstream of it is modeled. The methodology
+  // section is where a reader goes to find out what a number is, so the
+  // sentence belongs immediately under the line it qualifies.
+  const modeledMethodNote = modeledDollarFootnote(input);
+  if (modeledMethodNote) {
+    lines.push(`- **Dollars here are modeled.** ${modeledMethodNote.replace(/^_|_$/g, '')}`);
+  }
   lines.push(
     // Severity names come from severity-policy, never typed inline. A prose
     // edit that renamed the protected set would otherwise misstate the

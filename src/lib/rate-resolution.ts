@@ -218,7 +218,7 @@ export function resolveRate(
       // disclosure both states that AND tells the reader how to supply their
       // real rate — the override the agent should relay when a user asks why
       // the dollars look off.
-      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.${computeNote})`,
+      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB. Your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.${computeNote})`,
       origin: 'destination_list',
     };
   }

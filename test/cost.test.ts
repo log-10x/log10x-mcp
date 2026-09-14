@@ -592,11 +592,23 @@ test('the compute curve clamps outside 0..1 rather than extrapolating', () => {
   assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, -0.2), 0);
 });
 
-test('removing rows saves more than proportionally, which is the whole claim', () => {
+test('below the crossover, removing rows saves more than proportionally', () => {
   // Half the rows cost well under half the CPU. If this ever inverts, the
   // reason to remove rows on ClickHouse is gone.
   assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.5) < 0.5);
   assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.25) < 0.25);
+});
+
+test('above the crossover the curve is conservative, and that is deliberate', () => {
+  // The 0.7285 arm measured 83% of the CPU for 73% of the rows, so between
+  // roughly 0.63 rows-kept and 1.0 the model says a small cut saves LESS than
+  // its share of compute. Pinning it stops anyone "fixing" the curve into a
+  // uniformly more-than-proportional shape it was not measured to have.
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.7285) > 0.7285);
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.8) > 0.8);
+  // The crossover sits at about 0.63.
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.6) < 0.6);
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.66) > 0.66);
 });
 
 test('compute units step whole and never go below the floor', () => {
@@ -712,4 +724,16 @@ test('clickhouse offers offload, never compact', () => {
   const levers = getAllowedActionsForDestination('clickhouse');
   assert.deepEqual(levers, ['offload']);
   assert.equal(COST_MODEL_BY_DESTINATION.clickhouse.compact_mode, 'no-op');
+});
+
+test('projectComputeSaving is the only place a compute dollar can come from', () => {
+  // The estate-level entry point. If a caller reads rows kept off one pattern
+  // instead of the whole insert stream, an offload row alone resolves to 0
+  // rows kept and claims the entire compute bill. estimate_savings aggregates
+  // before calling this for exactly that reason; the test pins the shape that
+  // makes the mistake visible.
+  const wholeEstate = projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 100 });
+  const onePatternOffloaded = projectComputeSaving(CH_COMPUTE, 0, { current_units: 100 });
+  assert.ok(onePatternOffloaded.saving_fraction > wholeEstate.saving_fraction);
+  assert.equal(onePatternOffloaded.units_after, CH_COMPUTE.min_units);
 });

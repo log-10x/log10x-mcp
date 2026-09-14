@@ -15,15 +15,20 @@
  *
  * Per-destination action resolution honors the cost lib's CompactMode:
  *   - splunk           (envelope)         compact ⇒ encode-in-event
- *   - clickhouse       (dict-udf-view)    compact ⇒ dict + UDF + view
  *   - elasticsearch    (index-pruned)     compact ⇒ pruned _source
- *   - datadog/cw/azure/gcp/sumo (no-op)   compact is rejected — the solver
+ *   - datadog/cw/azure/gcp/sumo/clickhouse (no-op)
+ *                                          compact is rejected and the solver
  *                                          falls back to the destination's
  *                                          FIRST LEGAL SAVING LEVER, never to
  *                                          drop: cloudwatch ⇒ tier_down,
  *                                          datadog ⇒ offload (Flex tier_down
- *                                          is unpriced), offload-only
- *                                          destinations ⇒ offload.
+ *                                          is unpriced), clickhouse ⇒ offload,
+ *                                          offload-only destinations ⇒ offload.
+ *
+ * ClickHouse is in the no-op list on a measurement rather than a missing
+ * expander: compaction there was worth about 7% of table bytes, and table
+ * bytes are not the ClickHouse bill. That bill is compute, and compute follows
+ * rows inserted, so offload is the lever.
  *
  * drop/sample are opt-in only on the destination-resolution path: they appear
  * in no DEFAULT_ACTION_BY_DESTINATION entry, so the per-service auto path

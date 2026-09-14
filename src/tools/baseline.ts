@@ -143,6 +143,21 @@ export interface BaselineEnvelopeData {
    * not_ready envelope omits it (no rate computed before the gates pass).
    */
   effective_per_gb?: number | null;
+  /**
+   * The rate resolver's own disclosure for `effective_per_gb`, verbatim. Every
+   * sibling tool renders this; baseline resolved the rate through the same
+   * chain and then dropped the sentence, so a ClickHouse envelope quoted a
+   * $/GB figure with nothing saying it is a storage rate and not the bill.
+   * `null` when rate_source === 'unset' or the resolver had nothing to say.
+   */
+  rate_disclosure?: string | null;
+  /**
+   * True when these dollars rest on a model rather than on the destination's
+   * own meter. ClickHouse only, today: there the bill is compute.
+   */
+  modeled?: boolean;
+  /** Why the dollars are modeled, in one line. Present only when modeled. */
+  modeled_note?: string;
   current: {
     bytes_window: number;
     bytes_window_display: string;
@@ -597,6 +612,16 @@ async function computeBaseline(
     horizon,
     rate_source: rateSource,
     effective_per_gb: rateSource === 'unset' ? null : ingestPerGb,
+    rate_disclosure: rateSource === 'unset' ? null : resolvedRate.disclosure,
+    modeled: model.compute != null,
+    ...(model.compute
+      ? {
+          modeled_note:
+            `Modeled. On ${destination} the per-GB figure behind these dollars is a storage rate, not the bill: ` +
+            `the bill is compute, and the modeled compute saving rests on a measured rows-to-CPU curve and a unit ` +
+            `floor of ${model.compute.min_units} that is ASSUMED.`,
+        }
+      : {}),
     current: {
       bytes_window: totalBytesScaled,
       bytes_window_display: fmtBytes(totalBytesScaled),
@@ -1074,9 +1099,14 @@ function headlineFor(d: BaselineEnvelopeData): string {
     const futAmt  = fut.source === 'unset'  ? '—' : fmtDollar(fut.value);
     // Pick whichever non-null disclosure string is available (both carry the
     // same text when source === 'list_price'; neither fires for customer_supplied).
-    const disclosure = cur.disclosure ?? fut.disclosure ?? null;
+    // Fall back to the rate resolver's own sentence, which is where the
+    // compute-billed destinations say that the per-GB figure is a storage rate
+    // and not the bill. Without that fallback a ClickHouse baseline printed a
+    // dollar with nothing attached saying what it is.
+    const disclosure = cur.disclosure ?? fut.disclosure ?? d.rate_disclosure ?? null;
     const tail = disclosure ? ` ${disclosure}` : '';
-    dollarClause = ` · ${curAmt}/mo current, ${futAmt}/mo projected 90d no-action${tail}`;
+    const modeledTail = d.modeled && d.modeled_note ? ` ${d.modeled_note}` : '';
+    dollarClause = ` · ${curAmt}/mo current, ${futAmt}/mo projected 90d no-action${tail}${modeledTail}`;
   }
   let headline = `Baseline ready: ${band} · ${volume}${dollarClause}.`;
   // Volume projection lens: mark the headline so a lensed run is never
