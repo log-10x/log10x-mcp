@@ -342,6 +342,20 @@ export const estimateSavingsSchema = {
     .describe(
       "forecast and verify mode: override the destination list-price rate with the customer's contracted $/GB. When supplied, dollar projections use this rate and surface rate_source='customer_supplied'."
     ),
+  current_compute_units: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'forecast mode, compute-billed destinations only (ClickHouse): the service\'s current compute unit count. Turns the modeled compute saving in totals.compute_saving from a fraction into dollars.'
+    ),
+  monthly_compute_spend_usd: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "forecast mode, compute-billed destinations only (ClickHouse): the service's current monthly compute spend in dollars. Converted to units at the destination's unit price; ignored when current_compute_units is supplied."
+    ),
   // ── presentation ──────────────────────────────────────────────────
   enforcement_mode: z
     .enum(['engine', 'manual_report'])
@@ -1347,6 +1361,7 @@ export async function runEstimateForecast(
   let totalIn = 0;
   let totalSavedBytes = 0;
   let rowsRemovedBytes = 0;
+  let rowsRemovedEvents = 0;
   let totalLow = 0;
   let totalExpected = 0;
   let totalHigh = 0;
@@ -1447,8 +1462,14 @@ export async function runEstimateForecast(
     // deliberately: a compute saving is a property of the whole insert stream,
     // and reading one off a single pattern would let an offload row alone
     // resolve rows-kept to 0 and claim the entire compute bill.
+    //
+    // Counted in EVENTS where the events query returned any, because that is
+    // the basis the CPU curve was measured on. Bytes are the fallback, and the
+    // projection says when it fell back.
     if (row.action === 'offload' || row.action === 'drop' || row.action === 'sample') {
       rowsRemovedBytes += Math.max(0, savedBytes);
+      const keptShare = row.action === 'sample' ? 1 / Math.max(1, row.sample_n ?? 10) : 0;
+      rowsRemovedEvents += obsEvents * (1 - keptShare);
     }
     totalLow += Math.max(0, dollarsLow);
     totalExpected += Math.max(0, dollarsExpected);
@@ -1591,18 +1612,38 @@ export async function runEstimateForecast(
         ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}${forecastComputeNote}`
         : forecastRateResolved.disclosure;
 
-  // Estate-level compute saving. The denominator is env-wide observed bytes
-  // when we have them, because rows this forecast did not model still arrive
-  // at the cluster and still cost compute to insert and merge.
-  const computeDenominator = totalObservedMonthly > 0 ? totalObservedMonthly : totalIn;
+  // Estate-level compute saving.
+  //
+  // The denominator is the WHOLE insert stream, not the modeled slice: rows
+  // this forecast never looked at still arrive at the cluster and still cost
+  // compute to insert and merge. Numerator and denominator come from the same
+  // observation window, so the volume-lens scale factor cancels.
+  //
+  // Events first. The curve was measured against rows, so an event count is
+  // the basis it wants; bytes only stand in when the events query returned
+  // nothing, and `basis` on the result says which one this run used. The two
+  // disagree whenever the removed patterns are longer or shorter than average,
+  // which is exactly the case a per-pattern policy creates on purpose.
+  const totalObservedEvents = Object.values(eventsByHash).reduce(
+    (a, b) => a + (Number.isFinite(b) ? b : 0),
+    0,
+  );
+  const useEventBasis = totalObservedEvents > 0;
+  const computeDenominator = useEventBasis
+    ? totalObservedEvents
+    : totalObservedMonthly > 0
+      ? totalObservedMonthly
+      : totalIn;
+  const computeRemoved = useEventBasis ? rowsRemovedEvents : rowsRemovedBytes;
   const estateComputeSaving =
     forecastModel.compute && computeDenominator > 0
       ? projectComputeSaving(
           forecastModel.compute,
-          Math.max(0, 1 - rowsRemovedBytes / computeDenominator),
+          Math.max(0, Math.min(1, 1 - computeRemoved / computeDenominator)),
           {
             current_units: args.current_compute_units,
             monthly_spend_usd: args.monthly_compute_spend_usd,
+            basis: useEventBasis ? 'rows-inserted' : 'bytes-removed-as-rows-proxy',
           },
         )
       : undefined;
@@ -1615,7 +1656,7 @@ export async function runEstimateForecast(
     caveats.push(
       `${args.destination} dollars here are MODELED. Ingest is $0 and the storage line is small; the bill is compute. ` +
         `The modeled compute saving comes from a measured rows-to-CPU curve and a unit floor of ${computeTerm.min_units} that is ASSUMED. ` +
-        `Pass current_compute_units or monthly_compute_spend_usd for a dollar figure rather than a fraction.`,
+        `Pass current_compute_units or monthly_compute_spend_usd on this tool for a dollar figure rather than a fraction.`,
     );
   }
   if (noOpCompactCount > 0) {
@@ -1734,7 +1775,9 @@ export async function runEstimateForecast(
             modeled_note:
               `Modeled. On ${args.destination} the per-GB figure behind these dollars is a storage rate, not the bill: ` +
               `the bill is compute, priced from a measured rows-to-CPU curve and a unit floor of ` +
-              `${forecastModel.compute.min_units} that is ASSUMED. See per_pattern[].compute_saving.`,
+              `${forecastModel.compute.min_units} that is ASSUMED. See totals.compute_saving, which is ` +
+              `computed across the whole insert stream; per-pattern rows carry no compute saving, because ` +
+              `compute is a property of the stream and not of any one pattern.`,
           }
         : {}),
       projection_basis: {
@@ -2436,6 +2479,8 @@ export async function executeEstimateSavings(
           include_referenced: args.include_referenced,
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
+          current_compute_units: args.current_compute_units,
+          monthly_compute_spend_usd: args.monthly_compute_spend_usd,
           observation_window: explicitObservationWindow,
           monthly_volume_gb: args.monthly_volume_gb,
         },

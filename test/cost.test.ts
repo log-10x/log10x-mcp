@@ -737,3 +737,24 @@ test('projectComputeSaving is the only place a compute dollar can come from', ()
   assert.ok(onePatternOffloaded.saving_fraction > wholeEstate.saving_fraction);
   assert.equal(onePatternOffloaded.units_after, CH_COMPUTE.min_units);
 });
+
+test('a fraction derived from bytes is labelled as the proxy it is', () => {
+  // No rows_kept_fraction supplied, so the projection reads rows kept off the
+  // byte reduction. The curve is indexed on rows, so the result has to say
+  // which it got, and the note has to carry the skew.
+  const p = projectAction({ action: 'offload', bytes_in: GB, destination: 'clickhouse' });
+  assert.equal(p.compute_saving!.basis, 'bytes-removed-as-rows-proxy');
+  assert.match(p.compute_saving!.note, /derived from bytes removed, not from a row count/);
+  assert.match(p.compute_saving!.note, /average event size/);
+});
+
+test('a stated rows-kept fraction is taken as a row count and says so', () => {
+  const p = projectAction({
+    action: 'offload',
+    bytes_in: GB,
+    destination: 'clickhouse',
+    rows_kept_fraction: 0.5,
+  });
+  assert.equal(p.compute_saving!.basis, 'rows-inserted');
+  assert.ok(!/derived from bytes removed/.test(p.compute_saving!.note));
+});

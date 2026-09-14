@@ -153,9 +153,22 @@ export interface DestinationComputeTerm {
   curve: Array<[number, number]>;
 }
 
+/**
+ * What the rows-kept fraction was actually derived from on THIS call.
+ *
+ *  - 'rows-inserted': a real row or event count. The basis the curve was
+ *    measured on, so the answer means what it says.
+ *  - 'bytes-removed-as-rows-proxy': bytes stood in for rows because no count
+ *    was available. Fine when the removed patterns have about the average
+ *    event size, and wrong in proportion to how far they do not: removing
+ *    long lines takes more bytes than rows and understates the compute saving,
+ *    removing short ones overstates it.
+ */
+export type ComputeBasis = 'rows-inserted' | 'bytes-removed-as-rows-proxy';
+
 /** What a compute term says about one action, on one estate. */
 export interface ComputeSavingProjection {
-  basis: 'rows-inserted';
+  basis: ComputeBasis;
   /** Rows still inserted after the action, as a fraction of today's rows. */
   rows_kept_fraction: number;
   /** Insert-plus-merge CPU after the action, as a fraction of today's. */
@@ -1020,9 +1033,21 @@ export function cpuFractionForRowsKept(
 export function projectComputeSaving(
   compute: DestinationComputeTerm,
   rowsKeptFraction: number,
-  opts?: { current_units?: number; monthly_spend_usd?: number },
+  opts?: {
+    current_units?: number;
+    monthly_spend_usd?: number;
+    /** What the fraction came from. Defaults to the curve's own basis. */
+    basis?: ComputeBasis;
+  },
 ): ComputeSavingProjection {
   const kept = Math.max(0, Math.min(1, rowsKeptFraction));
+  const basis: ComputeBasis = opts?.basis ?? compute.basis;
+  // The curve is indexed on rows. When bytes stood in for rows, say so beside
+  // every number it produced rather than only in the field name.
+  const proxyCaveat =
+    basis === 'bytes-removed-as-rows-proxy'
+      ? ' Rows kept is derived from bytes removed, not from a row count, so it skews when the removed patterns differ in average event size from the rest.'
+      : '';
   const cpuFraction = cpuFractionForRowsKept(compute.curve, kept);
   const monthlyPerUnit = compute.unit_usd_per_hour * HOURS_PER_MONTH;
 
@@ -1033,13 +1058,14 @@ export function projectComputeSaving(
 
   if (currentUnits == null || !Number.isFinite(currentUnits) || currentUnits <= 0) {
     return {
-      basis: compute.basis,
+      basis,
       rows_kept_fraction: kept,
       cpu_fraction: cpuFraction,
       saving_fraction: 1 - cpuFraction,
       modeled: true,
       note:
-        'modeled compute saving: supply current compute units or monthly compute spend to get dollars',
+        'modeled compute saving: supply current compute units or monthly compute spend to get dollars.' +
+        proxyCaveat,
     };
   }
 
@@ -1049,7 +1075,7 @@ export function projectComputeSaving(
   const saving_usd_month = (units_before - units_after) * compute.unit_usd_per_hour * HOURS_PER_MONTH;
 
   return {
-    basis: compute.basis,
+    basis,
     rows_kept_fraction: kept,
     cpu_fraction: cpuFraction,
     units_before,
@@ -1058,9 +1084,10 @@ export function projectComputeSaving(
     saving_fraction: units_before > 0 ? (units_before - units_after) / units_before : 0,
     modeled: true,
     note:
-      units_after === units_before
+      (units_after === units_before
         ? `modeled compute saving: ${units_before} units before and after. Compute is billed in whole units with a floor of ${compute.min_units}, so this much row reduction sheds none.`
-        : `modeled compute saving: ${units_before} units to ${units_after}, at $${compute.unit_usd_per_hour}/unit-hour over ${HOURS_PER_MONTH} hours.`,
+        : `modeled compute saving: ${units_before} units to ${units_after}, at $${compute.unit_usd_per_hour}/unit-hour over ${HOURS_PER_MONTH} hours.`) +
+      proxyCaveat,
   };
 }
 
@@ -1419,12 +1446,16 @@ function projectActionWithRatio(
     model.compute &&
     (args.action === 'offload' || args.action === 'drop' || args.action === 'sample')
   ) {
+    const statedRowsKept = args.rows_kept_fraction;
     const rowsKept =
-      args.rows_kept_fraction ??
-      (args.bytes_in > 0 ? bytes_out / args.bytes_in : 1);
+      statedRowsKept ?? (args.bytes_in > 0 ? bytes_out / args.bytes_in : 1);
     compute_saving = projectComputeSaving(model.compute, rowsKept, {
       current_units: args.current_compute_units,
       monthly_spend_usd: args.monthly_compute_spend_usd,
+      // A caller that states rows_kept_fraction is asserting a row count.
+      // Anything else here is bytes wearing a row's name, and the projection
+      // says which it got.
+      basis: statedRowsKept != null ? 'rows-inserted' : 'bytes-removed-as-rows-proxy',
     });
     notes.push(compute_saving.note);
   }
