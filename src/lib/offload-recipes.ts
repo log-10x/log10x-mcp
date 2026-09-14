@@ -1352,6 +1352,663 @@ The documented POST does work, but only in a shape the docs never show:
   };
 }
 
+// ---------------------------------------------------------------------------
+// ClickHouse / ClickStack offload  (copied from the harness that ran, not from
+// documentation: benchmarks/clickstack-e2e, results/clickstack-e2e-2026-09-14.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which collector writes the offloaded rows. The OpenTelemetry Collector
+ * variant is a copy of the config that ran end to end on ClickStack 2.38.0 with
+ * engine 1.1.74. The Vector variant is written from Vector's documented sink
+ * options and has never been run.
+ */
+export type ClickhouseCollector = 'otel-collector' | 'vector';
+
+export interface ClickhouseOffloadParams {
+  /** Bucket the collector writes the offloaded rows into. */
+  bucket: string;
+  /** Region of that bucket. */
+  region: string;
+  /** Database holding the ClickStack tables. Default `default`. */
+  database?: string;
+  /** The hot table ClickStack ships. Default `otel_logs`. */
+  hotTable?: string;
+  /**
+   * S3 endpoint ClickHouse itself reads the objects through. Default is the
+   * regional AWS endpoint. The harness ran against MinIO at
+   * `http://cse-minio:9000`, which is why the path-style switches appear in
+   * the collector block as comments.
+   */
+  s3Endpoint?: string;
+  /** OTLP endpoint of the 10x receiver. Default `tenx-receiver:4317`. */
+  engineOtlpEndpoint?: string;
+  /** ClickStack's own OTLP endpoint, where everything not marked offload returns. */
+  clickstackOtlpEndpoint?: string;
+  /** Host and port of the HyperDX API. Default `clickstack:8000`. */
+  hyperdxApi?: string;
+  /** The engine's `symbolMessageHashField` value. Default `tenx_hash`. */
+  hashField?: string;
+}
+
+export interface ClickhouseRecipePart {
+  language: 'yaml' | 'toml' | 'sql' | 'bash' | 'text';
+  body: string;
+  note: string;
+}
+
+export interface ClickhouseOffloadRecipeParts {
+  collector: ClickhouseRecipePart & {
+    variant: ClickhouseCollector;
+    /** True only for the variant the harness actually ran. */
+    exercised: boolean;
+  };
+  /** The tables, the view, the Merge table and the counts table, as SQL. */
+  ddl: ClickhouseRecipePart;
+  /** Adding the Merge table to HyperDX as a second source, over its API. */
+  hyperdx: ClickhouseRecipePart;
+  /** Mandatory. Rendered with every variant, never trimmed. */
+  honesty: string[];
+}
+
+const CH_DEFAULTS = {
+  database: 'default',
+  hotTable: 'otel_logs',
+  engineOtlp: 'tenx-receiver:4317',
+  clickstackOtlp: 'clickstack:4317',
+  hyperdxApi: 'clickstack:8000',
+  hashField: 'tenx_hash',
+};
+
+function chNames(p: ClickhouseOffloadParams) {
+  const db = p.database ?? CH_DEFAULTS.database;
+  const hot = p.hotTable ?? CH_DEFAULTS.hotTable;
+  return {
+    db,
+    hot,
+    coldTable: `${hot}_cold`,
+    coldView: `${hot}_coldv`,
+    mergeTable: `${hot}_all`,
+    countsTable: 'counts_by_type',
+    countsMv: 'counts_by_type_hot_mv',
+    s3Endpoint: p.s3Endpoint ?? `https://s3.${p.region}.amazonaws.com`,
+    hashField: p.hashField ?? CH_DEFAULTS.hashField,
+  };
+}
+
+/**
+ * The honesty block. It states what the saving is, what the cold path costs,
+ * and the open engine defects that stop this being a shipped capability. Every
+ * number quoted is from the single run in
+ * benchmarks/clickstack-e2e/results/clickstack-e2e-2026-09-14.md, measured on
+ * 50,000 lines of the released capture with a dropped cache before each query.
+ *
+ * Exported so a caller can assert it is present rather than re-derive it.
+ */
+export function clickhouseOffloadHonesty(): string[] {
+  return [
+    '**What this buys, and what it costs.**',
+    '',
+    '- The saving on ClickHouse is COMPUTE, through rows that never enter. Insert and merge ' +
+      'CPU follows rows inserted, so a row held back at the edge is a row the cluster never ' +
+      'tokenises, never inserts and never merges. Table bytes barely move, and table bytes ' +
+      'are not where a ClickHouse bill lives.',
+    '- The offloaded rows stay searchable in place, through the Merge table, and reading them ' +
+      'is SLOWER than reading the hot table. A cold read pays object-store requests; a hot ' +
+      'read pays none.',
+    '- A query filtered only on time opens EVERY cold object in the bucket. Measured on the ' +
+      'harness sample, which held 12 objects: time only read 37,519 rows through 12 S3 GET in ' +
+      '52 ms, while the same query with a service predicate read 15,548 rows through 6 S3 GET ' +
+      'in 39 ms, and adding a day predicate held at 6 GET and 27 ms. The hot table alone ' +
+      'answered its count in 8 ms with zero requests. That sample carried one day of writes, ' +
+      'so the day predicate had nothing further to prune, and the object path carries the ' +
+      'WRITE time rather than the record time, so pruning across many days is unmeasured.',
+    '- Count-all dashboards read the counts-per-type table, not the Merge table: count all by ' +
+      'service over the counts table read 2,551 rows with zero S3 requests in 10 ms. The ' +
+      'counts table is fed twice, by a materialized view on the hot inserts and by an ' +
+      'INSERT ... SELECT over the cold objects, because offloaded rows never pass through an ' +
+      'insert.',
+    '- Alerts are NOT claimed unchanged. No alert was defined and none fired in the run this ' +
+      'recipe is copied from.',
+    '- NOT PRODUCTION SAFE ON CLICKSTACK TODAY. Three engine defects on the OpenTelemetry ' +
+      'return path are open. A record whose message is itself JSON with a top-level `body` ' +
+      'key comes back carrying no attributes at all, so it has no `routeState`, cannot be ' +
+      'routed, and takes the default route into the hot table: 19,436 of 37,519 records in ' +
+      'the run. Every record that does carry the marks comes back with no `timeUnixNano`. ' +
+      'The `tenx_resource_keys` field name arrives in several corrupted spellings. Until ' +
+      'those are fixed this recipe moves only the share of the stream the defect leaves ' +
+      'marked, and it must not be sold as a shipped ClickStack capability.',
+  ];
+}
+
+/** The OpenTelemetry Collector variant, copied from the harness config. */
+function clickhouseOtelCollector(p: ClickhouseOffloadParams): ClickhouseOffloadRecipeParts['collector'] {
+  const engine = p.engineOtlpEndpoint ?? CH_DEFAULTS.engineOtlp;
+  const clickstack = p.clickstackOtlpEndpoint ?? CH_DEFAULTS.clickstackOtlp;
+  return {
+    variant: 'otel-collector',
+    exercised: true,
+    language: 'yaml',
+    body: `# COPIED VERBATIM from the harness config that ran end to end
+# (benchmarks/clickstack-e2e/conf/router.yaml). Only the endpoints, the bucket
+# and the region are substituted; every processor, connector and exporter
+# option below is the text that produced the measured run.
+#
+# The routing hop. ClickStack's own collector build carries the routing
+# connector but no S3 exporter and no encoding extension, so the route and the
+# offload write run in a second, stock opentelemetry-collector-contrib
+# container. Everything that is not marked \`offload\` goes back to ClickStack's
+# shipped OTLP endpoint and is inserted by ClickStack's own ClickHouse exporter.
+
+extensions:
+  json_log_encoding/cold:
+    mode: body_with_inline_attributes
+
+receivers:
+  # The return path from the receiver.
+  otlp/back:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:24225
+        max_recv_msg_size_mib: 32
+
+  # The estate's existing log receivers stay where they are and feed
+  # \`otlp/engine\` below, so the receiver sees the stream before ClickStack does.
+
+processors:
+  # The capture's envelope carries no timestamp, so records arrive with none and
+  # would land on 1970-01-01. Ingest time is used instead, on both routes.
+  transform/stamp:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(log.time_unix_nano, log.observed_time_unix_nano) where log.time_unix_nano == 0
+
+  # Part of the returned stream carries the service as a log attribute rather
+  # than on the OTLP resource. groupbyattrs lifts it back onto the resource so
+  # ServiceName is set on the ClickHouse side and the offload path can key the
+  # object prefix on it.
+  transform/service:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(log.attributes["service.name"], log.attributes["k8s_container"]) where log.attributes["service.name"] == nil and log.attributes["k8s_container"] != nil
+  groupbyattrs/service:
+    keys: [ service.name ]
+
+  # The offloaded object carries body and log attributes only, so the service,
+  # the record time and the severity are copied into attributes before the
+  # write or they do not survive the encoding.
+  transform/cold:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(log.attributes["ServiceName"], resource.attributes["service.name"])
+          - set(log.attributes["SeverityText"], log.severity_text)
+          - set(log.attributes["TimestampNano"], UnixNano(log.time))
+          - set(log.attributes["TimestampSec"], UnixSeconds(log.time))
+      - context: resource
+        statements:
+          - set(resource.attributes["s3.prefix"], Concat(["service=", resource.attributes["service.name"]], ""))
+  batch/cold:
+    send_batch_size: 5000
+    timeout: 5s
+
+exporters:
+  otlp/engine:
+    endpoint: ${engine}
+    tls:
+      insecure: true
+  otlp/clickstack:
+    endpoint: ${clickstack}
+    tls:
+      insecure: true
+    headers:
+      authorization: \${env:HDX_API_KEY}
+  awss3/cold:
+    s3uploader:
+      region: ${p.region}
+      s3_bucket: ${p.bucket}
+      s3_prefix: cold
+      s3_partition_format: 'day=%Y-%m-%d'
+      # The harness ran against MinIO, which needs these three. On AWS S3 leave
+      # them out and let the exporter resolve the regional endpoint.
+      # endpoint: http://minio:9000
+      # s3_force_path_style: true
+      # disable_ssl: true
+      compression: none
+    encoding: json_log_encoding/cold
+    encoding_file_extension: json
+    # This is what puts the service in the object path: the per-record resource
+    # attribute REPLACES the static s3_prefix above, so objects land at
+    # service=<name>/day=<date>/logs_<n>.json.
+    resource_attrs_to_s3:
+      s3_prefix: s3.prefix
+
+connectors:
+  routing/state:
+    default_pipelines: [ logs/hot ]
+    error_mode: ignore
+    table:
+      - context: log
+        condition: attributes["routeState"] == "offload"
+        pipelines: [ logs/cold ]
+
+service:
+  extensions: [ json_log_encoding/cold ]
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    logs/in:
+      # The estate's existing log receivers, unchanged. Whatever reads the logs
+      # today points here instead of at ClickStack, so the receiver sees the
+      # stream first.
+      receivers: [ otlp, filelog ]
+      exporters: [ otlp/engine ]
+    logs/back:
+      receivers: [ otlp/back ]
+      processors: [ transform/stamp, transform/service, groupbyattrs/service ]
+      exporters: [ routing/state ]
+    logs/hot:
+      receivers: [ routing/state ]
+      exporters: [ otlp/clickstack ]
+    logs/cold:
+      receivers: [ routing/state ]
+      processors: [ transform/cold, batch/cold ]
+      exporters: [ awss3/cold ]`,
+    note:
+      'Runs as a SECOND, stock `opentelemetry-collector-contrib` container beside ' +
+      "ClickStack's own collector. ClickStack's build reports itself as 0.155.0 and " +
+      'carries `routing`, `clickhouse`, `groupbyattrs` and `transform`, but NOT ' +
+      '`awss3`, `json_log_encoding` or `otlp_encoding`, so the offload write cannot ' +
+      'run inside it. Everything not marked `offload` returns to ' +
+      "ClickStack's OTLP endpoint and is inserted by ClickStack's own ClickHouse " +
+      'exporter, unchanged. The three hops before the write are not decoration: the ' +
+      'JSON encoding extension in `body_with_inline_attributes` mode writes ' +
+      '`{"body": ..., "logAttributes": {...}}` and nothing else, so the record time, ' +
+      'the resource attributes and the severity are copied into log attributes first ' +
+      'or the cold rows have no timestamp and no service at all. The harness ran ' +
+      'this against ClickStack 2.38.0, ClickHouse 26.5.7.64 and ' +
+      'contrib 0.160.0 on 2026-09-14.',
+  };
+}
+
+/** The Vector variant. Written from Vector's documented sink options, unexercised. */
+function clickhouseVectorCollector(p: ClickhouseOffloadParams): ClickhouseOffloadRecipeParts['collector'] {
+  const n = chNames(p);
+  return {
+    variant: 'vector',
+    exercised: false,
+    language: 'toml',
+    body: `# NOT EXERCISED. The OpenTelemetry Collector variant is a copy of a config that
+# ran end to end; this one is written from Vector's documented \`aws_s3\` sink
+# options and has not been run against ClickHouse.
+#
+# ASSUMED: \`encoding.codec = "parquet"\` on \`aws_s3\`. Vector documents a parquet
+# codec, and the build in the estate is what decides whether it is there, so
+# confirm it before rolling this out.
+# ASSUMED: the field names below. The 10x return stream carries \`routeState\`,
+# \`${n.hashField}\` and \`message_pattern\` spliced into the event; which field holds
+# the service and the body depends on the input, so the remap normalises them.
+
+# 1) Normalise the names the object path and the Parquet columns key on.
+[transforms.tenx_shape]
+type = "remap"
+inputs = [ "tenx_return" ]        # the 10x receiver's return stream
+source = '''
+.ServiceName  = to_string(.ServiceName) ?? to_string(."service.name") ?? to_string(.k8s_container) ?? "unknown"
+.Body         = to_string(.message) ?? to_string(.body) ?? ""
+.SeverityText = to_string(.severity_text) ?? to_string(.level) ?? ""
+.Timestamp    = to_timestamp(.timestamp) ?? now()
+'''
+
+# 2) Route on the stamped action. The marker is a STRING, never a boolean.
+#    Everything the route does not match falls to _unmatched and keeps going to
+#    ClickHouse the way it already does.
+[transforms.tenx_route]
+type = "route"
+inputs = [ "tenx_shape" ]
+route.offload = '.routeState == "offload"'
+
+# 3) The offload write. Service and day in the key, Parquet in the object.
+[sinks.tenx_cold]
+type = "aws_s3"
+inputs = [ "tenx_route.offload" ]
+bucket = "${p.bucket}"
+region = "${p.region}"
+key_prefix = "service={{ ServiceName }}/day=%Y-%m-%d/"
+filename_extension = "parquet"
+compression = "none"              # Parquet carries its own compression
+
+[sinks.tenx_cold.encoding]
+codec = "parquet"
+
+# OBJECT COUNT IS THE QUERY-COST MULTIPLIER. Every cold query opens each object
+# its predicates do not prune, and ClickHouse pays one request per object, so
+# these two numbers decide what a cold read costs far more than the codec does.
+# Large and slow is right here: a query reads one big object faster than a
+# hundred small ones holding the same rows.
+[sinks.tenx_cold.batch]
+max_bytes    = 268435456          # 256 MiB per object
+timeout_secs = 300                # or five minutes, whichever comes first
+
+# 4) The rows that stay. The estate's existing ClickHouse or OTLP sink, with
+#    its inputs pointed at the unmatched route.
+# [sinks.tenx_hot]
+# inputs = [ "tenx_route._unmatched" ]
+# ... unchanged`,
+    note:
+      "Written from Vector's own documentation, not from a run. The shape mirrors the " +
+      'OpenTelemetry Collector variant: one route on the stamped action, service and day ' +
+      'in the object key, the identity columns inside the file. Two differences matter. ' +
+      'Parquet is columnar, so ClickHouse prunes row groups inside an object as well as ' +
+      'pruning objects by path, which the JSON path cannot do. And Vector writes the ' +
+      'event fields directly, so the cold table below reads named columns rather than a ' +
+      'body-and-attributes map. Nothing here is measured; the query numbers in the ' +
+      'honesty block were taken on the JSON path.',
+  };
+}
+
+/** The ClickHouse side. SQL the operator runs, keyed to the chosen collector. */
+function clickhouseDdl(
+  p: ClickhouseOffloadParams,
+  collector: ClickhouseCollector,
+): ClickhouseRecipePart {
+  const n = chNames(p);
+  const key = `'<access-key>', '<secret-key>'`;
+  const coldJson = `-- COPIED from the harness (benchmarks/clickstack-e2e/conf/schema_cold.sql).
+--
+-- The S3 engine takes the column names from the JSON the collector wrote:
+-- the jsonlogencoding extension in body_with_inline_attributes mode writes
+-- {"body": ..., "logAttributes": {...}} per record, as one JSON array per
+-- object. \`service\` and \`day\` are not in the file at all; they come from the
+-- object path, which is why use_hive_partitioning is on.
+DROP TABLE IF EXISTS ${n.db}.${n.coldTable};
+CREATE TABLE ${n.db}.${n.coldTable}
+(
+  body           String,
+  logAttributes  Map(String, String),
+  service        LowCardinality(String),
+  day            Date
+) ENGINE = S3('${n.s3Endpoint}/${p.bucket}/**.json', ${key}, 'JSONEachRow')
+SETTINGS use_hive_partitioning = 1;
+
+-- The S3 engine REJECTS ALIAS COLUMNS, so the rename to the ClickStack column
+-- names is a view. The Merge table below reads the view, not the S3 table.
+DROP VIEW IF EXISTS ${n.db}.${n.coldView};
+CREATE VIEW ${n.db}.${n.coldView} AS
+SELECT toDateTime64(toUInt64OrZero(logAttributes['TimestampSec']), 9) AS Timestamp,
+       CAST(service AS LowCardinality(String))                        AS ServiceName,
+       body                                                           AS Body,
+       CAST(logAttributes['SeverityText'] AS LowCardinality(String))  AS SeverityText,
+       logAttributes                                                  AS LogAttributes,
+       day                                                            AS day
+FROM ${n.db}.${n.coldTable};`;
+
+  const coldParquet = `-- ASSUMED, NOT MEASURED. The JSON variant above is the one the harness ran.
+-- Parquet carries its own column names, so the cold table names the columns the
+-- Vector remap wrote. \`service\` and \`day\` come from the object path, which is
+-- why use_hive_partitioning is on.
+DROP TABLE IF EXISTS ${n.db}.${n.coldTable};
+CREATE TABLE ${n.db}.${n.coldTable}
+(
+  Timestamp       DateTime64(9),
+  ServiceName     LowCardinality(String),
+  Body            String,
+  SeverityText    LowCardinality(String),
+  ${n.hashField}  String,
+  message_pattern String,
+  routeState      String,
+  service         LowCardinality(String),
+  day             Date
+) ENGINE = S3('${n.s3Endpoint}/${p.bucket}/**.parquet', ${key}, 'Parquet')
+SETTINGS use_hive_partitioning = 1;
+
+-- Same reason as the JSON path: the S3 engine rejects ALIAS columns, so the
+-- shaping is a view and the Merge table reads the view. The map rebuilds the
+-- LogAttributes shape the hot table has, so one Merge table covers both sides
+-- and the counts query reads the same expression on hot and cold.
+DROP VIEW IF EXISTS ${n.db}.${n.coldView};
+CREATE VIEW ${n.db}.${n.coldView} AS
+SELECT Timestamp,
+       CAST(service AS LowCardinality(String))                       AS ServiceName,
+       Body,
+       CAST(SeverityText AS LowCardinality(String))                  AS SeverityText,
+       CAST(map('${n.hashField}', ${n.hashField},
+                'message_pattern', message_pattern,
+                'routeState', routeState) AS Map(String, String))    AS LogAttributes,
+       day                                                           AS day
+FROM ${n.db}.${n.coldTable};`;
+
+  const body = `-- 1) The counts-per-type table and its materialized view. RUN THIS FIRST,
+--    before any data flows, or the view sees none of what is already there.
+--    COPIED from the harness (conf/schema_hot.sql).
+CREATE TABLE IF NOT EXISTS ${n.db}.${n.countsTable}
+(
+  Minute DateTime,
+  ServiceName LowCardinality(String),
+  ${n.hashField} String,
+  message_pattern String,
+  source LowCardinality(String),
+  cnt UInt64
+) ENGINE = SummingMergeTree(cnt)
+ORDER BY (Minute, ServiceName, ${n.hashField}, message_pattern, source);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${n.db}.${n.countsMv}
+TO ${n.db}.${n.countsTable} (Minute DateTime, ServiceName LowCardinality(String), ${n.hashField} String, message_pattern String, source LowCardinality(String), cnt UInt64) AS
+SELECT toStartOfMinute(Timestamp)          AS Minute,
+       ServiceName,
+       LogAttributes['${n.hashField}']${' '.repeat(Math.max(1, 20 - n.hashField.length))}AS ${n.hashField},
+       LogAttributes['message_pattern']    AS message_pattern,
+       'hot'                               AS source,
+       count()                             AS cnt
+FROM ${n.db}.${n.hot}
+GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;
+
+-- 2) ClickStack's ${n.hot} has NO day column, so a day predicate over the
+--    Merge table would exclude every hot row. One materialized column fixes it.
+--    This is a change to ClickStack's shipped schema and the harness reports it
+--    as one.
+ALTER TABLE ${n.db}.${n.hot} ADD COLUMN IF NOT EXISTS day Date MATERIALIZED toDate(Timestamp);
+
+-- 3) The offloaded objects, read in place.
+${collector === 'vector' ? coldParquet : coldJson}
+
+-- 4) Hot and cold as one table. \`_table\` names the side a row came from.
+DROP TABLE IF EXISTS ${n.db}.${n.mergeTable};
+CREATE TABLE ${n.db}.${n.mergeTable}
+(
+  Timestamp     DateTime64(9),
+  ServiceName   LowCardinality(String),
+  Body          String,
+  SeverityText  LowCardinality(String),
+  LogAttributes Map(String, String),
+  day           Date
+) ENGINE = Merge(${n.db}, '^(${n.hot}|${n.coldView})$');
+
+-- 5) The cold side of the counts table, one pass over the objects. Offloaded
+--    rows never pass through an insert, so the materialized view never sees
+--    them. Run this on a schedule, or feed the cold side from the receiver's
+--    own counters instead.
+INSERT INTO ${n.db}.${n.countsTable} (Minute, ServiceName, ${n.hashField}, message_pattern, source, cnt)
+SELECT toStartOfMinute(Timestamp)       AS Minute,
+       ServiceName,
+       LogAttributes['${n.hashField}']${' '.repeat(Math.max(1, 19 - n.hashField.length))}AS ${n.hashField},
+       LogAttributes['message_pattern'] AS message_pattern,
+       'cold'                           AS source,
+       count()                          AS cnt
+FROM ${n.db}.${n.coldView}
+GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;`;
+
+  return {
+    language: 'sql',
+    body,
+    note:
+      'Order matters in one place: the counts table and its materialized view are ' +
+      'created BEFORE any data flows, or the view sees none of the run. The rest is ' +
+      'idempotent. Two findings from the run are baked into the shape above and are ' +
+      'easy to lose in a rewrite: the S3 table engine rejects ALIAS columns, so the ' +
+      "rename to ClickStack's column names is a VIEW and the Merge table reads the " +
+      "view rather than the S3 table; and ClickStack's shipped table has no day " +
+      'column, so the day predicate that prunes objects would drop every hot row ' +
+      'until the materialized column is added.',
+  };
+}
+
+/** Adding the Merge table to HyperDX as a second source, over its API. */
+function clickhouseHyperdx(p: ClickhouseOffloadParams): ClickhouseRecipePart {
+  const n = chNames(p);
+  const api = p.hyperdxApi ?? CH_DEFAULTS.hyperdxApi;
+  return {
+    language: 'bash',
+    body: `# COPIED from the harness (benchmarks/clickstack-e2e/run.sh). It returned
+# HTTP 200 and no click was needed.
+
+# 1) Sign in and keep the cookie. The connection id is read from the response.
+curl -s -c /tmp/hdx.txt -X POST http://${api}/login/password \\
+  -H 'Content-Type: application/json' \\
+  --data '{"email":"<hyperdx-user>","password":"<hyperdx-password>"}' > /dev/null
+
+CONN=$(curl -s -b /tmp/hdx.txt http://${api}/connections \\
+  | sed -n 's/.*"_id":"\\([^"]*\\)".*/\\1/p' | head -1)
+
+# 2) Add the Merge table as a SECOND source. The hot table stays the default.
+curl -s -o /dev/null -w '%{http_code}\\n' -b /tmp/hdx.txt \\
+  -X POST http://${api}/sources -H 'Content-Type: application/json' \\
+  --data "{\\"kind\\":\\"log\\",\\"name\\":\\"Logs hot plus cold\\",\\"connection\\":\\"$CONN\\",
+ \\"from\\":{\\"databaseName\\":\\"${n.db}\\",\\"tableName\\":\\"${n.mergeTable}\\"},
+ \\"timestampValueExpression\\":\\"Timestamp\\",\\"displayedTimestampValueExpression\\":\\"Timestamp\\",
+ \\"implicitColumnExpression\\":\\"Body\\",\\"serviceNameExpression\\":\\"ServiceName\\",
+ \\"bodyExpression\\":\\"Body\\",\\"eventAttributesExpression\\":\\"LogAttributes\\",
+ \\"defaultTableSelectExpression\\":\\"Timestamp,ServiceName,Body\\"}"`,
+    note:
+      'The hot table STAYS THE DEFAULT SOURCE. A query against the Merge table pays ' +
+      'object-store requests and a query against the hot table pays none, so the ' +
+      'Merge table is the source picked when cold rows are wanted, not the one every ' +
+      'dashboard lands on. Searching it is how an operator reaches an offloaded line ' +
+      'without leaving HyperDX.',
+  };
+}
+
+/**
+ * The ClickHouse offload recipe: the collector that writes the objects, the SQL
+ * that reads them back beside the hot table, the HyperDX source, and the
+ * honesty block.
+ *
+ * Pass a collector to get one variant; the render function below shows both so
+ * the customer picks.
+ */
+export function clickhouseOffloadRecipe(
+  params: ClickhouseOffloadParams,
+  collector: ClickhouseCollector = 'otel-collector',
+): ClickhouseOffloadRecipeParts {
+  return {
+    collector:
+      collector === 'vector'
+        ? clickhouseVectorCollector(params)
+        : clickhouseOtelCollector(params),
+    ddl: clickhouseDdl(params, collector),
+    hyperdx: clickhouseHyperdx(params),
+    honesty: clickhouseOffloadHonesty(),
+  };
+}
+
+/**
+ * The full ClickHouse offload section. Substitutes for the generic forwarder
+ * section, the way the Coralogix shipper does: the generic recipes write
+ * newline JSON into the Retriever's `{bucket}/app/` layout and strip
+ * `routeState`, and neither is what a ClickHouse cold table reads.
+ */
+export function renderClickhouseOffloadSection(
+  params: ClickhouseOffloadParams,
+  collector?: ClickhouseCollector,
+): string {
+  const n = chNames(params);
+  const variants: ClickhouseCollector[] = collector ? [collector] : ['otel-collector', 'vector'];
+  const lines: string[] = [
+    '**ClickHouse offload: the rows marked `offload` are written to the customer\'s own ' +
+      'bucket and read back beside the hot table.**',
+    '',
+    'The receiver stamps a per-service action on the regulator\'s excess slice. The ' +
+      'collector routes `routeState == "offload"` to the bucket and everything else to ' +
+      'ClickHouse unchanged. A Merge table over the hot table and a view on the objects ' +
+      'answers a search across both, and a counts-per-type table answers count-all ' +
+      'without touching the objects. Both are part of this recipe, not options.',
+    '',
+    `Target: \`s3://${params.bucket}/service=<name>/day=<date>/\` (region \`${params.region}\`).`,
+    '',
+    'Prerequisites:',
+    '- Engine: the receiver runs with `outputOffload true`, so every event flows back to ' +
+      'the collector carrying full text plus the `routeState` marker.',
+    `- Engine: \`symbolMessageHashField\` is set (\`${n.hashField}\`) and the pattern TEXT is in the ` +
+      'splice list beside the hash and the route. The shipped expression splices the hash ' +
+      'and the route only, so without that edit the offloaded object cannot carry the ' +
+      'pattern text and the cold rows cannot be counted per type.',
+    `- IAM: the collector identity can \`s3:PutObject\` to \`${params.bucket}/*\`, and the ` +
+      'ClickHouse identity can `s3:GetObject` and `s3:ListBucket` on the same bucket. ' +
+      'ClickHouse reads the objects itself; this is not the Retriever path.',
+    '- Match the route name as a STRING (`routeState == "offload"`), never a boolean test.',
+    '',
+    '### 1. The collector',
+    '',
+  ];
+
+  if (variants.length > 1) {
+    lines.push(
+      'Two variants, one choice. The OpenTelemetry Collector variant is the one that ran ' +
+        'end to end. The Vector variant writes Parquet and has not been run.',
+      '',
+    );
+  }
+
+  for (const v of variants) {
+    const r = clickhouseOffloadRecipe(params, v).collector;
+    lines.push(
+      `_${v === 'vector' ? 'Vector, Parquet objects (NOT EXERCISED)' : 'OpenTelemetry Collector, JSON objects (ran end to end)'}_`,
+      '',
+      '```' + r.language,
+      r.body,
+      '```',
+      '',
+      r.note,
+      '',
+    );
+  }
+
+  const ddlVariant = variants[0];
+  const ddl = clickhouseDdl(params, ddlVariant);
+  lines.push(
+    '### 2. The ClickHouse side',
+    '',
+    variants.length > 1
+      ? 'The DDL below reads the JSON objects the OpenTelemetry Collector writes. On the ' +
+          'Vector path the cold table reads named Parquet columns instead; render the ' +
+          'section with that collector to get it.'
+      : ddlVariant === 'vector'
+        ? 'Reads the Parquet objects the Vector sink writes.'
+        : 'Reads the JSON objects the OpenTelemetry Collector writes.',
+    '',
+    '```sql',
+    ddl.body,
+    '```',
+    '',
+    ddl.note,
+    '',
+    '### 3. HyperDX',
+    '',
+  );
+
+  const hdx = clickhouseHyperdx(params);
+  lines.push('```bash', hdx.body, '```', '', hdx.note, '', '### 4. Before quoting any of this', '');
+  lines.push(...clickhouseOffloadHonesty());
+  return lines.join('\n');
+}
+
+
 /** Forwarders besides the detected one, stable order, for the "also supports"
  * hint. */
 export function otherOffloadForwarders(detected: OffloadForwarderId): OffloadForwarderId[] {
@@ -1426,6 +2083,26 @@ export function renderOffloadSection(
   // to write the offload slice to a bucket they did not ask for.
   if (params.destinationType === 'azure_blob') {
     return azureBlobOffloadUnavailable(params);
+  }
+
+  // ClickHouse substitutes for the whole generic section, the way the Coralogix
+  // shipper does, and for the same class of reason: applying the generic recipe
+  // here produces objects a ClickHouse cold table cannot read. The generic
+  // recipes write newline JSON into the Retriever's `{bucket}/app/` layout and
+  // strip `routeState` on the output path. The ClickHouse recipe needs the
+  // service and the day IN THE OBJECT PATH so a predicate prunes objects, and
+  // the identity columns inside the file so the cold rows can be counted per
+  // type. A warning appended after a config that already does the wrong thing
+  // would not fix that.
+  if (
+    destination === 'clickhouse' &&
+    getAllowedActionsForDestination('clickhouse').includes('offload')
+  ) {
+    return renderClickhouseOffloadSection({
+      bucket: params.bucket,
+      region: params.region,
+      hashField: params.hashField,
+    });
   }
 
   lines.push(
