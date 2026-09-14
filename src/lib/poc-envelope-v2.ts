@@ -318,7 +318,7 @@ export interface PatternOutput {
  * by combining `DEFAULT_ACTION_BY_DESTINATION[siem]` with the head-
  * concentration heuristic — high-volume info-class patterns land on
  * the destination's level-1 action (Datadog → tier_down, Splunk →
- * offload, ClickHouse → compact, …); error/audit and exception-pinned
+ * offload, ClickHouse → offload, …); error/audit and exception-pinned
  * patterns land on `pass`; mid-volume info patterns land on `sample`.
  *
  * Replaces the prior bag of sub-action shapes (code_fix /
@@ -695,7 +695,7 @@ export function buildPocEnvelopeV2(
  * Reducibility coefficients (multiply pattern monthly cost):
  *   drop      → 1.00 (full removal)
  *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
- *   compact   → 0.70 (ClickHouse / Splunk envelope; matches cost.ts mid-band)
+ *   compact   → 0.70 (Splunk envelope; matches cost.ts mid-band)
  *   tier_down → 0.60 (Datadog Flex / CW IA; conservative cost-tier delta)
  *   sample    → 0.90 (1-in-10 default keep rate is the common config)
  *   pass      → 0.00 (no reduction)
@@ -883,12 +883,6 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
       };
     }
     case 'compact': {
-      if (siem === 'clickhouse') {
-        return {
-          text: 'ClickHouse, losslessly compacted via the 10x dict+UDF+view (queryable as-is)',
-          recoverable: true, recoverVia: null,
-        };
-      }
       if (siem === 'splunk') {
         return {
           text: 'Splunk, envelope-compacted via the 10x app (queryable as-is, ~80-90% smaller)',

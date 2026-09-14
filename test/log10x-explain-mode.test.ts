@@ -46,7 +46,7 @@ import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-ty
  * A per-mode compatible destination (compatDestFor) is passed so the call does
  * not auto-detect one from the public demo backend, and so each mode renders its
  * APPLY shape rather than the 4-option "choose an alternative" branch. compact
- * runs only on compaction-capable stacks (splunk / self-hosted ES / clickhouse)
+ * runs only on compaction-capable stacks (splunk / self-hosted ES)
  * and tier_down only on cheap-tier stacks (azure-monitor / cloudwatch / datadog);
  * those two sets are disjoint, so there is no single all-modes destination.
  * Passing it also short-circuits the auto-detect round-trip, keeping runs

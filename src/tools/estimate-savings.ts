@@ -56,6 +56,7 @@ import {
   resolveTierDownTier,
   getDestinationCostModel,
   getDefaultActionForDestination,
+  getAllowedActionsForDestination,
   annualizeDollars,
   type Action,
 } from '../lib/cost.js';
@@ -807,6 +808,21 @@ export function computeActionSplit(args: {
 // ─── errors ─────────────────────────────────────────────────────────────
 
 /**
+ * What to reach for when compact turns out to be a no-op here. Read off the
+ * destination's own lever list rather than hardcoded, because the answer is
+ * not the same everywhere: on Datadog and CloudWatch it is tier_down, on
+ * ClickHouse there is no cheaper in-platform tier modeled and offload is the
+ * lever. Naming a lever the destination does not have sends the reader to a
+ * tool call that refuses one step later.
+ */
+export function leversInsteadOfCompact(destination: string): Action[] {
+  const allowed = getAllowedActionsForDestination(destination).filter(
+    (a) => a !== 'compact' && a !== 'pass',
+  );
+  return [...allowed, 'sample', 'drop'] as Action[];
+}
+
+/**
  * Thrown by runEstimateForecast when default_action is a no-op on the
  * destination (e.g., action=compact on datadog where compact_mode=no-op).
  * executeEstimateSavings catches this and returns a structured refusal
@@ -1517,9 +1533,19 @@ export async function runEstimateForecast(
         : forecastRateResolved.disclosure;
 
   const caveats: string[] = [];
+  // A compute-billed destination (ClickHouse) is priced from a model, not from
+  // its own meter, so every dollar this tool prints for it has to say so.
+  const computeTerm = forecastModel.compute;
+  if (computeTerm) {
+    caveats.push(
+      `${args.destination} dollars here are MODELED. Ingest is $0 and the storage line is small; the bill is compute. ` +
+        `The modeled compute saving comes from a measured rows-to-CPU curve and a unit floor of ${computeTerm.min_units} that is ASSUMED. ` +
+        `Pass current_compute_units or monthly_compute_spend_usd for a dollar figure rather than a fraction.`,
+    );
+  }
   if (noOpCompactCount > 0) {
     caveats.push(
-      `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, which is a no-op destination. Consider tier_down, sample, or drop.`
+      `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, where compact is a no-op. Consider ${leversInsteadOfCompact(args.destination).join(', ')}.`
     );
   }
   if (per_pattern_truncated) {
@@ -2623,7 +2649,7 @@ export async function executeEstimateSavings(
       return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use ${leversInsteadOfCompact(noOpDest).join(', ')} instead.`,
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
         source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(noOpDest)) },
@@ -2633,16 +2659,16 @@ export async function executeEstimateSavings(
           phase: 'target_resolution',
           error: `action=${action} is a no-op on ${noOpDest} (compact_mode=no-op)`,
           suggestion: {
-            use_instead: ['tier_down', 'sample', 'drop'],
-            reason: `COST_MODEL_BY_DESTINATION.${noOpDest}.compact_mode === 'no-op' — the destination bills on compressed ingest; compaction yields 0% reduction.`,
+            use_instead: leversInsteadOfCompact(noOpDest),
+            reason: `COST_MODEL_BY_DESTINATION.${noOpDest}.compact_mode === 'no-op': ${getDestinationCostModel(noOpDest as SiemId).compact_unavailable_reason ?? 'the destination bills on compressed ingest'}; compaction yields 0% reduction.`,
           },
         },
-        human_summary: `compact is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        human_summary: `compact is a no-op on ${noOpDest}. Use ${leversInsteadOfCompact(noOpDest).join(', ')} instead.`,
         error: {
           error_type: 'noop_action',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: `Use tier_down, sample, or drop on ${noOpDest} instead of compact.`,
+          hint: `Use ${leversInsteadOfCompact(noOpDest).join(', ')} on ${noOpDest} instead of compact.`,
         },
         telemetry,
       });

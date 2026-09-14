@@ -10,7 +10,7 @@ resolves it into stable pattern identities, and produces a
 3. Service-level breakdown — cost + severity mix per service
 4. Regulator recommendations — ready-to-paste Log10x regulator YAML
 5. Native SIEM exclusion configs — per-SIEM + fluent-bit configs
-6. Compaction potential — Splunk / Elasticsearch / ClickHouse only
+6. Compaction potential: Splunk and self-hosted Elasticsearch only
 7. Risk / dependency check — cheap-looking drops that may be load-bearing
 8. Deployment paths — automated (regulator) and manual (native drops)
 9. Appendix — full pattern table, methodology, run metadata
@@ -95,8 +95,10 @@ persist the `report_file_path` if you need the report later.
 - `target_event_count`: `250_000` (≈125 MB at 500B avg; pattern resolution in 2-3 min)
 - `max_pull_minutes`: `5` (whichever of target count / time hits first)
 - `analyzer_cost_per_gb`: per vendors.json (Splunk $6, Datadog $2.50,
-  Elasticsearch $1, Azure $2.30, CloudWatch $0.50, GCP $0.50, Sumo $0.25,
-  ClickHouse $0.15). Pass the arg to override.
+  Elasticsearch $1, Azure $2.30, CloudWatch $0.50, GCP $0.50, Sumo $0.25).
+  Pass the arg to override. ClickHouse carries $0.15, which is a storage
+  stand-in and not the bill: ClickHouse is priced as compute, and its dollars
+  come out modeled. See `src/lib/cost.ts`, `COST_MODEL_BY_DESTINATION.clickhouse.compute`.
 - Pattern resolution runs through a locally-installed `tenx` CLI; the
   sample never leaves your machine. The tool errors early with an install
   hint if `tenx` isn't on `PATH` (or `LOG10X_TENX_PATH`).

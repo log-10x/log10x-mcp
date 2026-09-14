@@ -25,7 +25,7 @@ import { getAllowedActionsForDestination, getDestinationCostModel, compactsInPla
 import type { SiemId } from '../src/lib/siem/pricing.js';
 
 /** Destinations where `compact` keeps the line queryable in place. */
-const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId, 'clickhouse'];
+const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId];
 /**
  * Mechanism real, AVAILABILITY unknown. Encoded events do shrink the _source
  * footprint Elasticsearch bills on, but the expander is the l1es plugin and
@@ -34,8 +34,14 @@ const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId, 'clickho
  * availability, never the mechanism.
  */
 const MECHANISM_ONLY: SiemId[] = ['elasticsearch'];
-/** Destinations where `compact` is a no-op and the claim would be false. */
-const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo'];
+/**
+ * Destinations where `compact` is a no-op and the claim would be false.
+ * ClickHouse is here on a measurement rather than a missing expander: the
+ * column codecs and the text index already take the repetition compaction
+ * would take, which put it at about 7% of table bytes, and table bytes are not
+ * the ClickHouse bill. Offload is the lever there.
+ */
+const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo', 'clickhouse'];
 
 function fixture(): ExtractedPatterns {
   return {

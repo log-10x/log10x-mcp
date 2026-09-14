@@ -642,7 +642,7 @@ interface EnrichedPattern extends ExtractedPattern {
    * The destination's preferred level-1 action (`tier_down`, `offload`,
    * `compact`, ...) per `DEFAULT_ACTION_BY_DESTINATION`. Informs which
    * lossless lever the decision falls to when compact is unavailable
-   * (Datadog: tier_down, Splunk: offload, ClickHouse: compact, ...).
+   * (Datadog: tier_down, Splunk: offload, ClickHouse: offload, ...).
    */
   destinationLevel1Action: CostAction;
 }
@@ -1714,14 +1714,15 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const totalBytes = input.extraction.totalBytes || 1;
   const analyzerCost = input.analyzerCostPerGb;
   // Destination-aware level-1 lever (per DEFAULT_ACTION_BY_DESTINATION):
-  //   datadog/cloudwatch/azure -> tier_down, clickhouse -> compact,
-  //   splunk / es / sumo / gcp / managed offerings -> offload, …
+  //   datadog/cloudwatch/azure -> tier_down,
+  //   splunk / es / clickhouse / sumo / gcp / managed offerings -> offload, …
   // Threaded into reasoning for high-volume info-class patterns so the
   // recommendation matches the SIEM's cheapest cost-cutting path.
   const destinationAction: CostAction = getDefaultActionForDestination(input.siem, 1);
   // Does this SIEM support in-place compaction (10x envelope / plugin)?
-  // Splunk, self-hosted ES/OS, and ClickHouse do; Datadog/CloudWatch/managed
-  // offerings do not. When it does, compact is the lead lever for a
+  // Splunk and self-hosted ES/OS do; Datadog/CloudWatch/managed offerings do
+  // not, and neither does ClickHouse, where the codecs and the text index have
+  // already taken what compaction would take. When it does, compact is the lead lever for a
   // compressible pattern (keeps every line searchable in the SIEM at a
   // fraction of the bytes). When it doesn't, we fall to tier_down (cheaper
   // in-platform tier) or offload (customer-owned S3) — both lossless.

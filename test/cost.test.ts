@@ -10,8 +10,10 @@
  * Acceptance gates from the spec:
  *   - compact on splunk: ~88.5% savings on $6/GB → ~$0.69 for 1GB.
  *   - compact on datadog: bytes_out === bytes_in + 'not supported' note.
- *   - small-event degradation: avg 50B against CH 0.26 → ~0.63.
+ *   - small-event degradation: avg 50B against a 0.26 band → ~0.63.
  *   - degradation clamped to ≤ 1.0.
+ *   - ClickHouse compute term: the measured curve, whole-unit stepping with a
+ *     floor, and the modeled flag on every ClickHouse dollar.
  */
 
 import { test } from 'node:test';
@@ -30,6 +32,9 @@ import {
   annualizeDollars,
   percentReduction,
   projectSavings,
+  cpuFractionForRowsKept,
+  projectComputeSaving,
+  HOURS_PER_MONTH,
 } from '../src/lib/cost.js';
 
 // GB = 10^9 bytes (decimal), matching src/lib/cost.ts. This is the unit
@@ -263,8 +268,11 @@ test('offload S3 rate is overridable (cheaper tier)', () => {
   assert.ok(Math.abs((glacier.s3_storage_dollars ?? -1) - 0.004) < 1e-6);
 });
 
-test('projectAction compact on clickhouse uses dict-udf-view band and stored-month basis', () => {
-  // mid = (0.22+0.30)/2 = 0.26. ingest_per_gb=0 (CH self-hosted), storage 0.023/GB-month.
+test('compact on clickhouse is a no-op: bytes unchanged, storage priced at full', () => {
+  // ClickHouse left the compacting set on a measurement: the column codecs and
+  // the text index already take what compaction would take, which put it at
+  // about 7% of table bytes. ingest_per_gb=0 and storage 0.023/GB-month both
+  // stay because both are true; neither is the bill.
   const p = projectAction({
     action: 'compact',
     bytes_in: GB,
@@ -273,7 +281,9 @@ test('projectAction compact on clickhouse uses dict-udf-view band and stored-mon
   });
   assert.equal(p.basis, 'stored-month');
   assert.equal(p.ingest_dollars, 0);
-  assert.ok(Math.abs(p.storage_dollars! - 0.26 * 0.023) < 1e-6);
+  assert.equal(p.bytes_out, GB);
+  assert.ok(Math.abs(p.storage_dollars! - 0.023) < 1e-6);
+  assert.ok(p.notes!.some((n) => /compact not supported on clickhouse/.test(n)));
 });
 
 // ---------------------------------------------------------------------------
@@ -304,17 +314,19 @@ test('degradeRatioForSmallEvents returns base when avgSize is 0 or undefined', (
 });
 
 test('projectAction compact with small avg event size shrinks savings', () => {
+  // Splunk, not ClickHouse: the small-event floor only bites where compaction
+  // is a lever at all.
   const big = projectAction({
     action: 'compact',
     bytes_in: GB,
     avg_event_size_bytes: 500,
-    destination: 'clickhouse',
+    destination: 'splunk',
   });
   const small = projectAction({
     action: 'compact',
     bytes_in: GB,
     avg_event_size_bytes: 50,
-    destination: 'clickhouse',
+    destination: 'splunk',
   });
   assert.ok(small.bytes_out > big.bytes_out);
   assert.ok(small.notes && small.notes.some((n) => /below floor/.test(n)));
@@ -490,16 +502,24 @@ test('compact_ratio_override on splunk uses the measured ratio across the whole 
   assert.ok(r.expected.notes!.some((n) => /measured/.test(n)), r.expected.notes?.join('|'));
 });
 
-test('compact_ratio_override is ignored on a non-envelope destination (clickhouse keeps its band)', () => {
-  // ClickHouse compacts in dict-udf-view mode; the wire ratio diverges from
-  // the stored size, so the measured override must NOT drive the projection.
+test('compact_ratio_override is ignored on a non-envelope destination (elasticsearch keeps its band)', () => {
+  // Elasticsearch compacts in index-pruned mode; the wire ratio diverges from
+  // the billed _source footprint, so the measured override must NOT drive the
+  // projection.
+  const withOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'elasticsearch', compact_ratio_override: 0.5,
+  });
+  const withoutOverride = projectActionRange({
+    action: 'compact', bytes_in: GB, destination: 'elasticsearch',
+  });
+  assert.equal(withOverride.expected.bytes_out, withoutOverride.expected.bytes_out);
+});
+
+test('compact_ratio_override is ignored on clickhouse, where compact is a no-op', () => {
   const withOverride = projectActionRange({
     action: 'compact', bytes_in: GB, destination: 'clickhouse', compact_ratio_override: 0.5,
   });
-  const withoutOverride = projectActionRange({
-    action: 'compact', bytes_in: GB, destination: 'clickhouse',
-  });
-  assert.equal(withOverride.expected.bytes_out, withoutOverride.expected.bytes_out);
+  assert.equal(withOverride.expected.bytes_out, GB);
 });
 
 // ---------------------------------------------------------------------------
@@ -536,4 +556,160 @@ test('projectAction tier_down on azure-monitor bills the Basic tier rate, not An
   assert.ok(p.total_dollars! < std.total_dollars!);
   // the routing caveat names the Basic tier
   assert.ok(p.notes && p.notes.some((n) => /Azure Monitor Basic Logs/.test(n)));
+});
+
+// ---------------------------------------------------------------------------
+// ClickHouse compute term
+//
+// The curve is the `bypattern` arm of the compute-vs-rows run (benchmarks
+// clickhouse-clickstack, 2026-09-13): whole message types removed, insert CPU
+// from system.query_log and merge CPU from system.part_log, fastest of three
+// passes. Rows 72.85% cost 83% of the CPU, 49.32% cost 35%, 23.88% cost 15%.
+// ---------------------------------------------------------------------------
+
+const CH_COMPUTE = COST_MODEL_BY_DESTINATION.clickhouse.compute!;
+
+test('the compute curve returns the measured points exactly', () => {
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.7285), 0.83);
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.4932), 0.35);
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.2388), 0.15);
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 1), 1);
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 0), 0);
+});
+
+test('the compute curve interpolates linearly between measured points', () => {
+  // Midway between (0.4932, 0.35) and (0.7285, 0.83).
+  const kept = (0.4932 + 0.7285) / 2;
+  const expected = (0.35 + 0.83) / 2;
+  assert.ok(Math.abs(cpuFractionForRowsKept(CH_COMPUTE.curve, kept) - expected) < 1e-9);
+  // A point inside the lowest segment, (0, 0) to (0.2388, 0.15).
+  const low = cpuFractionForRowsKept(CH_COMPUTE.curve, 0.1194);
+  assert.ok(Math.abs(low - 0.075) < 1e-9, `got ${low}`);
+});
+
+test('the compute curve clamps outside 0..1 rather than extrapolating', () => {
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, 1.5), 1);
+  assert.equal(cpuFractionForRowsKept(CH_COMPUTE.curve, -0.2), 0);
+});
+
+test('removing rows saves more than proportionally, which is the whole claim', () => {
+  // Half the rows cost well under half the CPU. If this ever inverts, the
+  // reason to remove rows on ClickHouse is gone.
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.5) < 0.5);
+  assert.ok(cpuFractionForRowsKept(CH_COMPUTE.curve, 0.25) < 0.25);
+});
+
+test('compute units step whole and never go below the floor', () => {
+  // 100 units, half the rows removed. cpu at 0.5 rows kept is just above 0.35.
+  const r = projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 100 });
+  assert.equal(r.units_before, 100);
+  assert.equal(r.units_after, Math.ceil(100 * r.cpu_fraction));
+  assert.equal(
+    r.saving_usd_month,
+    (r.units_before! - r.units_after!) * CH_COMPUTE.unit_usd_per_hour * HOURS_PER_MONTH,
+  );
+  assert.equal(r.modeled, true);
+});
+
+test('a small estate sitting at the floor saves nothing, and says so', () => {
+  // Four units is below the ASSUMED floor of 12, so before and after are both
+  // the floor and the modeled saving is zero dollars, not a fraction of one.
+  const r = projectComputeSaving(CH_COMPUTE, 0.25, { current_units: 4 });
+  assert.equal(r.units_before, CH_COMPUTE.min_units);
+  assert.equal(r.units_after, CH_COMPUTE.min_units);
+  assert.equal(r.saving_usd_month, 0);
+  assert.equal(r.saving_fraction, 0);
+  assert.match(r.note, /whole units/);
+});
+
+test('a monthly compute spend converts to units at the list unit price', () => {
+  const monthlyPerUnit = CH_COMPUTE.unit_usd_per_hour * HOURS_PER_MONTH;
+  const fromSpend = projectComputeSaving(CH_COMPUTE, 0.5, {
+    monthly_spend_usd: monthlyPerUnit * 40,
+  });
+  const fromUnits = projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 40 });
+  assert.equal(fromSpend.units_before, fromUnits.units_before);
+  assert.equal(fromSpend.units_after, fromUnits.units_after);
+  assert.equal(fromSpend.saving_usd_month, fromUnits.saving_usd_month);
+});
+
+test('with no unit count the compute saving is a fraction and asks for the input', () => {
+  const r = projectComputeSaving(CH_COMPUTE, 0.5);
+  assert.equal(r.units_before, undefined);
+  assert.equal(r.saving_usd_month, undefined);
+  assert.ok(Math.abs(r.saving_fraction - (1 - r.cpu_fraction)) < 1e-12);
+  assert.equal(r.modeled, true);
+  assert.match(r.note, /supply current compute units or monthly compute spend to get dollars/);
+});
+
+test('offload on clickhouse reports a modeled compute saving alongside the storage one', () => {
+  const p = projectAction({
+    action: 'offload',
+    bytes_in: GB,
+    destination: 'clickhouse',
+    rows_kept_fraction: 0.5,
+    current_compute_units: 100,
+  });
+  assert.equal(p.modeled, true);
+  assert.ok(p.compute_saving);
+  assert.equal(p.compute_saving!.basis, 'rows-inserted');
+  assert.equal(p.compute_saving!.rows_kept_fraction, 0.5);
+  assert.ok(p.compute_saving!.saving_usd_month! > 0);
+  // The storage side is untouched by the compute term: offloaded bytes still
+  // cost S3 and no longer cost ClickHouse storage.
+  assert.ok((p.s3_storage_dollars ?? 0) > 0);
+});
+
+test('sample and drop on clickhouse also carry a compute saving', () => {
+  for (const action of ['sample', 'drop'] as const) {
+    const p = projectAction({
+      action,
+      bytes_in: GB,
+      destination: 'clickhouse',
+      current_compute_units: 100,
+    });
+    assert.ok(p.compute_saving, `${action} should carry a compute saving`);
+    assert.equal(p.compute_saving!.modeled, true);
+  }
+});
+
+test('rows kept defaults to the byte reduction when the caller does not state it', () => {
+  // sample_n = 4 keeps a quarter of the bytes, so a quarter of the rows.
+  const p = projectAction({
+    action: 'sample',
+    bytes_in: GB,
+    sample_n: 4,
+    destination: 'clickhouse',
+  });
+  assert.ok(Math.abs(p.compute_saving!.rows_kept_fraction - 0.25) < 1e-9);
+});
+
+test('every clickhouse projection carries modeled:true and the word modeled', () => {
+  for (const action of ['pass', 'compact', 'offload', 'drop', 'sample', 'tier_down'] as const) {
+    const p = projectAction({ action, bytes_in: GB, destination: 'clickhouse' });
+    assert.equal(p.modeled, true, `${action} lost the modeled flag`);
+    assert.ok(
+      p.notes!.some((n) => /modeled/i.test(n)),
+      `${action} prints ClickHouse dollars with no note saying they are modeled`,
+    );
+  }
+});
+
+test('no destination other than clickhouse carries a compute term', () => {
+  for (const [dest, model] of Object.entries(COST_MODEL_BY_DESTINATION)) {
+    if (dest === 'clickhouse') {
+      assert.ok(model.compute, 'clickhouse must carry the compute term');
+      continue;
+    }
+    assert.equal(model.compute, undefined, `${dest} must not carry a compute term`);
+    const p = projectAction({ action: 'offload', bytes_in: GB, destination: model.destination });
+    assert.equal(p.compute_saving, undefined, `${dest} projected a compute saving`);
+    assert.equal(p.modeled, undefined, `${dest} was marked modeled`);
+  }
+});
+
+test('clickhouse offers offload, never compact', () => {
+  const levers = getAllowedActionsForDestination('clickhouse');
+  assert.deepEqual(levers, ['offload']);
+  assert.equal(COST_MODEL_BY_DESTINATION.clickhouse.compact_mode, 'no-op');
 });

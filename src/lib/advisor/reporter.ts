@@ -7,12 +7,13 @@
  *
  * The same builder serves both apps. The current chart format unifies
  * around a single Receiver workload with two opt-in feature flags:
- *   - `optimize`: compact events (~50-80% reduction, per-destination). The
- *     losslessness is not a property of the encoding alone: it holds only
- *     where the DESTINATION has the 10x expander installed to expand events
- *     again at read time — the Splunk app, the l1es Elasticsearch/OpenSearch
- *     plugin, the ClickHouse view. Destinations with no expander (Datadog,
- *     CloudWatch) cannot use the flag at all. See `./compaction-support.ts`.
+ *   - `optimize`: compact events (reduction varies by destination and by the
+ *     events themselves). The losslessness is not a property of the encoding
+ *     alone: it holds only where the DESTINATION has the 10x expander installed
+ *     to expand events again at read time, meaning the Splunk app or the l1es
+ *     Elasticsearch/OpenSearch plugin. Destinations with no expander (Datadog,
+ *     CloudWatch) cannot use the flag at all, and on ClickHouse the lever is
+ *     offload rather than compaction. See `./compaction-support.ts`.
  *   - `readOnly` — emit metrics, do NOT write events back through the
  *     forwarder (passive observation).
  * The flags are mutually exclusive at the chart level. AdvisorApp keeps
@@ -92,8 +93,8 @@ export interface ReporterAdviseArgs {
   /** Splunk HEC token if destination=splunk. */
   splunkHecToken?: string;
   /**
-   * Enable encoded event output (compact encoded form,
-   * ~50-80% reduction per-destination). Only meaningful when app='receiver';
+   * Enable encoded event output (compact encoded form; the reduction varies
+   * by destination and by the events). Only meaningful when app='receiver';
    * blocks when app='reporter' (Reporter has no write-back path to
    * encode events on). Maps to `tenx.optimize: true` in every
    * supported chart's values.yaml.
@@ -488,7 +489,7 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, typically 50-80% smaller on a destination whose 10x expander is installed — see the prerequisite below) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, smaller on a destination whose 10x expander is installed, see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
       'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',

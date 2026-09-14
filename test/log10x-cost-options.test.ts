@@ -266,10 +266,15 @@ test('drop and observe_only are always applicable at receiver tier', () => {
 
 test('siemSupportsCompact returns true ONLY where the cost model says compact is real', () => {
   // Single source of truth: COST_MODEL_BY_DESTINATION.compact_mode !== 'no-op'
-  // (splunk envelope, self-hosted ES index-pruned, clickhouse dict-udf-view).
+  // (splunk envelope, self-hosted ES index-pruned).
   assert.equal(siemSupportsCompact('splunk'), true);
   assert.equal(siemSupportsCompact('elasticsearch'), true);
-  assert.equal(siemSupportsCompact('clickhouse'), true);
+});
+
+test('siemSupportsCompact is false on clickhouse: the bill is compute, the lever is offload', () => {
+  // Not a missing expander. Measured on a ClickStack table, compaction was
+  // worth about 7% of table bytes, and table bytes are not the ClickHouse bill.
+  assert.equal(siemSupportsCompact('clickhouse'), false);
 });
 
 test('siemSupportsCompact returns false on compact no-op destinations', () => {

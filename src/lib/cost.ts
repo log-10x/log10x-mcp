@@ -11,18 +11,19 @@
  *     uncertainty bands, and degrades savings for small events where
  *     envelope overhead dominates.
  *
- * Compact-ratio numbers come from the CH/ES PoC findings:
- *   - ClickHouse dict+UDF+view: 70-78% typical reduction on noisy payloads
- *     (7-79% observed range). Modeled here as compact_ratio 0.22..0.30
- *     (post/pre).
+ * Compact-ratio numbers come from the ES/Splunk PoC findings:
  *   - Elasticsearch pruned (compactable fields excluded from _source):
  *     45-73% reduction range. Modeled as compact_ratio 0.30..0.40.
  *   - Elasticsearch unpruned: ~45-55% post/pre. Returned via
  *     getDestinationCostModel(dest, {esPruned:false}).
  *   - Splunk envelope-in-event: ~92% reduction on the OUTER stream.
  *     Modeled as 0.08..0.15.
- *   - Datadog/CW/Azure/GCP/Sumo/Coralogix: no-op (destination cannot accept
- *     encoded events). compact_ratio = 1.0..1.0; a caveat is emitted by callers.
+ *   - Datadog/CW/Azure/GCP/Sumo/Coralogix/ClickHouse: no-op. compact_ratio =
+ *     1.0..1.0; a caveat is emitted by callers. On ClickHouse the reason is
+ *     measured rather than structural: the text index and the column codecs
+ *     already absorb almost all of it, so compaction moves about 7% of table
+ *     bytes, and table bytes are not where a ClickHouse bill lives. The lever
+ *     there is rows that never enter, priced through the `compute` term below.
  *
  * Small-event degradation: below `small_event_floor_bytes` (default 100),
  * envelope overhead linearly degrades the compact ratio toward 1.0. At
@@ -93,7 +94,6 @@ export type BillingBasis =
  *  - no-op:          destination cannot accept encoded events (Datadog &
  *                    friends). compact_ratio fixed at 1.0; caller warns.
  *  - envelope:       Splunk-style encode-in-event; query-time expand.
- *  - dict-udf-view:  ClickHouse dictionary + UDF + view path.
  *  - index-pruned:   ES with `_source.excludes` of compactable fields.
  *  - index-unpruned: ES without pruning (savings come from value-level
  *                    rewrite, not index pruning).
@@ -101,7 +101,6 @@ export type BillingBasis =
 export type CompactMode =
   | 'no-op'
   | 'envelope'
-  | 'dict-udf-view'
   | 'index-pruned'
   | 'index-unpruned';
 
@@ -118,6 +117,67 @@ export interface TierDownTargetTier {
   ingest_rate_usd_per_gb: number;
   /** Cheaper storage rate for this tier ($/GB-month). */
   storage_rate_usd_per_gb_month: number;
+}
+
+/**
+ * A destination whose bill is COMPUTE, not bytes accepted or bytes stored.
+ *
+ * ClickHouse is the only one modeled this way. Its storage line is small and
+ * its ingest line is zero, so pricing it on bytes alone reads as if the bill
+ * were somewhere it is not. What moves a ClickHouse bill is rows that never
+ * enter: insert and merge CPU follows row count, faster than linearly, because
+ * a row never written is not paid for once and is not paid for again on every
+ * merge that would have carried it.
+ *
+ * `curve` maps rows KEPT (as a fraction of what arrives today) to insert-plus-
+ * merge CPU as a fraction of today's. Points are measured; between them this
+ * model interpolates linearly and nothing else.
+ *
+ * Compute is bought in whole units within the autoscaler's bounds, so a CPU
+ * drop is worth nothing until a whole unit can go, and never below the floor.
+ * `unit_step` and `min_units` carry that.
+ */
+export interface DestinationComputeTerm {
+  /** What the CPU curve is indexed on. Rows inserted is the only measured one. */
+  basis: 'rows-inserted';
+  /** List price of one compute unit, $/hour. */
+  unit_usd_per_hour: number;
+  /** True when the platform bills whole units (round up), not fractions. */
+  unit_step: boolean;
+  /** Lowest unit count the service can run at. Never billed below this. */
+  min_units: number;
+  /**
+   * [rowsKeptFraction, cpuFraction] points, ascending by rowsKeptFraction.
+   * Endpoints at 0 and 1 are required so every input is bracketed.
+   */
+  curve: Array<[number, number]>;
+}
+
+/** What a compute term says about one action, on one estate. */
+export interface ComputeSavingProjection {
+  basis: 'rows-inserted';
+  /** Rows still inserted after the action, as a fraction of today's rows. */
+  rows_kept_fraction: number;
+  /** Insert-plus-merge CPU after the action, as a fraction of today's. */
+  cpu_fraction: number;
+  /**
+   * Compute units billed before and after, whole units, floored at min_units.
+   * Present only when the caller supplied current units or a monthly spend.
+   */
+  units_before?: number;
+  units_after?: number;
+  /** (units_before - units_after) x unit_usd_per_hour x 730. */
+  saving_usd_month?: number;
+  /**
+   * Share of today's compute bill this action removes. When units are known
+   * this is (units_before - units_after) / units_before, which is the stepped
+   * answer and can be 0 at the floor. When they are not, it is 1 - cpu_fraction,
+   * which is the unstepped shape of the curve and nothing more.
+   */
+  saving_fraction: number;
+  /** Always true. No ClickHouse compute dollar in this codebase is measured on the customer's estate. */
+  modeled: true;
+  note: string;
 }
 
 export interface DestinationCostModel {
@@ -181,6 +241,13 @@ export interface DestinationCostModel {
    * = Basic Logs; alt = [Auxiliary Logs].
    */
   tier_down_alt_tiers?: TierDownTargetTier[];
+  /**
+   * Present only where the bill is compute rather than bytes. ClickHouse only.
+   * Do not add one to a destination that bills per GB accepted or per GB
+   * stored: there the byte projection already IS the bill, and a compute term
+   * would double-count it.
+   */
+  compute?: DestinationComputeTerm;
 }
 
 /**
@@ -270,6 +337,20 @@ export interface SavingsProjection {
     ingest: 'list' | 'customer_supplied' | 'unset';
     storage: 'list' | 'customer_supplied' | 'unset';
   };
+  /**
+   * Present only on a destination with a `compute` term (ClickHouse), and only
+   * for the actions that keep rows out of the cluster: offload, drop, sample.
+   * The byte axis above still carries the storage saving; this carries the
+   * compute one, which is the larger number and the modeled one.
+   */
+  compute_saving?: ComputeSavingProjection;
+  /**
+   * True when any dollar on this projection rests on a model rather than on the
+   * destination's own meter. Set on every ClickHouse projection, because the
+   * compute term is a curve fitted to one capture and a unit floor that is
+   * ASSUMED. Renderers must carry the word "modeled" wherever they print these.
+   */
+  modeled?: boolean;
   notes?: string[];
 }
 
@@ -461,16 +542,60 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
       storage_rate_usd_per_gb_month: 0.008,
     },
   },
+  // ClickHouse is priced as a COMPUTE bill. Ingest is genuinely $0 and the
+  // storage rate below is genuinely small, and both stay because both are
+  // true; what changed is that neither is the bill. See `compute`.
   clickhouse: {
     destination: 'clickhouse',
     ingest_per_gb: 0.0,
     storage_per_gb_month: 0.023,
     billing_basis: 'stored-month',
-    compact_mode: 'dict-udf-view',
-    compact_requires: 'the 10x ClickHouse dictionary + UDF + view installed (it auto-expands them inside a view)',
-    compact_ratio_low: 0.22,
-    compact_ratio_high: 0.3,
+    // COMPACT IS NOT A LEVER ON CLICKHOUSE, and this is a measurement rather
+    // than a missing expander. On a ClickStack table at ZSTD(1) the compact
+    // form is worth about 7% of table bytes: the text index and the column
+    // codecs have already taken the repetition that compaction would take.
+    // Seven percent of a line that is itself a small share of the bill is not
+    // a lever. Offload is.
+    compact_mode: 'no-op',
+    compact_unavailable_reason:
+      'the column codecs and the text index already absorb the repetition compaction would remove, so it is worth about 7% of table bytes, and table bytes are not where a ClickHouse bill lives',
+    compact_ratio_low: 1.0,
+    compact_ratio_high: 1.0,
     small_event_floor_bytes: 80,
+    // COMPUTE TERM. Rows that never enter are the lever.
+    //
+    // unit_usd_per_hour: ClickHouse Cloud Scale compute unit, 8 GiB / 2 vCPU,
+    // billed per minute. Documented pricing read 2026-09.
+    //
+    // min_units 12 is an ASSUMPTION: three replicas of four units, the
+    // autoscaler's configured minimum on a Scale service sized for a log
+    // estate. It is a knob, not a measurement. Where the customer's own floor
+    // is known, pass it and the stepping answers differently.
+    //
+    // curve: measured 2026-09-13 (benchmarks clickhouse-clickstack,
+    // compute-vs-rows). Insert CPU from system.query_log, merge CPU from
+    // system.part_log, fastest of three passes after a discarded warm-up, same
+    // ClickStack schema at ZSTD(1) in every arm. The points below are the
+    // `bypattern` arms, where whole message types were removed, because that is
+    // what a per-pattern policy actually does; the uniform-sample arms agree
+    // within a couple of points at half and a quarter of the rows.
+    //   rows 72.85% -> CPU 83%   (bypattern_75)
+    //   rows 49.32% -> CPU 35%   (bypattern_50)
+    //   rows 23.88% -> CPU 15%   (bypattern_25)
+    // Endpoints (0,0) and (1,1) close the curve. Between points, linear.
+    compute: {
+      basis: 'rows-inserted',
+      unit_usd_per_hour: 0.2985,
+      unit_step: true,
+      min_units: 12,
+      curve: [
+        [0.0, 0.0],
+        [0.2388, 0.15],
+        [0.4932, 0.35],
+        [0.7285, 0.83],
+        [1.0, 1.0],
+      ],
+    },
   },
   cloudwatch: {
     destination: 'cloudwatch',
@@ -586,7 +711,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
 //                             offload           → compact (if 10x plugin installable)
 //   - Elasticsearch managed / OpenSearch managed:
 //                             offload                  (no compact on managed)
-//   - ClickHouse:             compact (CH UDF)  → offload
+//   - ClickHouse:             offload                  (compact is a no-op here;
+//                             the bill is compute, and offload is what keeps
+//                             rows out of it. tier_down, as a cold table read
+//                             through a Merge table, is a storage saving only
+//                             and is not modeled yet.)
 //   - Sumo / NewRelic / Honeycomb / Grafana Cloud Logs / Loki:
 //                             offload                  (no level-2)
 //   - generic / unknown:      offload                  (safe fallback)
@@ -642,8 +771,9 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   elasticsearch_managed: ['offload'],
   opensearch_self: ['compact', 'offload'],
   opensearch_managed: ['offload'],
-  // ClickHouse: the dict+UDF+view compact path is the level-1 lever (PoC: 70-78%).
-  clickhouse: ['compact', 'offload'],
+  // ClickHouse: offload is the only modeled lever. Compaction is a no-op on the
+  // billed measure, and the cold-table tier_down recipe is not built yet.
+  clickhouse: ['offload'],
   // Single-lever destinations.
   sumo: ['offload'],
   newrelic: ['offload'],
@@ -692,10 +822,10 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  * destination, in place".
  *
  * True only where the destination has a real compaction mechanism: Splunk
- * (envelope), self-hosted Elasticsearch/OpenSearch (index-pruned) and
- * ClickHouse (dict-UDF-view). Everywhere else `compact_mode` is `no-op`
- * with ratio 1.0, and claiming in-place compaction there is a false
- * statement about the customer's own platform.
+ * (envelope) and self-hosted Elasticsearch/OpenSearch (index-pruned).
+ * Everywhere else `compact_mode` is `no-op` with ratio 1.0, and claiming
+ * in-place compaction there is a false statement about the customer's own
+ * platform.
  *
  * Every surface that renders or gates compaction language routes through
  * this. Without it the renderer carries rival notions of the same fact:
@@ -828,6 +958,92 @@ export function degradeRatioForSmallEvents(
   return Math.min(1, baseRatio + (1 - baseRatio) * penalty);
 }
 
+/** Hours in a billing month, the figure every compute dollar here is built on. */
+export const HOURS_PER_MONTH = 730;
+
+/**
+ * Insert-plus-merge CPU as a fraction of today's, for a given fraction of
+ * today's rows kept. Linear between measured points; identity outside them,
+ * which cannot happen once a curve carries its 0 and 1 endpoints.
+ *
+ * Exposed for testing and for surfaces that want the shape without the money.
+ */
+export function cpuFractionForRowsKept(
+  curve: Array<[number, number]>,
+  rowsKeptFraction: number,
+): number {
+  const kept = Math.max(0, Math.min(1, rowsKeptFraction));
+  const pts = [...curve].sort((a, b) => a[0] - b[0]);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [r0, c0] = pts[i];
+    const [r1, c1] = pts[i + 1];
+    if (kept >= r0 && kept <= r1) {
+      if (r1 === r0) return c0;
+      return c0 + ((c1 - c0) * (kept - r0)) / (r1 - r0);
+    }
+  }
+  return kept;
+}
+
+/**
+ * Model what an action does to a compute-billed destination's bill.
+ *
+ * Whole units, floored: the platform bills capacity in units within the
+ * autoscaler's bounds, so lower CPU is worth nothing until a whole unit can go
+ * and never below the floor. A small estate already at the floor saves zero,
+ * and this returns zero rather than a fractional dollar the invoice will not
+ * show.
+ *
+ * Without a current unit count or a monthly spend there is no dollar to give,
+ * so this returns the fraction and says what to supply.
+ */
+export function projectComputeSaving(
+  compute: DestinationComputeTerm,
+  rowsKeptFraction: number,
+  opts?: { current_units?: number; monthly_spend_usd?: number },
+): ComputeSavingProjection {
+  const kept = Math.max(0, Math.min(1, rowsKeptFraction));
+  const cpuFraction = cpuFractionForRowsKept(compute.curve, kept);
+  const monthlyPerUnit = compute.unit_usd_per_hour * HOURS_PER_MONTH;
+
+  let currentUnits: number | undefined = opts?.current_units;
+  if (currentUnits == null && opts?.monthly_spend_usd != null && monthlyPerUnit > 0) {
+    currentUnits = opts.monthly_spend_usd / monthlyPerUnit;
+  }
+
+  if (currentUnits == null || !Number.isFinite(currentUnits) || currentUnits <= 0) {
+    return {
+      basis: compute.basis,
+      rows_kept_fraction: kept,
+      cpu_fraction: cpuFraction,
+      saving_fraction: 1 - cpuFraction,
+      modeled: true,
+      note:
+        'modeled compute saving: supply current compute units or monthly compute spend to get dollars',
+    };
+  }
+
+  const step = (u: number): number => (compute.unit_step ? Math.ceil(u) : u);
+  const units_before = Math.max(compute.min_units, step(currentUnits));
+  const units_after = Math.max(compute.min_units, step(units_before * cpuFraction));
+  const saving_usd_month = (units_before - units_after) * compute.unit_usd_per_hour * HOURS_PER_MONTH;
+
+  return {
+    basis: compute.basis,
+    rows_kept_fraction: kept,
+    cpu_fraction: cpuFraction,
+    units_before,
+    units_after,
+    saving_usd_month,
+    saving_fraction: units_before > 0 ? (units_before - units_after) / units_before : 0,
+    modeled: true,
+    note:
+      units_after === units_before
+        ? `modeled compute saving: ${units_before} units before and after. Compute is billed in whole units with a floor of ${compute.min_units}, so this much row reduction sheds none.`
+        : `modeled compute saving: ${units_before} units to ${units_after}, at $${compute.unit_usd_per_hour}/unit-hour over ${HOURS_PER_MONTH} hours.`,
+  };
+}
+
 function midpoint(a: number, b: number): number {
   return (a + b) / 2;
 }
@@ -874,12 +1090,31 @@ export interface ProjectActionArgs {
    * where the on-wire encoded size IS the billed size), this replaces the
    * static destination band for action='compact' so the projection reflects
    * the service's real compressibility instead of a destination-wide guess.
-   * Ignored on index-pruned (ES) / dict-udf-view (ClickHouse) destinations,
-   * where the wire ratio diverges from the billed index/stored size; those
-   * keep the static band for the dollar projection. The value already
+   * Ignored on index-pruned (ES) destinations, where the wire ratio diverges
+   * from the billed index size; those keep the static band for the dollar
+   * projection. Ignored on ClickHouse too, where compact is a no-op. The value already
    * reflects realized small-event overhead, so it is NOT re-degraded.
    */
   compact_ratio_override?: number;
+  /**
+   * Compute-billed destinations only (ClickHouse). The service's CURRENT
+   * compute unit count. Supply it, or `monthly_compute_spend_usd`, to get a
+   * dollar compute saving instead of a fraction.
+   */
+  current_compute_units?: number;
+  /**
+   * Compute-billed destinations only. The service's current monthly compute
+   * spend in dollars. Converted to units at the model's unit price when
+   * `current_compute_units` is absent.
+   */
+  monthly_compute_spend_usd?: number;
+  /**
+   * Rows still inserted after the action, as a fraction of the cluster's
+   * current rows. Supply it when `bytes_in` is one slice of a larger estate.
+   * When absent, the compute term ASSUMES `bytes_in` is everything the cluster
+   * takes today and reads rows kept off the byte reduction.
+   */
+  rows_kept_fraction?: number;
 }
 
 /**
@@ -1045,8 +1280,10 @@ function projectActionWithRatio(
 
   // Ingest axis: customer override > list rate (effective for tier) > unset.
   // model.ingest_per_gb is always a known number in COST_MODEL_BY_DESTINATION
-  // (clickhouse self-hosted is genuinely $0, not unknown). 'unset' is
-  // reserved for future destinations that come without a list rate.
+  // (ClickHouse is genuinely $0 at ingest, not unknown, and that zero is not
+  // the whole bill: the compute term below carries what a ClickHouse cluster
+  // actually costs). 'unset' is reserved for future destinations that come
+  // without a list rate.
   const ingestOverride = args.customer_rate?.ingest_per_gb_override;
   let ingest_dollars: number | null;
   let ingestSource: 'list' | 'customer_supplied' | 'unset';
@@ -1149,6 +1386,34 @@ function projectActionWithRatio(
     ? null
     : buildDisclosedDollarValue(total_dollars, totalSource, siemLabel, null);
 
+  // Compute term. Only ClickHouse carries one. The byte axis above already
+  // holds the storage saving, which on this destination is the small half; the
+  // compute saving is the other half and the one worth naming.
+  //
+  // Rows kept is read off the byte reduction unless the caller states it. That
+  // ASSUMES bytes_in is everything the cluster takes today, which is right when
+  // the caller is pricing a whole estate and wrong when it is pricing one
+  // pattern out of many; `rows_kept_fraction` is there for the second case.
+  let compute_saving: ComputeSavingProjection | undefined;
+  if (
+    model.compute &&
+    (args.action === 'offload' || args.action === 'drop' || args.action === 'sample')
+  ) {
+    const rowsKept =
+      args.rows_kept_fraction ??
+      (args.bytes_in > 0 ? bytes_out / args.bytes_in : 1);
+    compute_saving = projectComputeSaving(model.compute, rowsKept, {
+      current_units: args.current_compute_units,
+      monthly_spend_usd: args.monthly_compute_spend_usd,
+    });
+    notes.push(compute_saving.note);
+  }
+  if (model.compute) {
+    notes.push(
+      `${siemLabel ?? args.destination} dollars are modeled: the bill is compute, priced from a measured rows-to-CPU curve and an ASSUMED unit floor, not from the destination's own meter.`,
+    );
+  }
+
   return {
     bytes_in: args.bytes_in,
     bytes_out,
@@ -1163,6 +1428,8 @@ function projectActionWithRatio(
     confidence,
     percent_reduction: pct,
     rate_source: { ingest: ingestSource, storage: storageSource },
+    ...(compute_saving ? { compute_saving } : {}),
+    ...(model.compute ? { modeled: true as const } : {}),
     notes: notes.length ? notes : undefined,
   };
 }

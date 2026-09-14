@@ -88,8 +88,9 @@ function readAnalyzerCostFromEnvVar(): number | undefined {
 
 /**
  * Look up destination list-price ingest rate. Returns `null` when the
- * destination is unknown or carries no list (e.g. ClickHouse self-hosted
- * which has $0 ingest by design).
+ * destination is unknown or carries no list. ClickHouse returns 0, which is a
+ * true zero and not the whole bill: that destination bills compute, and the
+ * disclosure below says so.
  *
  * Note: $0 is treated as a valid list rate when the destination model
  * declares it explicitly (Datadog storage, ClickHouse ingest). Callers
@@ -105,7 +106,7 @@ function readDestinationListRate(destination: string | undefined | null): {
   const model = COST_MODEL_BY_DESTINATION[key];
   if (!model) return { rate: null, siem: null };
   if (!Number.isFinite(model.ingest_per_gb)) return { rate: null, siem: key };
-  // ClickHouse self-hosted: ingest_per_gb === 0 is a true zero, not "unknown".
+  // ClickHouse: ingest_per_gb === 0 is a true zero, not "unknown".
   // We still treat 0 as a valid list rate so callers can render "$0/GB ingest"
   // honestly rather than collapsing to unset.
   return { rate: model.ingest_per_gb, siem: key };
@@ -202,6 +203,13 @@ export function resolveRate(
   const { rate: listRate, siem } = readDestinationListRate(destination);
   if (listRate != null) {
     const siemLabel = siem ? SIEM_DISPLAY_NAMES[siem] ?? siem : (destination ?? 'SIEM');
+    // A destination whose bill is compute (ClickHouse) has a true $0 ingest
+    // rate, and quoting that alone reads as if the platform were free. Say
+    // where the money is, and point at the modeled figure that carries it.
+    const computeNote =
+      siem && COST_MODEL_BY_DESTINATION[siem]?.compute
+        ? ' Compute billed separately, see modeled compute saving.'
+        : '';
     return {
       rate_per_gb: listRate,
       source: 'list_price',
@@ -210,7 +218,7 @@ export function resolveRate(
       // disclosure both states that AND tells the reader how to supply their
       // real rate — the override the agent should relay when a user asks why
       // the dollars look off.
-      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
+      disclosure: `(at ${siemLabel} list price $${listRate.toFixed(2)}/GB — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.${computeNote})`,
       origin: 'destination_list',
     };
   }

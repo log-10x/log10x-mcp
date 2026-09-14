@@ -484,20 +484,34 @@ export async function executeMeasureCompaction(
     );
   }
 
+  // What this tool measures is a WIRE-BYTE ratio: original text against the
+  // bytes the forwarder would ship. On destinations that bill on bytes accepted
+  // or bytes indexed, that ratio is close to the billed saving. On ClickHouse
+  // it is not: the table's own codecs and its text index already take most of
+  // the repetition, so the measured saving on the TABLE came out at about 7%,
+  // and the ClickHouse bill is compute anyway. The measurement stays, because
+  // the wire ratio is a real fact about the stream; the claim it licenses does
+  // not travel to this destination.
+  const wireOnlyCaveat =
+    sel.id === 'clickhouse'
+      ? ' This is a wire-byte ratio, not a ClickHouse table saving: measured on a ClickStack table, compaction was worth about 7% of table bytes. On ClickHouse the lever is offload and the bill is compute.'
+      : '';
   const compactionHeadline =
     `Aggregate compaction: ${aggregateRatio}x on ${patterns.length} pattern(s) ` +
     `(${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
     `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x` +
     (aggregateRatio !== weightedAvgRatio
       ? ` — diverges when small-volume patterns have outlier ratios.`
-      : `.`);
+      : `.`) +
+    wireOnlyCaveat;
   const compactionHumanSummary =
     `${patterns.length} pattern(s) measured for service "${args.service}" via ${sel.displayName} ` +
     `(${rawEvents.length} events sampled over ${timeRange}). ` +
     `Aggregate compaction ratio: ${aggregateRatio}x (${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
     `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x. ` +
     `Use aggregate_compaction_ratio_x for total savings projections; weighted_avg_compaction_ratio_x for per-pattern framing. ` +
-    (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence — increase sample_size for accuracy.` : `All patterns have medium or high confidence.`);
+    (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence — increase sample_size for accuracy.` : `All patterns have medium or high confidence.`) +
+    wireOnlyCaveat;
   return buildChassisEnvelope({
     tool: 'log10x_measure_compaction',
     view: 'summary',

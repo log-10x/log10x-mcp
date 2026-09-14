@@ -63,7 +63,7 @@ export const explainModeSchema = {
     .enum(EXPLAIN_MODES)
     .describe(
       'Which enforcement mode to explain. Keep-everything levers come first, then the lossy opt-ins. ' +
-      '`compact` = keeps everything: engine minifies events ~50-80% losslessly; all events still reach the stack. ' +
+      '`compact` = keeps everything: engine minifies events losslessly; all events still reach the stack. ' +
       '`offload` = keeps everything: engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
       '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       '`sample` = lossy opt-in: engine passes 1-in-N events through to the stack; the rest are discarded. ' +
@@ -97,9 +97,10 @@ export const explainModeSchema = {
 // Derived from the cost/action model (lib/cost.ts), the single source of truth,
 // so this tool cannot drift into a false promise estimate_savings then refuses:
 //   compact  — real only where compact_mode !== 'no-op' (splunk / self-hosted
-//              elasticsearch / clickhouse); a no-op on azure-monitor, cloudwatch,
-//              datadog, gcp-logging, sumo, coralogix. Elastic Cloud Serverless
-//              DOES support it (index-pruned), same as self-hosted.
+//              elasticsearch); a no-op on azure-monitor, cloudwatch, datadog,
+//              gcp-logging, sumo, coralogix, clickhouse and Elastic Cloud
+//              Serverless. On ClickHouse the lever is offload and the bill is
+//              compute.
 //   tier_down — applies only where the destination's default actions include it
 //              (datadog / cloudwatch / azure-monitor / gcp-logging / sumo /
 //              coralogix). Mirrors cost-options.ts.
@@ -191,17 +192,18 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   },
   compact: {
     what_it_does:
-      'All events reach the stack, each ~50-80% smaller. ' +
-      'Engine encodes events into the 10x compact wire format. ' +
-      'All events arrive in the stack; fields stay searchable.',
+      'All events reach the stack, each smaller. ' +
+      'Engine encodes events into the 10x compact wire format, losslessly. ' +
+      'All events arrive in the stack; fields stay searchable. ' +
+      'Run log10x_measure_compaction to see the ratio on the real stream.',
     what_you_need:
       'The 10x Receiver sidecar must be installed in-path. ' +
-      'Compatible stack (Splunk, self-hosted Elasticsearch/OpenSearch, ClickHouse). ' +
+      'Compatible stack (Splunk, self-hosted Elasticsearch/OpenSearch). ' +
       'GitOps repo configured for the action-plan PR.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'compact' }),
-    what_survives: 'All events reach the stack, each ~50-80% smaller. Fully searchable.',
+    what_survives: 'All events reach the stack, each smaller. Fully searchable.',
   },
   tier_down: {
     what_it_does:

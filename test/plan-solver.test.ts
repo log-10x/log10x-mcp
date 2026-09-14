@@ -15,7 +15,12 @@ function estate(): SolverPattern[] {
 
 test('lever derivation: compact destinations, tier_down destinations, retriever gate', () => {
   assert.equal(keepEverythingLever('splunk', true), 'compact');
-  assert.equal(keepEverythingLever('clickhouse', true), 'compact');
+  // ClickHouse has no in-SIEM keep-everything lever modeled: compact is a
+  // no-op on its billed measure and the cold-table tier_down recipe does not
+  // exist yet, so with a retriever the lever is offload and without one there
+  // is none.
+  assert.equal(keepEverythingLever('clickhouse', true), 'offload');
+  assert.equal(keepEverythingLever('clickhouse', false), null);
   assert.equal(keepEverythingLever('cloudwatch', true), 'tier_down');
   assert.equal(keepEverythingLever('datadog', true), 'tier_down');
   // sumo has no in-SIEM lever; with the retriever it offloads, without it there is none.

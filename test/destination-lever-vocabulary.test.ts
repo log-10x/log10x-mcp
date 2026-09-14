@@ -203,10 +203,10 @@ for (const siem of ALL_SIEMS) {
  * the same green tick.
  */
 test('the vocabulary matches where the lever IS allowed', () => {
-  const compactHome = renderPocReport(renderInput('clickhouse')).markdown;
+  const compactHome = renderPocReport(renderInput('splunk')).markdown;
   assert.ok(
     LEVER_VOCABULARY.compact.test(compactHome),
-    'clickhouse allows compact, so the report should name it; the regex or the renderer is wrong',
+    'splunk allows compact, so the report should name it; the regex or the renderer is wrong',
   );
 
   const tierHome = renderPocReport(renderInput('cloudwatch')).markdown;
