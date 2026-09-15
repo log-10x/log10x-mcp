@@ -46,8 +46,11 @@ import {
 } from '../lib/offload-delivery.js';
 import {
   storeReadAccessRemedy,
+  storeUri,
+  listStoreObjects,
   type ObjectStoreKind,
   type ObjectStoreTarget,
+  type StoreObjectMeta,
 } from '../lib/object-store.js';
 import { verifyConfigGeneration } from '../lib/config-generation.js';
 import { findNewestConfigMapTarget } from './commitment-report.js';
@@ -246,6 +249,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
   await addInfrastructureChecks(globalChecks);
   await addEngineCheck(globalChecks);
   await addSiemDiscoveryCheck(globalChecks);
+  await addClickhouseOffloadReadinessCheck(globalChecks);
   addNetworkEgressInventory(globalChecks, envs);
 
   // 3. Per-environment checks. byNickname includes aliases from
@@ -1598,6 +1602,200 @@ async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void>
       name: 'siem_discovery',
       status: 'warn',
       message: `SIEM discovery failed: ${(e as Error).message}`,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ClickHouse offload readiness
+// ---------------------------------------------------------------------------
+
+/** What the ClickHouse offload readiness check reads. Both probes are read-only. */
+export interface ClickhouseReadinessDeps {
+  /** Table and view names in the database. Throws when ClickHouse is unreachable. */
+  listTables: () => Promise<string[]>;
+  /** Objects under the offload prefix. Throws when the bucket cannot be read. */
+  listObjects: () => Promise<StoreObjectMeta[]>;
+  /** Database the ClickStack tables live in. */
+  database: string;
+  /** Where the offloaded objects land. Undefined when no bucket is configured. */
+  store?: ObjectStoreTarget;
+  hotTable?: string;
+  mergeTable?: string;
+  coldTable?: string;
+  coldView?: string;
+  countsTable?: string;
+  countsMv?: string;
+}
+
+/**
+ * Is this install ready to read hot and cold as one table?
+ *
+ * Reads only. It lists the database's tables and lists the offload bucket, and
+ * it reports what is missing rather than creating anything. A missing Merge
+ * table is not a failure: it means the recipe from `renderClickhouseOffloadSection`
+ * has not been applied yet, which is exactly what an operator runs doctor to
+ * find out. Neither probe throws out of this function, so a doctor run against
+ * an unreachable ClickHouse still produces a report.
+ */
+export async function clickhouseOffloadReadiness(
+  deps: ClickhouseReadinessDeps,
+): Promise<DoctorCheck> {
+  const hot = deps.hotTable ?? 'otel_logs';
+  const merge = deps.mergeTable ?? `${hot}_all`;
+  const coldTable = deps.coldTable ?? `${hot}_cold`;
+  const coldView = deps.coldView ?? `${hot}_coldv`;
+  const counts = deps.countsTable ?? 'counts_by_type';
+  const countsMv = deps.countsMv ?? `${counts}_hot_mv`;
+
+  let tables: string[] | null = null;
+  let tableError: string | undefined;
+  try {
+    tables = await deps.listTables();
+  } catch (e) {
+    tableError = (e as Error).message.slice(0, 200);
+  }
+
+  let objectCount: number | null = null;
+  let storeError: string | undefined;
+  if (deps.store) {
+    try {
+      objectCount = (await deps.listObjects()).length;
+    } catch (e) {
+      storeError = (e as Error).message.slice(0, 200);
+    }
+  }
+
+  const present = new Set(tables ?? []);
+  // All five objects the recipe creates, plus the hot table it reads. The
+  // counts materialized view is listed separately from its target table
+  // because the two fail apart: a table created by hand without the view
+  // carries hot counts for nothing that arrived after it.
+  const wanted: Array<{ name: string; what: string }> = [
+    { name: hot, what: 'the hot table ClickStack ships' },
+    { name: coldTable, what: 'the S3 table over the offloaded objects' },
+    { name: coldView, what: 'the view that renames the offloaded columns' },
+    { name: merge, what: 'the Merge table that reads hot and cold as one' },
+    { name: counts, what: 'the counts-per-type table' },
+    { name: countsMv, what: 'the materialized view feeding it from the hot inserts' },
+  ];
+  const lines: string[] = [];
+
+  if (tableError) {
+    lines.push(`  - ClickHouse tables: NOT READ (${tableError})`);
+  } else {
+    for (const w of wanted) {
+      lines.push(
+        `  - \`${deps.database}.${w.name}\`: ${present.has(w.name) ? 'present' : 'MISSING'} (${w.what})`,
+      );
+    }
+  }
+
+  if (!deps.store) {
+    lines.push(
+      '  - offload bucket: not configured (set LOG10X_OFFLOAD_BUCKET, or name it in the env-config offload destinations)',
+    );
+  } else if (storeError) {
+    lines.push(`  - \`${storeUri(deps.store)}\`: NOT READ (${storeError})`);
+  } else {
+    lines.push(
+      `  - \`${storeUri(deps.store)}\`: reachable, ${objectCount} object${objectCount === 1 ? '' : 's'}`,
+    );
+  }
+
+  const missing = tableError ? [] : wanted.filter((w) => !present.has(w.name)).map((w) => w.name);
+  const unread = Boolean(tableError) || Boolean(storeError) || !deps.store;
+  const status: CheckStatus = unread || missing.length > 0 ? 'warn' : 'pass';
+
+  const headline = tableError
+    ? 'ClickHouse offload readiness: could not read the database.'
+    : missing.length > 0
+      ? `ClickHouse offload readiness: ${missing.length} of ${wanted.length} tables missing (${missing.join(', ')}).`
+      : 'ClickHouse offload readiness: every table the recipe needs is present.';
+
+  const fix =
+    missing.length > 0
+      ? 'Apply the ClickHouse offload recipe (log10x_advise_retriever with destination "clickhouse"): it emits the collector config, the cold table and its view, the Merge table and the counts table. The counts table has to exist BEFORE data flows or its materialized view sees none of it.'
+      : storeError
+        ? `Could not list the offload bucket. ${storeReadAccessRemedy(deps.store as ObjectStoreTarget)}`
+        : tableError
+          ? 'Set CLICKHOUSE_URL plus CLICKHOUSE_USER and CLICKHOUSE_PASSWORD (or CLICKHOUSE_API_KEY) for an identity that can read system.tables, and confirm the database name.'
+          : undefined;
+
+  return {
+    name: 'clickhouse_offload_readiness',
+    status,
+    message: `${headline}\n${lines.join('\n')}`,
+    ...(fix ? { fix } : {}),
+  };
+}
+
+/**
+ * Wire the readiness check to the live environment. Skipped entirely when
+ * CLICKHOUSE_URL is unset, so estates on another destination see nothing.
+ */
+async function addClickhouseOffloadReadinessCheck(globalChecks: DoctorCheck[]): Promise<void> {
+  const url = process.env.CLICKHOUSE_URL;
+  if (!url) return;
+  const database = process.env.CLICKHOUSE_DATABASE || 'default';
+  // Guarded the same way the connector guards it: the name is interpolated into
+  // SQL, so a name that is not an identifier never reaches the server.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(database)) {
+    globalChecks.push({
+      name: 'clickhouse_offload_readiness',
+      status: 'warn',
+      message: `ClickHouse offload readiness: skipped, CLICKHOUSE_DATABASE is not a valid identifier (${database.slice(0, 40)}).`,
+    });
+    return;
+  }
+  const bucket = process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET;
+  const store: ObjectStoreTarget | undefined = bucket
+    ? process.env.LOG10X_OFFLOAD_TYPE === 'azure_blob'
+      ? {
+          kind: 'azure_blob',
+          container: bucket,
+          storageAccount: process.env.LOG10X_OFFLOAD_STORAGE_ACCOUNT,
+        }
+      : { kind: 's3', container: bucket }
+    : undefined;
+
+  const listTables = async (): Promise<string[]> => {
+    const { createClient } = await import('@clickhouse/client');
+    const apiKey = process.env.CLICKHOUSE_API_KEY;
+    const client = createClient({
+      url,
+      username: apiKey ? 'default' : process.env.CLICKHOUSE_USER || process.env.CLICKHOUSE_USERNAME,
+      password: apiKey || process.env.CLICKHOUSE_PASSWORD,
+      database,
+    });
+    try {
+      const resp = await client.query({
+        query: `SELECT name FROM system.tables WHERE database = '${database}'`,
+        format: 'JSONEachRow',
+      });
+      const rows = (await resp.json()) as Array<{ name: string }>;
+      return rows.map((r) => r.name);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  };
+
+  try {
+    globalChecks.push(
+      await clickhouseOffloadReadiness({
+        listTables,
+        listObjects: () => listStoreObjects(store as ObjectStoreTarget, ''),
+        database,
+        store,
+      }),
+    );
+  } catch (e) {
+    // The readiness function swallows both probes, so reaching here means the
+    // wiring itself failed. Doctor never blocks on one check.
+    globalChecks.push({
+      name: 'clickhouse_offload_readiness',
+      status: 'warn',
+      message: `ClickHouse offload readiness: check did not run (${(e as Error).message.slice(0, 200)}).`,
     });
   }
 }
