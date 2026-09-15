@@ -135,7 +135,7 @@ test('HyperDX gets the Merge table as a SECOND source, hot stays default', () =>
 // The honesty block
 // ---------------------------------------------------------------------------
 
-test('the honesty block is present in every render and states all six things', () => {
+test('the honesty block is present in every render and states what it must', () => {
   const renders = [
     renderClickhouseOffloadSection(CH),
     ...VARIANTS.map((v) => renderClickhouseOffloadSection(CH, v)),
@@ -151,12 +151,15 @@ test('the honesty block is present in every render and states all six things', (
     assert.match(text, /saving on ClickHouse is COMPUTE/);
     assert.match(text, /searchable in place, through the Merge table, and reading them is SLOWER/);
     assert.match(text, /query filtered only on time opens EVERY cold object/);
-    assert.match(text, /12 S3 GET in 52 ms/);
-    assert.match(text, /6 S3 GET\s+in 39 ms/);
+    assert.match(text, /14 S3 GET in 118 ms/);
+    assert.match(text, /6 S3 GET\s+in 77 ms/);
     assert.match(text, /Count-all dashboards read the counts-per-type table/);
     assert.match(text, /Alerts are NOT claimed unchanged/);
-    assert.match(text, /NOT PRODUCTION SAFE ON CLICKSTACK TODAY/);
-    assert.match(text, /19,436 of 37,519/);
+    assert.match(text, /THIS RECIPE REQUIRES ENGINE 1\.1\.79 OR NEWER/);
+    assert.match(text, /19,436 of 37,519 records on 1\.1\.74/);
+    assert.match(text, /37,536 of 37,536 returned records carried\s+`routeState`/);
+    assert.match(text, /gap of 0/);
+    assert.match(text, /2,495 distinct type hashes/);
     assert.match(text, /no `timeUnixNano`/);
     assert.match(text, /corrupted spellings/);
   }

@@ -1354,14 +1354,16 @@ The documented POST does work, but only in a shape the docs never show:
 
 // ---------------------------------------------------------------------------
 // ClickHouse / ClickStack offload  (copied from the harness that ran, not from
-// documentation: benchmarks/clickstack-e2e, results/clickstack-e2e-2026-09-14.md)
+// documentation: benchmarks/clickstack-e2e, results/clickstack-e2e-2026-09-15.md)
 // ---------------------------------------------------------------------------
 
 /**
  * Which collector writes the offloaded rows. The OpenTelemetry Collector
  * variant is a copy of the config that ran end to end on ClickStack 2.38.0 with
- * engine 1.1.74. The Vector variant is written from Vector's documented sink
- * options and has never been run.
+ * engine 1.1.79, the released image
+ * `ghcr.io/log-10x/edge-10x@sha256:14357d8d570cb36ba6ca254802a1b8eedb11d8acf6916a936893f8e3babb41f4`.
+ * The Vector variant is written from Vector's documented sink options and has
+ * never been run.
  */
 export type ClickhouseCollector = 'otel-collector' | 'vector';
 
@@ -1438,9 +1440,9 @@ function chNames(p: ClickhouseOffloadParams) {
 
 /**
  * The honesty block. It states what the saving is, what the cold path costs,
- * and the open engine defects that stop this being a shipped capability. Every
- * number quoted is from the single run in
- * benchmarks/clickstack-e2e/results/clickstack-e2e-2026-09-14.md, measured on
+ * and the engine version this recipe requires. Every number quoted is from the
+ * single run in
+ * benchmarks/clickstack-e2e/results/clickstack-e2e-2026-09-15.md, measured on
  * 50,000 lines of the released capture with a dropped cache before each query.
  *
  * Exported so a caller can assert it is present rather than re-derive it.
@@ -1460,27 +1462,36 @@ export function clickhouseOffloadHonesty(): string[] {
       'is SLOWER than reading the hot table. A cold read pays object-store requests; a hot ' +
       'read pays none.',
     '- A query filtered only on time opens EVERY cold object in the bucket. Measured on the ' +
-      'harness sample, which held 12 objects: time only read 37,519 rows through 12 S3 GET in ' +
-      '52 ms, while the same query with a service predicate read 15,548 rows through 6 S3 GET ' +
-      'in 39 ms, and adding a day predicate held at 6 GET and 27 ms. The hot table alone ' +
+      'harness sample, which held 14 objects: time only read 37,536 rows through 14 S3 GET in ' +
+      '118 ms, while the same query with a service predicate read 25,793 rows through 6 S3 GET ' +
+      'in 77 ms, and adding a day predicate held at 6 GET and 43 ms. The hot table alone ' +
       'answered its count in 8 ms with zero requests. That sample carried one day of writes, ' +
       'so the day predicate had nothing further to prune, and the object path carries the ' +
       'WRITE time rather than the record time, so pruning across many days is unmeasured.',
     '- Count-all dashboards read the counts-per-type table, not the Merge table: count all by ' +
-      'service over the counts table read 2,551 rows with zero S3 requests in 10 ms. The ' +
+      'service over the counts table read 2,539 rows with zero S3 requests in 6 ms. The ' +
       'counts table is fed twice, by a materialized view on the hot inserts and by an ' +
       'INSERT ... SELECT over the cold objects, because offloaded rows never pass through an ' +
       'insert.',
     '- Alerts are NOT claimed unchanged. No alert was defined and none fired in the run this ' +
       'recipe is copied from.',
-    '- NOT PRODUCTION SAFE ON CLICKSTACK TODAY. Three engine defects on the OpenTelemetry ' +
-      'return path are open. A record whose message is itself JSON with a top-level `body` ' +
-      'key comes back carrying no attributes at all, so it has no `routeState`, cannot be ' +
-      'routed, and takes the default route into the hot table: 19,436 of 37,519 records in ' +
-      'the run. Every record that does carry the marks comes back with no `timeUnixNano`. ' +
-      'The `tenx_resource_keys` field name arrives in several corrupted spellings. Until ' +
-      'those are fixed this recipe moves only the share of the stream the defect leaves ' +
-      'marked, and it must not be sold as a shipped ClickStack capability.',
+    '- THIS RECIPE REQUIRES ENGINE 1.1.79 OR NEWER. The three OpenTelemetry return-path ' +
+      'defects that blocked it are fixed and released in 1.1.79 (pipeline-extensions ' +
+      '8ebaf793, engine b9074b9a, engine PR #150). On an older image a record whose message ' +
+      'is itself JSON with a top-level `body` key came back carrying no attributes at all, so ' +
+      'it had no `routeState`, could not be routed, and took the default route into the hot ' +
+      'table: 19,436 of 37,519 records on 1.1.74. Marked records came back with no ' +
+      '`timeUnixNano`, and the `tenx_resource_keys` field name arrived in several corrupted ' +
+      'spellings.',
+    '- Verified on the released image. The harness reran on ' +
+      '`ghcr.io/log-10x/edge-10x:1.1.79` and 37,536 of 37,536 returned records carried ' +
+      '`routeState` and a `timeUnixNano`, against 18,083 marked of 37,519 on 1.1.74. Hot plus ' +
+      'offloaded reconciled to 37,536 with a gap of 0, on 13,010 hot rows and 24,526 ' +
+      'offloaded, and 2,495 distinct type hashes came back on the wire against 2,495 stored.',
+    '- The route arrives more often than the type does. In that rerun all 37,536 records ' +
+      'carried `routeState`, 37,486 carried the type hash and 37,469 carried the type text, ' +
+      'so the router moves every record while the counts-per-type table can only count what ' +
+      'carries a type.',
   ];
 }
 

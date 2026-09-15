@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://doc.log10x.com/apps/mcp/",
-  "version": "1.30.14",
+  "version": "1.30.15",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "log10x-mcp",
-      "version": "1.30.14",
+      "version": "1.30.15",
       "transport": {
         "type": "stdio"
       },
