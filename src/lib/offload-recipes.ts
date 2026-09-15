@@ -1452,7 +1452,10 @@ export function clickhouseOffloadHonesty(): string[] {
     '- The saving on ClickHouse is COMPUTE, through rows that never enter. Insert and merge ' +
       'CPU follows rows inserted, so a row held back at the edge is a row the cluster never ' +
       'tokenises, never inserts and never merges. Table bytes barely move, and table bytes ' +
-      'are not where a ClickHouse bill lives.',
+      'are not where a ClickHouse bill lives. THAT COMES FROM A DIFFERENT MEASUREMENT: the ' +
+      'compute-vs-rows arms in benchmarks/clickhouse-clickstack (benchmarks PR #10), insert ' +
+      'CPU from system.query_log and merge CPU from system.part_log. The run this recipe is ' +
+      'copied from measured no compute, no bill and no autoscaler.',
     '- The offloaded rows stay searchable in place, through the Merge table, and reading them ' +
       'is SLOWER than reading the hot table. A cold read pays object-store requests; a hot ' +
       'read pays none.',
@@ -1489,10 +1492,25 @@ function clickhouseOtelCollector(p: ClickhouseOffloadParams): ClickhouseOffloadR
     variant: 'otel-collector',
     exercised: true,
     language: 'yaml',
-    body: `# COPIED VERBATIM from the harness config that ran end to end
-# (benchmarks/clickstack-e2e/conf/router.yaml). Only the endpoints, the bucket
-# and the region are substituted; every processor, connector and exporter
-# option below is the text that produced the measured run.
+    body: `# COPIED from the harness config that ran end to end
+# (benchmarks/clickstack-e2e/conf/router.yaml). Every processor, connector and
+# exporter OPTION below is the text that produced the measured run. What
+# differs from the file that ran, in full:
+#   - the two OTLP exporter endpoints carry this deployment's hosts. The run
+#     used \`cse-engine:4317\` and \`cse-clickstack:4317\`.
+#   - the S3 bucket and the region carry this deployment's values. The run used
+#     \`coldlogs\` and \`us-east-1\`.
+#   - the run wrote to MinIO, so its \`endpoint: http://cse-minio:9000\`,
+#     \`s3_force_path_style\` and \`disable_ssl\` are commented out below and the
+#     host is written as \`minio:9000\`. On AWS S3 all three stay out.
+#   - the run's input was a \`filelog\` receiver over one capture file. The two
+#     receivers under \`logs/in\` here are PLACEHOLDERS for the estate's own and
+#     must be replaced.
+#   - the run's measurement tap (the \`file/wire\` exporter and the \`logs/wire\`
+#     pipeline) is dropped. It counted what the receiver returned and is not
+#     part of the design.
+#   - the comments are expanded here. The ones the harness file carries are
+#     kept word for word.
 #
 # The routing hop. ClickStack's own collector build carries the routing
 # connector but no S3 exporter and no encoding extension, so the route and the
@@ -1512,8 +1530,16 @@ receivers:
         endpoint: 0.0.0.0:24225
         max_recv_msg_size_mib: 32
 
-  # The estate's existing log receivers stay where they are and feed
-  # \`otlp/engine\` below, so the receiver sees the stream before ClickStack does.
+  # PLACEHOLDERS, REPLACE BOTH. These two stand for whatever reads the logs in
+  # the estate today. Pointing them at this collector rather than at ClickStack
+  # is what puts the 10x receiver in front of the stream. The harness ran a
+  # \`filelog\` receiver over one capture file in their place.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+  filelog:
+    include: [ /var/log/containers/*.log ]
 
 processors:
   # The capture's envelope carries no timestamp, so records arrive with none and
@@ -1604,9 +1630,8 @@ service:
       level: warn
   pipelines:
     logs/in:
-      # The estate's existing log receivers, unchanged. Whatever reads the logs
-      # today points here instead of at ClickStack, so the receiver sees the
-      # stream first.
+      # The placeholder receivers declared above, to be replaced with the
+      # estate's own. Only the exporter matters on this pipeline.
       receivers: [ otlp, filelog ]
       exporters: [ otlp/engine ]
     logs/back:
@@ -1721,6 +1746,9 @@ function clickhouseDdl(
   const n = chNames(p);
   const key = `'<access-key>', '<secret-key>'`;
   const coldJson = `-- COPIED from the harness (benchmarks/clickstack-e2e/conf/schema_cold.sql).
+-- Substituted: the S3 URL and the key pair (the run read
+-- 'http://cse-minio:9000/coldlogs/**.json' with the MinIO root credentials),
+-- and the database and table names. Everything else is the text that ran.
 --
 -- The S3 engine takes the column names from the JSON the collector wrote:
 -- the jsonlogencoding extension in body_with_inline_attributes mode writes
@@ -1749,7 +1777,11 @@ SELECT toDateTime64(toUInt64OrZero(logAttributes['TimestampSec']), 9) AS Timesta
        day                                                            AS day
 FROM ${n.db}.${n.coldTable};`;
 
-  const coldParquet = `-- ASSUMED, NOT MEASURED. The JSON variant above is the one the harness ran.
+  const coldParquet = `-- ASSUMED, NOT MEASURED. This table reads what the Vector sink writes, and
+-- that sink has never been run. The harness ran the OpenTelemetry Collector
+-- variant of this recipe, which writes JSON and is read by a different cold
+-- table; render the section with that collector to get it.
+--
 -- Parquet carries its own column names, so the cold table names the columns the
 -- Vector remap wrote. \`service\` and \`day\` come from the object path, which is
 -- why use_hive_partitioning is on.
@@ -1786,7 +1818,8 @@ FROM ${n.db}.${n.coldTable};`;
 
   const body = `-- 1) The counts-per-type table and its materialized view. RUN THIS FIRST,
 --    before any data flows, or the view sees none of what is already there.
---    COPIED from the harness (conf/schema_hot.sql).
+--    COPIED from the harness (conf/schema_hot.sql); only the database, the
+--    table and the hash-field names are substituted.
 CREATE TABLE IF NOT EXISTS ${n.db}.${n.countsTable}
 (
   Minute DateTime,
@@ -2067,6 +2100,10 @@ export function renderOffloadSection(
           es: 'elasticsearch',
           opensearch: 'elasticsearch',
           ch: 'clickhouse',
+          // ClickStack is ClickHouse with HyperDX and a collector in front of
+          // it, and it is the estate the recipe was measured on, so a caller
+          // naming the distribution reaches the same recipe.
+          clickstack: 'clickhouse',
           azure: 'azure-monitor',
           'azure-monitor-logs': 'azure-monitor',
           gcp: 'gcp-logging',

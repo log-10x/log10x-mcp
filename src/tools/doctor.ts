@@ -1622,8 +1622,10 @@ export interface ClickhouseReadinessDeps {
   store?: ObjectStoreTarget;
   hotTable?: string;
   mergeTable?: string;
+  coldTable?: string;
   coldView?: string;
   countsTable?: string;
+  countsMv?: string;
 }
 
 /**
@@ -1641,8 +1643,10 @@ export async function clickhouseOffloadReadiness(
 ): Promise<DoctorCheck> {
   const hot = deps.hotTable ?? 'otel_logs';
   const merge = deps.mergeTable ?? `${hot}_all`;
+  const coldTable = deps.coldTable ?? `${hot}_cold`;
   const coldView = deps.coldView ?? `${hot}_coldv`;
   const counts = deps.countsTable ?? 'counts_by_type';
+  const countsMv = deps.countsMv ?? `${counts}_hot_mv`;
 
   let tables: string[] | null = null;
   let tableError: string | undefined;
@@ -1663,11 +1667,17 @@ export async function clickhouseOffloadReadiness(
   }
 
   const present = new Set(tables ?? []);
+  // All five objects the recipe creates, plus the hot table it reads. The
+  // counts materialized view is listed separately from its target table
+  // because the two fail apart: a table created by hand without the view
+  // carries hot counts for nothing that arrived after it.
   const wanted: Array<{ name: string; what: string }> = [
     { name: hot, what: 'the hot table ClickStack ships' },
-    { name: merge, what: 'the Merge table that reads hot and cold as one' },
+    { name: coldTable, what: 'the S3 table over the offloaded objects' },
     { name: coldView, what: 'the view that renames the offloaded columns' },
+    { name: merge, what: 'the Merge table that reads hot and cold as one' },
     { name: counts, what: 'the counts-per-type table' },
+    { name: countsMv, what: 'the materialized view feeding it from the hot inserts' },
   ];
   const lines: string[] = [];
 

@@ -66,7 +66,7 @@ test('only the OpenTelemetry Collector variant claims to have been run', () => {
   assert.ok(vector.body.includes('ASSUMED'), 'the Vector body must mark what is assumed');
 });
 
-test('the collector routes on the route name as a STRING, in each tool's own form', () => {
+test('the collector routes on the route name as a STRING, in the syntax of each tool', () => {
   assert.match(
     clickhouseOffloadRecipe(CH, 'otel-collector').collector.body,
     /condition: attributes\["routeState"\] == "offload"/,
@@ -173,7 +173,7 @@ test('the ClickHouse section says offload, never archive, and carries no em dash
 // ---------------------------------------------------------------------------
 
 test('the dispatch routes a clickhouse offload to the new recipe, alias included', () => {
-  for (const dest of ['clickhouse', 'ClickHouse', ' ch ', 'CH']) {
+  for (const dest of ['clickhouse', 'ClickHouse', ' ch ', 'CH', 'clickstack', 'ClickStack']) {
     const text = renderOffloadSection(CH, 'vector', dest);
     assert.ok(text.includes('### 2. The ClickHouse side'), `${dest}: not the ClickHouse recipe`);
     assert.ok(text.includes('ENGINE = Merge('), `${dest}: no Merge table`);
@@ -257,7 +257,15 @@ test('every pre-existing recipe is byte-identical to the parent commit', () => {
 // doctor
 // ---------------------------------------------------------------------------
 
-const TABLES_ALL = ['otel_logs', 'otel_logs_cold', 'otel_logs_coldv', 'otel_logs_all', 'counts_by_type'];
+// The five objects the recipe creates, plus the hot table ClickStack ships.
+const TABLES_ALL = [
+  'otel_logs',
+  'otel_logs_cold',
+  'otel_logs_coldv',
+  'otel_logs_all',
+  'counts_by_type',
+  'counts_by_type_hot_mv',
+];
 
 test('doctor reports missing ClickHouse tables without throwing', async () => {
   const check = await clickhouseOffloadReadiness({
@@ -268,9 +276,11 @@ test('doctor reports missing ClickHouse tables without throwing', async () => {
   });
   assert.equal(check.name, 'clickhouse_offload_readiness');
   assert.equal(check.status, 'warn');
-  assert.match(check.message, /otel_logs_all/);
-  assert.match(check.message, /counts_by_type/);
-  assert.match(check.message, /MISSING/);
+  // Every object the recipe creates is reported, not just the Merge table.
+  assert.match(check.message, /5 of 6 tables missing/);
+  for (const name of ['otel_logs_cold', 'otel_logs_coldv', 'otel_logs_all', 'counts_by_type', 'counts_by_type_hot_mv']) {
+    assert.match(check.message, new RegExp(`\`default\\.${name}\`: MISSING`), `${name} not reported`);
+  }
   assert.match(check.message, /`default\.otel_logs`: present/);
   assert.ok(check.fix && check.fix.length > 0);
 });
@@ -319,4 +329,67 @@ test('doctor says so when no offload bucket is configured, and still reads the t
   assert.equal(check.status, 'warn');
   assert.match(check.message, /offload bucket: not configured/);
   assert.match(check.message, /`default\.otel_logs_all`: present/);
+});
+
+// ---------------------------------------------------------------------------
+// The config has to be loadable, and the header has to be true
+// ---------------------------------------------------------------------------
+
+test('every receiver a pipeline names is declared in the receivers block', () => {
+  // A pipeline naming a receiver the file does not define is a collector that
+  // refuses to start, and the operator sees it as our config being broken.
+  const body = clickhouseOffloadRecipe(CH, 'otel-collector').collector.body;
+  const declared = new Set<string>();
+  const receiversBlock = body.slice(body.indexOf('\nreceivers:'), body.indexOf('\nprocessors:'));
+  for (const line of receiversBlock.split('\n')) {
+    const m = /^ {2}([A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)?):\s*$/.exec(line);
+    if (m) declared.add(m[1]);
+  }
+  assert.ok(declared.has('otlp/back'), 'otlp/back missing');
+  assert.ok(declared.has('otlp'), 'the placeholder otlp receiver is not declared');
+  assert.ok(declared.has('filelog'), 'the placeholder filelog receiver is not declared');
+  for (const m of body.matchAll(/^ {6}receivers: \[ ([^\]]+) \]$/gm)) {
+    for (const name of m[1].split(',').map((s) => s.trim())) {
+      if (name === 'routing/state') continue; // a connector, declared as one
+      assert.ok(declared.has(name), `pipeline names an undeclared receiver: ${name}`);
+    }
+  }
+  // And the placeholders say what they are, in the config itself.
+  assert.ok(body.includes('PLACEHOLDERS, REPLACE BOTH'));
+});
+
+test('the copy header lists every substitution, not just the endpoints', () => {
+  const body = clickhouseOffloadRecipe(CH, 'otel-collector').collector.body;
+  assert.ok(!body.includes('COPIED VERBATIM'), 'the body is not verbatim, so it must not claim to be');
+  for (const substitution of [
+    'cse-engine:4317',
+    'cse-clickstack:4317',
+    'coldlogs',
+    'http://cse-minio:9000',
+    'minio:9000',
+    'measurement tap',
+  ]) {
+    assert.ok(body.includes(substitution), `substitution not disclosed: ${substitution}`);
+  }
+  // The DDL discloses its own two: the S3 URL and the credentials.
+  const ddl = clickhouseOffloadRecipe(CH, 'otel-collector').ddl.body;
+  assert.ok(ddl.includes("'http://cse-minio:9000/coldlogs/**.json'"));
+  assert.ok(ddl.includes('MinIO root credentials'));
+  assert.ok(ddl.includes("'<access-key>', '<secret-key>'"));
+});
+
+test('the Parquet DDL comment stands on its own in a Vector-only render', () => {
+  const text = renderClickhouseOffloadSection(CH, 'vector');
+  // "The JSON variant above" referred to a block that a Vector-only render
+  // never emits.
+  assert.ok(!text.includes('The JSON variant above'));
+  assert.match(text, /This table reads what the Vector sink writes, and\n-- that sink has never been run/);
+});
+
+test('the compute claim is attributed to the measurement that made it', () => {
+  // This harness measured no compute, no bill and no autoscaler, so the one
+  // sentence carrying the product claim names where it does come from.
+  const text = renderClickhouseOffloadSection(CH);
+  assert.match(text, /compute-vs-rows arms in benchmarks\/clickhouse-clickstack \(benchmarks PR #10\)/);
+  assert.match(text, /measured no compute, no bill and no autoscaler/);
 });
