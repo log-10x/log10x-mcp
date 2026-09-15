@@ -5,10 +5,9 @@
  * event into an encoded form, and something on the DESTINATION side expands
  * it again at search or query time. That expander is a separate artifact
  * installed on the SIEM, not part of the helm release this advisor emits:
- * the 10x Splunk app, the l1es Elasticsearch/OpenSearch plugin, the 10x
- * ClickHouse view. Without it, compaction is lossless on disk and lossy to
- * the person running the search — which is the one failure the product's
- * headline claim cannot afford.
+ * the 10x Splunk app, or the l1es Elasticsearch/OpenSearch plugin. Without it,
+ * compaction is lossless on disk and lossy to the person running the search,
+ * which is the one failure the product's headline claim cannot afford.
  *
  * So `optimize=true` carries a prerequisite the plan MUST state, and on
  * destinations that have no expander at all it is not a lever, it is damage.
@@ -70,15 +69,15 @@ export function compactionSupport(destination: OutputDestination): CompactionSup
  * The install wizard does not ask where events go: the Receiver is a sidecar
  * that rides the customer's existing forwarder, and that forwarder still owns
  * the destination. So the plan it emits genuinely does not know which expander
- * applies, and saying "install the Splunk app" would be a guess. Name all
- * three and let the customer pick the row that matches their stack.
+ * applies, and saying "install the Splunk app" would be a guess. Name both and
+ * let the customer pick the row that matches their stack.
  */
 export const EXPANDER_PREREQUISITE_GENERAL =
   'Compaction is only lossless end to end when the destination can expand the encoded events again at read time, ' +
   'and that expander is a separate install on the destination, not part of this release: ' +
   'the [10x Splunk app](https://doc.log10x.com/apps/receiver/compact/splunk/), ' +
-  'the [l1es plugin](https://doc.log10x.com/apps/receiver/compact/elasticsearch/) for self-managed Elasticsearch 8.17.0 / OpenSearch 2.19.0, ' +
-  'or the [10x ClickHouse view](https://doc.log10x.com/apps/receiver/compact/clickhouse/). ' +
+  'or the [l1es plugin](https://doc.log10x.com/apps/receiver/compact/elasticsearch/) for self-managed Elasticsearch 8.17.0 / OpenSearch 2.19.0. ' +
   'Install it before you compact anything the destination is searched on, or those searches return compacted lines. ' +
-  'Managed and serverless platforms (Datadog, CloudWatch, Elastic Cloud Serverless) have nowhere to install one — ' +
-  'use tier_down or offload there instead of compaction.';
+  'Managed and serverless platforms (Datadog, CloudWatch, Elastic Cloud Serverless) have nowhere to install one. ' +
+  'ClickHouse has one, and it is still not the lever: compaction measured about 7% of table bytes there, and the ' +
+  'ClickHouse bill is compute. Use tier_down or offload on all of these instead of compaction.';

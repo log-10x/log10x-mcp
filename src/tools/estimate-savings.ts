@@ -56,8 +56,11 @@ import {
   resolveTierDownTier,
   getDestinationCostModel,
   getDefaultActionForDestination,
+  getAllowedActionsForDestination,
   annualizeDollars,
+  projectComputeSaving,
   type Action,
+  type ComputeSavingProjection,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import { resolveRate } from '../lib/rate-resolution.js';
@@ -339,6 +342,20 @@ export const estimateSavingsSchema = {
     .describe(
       "forecast and verify mode: override the destination list-price rate with the customer's contracted $/GB. When supplied, dollar projections use this rate and surface rate_source='customer_supplied'."
     ),
+  current_compute_units: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'forecast mode, compute-billed destinations only (ClickHouse): the service\'s current compute unit count. Turns the modeled compute saving in totals.compute_saving from a fraction into dollars.'
+    ),
+  monthly_compute_spend_usd: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "forecast mode, compute-billed destinations only (ClickHouse): the service's current monthly compute spend in dollars. Converted to units at the destination's unit price; ignored when current_compute_units is supplied."
+    ),
   // ── presentation ──────────────────────────────────────────────────
   enforcement_mode: z
     .enum(['engine', 'manual_report'])
@@ -375,6 +392,13 @@ export interface ForecastRow {
   dollars_saved_low: number;
   dollars_saved_expected: number;
   dollars_saved_high: number;
+  /**
+   * True when this row's dollars rest on a model rather than on the
+   * destination's own meter. Set on every ClickHouse row: there the bill is
+   * compute, priced from a measured rows-to-CPU curve and an ASSUMED unit
+   * floor. A renderer that prints these figures must carry the word "modeled".
+   */
+  modeled?: boolean;
   notes?: string[];  siem_lens?: string;
 }
 
@@ -429,6 +453,24 @@ export interface ForecastResult {
     dollars_expected_monthly: number;
     dollars_high_monthly: number;
     annual_projection_expected: number;
+    /**
+     * True when these totals rest on a model rather than on the destination's
+     * own meter. ClickHouse only, today. Renderers must carry the word
+     * "modeled" wherever they print a dollar from a modeled total.
+     */
+    modeled: boolean;
+    /** Why the totals are modeled, in one line. Present only when modeled. */
+    modeled_note?: string;
+    /**
+     * The modeled compute saving for the WHOLE estate, on a compute-billed
+     * destination. Rows kept is `1 - (bytes removed by offload/drop/sample) /
+     * env bytes`, taken across every modeled pattern at once, because compute
+     * is a property of the insert stream rather than of any one pattern.
+     * Carries units before and after when the caller supplied
+     * `current_compute_units` or `monthly_compute_spend_usd`, and a fraction
+     * plus a note saying what to supply when it did not.
+     */
+    compute_saving?: ComputeSavingProjection;
     /**
      * Disclose the extrapolation method for annual_projection_expected so
      * consumers understand it's a naive monthly × 12, NOT a
@@ -807,6 +849,21 @@ export function computeActionSplit(args: {
 // ─── errors ─────────────────────────────────────────────────────────────
 
 /**
+ * What to reach for when compact turns out to be a no-op here. Read off the
+ * destination's own lever list rather than hardcoded, because the answer is
+ * not the same everywhere: on Datadog and CloudWatch it is tier_down, on
+ * ClickHouse there is no cheaper in-platform tier modeled and offload is the
+ * lever. Naming a lever the destination does not have sends the reader to a
+ * tool call that refuses one step later.
+ */
+export function leversInsteadOfCompact(destination: string): Action[] {
+  const allowed = getAllowedActionsForDestination(destination).filter(
+    (a) => a !== 'compact' && a !== 'pass',
+  );
+  return [...allowed, 'sample', 'drop'] as Action[];
+}
+
+/**
  * Thrown by runEstimateForecast when default_action is a no-op on the
  * destination (e.g., action=compact on datadog where compact_mode=no-op).
  * executeEstimateSavings catches this and returns a structured refusal
@@ -851,6 +908,20 @@ export interface RunForecastArgs {
   observation_window?: string;
   /** Alias for `observation_window`. observation_window wins when both are set. */
   timeRange?: string;
+  /**
+   * Compute-billed destinations only (ClickHouse). The service's CURRENT
+   * compute unit count. Supply it, or `monthly_compute_spend_usd`, to turn the
+   * modeled compute saving in `totals.compute_saving` from a fraction into
+   * dollars. No tool schema exposes this yet; the plumbing lands with the
+   * caller that collects it.
+   */
+  current_compute_units?: number;
+  /**
+   * Compute-billed destinations only. The service's current monthly compute
+   * spend in dollars, converted to units at the model's unit price when
+   * `current_compute_units` is absent.
+   */
+  monthly_compute_spend_usd?: number;
   /**
    * Maximum per_pattern rows to return. Default 50 when service is omitted;
    * unlimited when service is set. Totals computed over full result before slice.
@@ -1289,6 +1360,8 @@ export async function runEstimateForecast(
   const per_pattern: ForecastRow[] = [];
   let totalIn = 0;
   let totalSavedBytes = 0;
+  let rowsRemovedBytes = 0;
+  let rowsRemovedEvents = 0;
   let totalLow = 0;
   let totalExpected = 0;
   let totalHigh = 0;
@@ -1379,10 +1452,25 @@ export async function runEstimateForecast(
       dollars_saved_low: Math.max(0, dollarsLow),
       dollars_saved_expected: Math.max(0, dollarsExpected),
       dollars_saved_high: Math.max(0, dollarsHigh),
+      ...(actionRange.expected.modeled ? { modeled: true } : {}),
       notes: actionRange.expected.notes,
     });
     totalIn += monthlyBytes;
     totalSavedBytes += Math.max(0, savedBytes);
+    // Rows that never reach the cluster. Only these move compute; compact and
+    // tier_down leave every row in place. Accumulated at the ESTATE level
+    // deliberately: a compute saving is a property of the whole insert stream,
+    // and reading one off a single pattern would let an offload row alone
+    // resolve rows-kept to 0 and claim the entire compute bill.
+    //
+    // Counted in EVENTS where the events query returned any, because that is
+    // the basis the CPU curve was measured on. Bytes are the fallback, and the
+    // projection says when it fell back.
+    if (row.action === 'offload' || row.action === 'drop' || row.action === 'sample') {
+      rowsRemovedBytes += Math.max(0, savedBytes);
+      const keptShare = row.action === 'sample' ? 1 / Math.max(1, row.sample_n ?? 10) : 0;
+      rowsRemovedEvents += obsEvents * (1 - keptShare);
+    }
     totalLow += Math.max(0, dollarsLow);
     totalExpected += Math.max(0, dollarsExpected);
     totalHigh += Math.max(0, dollarsHigh);
@@ -1498,6 +1586,14 @@ export async function runEstimateForecast(
   });
   const forecastRetentionMonths = 1; // matches projectActionRange default
   const customerSuppliedRate = forecastRateResolved.rate_per_gb;
+  // On a compute-billed destination the per-GB line is a storage rate, not the
+  // bill. The list-price disclosure already carries this sentence from
+  // rate-resolution; the customer-supplied branch below rebuilds the string
+  // from scratch, so without this it silently dropped it and quoted a $/GB
+  // figure as if it were what the platform charges.
+  const forecastComputeNote = forecastModel.compute
+    ? ' Compute billed separately, see modeled compute saving.'
+    : '';
   const forecast_rate_disclosure: string | null =
     forecastRateResolved.source === 'list_price' &&
     forecastModel.storage_per_gb_month > 0 &&
@@ -1513,13 +1609,59 @@ export async function runEstimateForecast(
         // computed from an undisclosed scalar. Surface the customer-supplied
         // rate string so a CFO can audit the math from the envelope alone,
         // matching the top_patterns rate_disclosure pattern.
-        ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}`
+        ? `$${customerSuppliedRate.toFixed(2)}/GB ingest (customer-supplied)${forecastModel.storage_per_gb_month > 0 ? ` + $${forecastModel.storage_per_gb_month.toFixed(2)}/GB-month storage × ${forecastRetentionMonths}mo = $${(customerSuppliedRate + forecastModel.storage_per_gb_month * forecastRetentionMonths).toFixed(2)}/GB effective` : ''}${forecastComputeNote}`
         : forecastRateResolved.disclosure;
 
+  // Estate-level compute saving.
+  //
+  // The denominator is the WHOLE insert stream, not the modeled slice: rows
+  // this forecast never looked at still arrive at the cluster and still cost
+  // compute to insert and merge. Numerator and denominator come from the same
+  // observation window, so the volume-lens scale factor cancels.
+  //
+  // Events first. The curve was measured against rows, so an event count is
+  // the basis it wants; bytes only stand in when the events query returned
+  // nothing, and `basis` on the result says which one this run used. The two
+  // disagree whenever the removed patterns are longer or shorter than average,
+  // which is exactly the case a per-pattern policy creates on purpose.
+  const totalObservedEvents = Object.values(eventsByHash).reduce(
+    (a, b) => a + (Number.isFinite(b) ? b : 0),
+    0,
+  );
+  const useEventBasis = totalObservedEvents > 0;
+  const computeDenominator = useEventBasis
+    ? totalObservedEvents
+    : totalObservedMonthly > 0
+      ? totalObservedMonthly
+      : totalIn;
+  const computeRemoved = useEventBasis ? rowsRemovedEvents : rowsRemovedBytes;
+  const estateComputeSaving =
+    forecastModel.compute && computeDenominator > 0
+      ? projectComputeSaving(
+          forecastModel.compute,
+          Math.max(0, Math.min(1, 1 - computeRemoved / computeDenominator)),
+          {
+            current_units: args.current_compute_units,
+            monthly_spend_usd: args.monthly_compute_spend_usd,
+            basis: useEventBasis ? 'rows-inserted' : 'bytes-removed-as-rows-proxy',
+          },
+        )
+      : undefined;
+
   const caveats: string[] = [];
+  // A compute-billed destination (ClickHouse) is priced from a model, not from
+  // its own meter, so every dollar this tool prints for it has to say so.
+  const computeTerm = forecastModel.compute;
+  if (computeTerm) {
+    caveats.push(
+      `${args.destination} dollars here are MODELED. Ingest is $0 and the storage line is small; the bill is compute. ` +
+        `The modeled compute saving comes from a measured rows-to-CPU curve and a unit floor of ${computeTerm.min_units} that is ASSUMED. ` +
+        `Pass current_compute_units or monthly_compute_spend_usd on this tool for a dollar figure rather than a fraction.`,
+    );
+  }
   if (noOpCompactCount > 0) {
     caveats.push(
-      `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, which is a no-op destination. Consider tier_down, sample, or drop.`
+      `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, where compact is a no-op. Consider ${leversInsteadOfCompact(args.destination).join(', ')}.`
     );
   }
   if (per_pattern_truncated) {
@@ -1626,6 +1768,18 @@ export async function runEstimateForecast(
       dollars_expected_monthly: totalExpected,
       dollars_high_monthly: totalHigh,
       annual_projection_expected: totalExpected * 12,
+      modeled: forecastModel.compute != null,
+      ...(estateComputeSaving ? { compute_saving: estateComputeSaving } : {}),
+      ...(forecastModel.compute
+        ? {
+            modeled_note:
+              `Modeled. On ${args.destination} the per-GB figure behind these dollars is a storage rate, not the bill: ` +
+              `the bill is compute, priced from a measured rows-to-CPU curve and a unit floor of ` +
+              `${forecastModel.compute.min_units} that is ASSUMED. See totals.compute_saving, which is ` +
+              `computed across the whole insert stream; per-pattern rows carry no compute saving, because ` +
+              `compute is a property of the stream and not of any one pattern.`,
+          }
+        : {}),
       projection_basis: {
         method: 'linear_extrapolation' as const,
         scale_factor: 12 as const,
@@ -2325,6 +2479,8 @@ export async function executeEstimateSavings(
           include_referenced: args.include_referenced,
           pattern_limit: args.pattern_limit,
           effective_ingest_per_gb: args.effective_ingest_per_gb,
+          current_compute_units: args.current_compute_units,
+          monthly_compute_spend_usd: args.monthly_compute_spend_usd,
           observation_window: explicitObservationWindow,
           monthly_volume_gb: args.monthly_volume_gb,
         },
@@ -2623,7 +2779,7 @@ export async function executeEstimateSavings(
       return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        headline: `estimate_savings refused: ${action} is a no-op on ${noOpDest}. Use ${leversInsteadOfCompact(noOpDest).join(', ')} instead.`,
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
         source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(noOpDest)) },
@@ -2633,16 +2789,16 @@ export async function executeEstimateSavings(
           phase: 'target_resolution',
           error: `action=${action} is a no-op on ${noOpDest} (compact_mode=no-op)`,
           suggestion: {
-            use_instead: ['tier_down', 'sample', 'drop'],
-            reason: `COST_MODEL_BY_DESTINATION.${noOpDest}.compact_mode === 'no-op' — the destination bills on compressed ingest; compaction yields 0% reduction.`,
+            use_instead: leversInsteadOfCompact(noOpDest),
+            reason: `COST_MODEL_BY_DESTINATION.${noOpDest}.compact_mode === 'no-op': ${getDestinationCostModel(noOpDest as SiemId).compact_unavailable_reason ?? 'the destination bills on compressed ingest'}; compaction yields 0% reduction.`,
           },
         },
-        human_summary: `compact is a no-op on ${noOpDest}. Use tier_down, sample, or drop instead.`,
+        human_summary: `compact is a no-op on ${noOpDest}. Use ${leversInsteadOfCompact(noOpDest).join(', ')} instead.`,
         error: {
           error_type: 'noop_action',
           retryable: false,
           suggested_backoff_ms: null,
-          hint: `Use tier_down, sample, or drop on ${noOpDest} instead of compact.`,
+          hint: `Use ${leversInsteadOfCompact(noOpDest).join(', ')} on ${noOpDest} instead of compact.`,
         },
         telemetry,
       });

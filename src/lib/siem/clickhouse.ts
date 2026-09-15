@@ -301,6 +301,12 @@ function tsPredicate(col: string, since: Date): string {
 
 /**
  * Detect ClickHouse daily ingest for the configured database + table.
+ * STORAGE SIGNAL, NOT THE BILL. `system.parts.bytes_on_disk` says how much
+ * table is on disk, which on ClickHouse is a small share of what the cluster
+ * costs: the bill is compute, and compute follows rows inserted. Use this to
+ * size the estate, never to price it. The compute term lives in
+ * COST_MODEL_BY_DESTINATION.clickhouse.compute (lib/cost.ts).
+ *
  * Uses `system.parts.bytes_on_disk` for the target table divided by
  * the span of the timestamp column (observed from `min()` / `max()`).
  * Operates on-table; no cluster-wide licensing API is assumed.

@@ -20,7 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, type Action as CostAction } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { isProtectedSeverity } from './severity-policy.js';
@@ -99,6 +99,14 @@ export interface PocInput {
     first_seen_source: 'per_event_timestamps_in_window' | 'engine_history' | 'unavailable';
   };
   analyzer_rate_usd_per_gb: number;
+  /**
+   * True when every dollar in this envelope rests on a model rather than on
+   * the destination's own meter. ClickHouse only, today: `analyzer_rate_usd_per_gb`
+   * is a storage rate there and the bill is compute.
+   */
+  dollars_modeled?: boolean;
+  /** Why the dollars are modeled, in one line. Present only when modeled. */
+  dollars_modeled_note?: string;
 }
 
 export interface PocOutput {
@@ -318,7 +326,7 @@ export interface PatternOutput {
  * by combining `DEFAULT_ACTION_BY_DESTINATION[siem]` with the head-
  * concentration heuristic — high-volume info-class patterns land on
  * the destination's level-1 action (Datadog → tier_down, Splunk →
- * offload, ClickHouse → compact, …); error/audit and exception-pinned
+ * offload, ClickHouse → offload, …); error/audit and exception-pinned
  * patterns land on `pass`; mid-volume info patterns land on `sample`.
  *
  * Replaces the prior bag of sub-action shapes (code_fix /
@@ -443,6 +451,7 @@ export function buildPocEnvelopeV2(
   // absent, fall back to summing the templater-side per-pattern
   // costPerWindow, which understates because it ignores the JSON
   // envelope bytes around each event.
+  const envelopeModeledNote = modeledDollarNote(siem);
   const monthlyCostUsd = input.rawIngestBytes && input.rawIngestBytes > 0 && input.windowHours > 0
     ? (input.rawIngestBytes / (1024 ** 3)) * input.analyzerCostPerGb * (24 * 30) / input.windowHours
     : enrichedPatterns.reduce((s, p) => s + p.costPerWindow, 0) * (24 * 30) / Math.max(0.001, input.windowHours);
@@ -551,15 +560,19 @@ export function buildPocEnvelopeV2(
       pinReason = 'pinned_by_pin_services';
     }
     if (!pinned || !pinReason) continue;
+    const resolvedPin = resolvePinnedAction(siem, pinned);
+    const effectivePin = resolvedPin.action;
     const monthlyBytes = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
-    const desc = describeDestination(siem, pinned);
-    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(pinned);
+    const desc = describeDestination(siem, effectivePin);
+    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(effectivePin);
     p.actions = {
-      recommended_action: pinned,
-      reason: pinReason,
+      recommended_action: effectivePin,
+      reason: resolvedPin.substitutedFrom
+        ? `${pinReason} (pinned ${resolvedPin.substitutedFrom}, which is a no-op on ${siem}; substituted ${effectivePin})`
+        : pinReason,
       expected_savings_usd_per_month: dollars(expectedSavings),
-      sample_n: pinned === 'sample' ? 10 : null,
-      cap_bytes_per_window: Math.round(capBytesPerWindow(pinned, monthlyBytes, 10)),
+      sample_n: effectivePin === 'sample' ? 10 : null,
+      cap_bytes_per_window: Math.round(capBytesPerWindow(effectivePin, monthlyBytes, 10)),
       consequence: {
         destination_description: desc.text,
         recoverable: desc.recoverable,
@@ -671,6 +684,12 @@ export function buildPocEnvelopeV2(
         first_seen_source: withTimestamp > 0 ? 'per_event_timestamps_in_window' : 'unavailable',
       },
       analyzer_rate_usd_per_gb: input.analyzerCostPerGb,
+      // On a compute-billed destination the rate above is a STORAGE rate, and
+      // every dollar in this envelope is derived from it. Say so structurally,
+      // not only in the markdown, so a consumer that reads the JSON cannot
+      // print the figure as if it were metered.
+      dollars_modeled: envelopeModeledNote != null,
+      ...(envelopeModeledNote ? { dollars_modeled_note: envelopeModeledNote } : {}),
     },
     output: {
       aggregates,
@@ -695,7 +714,7 @@ export function buildPocEnvelopeV2(
  * Reducibility coefficients (multiply pattern monthly cost):
  *   drop      → 1.00 (full removal)
  *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
- *   compact   → 0.70 (ClickHouse / Splunk envelope; matches cost.ts mid-band)
+ *   compact   → 0.70 (Splunk envelope; matches cost.ts mid-band)
  *   tier_down → 0.60 (Datadog Flex / CW IA; conservative cost-tier delta)
  *   sample    → 0.90 (1-in-10 default keep rate is the common config)
  *   pass      → 0.00 (no reduction)
@@ -732,9 +751,9 @@ function computeFeasibility(
     const pinByHash = p.hash ? pinPatterns[p.hash] : undefined;
     const pinBySvc = svc ? pinServicesLower.get(svc) : undefined;
     if (pinByHash) {
-      action = pinByHash;
+      action = resolvePinnedAction(siem, pinByHash).action;
     } else if (pinBySvc) {
-      action = pinBySvc;
+      action = resolvePinnedAction(siem, pinBySvc).action;
     } else if (svc && exceptionSet.has(svc)) {
       exceptionMonthly += monthly;
       const slot = byAction.get('pass') ?? { monthly: 0, count: 0 };
@@ -822,6 +841,48 @@ function computeFeasibility(
   };
 }
 
+/**
+ * A pinned action has to be a lever the destination actually has.
+ *
+ * `pin_services` and `pin_patterns` are caller-supplied, so nothing upstream
+ * checks them against the destination. Pinning `compact` on a destination
+ * where compact_mode is 'no-op' used to price it at the 0.70 coefficient and
+ * describe the bytes as "losslessly compacted (queryable as-is)", which is a
+ * dollar figure and a promise for a mechanism that does not land there. The
+ * pin becomes the destination's own level-1 lever and the caller is told.
+ */
+function resolvePinnedAction(
+  siem: SiemId,
+  requested: CostAction,
+): { action: CostAction; substitutedFrom?: CostAction } {
+  if (requested !== 'compact' || compactsInPlace(siem)) return { action: requested };
+  const canonical = getAllowedActionsForDestination(siem)[0] ?? 'offload';
+  return { action: canonical, substitutedFrom: 'compact' };
+}
+
+/**
+ * What a compute-billed destination has to say beside any dollar in this
+ * envelope. Null everywhere else.
+ *
+ * On ClickHouse `analyzerCostPerGb` is a storage rate. Ingest is $0 and stored
+ * bytes are a small share of the cost; the bill is compute. Every dollar here
+ * multiplies bytes by that per-GB figure, so every dollar here is modeled.
+ */
+function modeledDollarNote(siem: SiemId): string | null {
+  let model;
+  try {
+    model = getDestinationCostModel(siem);
+  } catch {
+    return null;
+  }
+  if (!model.compute) return null;
+  return (
+    `MODELED. The per-GB rate behind every dollar in this envelope is a ${siem} STORAGE rate, not the bill: ` +
+    'ingest is $0 and stored bytes are a small share of the cost. The bill is compute, it follows rows inserted, ' +
+    `and the modeled compute saving rests on a measured rows-to-CPU curve and a unit floor of ${model.compute.min_units} that is ASSUMED.`
+  );
+}
+
 function reductionCoefficient(action: CostAction): number {
   switch (action) {
     case 'drop': return 1.0;
@@ -883,12 +944,6 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
       };
     }
     case 'compact': {
-      if (siem === 'clickhouse') {
-        return {
-          text: 'ClickHouse, losslessly compacted via the 10x dict+UDF+view (queryable as-is)',
-          recoverable: true, recoverVia: null,
-        };
-      }
       if (siem === 'splunk') {
         return {
           text: 'Splunk, envelope-compacted via the 10x app (queryable as-is, ~80-90% smaller)',
@@ -899,6 +954,16 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
         return {
           text: 'Elasticsearch, envelope-compacted via the 10x plugin (queryable as-is, ~60-70% smaller)',
           recoverable: true, recoverVia: null,
+        };
+      }
+      // A destination with no expander, or one where the measurement says
+      // compaction does not reach the billed measure, must not be described as
+      // losslessly compacted. Say what actually happens: nothing.
+      if (!compactsInPlace(siem)) {
+        return {
+          text: `${siem} unchanged: compact is a no-op on this destination, so the bytes land in full`,
+          recoverable: true,
+          recoverVia: null,
         };
       }
       return { text: `${siem} losslessly compacted (queryable as-is)`, recoverable: true, recoverVia: null };
@@ -1020,6 +1085,8 @@ function buildCommitmentArtifact(
   lines.push(`- Projected max achievable: **${f.max_achievable_percent.toFixed(1)}%** (${f.feasible ? 'feasible' : 'short of target'})`);
   lines.push(`- Total bytes affected (per month): **${formatBytes(affectedBytes)}**`);
   lines.push(`- Sample monthly cost analyzed: **$${dollars(monthlyCostUsd).toFixed(2)}**`);
+  const modeledNote = modeledDollarNote(input.siem);
+  if (modeledNote) lines.push(`- ${modeledNote}`);
   lines.push('');
 
   // FOURTH: next step.

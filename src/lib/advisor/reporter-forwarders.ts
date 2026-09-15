@@ -95,8 +95,8 @@ export interface ForwarderSpec {
    * (`optimize`, `readOnly`) for the two opt-in modes:
    *   - default (neither flag): receive + filter events, emit them in
    *     their original form back through the forwarder.
-   *   - optimize=true: receive + filter + losslessly compact (~50-80%
-   *     volume reduction, per destination).
+   *   - optimize=true: receive + filter + losslessly compact (volume
+   *     reduction varies by destination and by the events).
    *   - readOnly=true: receive + emit TenXSummary metrics, do NOT write
    *     events back through the forwarder (passive observation).
    *
@@ -135,8 +135,9 @@ export interface ForwarderSpec {
     /** Placeholder emitted into `tenx.gitToken`. Defaults to the public-repo no-op string. */
     gitToken?: string;
     /**
-     * When true, emit events in compact encoded form (~50-80% volume
-     * reduction, per destination). Mutually exclusive with `readOnly`.
+     * When true, emit events in compact encoded form (volume reduction
+     * varies by destination and by the events). Mutually exclusive with
+     * `readOnly`.
      */
     optimize?: boolean;
     /**

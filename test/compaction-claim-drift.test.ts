@@ -25,7 +25,7 @@ import { getAllowedActionsForDestination, getDestinationCostModel, compactsInPla
 import type { SiemId } from '../src/lib/siem/pricing.js';
 
 /** Destinations where `compact` keeps the line queryable in place. */
-const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId, 'clickhouse'];
+const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId];
 /**
  * Mechanism real, AVAILABILITY unknown. Encoded events do shrink the _source
  * footprint Elasticsearch bills on, but the expander is the l1es plugin and
@@ -34,8 +34,14 @@ const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId, 'clickho
  * availability, never the mechanism.
  */
 const MECHANISM_ONLY: SiemId[] = ['elasticsearch'];
-/** Destinations where `compact` is a no-op and the claim would be false. */
-const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo'];
+/**
+ * Destinations where `compact` is a no-op and the claim would be false.
+ * ClickHouse is here on a measurement rather than a missing expander: the
+ * column codecs and the text index already take the repetition compaction
+ * would take, which put it at about 7% of table bytes, and table bytes are not
+ * the ClickHouse bill. Offload is the lever there.
+ */
+const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo', 'clickhouse'];
 
 function fixture(): ExtractedPatterns {
   return {
@@ -181,6 +187,27 @@ test('section numbering has no holes, on every destination', () => {
       nums.map((_, i) => i + 1),
       `${siem}: section numbers are ${nums.join(',')}. Conditional sections must not leave a ` +
         `gap — a reader sees the hole and asks what was hidden.`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A dollar from a model must say so on the page that prints it
+// ---------------------------------------------------------------------------
+
+test('a clickhouse report says its dollars are modeled and the per-GB line is storage', () => {
+  const md = report('clickhouse');
+  assert.match(md, /MODELED/, 'the ClickHouse report must mark its dollars modeled');
+  assert.match(md, /STORAGE rate, not the bill/);
+  assert.match(md, /ASSUMED/);
+});
+
+test('reports for metered destinations carry no modeled footnote', () => {
+  for (const siem of ['splunk', 'datadog', 'cloudwatch'] as SiemId[]) {
+    const md = report(siem);
+    assert.ok(
+      !/STORAGE rate, not the bill/.test(md),
+      `${siem} bills on what this report measures; it must not carry the modeled footnote`,
     );
   }
 });

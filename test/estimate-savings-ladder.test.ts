@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runEstimateForecast } from '../src/tools/estimate-savings.js';
+import { runEstimateForecast, leversInsteadOfCompact } from '../src/tools/estimate-savings.js';
 import type { EnvConfig } from '../src/lib/environments.js';
 
 const hollowEnv = { nickname: 'test', labels: {} } as unknown as EnvConfig;
@@ -56,4 +56,29 @@ test('forecast with no target at all names all three options', async () => {
     runEstimateForecast({ ...base } as any, hollowEnv),
     /target_percent, budget_usd_monthly, or budget_gb_monthly/
   );
+});
+
+// ---------------------------------------------------------------------------
+// Compact refused on ClickHouse
+//
+// The refusal has to name a lever the destination actually has. Hardcoding
+// "tier_down, sample, or drop" sent a ClickHouse user to a tool call that
+// refuses one step later: there is no cheaper in-platform tier modeled there.
+// ---------------------------------------------------------------------------
+
+test('compact is refused on clickhouse and the refusal names offload', () => {
+  const levers = leversInsteadOfCompact('clickhouse');
+  assert.ok(levers.includes('offload'), `expected offload, got ${levers.join(', ')}`);
+  assert.ok(!levers.includes('compact'));
+  assert.ok(!levers.includes('tier_down'), 'clickhouse has no modeled cheaper tier yet');
+});
+
+test('compact refused elsewhere still names that destination own lever', () => {
+  assert.ok(leversInsteadOfCompact('datadog').includes('tier_down'));
+  assert.ok(leversInsteadOfCompact('cloudwatch').includes('tier_down'));
+  // Every destination keeps the lossy opt-ins as the last resort.
+  for (const dest of ['clickhouse', 'datadog', 'sumo']) {
+    assert.ok(leversInsteadOfCompact(dest).includes('sample'));
+    assert.ok(leversInsteadOfCompact(dest).includes('drop'));
+  }
 });

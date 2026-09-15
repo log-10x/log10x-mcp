@@ -15,7 +15,12 @@ function estate(): SolverPattern[] {
 
 test('lever derivation: compact destinations, tier_down destinations, retriever gate', () => {
   assert.equal(keepEverythingLever('splunk', true), 'compact');
-  assert.equal(keepEverythingLever('clickhouse', true), 'compact');
+  // ClickHouse has no in-SIEM keep-everything lever modeled: compact is a
+  // no-op on its billed measure and the cold-table tier_down recipe does not
+  // exist yet, so with a retriever the lever is offload and without one there
+  // is none.
+  assert.equal(keepEverythingLever('clickhouse', true), 'offload');
+  assert.equal(keepEverythingLever('clickhouse', false), null);
   assert.equal(keepEverythingLever('cloudwatch', true), 'tier_down');
   assert.equal(keepEverythingLever('datadog', true), 'tier_down');
   // sumo has no in-SIEM lever; with the retriever it offloads, without it there is none.
@@ -395,4 +400,22 @@ test('prerequisite copy uses the compact/expand pair and never names a rejected 
     // schema rejects — that turns guidance into a validation error.
     assert.ok(!/destination=/.test(t), `prerequisite names a destination path: ${t}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// A plan's dollars have to say whose meter they came off
+// ---------------------------------------------------------------------------
+
+test('a clickhouse plan carries modeled, the note, and the cost model notes', () => {
+  const pl = solvePlan(estate(), { destination: 'clickhouse', retrieverInstalled: true, targetPct: 50 });
+  assert.equal(pl.modeled, true);
+  assert.match(pl.modeledNote!, /storage rate, not the bill/);
+  assert.match(pl.modeledNote!, /ASSUMED/);
+  assert.ok(pl.notes && pl.notes.some((n) => /modeled/i.test(n)), pl.notes?.join(' | '));
+});
+
+test('a splunk plan is not modeled and carries no modeled note', () => {
+  const pl = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
+  assert.equal(pl.modeled, false);
+  assert.equal(pl.modeledNote, undefined);
 });

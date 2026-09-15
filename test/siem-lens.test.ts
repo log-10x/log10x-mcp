@@ -160,10 +160,10 @@ test('cost_options gates compact by the cost model under a lens (no-op set)', as
   // siemSupportsCompact is internal; assert through the public surface if
   // exported, else via the cost model directly.
   const { COST_MODEL_BY_DESTINATION } = await import('../src/lib/cost.js');
-  for (const dest of ['azure-monitor', 'gcp-logging', 'sumo', 'datadog', 'cloudwatch'] as const) {
+  for (const dest of ['azure-monitor', 'gcp-logging', 'sumo', 'datadog', 'cloudwatch', 'clickhouse'] as const) {
     assert.equal(COST_MODEL_BY_DESTINATION[dest].compact_mode, 'no-op', dest);
   }
-  for (const dest of ['splunk', 'elasticsearch', 'clickhouse'] as const) {
+  for (const dest of ['splunk', 'elasticsearch'] as const) {
     assert.notEqual(COST_MODEL_BY_DESTINATION[dest].compact_mode, 'no-op', dest);
   }
   void _internals;

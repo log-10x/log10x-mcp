@@ -119,6 +119,16 @@ interface MeasureCompactionData {
    */
   aggregate_compaction_ratio_x: number;
   /**
+   * Whether `aggregate_compaction_ratio_x` describes something the destination
+   * BILLS on. False on ClickHouse: the ratio is a wire-byte fact, ClickHouse
+   * bills compute, and on a ClickStack table the compact form measured about
+   * 7% of table bytes. A consumer must read this before turning the ratio into
+   * dollars.
+   */
+  ratio_applicability:
+    | { applies_to_bill: true }
+    | { applies_to_bill: false; reason: string; use_instead: string };
+  /**
    * Volume-weighted average of per-pattern ratios:
    * sum(ratio * orig_bytes) / sum(orig_bytes). Useful for "typical pattern"
    * framing but will diverge from aggregate_compaction_ratio_x when
@@ -130,6 +140,23 @@ interface MeasureCompactionData {
    * Expressed as a decimal (0.40 = 40% of original size remains after compaction).
    */
   fraction_on_wire: number;
+}
+
+/**
+ * Does a wire-byte compaction ratio describe anything this destination bills
+ * on? Everywhere but ClickHouse, near enough. On ClickHouse, no.
+ */
+function ratioApplicabilityFor(
+  siem: string,
+): MeasureCompactionData['ratio_applicability'] {
+  if (siem !== 'clickhouse') return { applies_to_bill: true };
+  return {
+    applies_to_bill: false,
+    reason:
+      'ClickHouse bills compute, not bytes accepted or bytes stored. On a ClickStack table the compact form measured about 7% of table bytes, because the column codecs and the text index already absorb the repetition. This ratio describes the wire, not the table and not the bill.',
+    use_instead:
+      'offload, priced through the modeled compute term (COST_MODEL_BY_DESTINATION.clickhouse.compute)',
+  };
 }
 
 // ── Helpers ──
@@ -344,6 +371,7 @@ export async function executeMeasureCompaction(
         aggregate_compaction_ratio_x: 0,
         weighted_avg_compaction_ratio_x: 0,
         fraction_on_wire: 1,
+        ratio_applicability: ratioApplicabilityFor(sel.id),
       } as MeasureCompactionData,
       human_summary: noEventsHeadline,
       actions: [],
@@ -462,6 +490,23 @@ export async function executeMeasureCompaction(
       ? Math.round((1 / aggregateRatio) * 1000) / 1000
       : 1;
 
+  // What this tool measures is a WIRE-BYTE ratio: original text against the
+  // bytes the forwarder would ship. On destinations that bill on bytes accepted
+  // or bytes indexed, that ratio is close to the billed saving. On ClickHouse
+  // it is not: the table's own codecs and its text index already take most of
+  // the repetition, so the measured saving on the TABLE came out at about 7%,
+  // and the ClickHouse bill is compute anyway. The measurement stays, because
+  // the wire ratio is a real fact about the stream; the claim it licenses does
+  // not travel to this destination.
+  const wireByteOnly = sel.id === 'clickhouse';
+  const wireOnlyCaveat = wireByteOnly
+    ? ' This is a wire-byte ratio, not a ClickHouse table saving: measured on a ClickStack table, compaction was worth about 7% of table bytes. On ClickHouse the lever is offload and the bill is compute.'
+    : '';
+  // Structured twin of the sentence above, so a consumer reading the payload
+  // cannot lift aggregate_compaction_ratio_x into a savings projection without
+  // meeting the reason it does not apply here.
+  const ratioApplicability = ratioApplicabilityFor(sel.id);
+
   const data: MeasureCompactionData = {
     service: args.service,
     sample_size_requested: sampleSize,
@@ -474,6 +519,7 @@ export async function executeMeasureCompaction(
     aggregate_compaction_ratio_x: aggregateRatio,
     weighted_avg_compaction_ratio_x: weightedAvgRatio,
     fraction_on_wire: fractionOnWire,
+    ratio_applicability: ratioApplicability,
   };
 
   const lowConfidenceCount = patterns.filter((p) => p.confidence === 'low').length;
@@ -490,14 +536,18 @@ export async function executeMeasureCompaction(
     `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x` +
     (aggregateRatio !== weightedAvgRatio
       ? ` — diverges when small-volume patterns have outlier ratios.`
-      : `.`);
+      : `.`) +
+    wireOnlyCaveat;
   const compactionHumanSummary =
     `${patterns.length} pattern(s) measured for service "${args.service}" via ${sel.displayName} ` +
     `(${rawEvents.length} events sampled over ${timeRange}). ` +
     `Aggregate compaction ratio: ${aggregateRatio}x (${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
     `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x. ` +
-    `Use aggregate_compaction_ratio_x for total savings projections; weighted_avg_compaction_ratio_x for per-pattern framing. ` +
-    (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence — increase sample_size for accuracy.` : `All patterns have medium or high confidence.`);
+    (wireByteOnly
+      ? `Do NOT carry aggregate_compaction_ratio_x into a savings projection on ${sel.displayName}: it is a wire-byte ratio and this destination does not bill on those bytes. `
+      : `Use aggregate_compaction_ratio_x for total savings projections; weighted_avg_compaction_ratio_x for per-pattern framing. `) +
+    (lowConfidenceCount > 0 ? `${lowConfidenceCount} pattern(s) have low confidence, so increase sample_size for accuracy.` : `All patterns have medium or high confidence.`) +
+    wireOnlyCaveat;
   return buildChassisEnvelope({
     tool: 'log10x_measure_compaction',
     view: 'summary',

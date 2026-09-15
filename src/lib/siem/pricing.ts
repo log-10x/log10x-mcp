@@ -38,9 +38,13 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // 2.5, matching PRICING.md). A prior entry hardcoded 0.25 with a comment that
   // misquoted vendors.json; corrected to the canonical 2.5.
   sumo: 2.5,
-  // Not in vendors.json — self-hosted ClickHouse storage cost, approx.
-  // Set to 0.15 ($/GB-month) as a conservative default. Override via
-  // analyzer_cost_per_gb arg on the submit tool if using ClickHouse Cloud.
+  // Not in vendors.json. STORAGE ONLY, and storage is not the ClickHouse
+  // bill: $0.15/GB-month is a conservative stand-in for what a table costs to
+  // keep. What a ClickHouse cluster actually costs is compute, priced through
+  // COST_MODEL_BY_DESTINATION.clickhouse.compute (lib/cost.ts), and every
+  // dollar that comes out of it is modeled. Do not read this number as the
+  // destination's $/GB the way Datadog's $2.50 is read. Override via
+  // analyzer_cost_per_gb arg on the submit tool for a known deployment.
   clickhouse: 0.15,
   // Coralogix Frequent Search (the default priority every event lands in when
   // no TCO policy matches — zero policies means priorityclass "high").

@@ -23,7 +23,7 @@ import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
-import { COST_MODEL_BY_DESTINATION } from '../lib/cost.js';
+import { COST_MODEL_BY_DESTINATION, getAllowedActionsForDestination } from '../lib/cost.js';
 import { loadEnvironments, type EnvConfig, type Environments } from '../lib/environments.js';
 import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -128,11 +128,25 @@ export interface CostOptionsEnvelope {
 //
 // Derived from COST_MODEL_BY_DESTINATION (lib/cost.ts), the single source of
 // truth: compact is real only where compact_mode !== 'no-op' (splunk envelope,
-// self-hosted elasticsearch index-pruned, clickhouse dict-udf-view). The old
-// hand-maintained set here drifted to also claim azure-monitor / gcp-logging /
-// sumo, where the engine models compact as a no-op — a false "lossless +
-// everything stays searchable" promise that estimate_savings then refused
-// one step later.
+// self-hosted elasticsearch index-pruned). The old hand-maintained set here
+// drifted to also claim azure-monitor / gcp-logging / sumo, where the engine
+// models compact as a no-op, a false "lossless + everything stays searchable"
+// promise that estimate_savings then refused one step later. ClickHouse left
+// the list on measurement: compaction moves about 7% of table bytes there, and
+// table bytes are not the bill. On ClickHouse offload is the lever.
+
+/** The destination's own stated reason, when it has one worth reading. */
+function compactNoOpReason(siem: string | null): string | undefined {
+  if (!siem) return undefined;
+  const model = COST_MODEL_BY_DESTINATION[siem as keyof typeof COST_MODEL_BY_DESTINATION];
+  return model?.compact_unavailable_reason;
+}
+
+/** The lever to name when compact is refused: the destination's level-1 action. */
+function leadLeverFor(siem: string | null): string {
+  if (!siem) return 'offload';
+  return getAllowedActionsForDestination(siem)[0] ?? 'offload';
+}
 
 function siemSupportsCompact(siem: string | null): boolean {
   if (!siem) return true; // unknown stack — don't gate; estimate_savings will error if needed
@@ -345,7 +359,7 @@ function buildModes(
   const compactGatedReason = !caps.compact_installable
     ? 'Requires Receiver tier (in-path forwarder sidecar). Install via log10x_advise_install.'
     : !siemSupportsCompact(effectiveDestination)
-      ? `compact mode is a no-op on ${effectiveDestination}: it does not reduce ingest cost on that destination.`
+      ? `compact is a no-op on ${effectiveDestination}${compactNoOpReason(effectiveDestination) ? `: ${compactNoOpReason(effectiveDestination)}` : ': it does not reduce what that destination bills on'}. Use ${leadLeverFor(effectiveDestination)} instead.`
       : undefined;
 
   const tierDownApplicable =
@@ -369,14 +383,14 @@ function buildModes(
   return [
     {
       id: 'compact',
-      label: 'Compact (keeps everything): minify events ~50-80% smaller, losslessly. Every event still lands in the stack, fully searchable.',
+      label: 'Compact (keeps everything): minify events losslessly. Every event still lands in the stack, fully searchable.',
       description:
-        'Engine encodes events into the 10x compact wire format (~50-80% smaller, lossless). All events arrive in the stack; fields stay searchable.',
+        'Engine encodes events into the 10x compact wire format, losslessly. All events arrive in the stack; fields stay searchable. How much smaller depends on the destination and the events; log10x_measure_compaction measures it on the real stream.',
       who_enforces: 'engine',
       applicable: compactApplicable,
       gated_reason: compactGatedReason,
       what_survives:
-        'All events reach the stack, each ~50-80% smaller. Fully searchable.',
+        'All events reach the stack, each smaller. Fully searchable.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {

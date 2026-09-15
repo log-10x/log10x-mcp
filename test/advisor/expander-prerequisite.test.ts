@@ -113,7 +113,15 @@ test('the wizard-shaped plan states the dependency even without a destination', 
   const md = renderPlan(plan, 'all');
   assert.match(md, /Splunk app/, 'rendered plan must name the Splunk app');
   assert.match(md, /l1es plugin/, 'rendered plan must name the l1es plugin');
-  assert.match(md, /ClickHouse view/, 'rendered plan must name the ClickHouse view');
+  // The ClickHouse view is deliberately NOT offered. An expander exists there,
+  // and compaction still measured about 7% of table bytes, which is not the
+  // ClickHouse bill; pointing a customer at it would sell a lever that does
+  // not move their invoice.
+  assert.ok(
+    !/ClickHouse view/.test(md),
+    'the plan must not offer the ClickHouse view as a compaction expander',
+  );
+  assert.match(md, /ClickHouse/, 'the plan must still say what happens on ClickHouse');
   // The line that tells the user to turn compaction on later must not do so
   // silently.
   assert.match(md, /Install the destination expander first/);
