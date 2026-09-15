@@ -53,21 +53,24 @@ test('the recipe renders for both collector variants, each with its own DDL', ()
     assert.ok(r.honesty.length > 0, `${v}: honesty block empty`);
   }
   // Both collectors write body plus a flat attribute map as JSON, so one cold
-  // table reads either. Vector 0.50 has no parquet codec (clickstack-e2e-gaps,
-  // gap 2), so there is no second object format to read.
+  // table reads either. Vector can write Parquet on aws_s3 under
+  // batch_encoding.codec (v0.55.0, official builds v0.56.0), but no run of ours
+  // has exercised it, so no Parquet variant is rendered and there is no second
+  // object format to read.
   assert.match(clickhouseOffloadRecipe(CH, 'otel-collector').ddl.body, /'JSONEachRow'/);
   assert.match(clickhouseOffloadRecipe(CH, 'vector').ddl.body, /'JSONEachRow'/);
   assert.ok(!clickhouseOffloadRecipe(CH, 'vector').ddl.body.includes("'Parquet'"));
 });
 
-test('both variants ran, and the Vector body says what it will not write', () => {
+test('both variants ran, and the Vector body says what it wrote and what it did not measure', () => {
   assert.equal(clickhouseOffloadRecipe(CH, 'otel-collector').collector.exercised, true);
   const vector = clickhouseOffloadRecipe(CH, 'vector').collector;
   assert.equal(vector.exercised, true);
   assert.ok(vector.body.includes('COPIED from the harness config that ran end to end'));
-  // The measurement that made this variant honest.
-  assert.ok(vector.body.includes('VECTOR WRITES JSON, NOT PARQUET'));
-  assert.ok(!vector.body.includes('codec: parquet\n'));
+  // The arm that ran, and the retreat on the arm that did not.
+  assert.ok(vector.body.includes('VECTOR WRITES JSON HERE, AND JSON IS THE ARM THAT RAN'));
+  assert.ok(vector.body.includes('run measured nothing about Parquet in Vector'));
+  assert.ok(!/^\s*codec: parquet\s*$/m.test(vector.body));
 });
 
 test('the collector routes on the route name as a STRING, in the syntax of each tool', () => {
@@ -151,13 +154,24 @@ test('the honesty block is present in every render and states what it must', () 
       assert.ok(text.includes(line), `honesty line missing:\n${line.slice(0, 80)}`);
     }
     // the six claims, by their load-bearing words
-    assert.match(text, /saving on ClickHouse is COMPUTE/);
+    assert.match(text, /saving on ClickHouse is the WRITE PATH/);
+    assert.match(text, /NO LINE IS DROPPED/);
+    assert.match(text, /THE DAY IN THE PATH IS THE UPLOAD DAY, NOT THE RECORD DAY/);
+    assert.match(text, /ClickHouse issue 116888/);
+    assert.match(text, /s3_list_object_keys_size, default 1000/);
+    assert.match(text, /remote_read_min_bytes_for_seek, default 4194304/);
+    assert.match(text, /TTL MOVES ARE THE RIGHT TOOL FOR STORAGE/);
+    assert.match(text, /ClickHouse issue 85636/);
+    assert.match(text, /NO PER-TYPE CPU FIGURE IS A MEASUREMENT/);
     assert.match(text, /searchable in place, through the Merge table, and reading them is SLOWER/);
     assert.match(text, /query filtered only on time opens EVERY cold object/);
     assert.match(text, /14 S3 GET in 118 ms/);
     assert.match(text, /6 S3 GET\s+in 77 ms/);
     assert.match(text, /Count-all dashboards read the counts-per-type table/);
     assert.match(text, /Alerts are NOT claimed unchanged/);
+    assert.match(text, /point at THE COUNTS TABLE/);
+    assert.match(text, /Never point an alert at the Merge table/);
+    assert.ok(!text.includes('point at the Merge table or the counts table'));
     assert.match(text, /THIS RECIPE REQUIRES ENGINE 1\.1\.79 OR NEWER/);
     assert.match(text, /19,436 of 37,519 records on 1\.1\.74/);
     assert.match(text, /37,536 of 37,536 returned records carried\s+`routeState`/);
@@ -384,18 +398,19 @@ test('the copy header lists every substitution, not just the endpoints', () => {
   assert.ok(ddl.includes("'<access-key>', '<secret-key>'"));
 });
 
-test('a Vector-only render reads the same cold table and claims no Parquet', () => {
+test('a Vector-only render reads the same cold table and renders no Parquet variant', () => {
   const text = renderClickhouseOffloadSection(CH, 'vector');
   assert.ok(!text.includes('The JSON variant above'));
   assert.ok(text.includes("/tenx-cold-logs/**.json', '<access-key>', '<secret-key>', 'JSONEachRow')"));
   assert.ok(!text.includes("'Parquet')"));
-  assert.ok(text.includes('VECTOR WRITES JSON, NOT PARQUET'));
+  assert.ok(text.includes('VECTOR WRITES JSON HERE, AND JSON IS THE ARM THAT RAN'));
+  assert.ok(!text.includes('Vector will not write Parquet'));
 });
 
-test('the compute claim is attributed to the measurement that made it', () => {
-  // This harness measured no compute, no bill and no autoscaler, so the one
+test('the write-path claim is attributed to the measurement that made it', () => {
+  // This harness measured no write path, no bill and no autoscaler, so the one
   // sentence carrying the product claim names where it does come from.
   const text = renderClickhouseOffloadSection(CH);
   assert.match(text, /compute-vs-rows arms in benchmarks\/clickhouse-clickstack \(benchmarks PR #10\)/);
-  assert.match(text, /measured no compute, no bill and no autoscaler/);
+  assert.match(text, /measured no write path, no bill and no autoscaler/);
 });

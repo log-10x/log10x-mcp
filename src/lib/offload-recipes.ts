@@ -1451,16 +1451,44 @@ export function clickhouseOffloadHonesty(): string[] {
   return [
     '**What this buys, and what it costs.**',
     '',
-    '- The saving on ClickHouse is COMPUTE, through rows that never enter. Insert and merge ' +
-      'CPU follows rows inserted, so a row held back at the edge is a row the cluster never ' +
-      'tokenises, never inserts and never merges. Table bytes barely move, and table bytes ' +
-      'are not where a ClickHouse bill lives. THAT COMES FROM A DIFFERENT MEASUREMENT: the ' +
-      'compute-vs-rows arms in benchmarks/clickhouse-clickstack (benchmarks PR #10), insert ' +
-      'CPU from system.query_log and merge CPU from system.part_log. The run this recipe is ' +
-      'copied from measured no compute, no bill and no autoscaler.',
+    '- NO LINE IS DROPPED. The cap decides what moves, never what disappears: the marked ' +
+      'lines go to the account\'s own bucket and are read beside the hot rows through the ' +
+      'Merge table below. Gap 5 counted 36,395 rows before the offload and 36,395 after, ' +
+      'matching to the row.',
+    '- The saving on ClickHouse is the WRITE PATH, through rows that never enter: insert CPU, ' +
+      'merge CPU and merge IO, disk bandwidth, part metadata in Keeper, and object-store ' +
+      'requests. A row held back at the edge is a row the cluster never tokenises, never ' +
+      'inserts and never merges. Table bytes barely move, and table bytes are not where a ' +
+      'ClickHouse bill lives. THAT COMES FROM A DIFFERENT MEASUREMENT: the compute-vs-rows ' +
+      'arms in benchmarks/clickhouse-clickstack (benchmarks PR #10), insert CPU from ' +
+      'system.query_log and merge CPU from system.part_log. The run this recipe is copied ' +
+      'from measured no write path, no bill and no autoscaler.',
+    '- WHAT THE INVOICE DOES. ClickHouse Cloud meters compute per minute in 8 GiB increments ' +
+      'and bills it per compute-unit-hour, where a unit is 8 GiB of RAM and 2 vCPU; storage ' +
+      'is metered on the compressed bytes stored. Fewer rows lower the work the cluster does, ' +
+      'and the invoice moves when that lets the autoscaler hold a smaller size, or lets the ' +
+      'service idle for longer. On a service already sitting at its floor, a smaller row ' +
+      'count changes nothing on the invoice at all. ClickHouse\'s own Managed ClickStack post ' +
+      '(2026-02-04) says retention "effectively stops being a meaningful cost dimension" and ' +
+      'that "the remaining variable becomes compute".',
+    '- NO PER-TYPE CPU FIGURE IS A MEASUREMENT. system.part_log records a merge against a ' +
+      'PART, never against a message type, and a part holds rows of every type inserted in ' +
+      'its window. What the compute arms measure is the whole table\'s insert and merge CPU ' +
+      'with a given set of rows removed before the load, which is an A/B of whole-table cost. ' +
+      'Any per-type figure derived from it is MODELED and is labeled modeled.',
     '- The offloaded rows stay searchable in place, through the Merge table, and reading them ' +
       'is SLOWER than reading the hot table. A cold read pays object-store requests; a hot ' +
       'read pays none.',
+    '- SIZING THE REQUESTS, because this is where an operator sizes a bucket. One LIST per ' +
+      'query covers up to a thousand matched keys (s3_list_object_keys_size, default 1000), ' +
+      'and one further LIST for every thousand after that, so the LIST count rises with the ' +
+      'bucket. The runs behind this recipe never crossed that line: 14 objects end to end, 50 ' +
+      'in gap 2, 180 in gap 1. One GET per object is what a read of the whole object costs, ' +
+      'which is what JSONEachRow does. A columnar object large enough to seek past four ' +
+      'megabytes at a time (remote_read_min_bytes_for_seek, default 4194304) pays one GET per ' +
+      'skip on top. The Vector batch below is set at 33554432 bytes, eight times that ' +
+      'threshold, so the one-GET arithmetic holds for the JSON objects it writes and stops ' +
+      'holding the moment anything columnar is written at that size.',
     '- A query filtered only on time opens EVERY cold object in the bucket. Measured on the ' +
       'harness sample, which held 14 objects: time only read 37,536 rows through 14 S3 GET in ' +
       '118 ms, while the same query with a service predicate read 25,793 rows through 6 S3 GET ' +
@@ -1472,18 +1500,24 @@ export function clickhouseOffloadHonesty(): string[] {
       'alone opened 60, that service\'s objects on every day. A pattern-hash predicate alone ' +
       'opened all 180, because the hash is a column inside the file and not a path segment. ' +
       'Every dashboard query that names only a time pays one request per object in the ' +
-      'bucket. The object path carries the WRITE time rather than the record time.',
+      'bucket. THE DAY IN THE PATH IS THE UPLOAD DAY, NOT THE RECORD DAY: the S3 exporter ' +
+      'builds the key from the wall clock at upload (awss3exporter, ' +
+      'internal/upload/writer.go, clock.Now). On a steady feed the two agree. After a ' +
+      'backfill or a replay they do not, so a day predicate is a cost control and never a ' +
+      'substitute for the time filter.',
     '- Count-all dashboards read the counts-per-type table, not the Merge table: count all by ' +
       'service over the counts table read 2,539 rows with zero S3 requests in 6 ms. The ' +
       'counts table is fed twice, by a materialized view on the hot inserts and by an ' +
       'INSERT ... SELECT over the cold objects, because offloaded rows never pass through an ' +
       'insert.',
-    '- Alerts are NOT claimed unchanged. HyperDX accepted an alert over the hot table, the ' +
-      'Merge table and the counts table, all 200, and an alert on the hot table stops firing ' +
-      'once the rows it counts are offloaded, which is why the alert an offload keeps must ' +
-      'point at the Merge table or the counts table. Whether HyperDX\'s own evaluation loop ' +
-      'fires is still unmeasured: a replayed capture is older than any interval short enough ' +
-      'to wait for.',
+    '- Alerts are NOT claimed unchanged, and an alert an offload keeps must point at THE ' +
+      'COUNTS TABLE. HyperDX accepted an alert over the hot table, the Merge table and the ' +
+      'counts table, all 200, and an alert on the hot table stops firing once the rows it ' +
+      'counts are offloaded. Never point an alert at the Merge table: every evaluation opens ' +
+      'every cold object its predicates do not prune, so the alert pays object-store requests ' +
+      'on its own schedule, for as long as it is enabled. Whether HyperDX\'s own evaluation ' +
+      'loop fires is still unmeasured: a replayed capture is older than any interval short ' +
+      'enough to wait for.',
     '- THE HANDOFF IS NOT DURABLE, so "every line kept" is a claim about the POLICY and not ' +
       'about the route. Neither hop keeps a queue on disk in this recipe. Measured by a ' +
       'sequence number inside every line: with the routing collector killed mid-feed and ' +
@@ -1493,6 +1527,27 @@ export function clickhouseOffloadHonesty(): string[] {
       'and only logs it, so a feed reads as finished while lines are missing unless ' +
       '`sending_queue.block_on_overflow: true` is set on the exporter into the receiver. Set ' +
       'it, and put a persistent queue behind both hops, before quoting anything about loss.',
+    '- INSTALL ORDER, AND A DEFECT IT AVOIDS. Run the collector FIRST and confirm at least ' +
+      'one object exists under the prefix before the cold table is created. An S3 table ' +
+      'created with an explicit schema and use_hive_partitioning = 1 while the prefix is ' +
+      'still empty caches that empty listing as resolved: the partition columns then read ' +
+      'file defaults, and every path predicate returns ZERO ROWS, with no error, for the ' +
+      'lifetime of the table. ClickHouse issue 116888, open, filed 2026-08-28 by a ClickHouse ' +
+      'member. The DDL below carries the check as its own numbered step; do not skip it and ' +
+      'do not reorder the steps.',
+    '- TTL MOVES ARE THE RIGHT TOOL FOR STORAGE, AND THIS RECIPE DOES NOT COMPETE WITH THEM. ' +
+      'A `TTL Timestamp + INTERVAL <n> DAY TO VOLUME \'cold\'` rule leaves the parts as ' +
+      'MergeTree parts, so the primary index and the eight skip indexes still apply, the ' +
+      'schema does not change, nothing is renamed, and no Merge table, no view and no counts ' +
+      'table are needed. An operator who wants cheaper STORAGE should use TTL moves. TTL is ' +
+      'evaluated during background merges, after the row has been parsed, indexed, written ' +
+      'and merged, so a TTL move never returns insert or merge work; the lever here is the ' +
+      'row that never enters. Two things worth knowing before choosing between them: ' +
+      '`prefer_not_to_merge` on a cold volume, the standard way to keep merges off the ' +
+      'bucket, stops TTL deletes from running (ClickHouse issue 85636, open, confirmed ' +
+      'independently across 25.1 to 25.8), and Mohamed Aziz of Luciq published on 2026-08-10 ' +
+      'what merges on object storage cost when they do run there. No figure of ours is ' +
+      'attached to this comparison, because no TTL arm has been run.',
     '- THIS RECIPE REQUIRES ENGINE 1.1.79 OR NEWER. The three OpenTelemetry return-path ' +
       'defects that blocked it are fixed and released in 1.1.79 (pipeline-extensions ' +
       '8ebaf793, engine b9074b9a, engine PR #150). On an older image a record whose message ' +
@@ -1506,7 +1561,8 @@ export function clickhouseOffloadHonesty(): string[] {
       '`routeState` and a `timeUnixNano`, against 18,083 marked of 37,519 on 1.1.74. Hot plus ' +
       'offloaded reconciled to 37,536 with a gap of 0, on 13,010 hot rows and 24,526 ' +
       'offloaded, and 2,495 distinct type hashes came back on the wire against 2,495 stored.',
-    '- A COLLECTOR-ONLY RULE CAN BEAT THIS ON HOT COMPUTE. Measured over the whole 197,430 ' +
+    '- A COLLECTOR-ONLY RULE CAN BEAT THIS ON HOT WRITE-PATH CPU. Measured over the whole ' +
+      '197,430 ' +
       'line capture on one container: a rule by service and severity, written off one reading ' +
       'of the census, cost 2.7 insert-plus-merge CPU seconds against 8.1 for the per-type cap ' +
       'and 10.1 for no offload at all, while keeping MORE rows. The receiver groups a ' +
@@ -1713,11 +1769,18 @@ function clickhouseVectorCollector(p: ClickhouseOffloadParams): ClickhouseOffloa
 # the routing collector: the collector still makes the split and forwards the
 # marked stream here over OTLP, and Vector writes the objects.
 #
-# VECTOR WRITES JSON, NOT PARQUET. Vector 0.50.0 refuses
-# \`encoding.codec: parquet\` and names the codecs it does take: avro, cef, csv,
-# gelf, json, logfmt, native, native_json, protobuf, raw_message, text. There is
-# no \`ndjson\` codec either, so newline delimited JSON is the \`json\` codec with
-# newline framing, which is what the cold table below reads.
+# VECTOR WRITES JSON HERE, AND JSON IS THE ARM THAT RAN. The sink below sets
+# \`encoding.codec: json\` with newline framing, which is what the cold table
+# reads. There is no \`ndjson\` codec, so newline delimited JSON is the \`json\`
+# codec with newline framing.
+#
+# Vector ALSO writes Parquet on the \`aws_s3\` sink, under
+# \`batch_encoding.codec: parquet\`, added in v0.55.0 (2026-04-22) and available
+# in official release builds from v0.56.0 (2026-06-03). That option is not
+# rendered here: the run behind this recipe pinned Vector 0.50.0, which predates
+# it, and probed \`encoding.codec\`, which is not where the option lives, so the
+# run measured nothing about Parquet in Vector. A Parquet variant is rendered
+# once a run exists, and not before.
 #
 # What differs from the file that ran: the bucket, the region and the S3
 # endpoint carry this deployment's values (the run wrote to MinIO at
@@ -1802,12 +1865,16 @@ sinks:
       'took the returned stream, made the same routing decision on `routeState`, and ' +
       'wrote 50 JSON objects holding 113,732 rows, which the SAME S3 table and the ' +
       'SAME Merge table below read with no change to either, answering the same ' +
-      'queries with the same numbers. What the run also settled is that Vector will ' +
-      'not write Parquet: 0.50.0 rejects the parquet codec outright. A Parquet copy ' +
-      'of exactly those rows, written by ClickHouse rather than by Vector, held them ' +
-      'in 3 objects and 1.3 MiB against 50 objects and 165 MiB of JSON and read fewer ' +
-      'rows on a text search, so the codec is worth having wherever something in the ' +
-      'path can write it. Nothing in this path can today.',
+      'queries with the same numbers. What the run did NOT settle is Parquet. Vector ' +
+      'writes Parquet on the `aws_s3` sink under `batch_encoding.codec: parquet`, added ' +
+      'in v0.55.0 and available in official builds from v0.56.0; the run pinned 0.50.0 ' +
+      'and probed `encoding.codec`, which is not where the option lives, so it measured ' +
+      'nothing about Parquet in Vector, and no Parquet variant is rendered until a run ' +
+      'exists. The OpenTelemetry collector\'s S3 exporter has no Parquet marshaler at ' +
+      'all, and the request for one (contrib issue 45103) was closed unplanned in May ' +
+      '2026. A Parquet copy of exactly those rows, written by ClickHouse rather than by ' +
+      'a collector, held them in 3 objects and 1.3 MiB against 50 objects and 165 MiB ' +
+      'of JSON.',
   };
 }
 
@@ -1883,12 +1950,26 @@ GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;
 --    as one.
 ALTER TABLE ${n.db}.${n.hot} ADD COLUMN IF NOT EXISTS day Date MATERIALIZED toDate(Timestamp);
 
--- 3) The offloaded objects, read in place. The same table reads what either
---    collector writes: the OpenTelemetry Collector's JSON encoding extension
---    and Vector's remap both produce {"body": ..., "logAttributes": {...}}.
+-- 3) START THE COLLECTOR NOW, AND DO NOT CREATE THE COLD TABLE UNTIL AT LEAST
+--    ONE OBJECT EXISTS UNDER THE PREFIX. An S3 table created with an explicit
+--    schema and use_hive_partitioning = 1 while the prefix is still empty
+--    caches that empty listing as resolved: the partition columns then read
+--    file defaults and every path predicate returns ZERO ROWS, with no error,
+--    for the lifetime of the table. ClickHouse issue 116888, open, filed
+--    2026-08-28 by a ClickHouse member. The s3 TABLE FUNCTION below lists at
+--    call time and caches nothing, so it is safe to run before the table
+--    exists. Wait for a non-zero count. A bucket listing answers the same
+--    question:  aws s3 ls s3://${p.bucket}/ --recursive | head
+SELECT count() AS objects_ready
+FROM s3('${n.s3Endpoint}/${p.bucket}/**.json', ${key}, 'JSONEachRow');
+
+-- 4) The offloaded objects, read in place. Create this only after step 3
+--    returned a non-zero count. The same table reads what either collector
+--    writes: the OpenTelemetry Collector's JSON encoding extension and Vector's
+--    remap both produce {"body": ..., "logAttributes": {...}}.
 ${coldJson}
 
--- 4) Hot and cold as one table. \`_table\` names the side a row came from.
+-- 5) Hot and cold as one table. \`_table\` names the side a row came from.
 DROP TABLE IF EXISTS ${n.db}.${n.mergeTable};
 CREATE TABLE ${n.db}.${n.mergeTable}
 (
@@ -1900,7 +1981,7 @@ CREATE TABLE ${n.db}.${n.mergeTable}
   day           Date
 ) ENGINE = Merge(${n.db}, '^(${n.hot}|${n.coldView})$');
 
--- 5) The cold side of the counts table, one pass over the objects. Offloaded
+-- 6) The cold side of the counts table, one pass over the objects. Offloaded
 --    rows never pass through an insert, so the materialized view never sees
 --    them. Run this on a schedule, or feed the cold side from the receiver's
 --    own counters instead.
@@ -1918,9 +1999,14 @@ GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;`;
     language: 'sql',
     body,
     note:
-      'Order matters in one place: the counts table and its materialized view are ' +
-      'created BEFORE any data flows, or the view sees none of the run. The rest is ' +
-      'idempotent. Two findings from the run are baked into the shape above and are ' +
+      'ORDER MATTERS IN TWO PLACES, and both are numbered above. The counts table and ' +
+      'its materialized view are created BEFORE any data flows, or the view sees none of ' +
+      'the run; and the cold S3 table is created AFTER the collector has written its ' +
+      'first object, because a table created over an empty prefix with ' +
+      'use_hive_partitioning = 1 caches the empty listing and answers every path ' +
+      'predicate with zero rows, silently, for the life of the table (ClickHouse issue ' +
+      '116888). Step 3 is the guard; run it until it returns a non-zero count. The rest ' +
+      'is idempotent. Two findings from the run are baked into the shape above and are ' +
       'easy to lose in a rewrite: the S3 table engine rejects ALIAS columns, so the ' +
       "rename to ClickStack's column names is a VIEW and the Merge table reads the " +
       "view rather than the S3 table; and ClickStack's shipped table has no day " +
