@@ -52,18 +52,22 @@ test('the recipe renders for both collector variants, each with its own DDL', ()
     assert.ok(r.hyperdx.body.includes('/sources'), `${v}: no HyperDX source call`);
     assert.ok(r.honesty.length > 0, `${v}: honesty block empty`);
   }
-  // The object format follows the collector, because the S3 engine reads what
-  // was written and nothing converts between the two.
+  // Both collectors write body plus a flat attribute map as JSON, so one cold
+  // table reads either. Vector 0.50 has no parquet codec (clickstack-e2e-gaps,
+  // gap 2), so there is no second object format to read.
   assert.match(clickhouseOffloadRecipe(CH, 'otel-collector').ddl.body, /'JSONEachRow'/);
-  assert.match(clickhouseOffloadRecipe(CH, 'vector').ddl.body, /'Parquet'/);
+  assert.match(clickhouseOffloadRecipe(CH, 'vector').ddl.body, /'JSONEachRow'/);
+  assert.ok(!clickhouseOffloadRecipe(CH, 'vector').ddl.body.includes("'Parquet'"));
 });
 
-test('only the OpenTelemetry Collector variant claims to have been run', () => {
+test('both variants ran, and the Vector body says what it will not write', () => {
   assert.equal(clickhouseOffloadRecipe(CH, 'otel-collector').collector.exercised, true);
   const vector = clickhouseOffloadRecipe(CH, 'vector').collector;
-  assert.equal(vector.exercised, false);
-  assert.ok(vector.body.includes('NOT EXERCISED'), 'the Vector body must say so in the config itself');
-  assert.ok(vector.body.includes('ASSUMED'), 'the Vector body must mark what is assumed');
+  assert.equal(vector.exercised, true);
+  assert.ok(vector.body.includes('COPIED from the harness config that ran end to end'));
+  // The measurement that made this variant honest.
+  assert.ok(vector.body.includes('VECTOR WRITES JSON, NOT PARQUET'));
+  assert.ok(!vector.body.includes('codec: parquet\n'));
 });
 
 test('the collector routes on the route name as a STRING, in the syntax of each tool', () => {
@@ -73,7 +77,7 @@ test('the collector routes on the route name as a STRING, in the syntax of each 
   );
   assert.match(
     clickhouseOffloadRecipe(CH, 'vector').collector.body,
-    /route\.offload = '\.routeState == "offload"'/,
+    /cold: '\.attributes\.routeState == "offload"'/,
   );
 });
 
@@ -96,13 +100,12 @@ test('the OTel variant carries the three hops the encoding makes necessary', () 
   );
 });
 
-test('the Vector sink keys the object path on service and day and batches large', () => {
+test('the Vector sink keys the object path on service and day, in the codec it has', () => {
   const body = clickhouseOffloadRecipe(CH, 'vector').collector.body;
-  assert.ok(body.includes('key_prefix = "service={{ ServiceName }}/day=%Y-%m-%d/"'));
-  assert.ok(body.includes('codec = "parquet"'));
-  assert.ok(body.includes('max_bytes    = 268435456'));
-  assert.ok(body.includes('timeout_secs = 300'));
-  // Why the batch is large, in the config where the operator will change it.
+  assert.ok(body.includes('key_prefix: "service={{ svc }}/day=%F/"'));
+  assert.ok(body.includes('codec: json'));
+  assert.ok(body.includes('method: newline_delimited'));
+  // Why object count matters, in the config where the operator will change it.
   assert.ok(body.includes('OBJECT COUNT IS THE QUERY-COST MULTIPLIER'));
 });
 
@@ -381,12 +384,12 @@ test('the copy header lists every substitution, not just the endpoints', () => {
   assert.ok(ddl.includes("'<access-key>', '<secret-key>'"));
 });
 
-test('the Parquet DDL comment stands on its own in a Vector-only render', () => {
+test('a Vector-only render reads the same cold table and claims no Parquet', () => {
   const text = renderClickhouseOffloadSection(CH, 'vector');
-  // "The JSON variant above" referred to a block that a Vector-only render
-  // never emits.
   assert.ok(!text.includes('The JSON variant above'));
-  assert.match(text, /This table reads what the Vector sink writes, and\n-- that sink has never been run/);
+  assert.ok(text.includes("/tenx-cold-logs/**.json', '<access-key>', '<secret-key>', 'JSONEachRow')"));
+  assert.ok(!text.includes("'Parquet')"));
+  assert.ok(text.includes('VECTOR WRITES JSON, NOT PARQUET'));
 });
 
 test('the compute claim is attributed to the measurement that made it', () => {

@@ -1465,16 +1465,34 @@ export function clickhouseOffloadHonesty(): string[] {
       'harness sample, which held 14 objects: time only read 37,536 rows through 14 S3 GET in ' +
       '118 ms, while the same query with a service predicate read 25,793 rows through 6 S3 GET ' +
       'in 77 ms, and adding a day predicate held at 6 GET and 43 ms. The hot table alone ' +
-      'answered its count in 8 ms with zero requests. That sample carried one day of writes, ' +
-      'so the day predicate had nothing further to prune, and the object path carries the ' +
-      'WRITE time rather than the record time, so pruning across many days is unmeasured.',
+      'answered its count in 8 ms with zero requests.',
+    '- Across thirty days of objects the same shape holds and costs more. Measured on 180 ' +
+      'objects, 30 days of the cold side: a time-only query opened all 180 in 7,449 ms, and ' +
+      'the same query with `day >= today() - 1` opened 12 in 468 ms. A service predicate ' +
+      'alone opened 60, that service\'s objects on every day. A pattern-hash predicate alone ' +
+      'opened all 180, because the hash is a column inside the file and not a path segment. ' +
+      'Every dashboard query that names only a time pays one request per object in the ' +
+      'bucket. The object path carries the WRITE time rather than the record time.',
     '- Count-all dashboards read the counts-per-type table, not the Merge table: count all by ' +
       'service over the counts table read 2,539 rows with zero S3 requests in 6 ms. The ' +
       'counts table is fed twice, by a materialized view on the hot inserts and by an ' +
       'INSERT ... SELECT over the cold objects, because offloaded rows never pass through an ' +
       'insert.',
-    '- Alerts are NOT claimed unchanged. No alert was defined and none fired in the run this ' +
-      'recipe is copied from.',
+    '- Alerts are NOT claimed unchanged. HyperDX accepted an alert over the hot table, the ' +
+      'Merge table and the counts table, all 200, and an alert on the hot table stops firing ' +
+      'once the rows it counts are offloaded, which is why the alert an offload keeps must ' +
+      'point at the Merge table or the counts table. Whether HyperDX\'s own evaluation loop ' +
+      'fires is still unmeasured: a replayed capture is older than any interval short enough ' +
+      'to wait for.',
+    '- THE HANDOFF IS NOT DURABLE, so "every line kept" is a claim about the POLICY and not ' +
+      'about the route. Neither hop keeps a queue on disk in this recipe. Measured by a ' +
+      'sequence number inside every line: with the routing collector killed mid-feed and ' +
+      'restarted twenty seconds later, 65,269 of 197,430 input lines were never stored and ' +
+      '16,828 deliveries arrived twice; with the receiver killed instead, 84,762 were never ' +
+      'stored. Separately, the collector\'s sending queue REJECTS a batch that does not fit ' +
+      'and only logs it, so a feed reads as finished while lines are missing unless ' +
+      '`sending_queue.block_on_overflow: true` is set on the exporter into the receiver. Set ' +
+      'it, and put a persistent queue behind both hops, before quoting anything about loss.',
     '- THIS RECIPE REQUIRES ENGINE 1.1.79 OR NEWER. The three OpenTelemetry return-path ' +
       'defects that blocked it are fixed and released in 1.1.79 (pipeline-extensions ' +
       '8ebaf793, engine b9074b9a, engine PR #150). On an older image a record whose message ' +
@@ -1488,6 +1506,15 @@ export function clickhouseOffloadHonesty(): string[] {
       '`routeState` and a `timeUnixNano`, against 18,083 marked of 37,519 on 1.1.74. Hot plus ' +
       'offloaded reconciled to 37,536 with a gap of 0, on 13,010 hot rows and 24,526 ' +
       'offloaded, and 2,495 distinct type hashes came back on the wire against 2,495 stored.',
+    '- A COLLECTOR-ONLY RULE CAN BEAT THIS ON HOT COMPUTE. Measured over the whole 197,430 ' +
+      'line capture on one container: a rule by service and severity, written off one reading ' +
+      'of the census, cost 2.7 insert-plus-merge CPU seconds against 8.1 for the per-type cap ' +
+      'and 10.1 for no offload at all, while keeping MORE rows. The receiver groups a ' +
+      'multi-line event into one record, so the per-type arm\'s rows are fewer and bigger, and ' +
+      'ClickStack indexes the text of every row. What the collector-only rule cannot do is ' +
+      'answer a question by message type: no row it writes carries a type hash, so the ' +
+      'question cannot be put at all. Sell the question, not the CPU second. Merge CPU is also ' +
+      'unstable run to run; it depends on which parts the scheduler merged inside the window.',
     '- The route arrives more often than the type does. In that rerun all 37,536 records ' +
       'carried `routeState`, 37,486 carried the type hash and 37,469 carried the type text, ' +
       'so the router moves every record while the counts-per-type table can only count what ' +
@@ -1673,87 +1700,120 @@ service:
   };
 }
 
-/** The Vector variant. Written from Vector's documented sink options, unexercised. */
+/** The Vector variant, copied from the harness run that exercised it. */
 function clickhouseVectorCollector(p: ClickhouseOffloadParams): ClickhouseOffloadRecipeParts['collector'] {
   const n = chNames(p);
+  const endpoint = p.s3Endpoint ?? `https://s3.${p.region}.amazonaws.com`;
   return {
     variant: 'vector',
-    exercised: false,
-    language: 'toml',
-    body: `# NOT EXERCISED. The OpenTelemetry Collector variant is a copy of a config that
-# ran end to end; this one is written from Vector's documented \`aws_s3\` sink
-# options and has not been run against ClickHouse.
+    exercised: true,
+    language: 'yaml',
+    body: `# COPIED from the harness config that ran end to end
+# (benchmarks/clickstack-e2e-gaps/gap2_vector_parquet.sh). Vector sits BEHIND
+# the routing collector: the collector still makes the split and forwards the
+# marked stream here over OTLP, and Vector writes the objects.
 #
-# ASSUMED: \`encoding.codec = "parquet"\` on \`aws_s3\`. Vector documents a parquet
-# codec, and the build in the estate is what decides whether it is there, so
-# confirm it before rolling this out.
-# ASSUMED: the field names below. The 10x return stream carries \`routeState\`,
-# \`${n.hashField}\` and \`message_pattern\` spliced into the event; which field holds
-# the service and the body depends on the input, so the remap normalises them.
+# VECTOR WRITES JSON, NOT PARQUET. Vector 0.50.0 refuses
+# \`encoding.codec: parquet\` and names the codecs it does take: avro, cef, csv,
+# gelf, json, logfmt, native, native_json, protobuf, raw_message, text. There is
+# no \`ndjson\` codec either, so newline delimited JSON is the \`json\` codec with
+# newline framing, which is what the cold table below reads.
+#
+# What differs from the file that ran: the bucket, the region and the S3
+# endpoint carry this deployment's values (the run wrote to MinIO at
+# \`http://cse-minio:9000\` with its root credentials, which is why the endpoint
+# and the auth block are here at all; on AWS S3 both come out and the sink takes
+# the instance's own credentials).
 
-# 1) Normalise the names the object path and the Parquet columns key on.
-[transforms.tenx_shape]
-type = "remap"
-inputs = [ "tenx_return" ]        # the 10x receiver's return stream
-source = '''
-.ServiceName  = to_string(.ServiceName) ?? to_string(."service.name") ?? to_string(.k8s_container) ?? "unknown"
-.Body         = to_string(.message) ?? to_string(.body) ?? ""
-.SeverityText = to_string(.severity_text) ?? to_string(.level) ?? ""
-.Timestamp    = to_timestamp(.timestamp) ?? now()
-'''
+data_dir: /vector-data
 
-# 2) Route on the stamped action. The marker is a STRING, never a boolean.
-#    Everything the route does not match falls to _unmatched and keeps going to
-#    ClickHouse the way it already does.
-[transforms.tenx_route]
-type = "route"
-inputs = [ "tenx_shape" ]
-route.offload = '.routeState == "offload"'
+sources:
+  otlp:
+    type: opentelemetry
+    # End to end acknowledgements hold the gRPC response until the S3 batch
+    # flushes, and the collector's exporter then holds the WHOLE route behind
+    # it, hot side included. The first run of the harness script moved 1,425
+    # records of 157,083 for that reason.
+    acknowledgements:
+      enabled: false
+    grpc:
+      address: 0.0.0.0:4319
+    http:
+      address: 0.0.0.0:4320
+      keepalive:
+        max_connection_age_secs: 600
 
-# 3) The offload write. Service and day in the key, Parquet in the object.
-[sinks.tenx_cold]
-type = "aws_s3"
-inputs = [ "tenx_route.offload" ]
-bucket = "${p.bucket}"
-region = "${p.region}"
-key_prefix = "service={{ ServiceName }}/day=%Y-%m-%d/"
-filename_extension = "parquet"
-compression = "none"              # Parquet carries its own compression
+transforms:
+  # Route on the stamped action. The marker is a STRING, never a boolean.
+  split:
+    type: route
+    inputs: [ otlp.logs ]
+    route:
+      cold: '.attributes.routeState == "offload"'
 
-[sinks.tenx_cold.encoding]
-codec = "parquet"
+  # The shape the cold table reads: the body and a flat attribute map, with the
+  # service, the severity and the record time folded into it, because the object
+  # carries no resource and no timestamp of its own.
+  shape:
+    type: remap
+    inputs: [ split.cold ]
+    source: |
+      svc = string!(.resources."service.name" || .attributes.k8s_container || "unknown")
+      stamp = now()
+      if is_timestamp(.timestamp) { stamp = timestamp!(.timestamp) }
+      ts = to_unix_timestamp(stamp)
+      attrs = object!(.attributes || {})
+      attrs.ServiceName = svc
+      attrs.SeverityText = string(.severity_text) ?? ""
+      attrs.TimestampSec = to_string(ts)
+      attrs.TimestampNano = to_string(ts * 1000000000)
+      body = string(.message) ?? string(.body) ?? ""
+      . = { "body": body, "logAttributes": attrs, "svc": svc }
 
-# OBJECT COUNT IS THE QUERY-COST MULTIPLIER. Every cold query opens each object
-# its predicates do not prune, and ClickHouse pays one request per object, so
-# these two numbers decide what a cold read costs far more than the codec does.
-# Large and slow is right here: a query reads one big object faster than a
-# hundred small ones holding the same rows.
-[sinks.tenx_cold.batch]
-max_bytes    = 268435456          # 256 MiB per object
-timeout_secs = 300                # or five minutes, whichever comes first
-
-# 4) The rows that stay. The estate's existing ClickHouse or OTLP sink, with
-#    its inputs pointed at the unmatched route.
-# [sinks.tenx_hot]
-# inputs = [ "tenx_route._unmatched" ]
-# ... unchanged`,
+sinks:
+  cold:
+    type: aws_s3
+    inputs: [ shape ]
+    bucket: ${p.bucket}
+    region: ${p.region}
+    # MinIO only. Delete both on AWS S3.
+    endpoint: ${endpoint}
+    auth:
+      access_key_id: <access-key>
+      secret_access_key: <secret-key>
+    key_prefix: "service={{ svc }}/day=%F/"
+    filename_extension: json
+    compression: none
+    encoding:
+      codec: json
+      except_fields: [ svc ]
+    framing:
+      method: newline_delimited
+    # OBJECT COUNT IS THE QUERY-COST MULTIPLIER. Every cold query opens each
+    # object its predicates do not prune, and ClickHouse pays one request per
+    # object, so these two numbers decide what a cold read costs far more than
+    # the codec does. The harness run wrote 50 objects for the whole cold side
+    # with the values below; larger and slower is right here.
+    batch:
+      max_bytes: 33554432
+      timeout_secs: 5`,
     note:
-      "Written from Vector's own documentation, not from a run. The shape mirrors the " +
-      'OpenTelemetry Collector variant: one route on the stamped action, service and day ' +
-      'in the object key, the identity columns inside the file. Two differences matter. ' +
-      'Parquet is columnar, so ClickHouse prunes row groups inside an object as well as ' +
-      'pruning objects by path, which the JSON path cannot do. And Vector writes the ' +
-      'event fields directly, so the cold table below reads named columns rather than a ' +
-      'body-and-attributes map. Nothing here is measured; the query numbers in the ' +
-      'honesty block were taken on the JSON path.',
+      'Ran end to end in benchmarks/clickstack-e2e-gaps (gap 2, 2026-09-15). Vector ' +
+      'took the returned stream, made the same routing decision on `routeState`, and ' +
+      'wrote 50 JSON objects holding 113,732 rows, which the SAME S3 table and the ' +
+      'SAME Merge table below read with no change to either, answering the same ' +
+      'queries with the same numbers. What the run also settled is that Vector will ' +
+      'not write Parquet: 0.50.0 rejects the parquet codec outright. A Parquet copy ' +
+      'of exactly those rows, written by ClickHouse rather than by Vector, held them ' +
+      'in 3 objects and 1.3 MiB against 50 objects and 165 MiB of JSON and read fewer ' +
+      'rows on a text search, so the codec is worth having wherever something in the ' +
+      'path can write it. Nothing in this path can today.',
   };
 }
 
-/** The ClickHouse side. SQL the operator runs, keyed to the chosen collector. */
-function clickhouseDdl(
-  p: ClickhouseOffloadParams,
-  collector: ClickhouseCollector,
-): ClickhouseRecipePart {
+/** The ClickHouse side. SQL the operator runs. One shape reads what either
+ * collector writes, because both write body plus a flat attribute map. */
+function clickhouseDdl(p: ClickhouseOffloadParams): ClickhouseRecipePart {
   const n = chNames(p);
   const key = `'<access-key>', '<secret-key>'`;
   const coldJson = `-- COPIED from the harness (benchmarks/clickstack-e2e/conf/schema_cold.sql).
@@ -1766,6 +1826,9 @@ function clickhouseDdl(
 -- {"body": ..., "logAttributes": {...}} per record, as one JSON array per
 -- object. \`service\` and \`day\` are not in the file at all; they come from the
 -- object path, which is why use_hive_partitioning is on.
+--
+-- The Vector variant's remap writes the same two keys, one record per line, and
+-- this table read Vector's objects unchanged in the gap 2 run.
 DROP TABLE IF EXISTS ${n.db}.${n.coldTable};
 CREATE TABLE ${n.db}.${n.coldTable}
 (
@@ -1786,45 +1849,6 @@ SELECT toDateTime64(toUInt64OrZero(logAttributes['TimestampSec']), 9) AS Timesta
        CAST(logAttributes['SeverityText'] AS LowCardinality(String))  AS SeverityText,
        logAttributes                                                  AS LogAttributes,
        day                                                            AS day
-FROM ${n.db}.${n.coldTable};`;
-
-  const coldParquet = `-- ASSUMED, NOT MEASURED. This table reads what the Vector sink writes, and
--- that sink has never been run. The harness ran the OpenTelemetry Collector
--- variant of this recipe, which writes JSON and is read by a different cold
--- table; render the section with that collector to get it.
---
--- Parquet carries its own column names, so the cold table names the columns the
--- Vector remap wrote. \`service\` and \`day\` come from the object path, which is
--- why use_hive_partitioning is on.
-DROP TABLE IF EXISTS ${n.db}.${n.coldTable};
-CREATE TABLE ${n.db}.${n.coldTable}
-(
-  Timestamp       DateTime64(9),
-  ServiceName     LowCardinality(String),
-  Body            String,
-  SeverityText    LowCardinality(String),
-  ${n.hashField}  String,
-  message_pattern String,
-  routeState      String,
-  service         LowCardinality(String),
-  day             Date
-) ENGINE = S3('${n.s3Endpoint}/${p.bucket}/**.parquet', ${key}, 'Parquet')
-SETTINGS use_hive_partitioning = 1;
-
--- Same reason as the JSON path: the S3 engine rejects ALIAS columns, so the
--- shaping is a view and the Merge table reads the view. The map rebuilds the
--- LogAttributes shape the hot table has, so one Merge table covers both sides
--- and the counts query reads the same expression on hot and cold.
-DROP VIEW IF EXISTS ${n.db}.${n.coldView};
-CREATE VIEW ${n.db}.${n.coldView} AS
-SELECT Timestamp,
-       CAST(service AS LowCardinality(String))                       AS ServiceName,
-       Body,
-       CAST(SeverityText AS LowCardinality(String))                  AS SeverityText,
-       CAST(map('${n.hashField}', ${n.hashField},
-                'message_pattern', message_pattern,
-                'routeState', routeState) AS Map(String, String))    AS LogAttributes,
-       day                                                           AS day
 FROM ${n.db}.${n.coldTable};`;
 
   const body = `-- 1) The counts-per-type table and its materialized view. RUN THIS FIRST,
@@ -1859,8 +1883,10 @@ GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;
 --    as one.
 ALTER TABLE ${n.db}.${n.hot} ADD COLUMN IF NOT EXISTS day Date MATERIALIZED toDate(Timestamp);
 
--- 3) The offloaded objects, read in place.
-${collector === 'vector' ? coldParquet : coldJson}
+-- 3) The offloaded objects, read in place. The same table reads what either
+--    collector writes: the OpenTelemetry Collector's JSON encoding extension
+--    and Vector's remap both produce {"body": ..., "logAttributes": {...}}.
+${coldJson}
 
 -- 4) Hot and cold as one table. \`_table\` names the side a row came from.
 DROP TABLE IF EXISTS ${n.db}.${n.mergeTable};
@@ -1955,7 +1981,7 @@ export function clickhouseOffloadRecipe(
       collector === 'vector'
         ? clickhouseVectorCollector(params)
         : clickhouseOtelCollector(params),
-    ddl: clickhouseDdl(params, collector),
+    ddl: clickhouseDdl(params),
     hyperdx: clickhouseHyperdx(params),
     honesty: clickhouseOffloadHonesty(),
   };
@@ -2003,8 +2029,9 @@ export function renderClickhouseOffloadSection(
 
   if (variants.length > 1) {
     lines.push(
-      'Two variants, one choice. The OpenTelemetry Collector variant is the one that ran ' +
-        'end to end. The Vector variant writes Parquet and has not been run.',
+      'Two variants, one choice. Both have been run: the OpenTelemetry Collector variant ' +
+        'end to end, and the Vector variant over the returned stream behind that same ' +
+        'collector. Both write JSON, and one cold table reads either.',
       '',
     );
   }
@@ -2012,7 +2039,7 @@ export function renderClickhouseOffloadSection(
   for (const v of variants) {
     const r = clickhouseOffloadRecipe(params, v).collector;
     lines.push(
-      `_${v === 'vector' ? 'Vector, Parquet objects (NOT EXERCISED)' : 'OpenTelemetry Collector, JSON objects (ran end to end)'}_`,
+      `_${v === 'vector' ? 'Vector, JSON objects (ran behind the routing collector)' : 'OpenTelemetry Collector, JSON objects (ran end to end)'}_`,
       '',
       '```' + r.language,
       r.body,
@@ -2023,18 +2050,13 @@ export function renderClickhouseOffloadSection(
     );
   }
 
-  const ddlVariant = variants[0];
-  const ddl = clickhouseDdl(params, ddlVariant);
+  const ddl = clickhouseDdl(params);
   lines.push(
     '### 2. The ClickHouse side',
     '',
-    variants.length > 1
-      ? 'The DDL below reads the JSON objects the OpenTelemetry Collector writes. On the ' +
-          'Vector path the cold table reads named Parquet columns instead; render the ' +
-          'section with that collector to get it.'
-      : ddlVariant === 'vector'
-        ? 'Reads the Parquet objects the Vector sink writes.'
-        : 'Reads the JSON objects the OpenTelemetry Collector writes.',
+    'Reads the JSON objects either collector writes. The OpenTelemetry Collector\'s ' +
+      'JSON encoding extension and Vector\'s remap both produce a body and a flat ' +
+      'attribute map, so the same table, view and Merge table cover both paths.',
     '',
     '```sql',
     ddl.body,
