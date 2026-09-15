@@ -36,13 +36,13 @@ import {
 import { clickhouseOffloadReadiness } from '../src/tools/doctor.js';
 
 const CH = { bucket: 'tenx-cold-logs', region: 'us-east-1' };
-const VARIANTS: ClickhouseCollector[] = ['otel-collector', 'vector'];
+const VARIANTS: ClickhouseCollector[] = ['otel-collector', 'vector', 'vector-parquet'];
 
 // ---------------------------------------------------------------------------
 // The recipe renders, both variants
 // ---------------------------------------------------------------------------
 
-test('the recipe renders for both collector variants, each with its own DDL', () => {
+test('the recipe renders for all three collector variants, each with its own DDL', () => {
   for (const v of VARIANTS) {
     const r = clickhouseOffloadRecipe(CH, v);
     assert.equal(r.collector.variant, v);
@@ -52,25 +52,42 @@ test('the recipe renders for both collector variants, each with its own DDL', ()
     assert.ok(r.hyperdx.body.includes('/sources'), `${v}: no HyperDX source call`);
     assert.ok(r.honesty.length > 0, `${v}: honesty block empty`);
   }
-  // Both collectors write body plus a flat attribute map as JSON, so one cold
-  // table reads either. Vector can write Parquet on aws_s3 under
-  // batch_encoding.codec (v0.55.0, official builds v0.56.0), but no run of ours
-  // has exercised it, so no Parquet variant is rendered and there is no second
-  // object format to read.
+  // Both JSON collectors write body plus a flat attribute map, so one cold
+  // table reads either. The Parquet variant, exercised on Vector 0.58.0 in gap
+  // 2b, writes named columns instead and takes a cold table of its own.
   assert.match(clickhouseOffloadRecipe(CH, 'otel-collector').ddl.body, /'JSONEachRow'/);
   assert.match(clickhouseOffloadRecipe(CH, 'vector').ddl.body, /'JSONEachRow'/);
   assert.ok(!clickhouseOffloadRecipe(CH, 'vector').ddl.body.includes("'Parquet'"));
+  const pqDdl = clickhouseOffloadRecipe(CH, 'vector-parquet').ddl.body;
+  assert.match(pqDdl, /'Parquet'\)/);
+  assert.match(pqDdl, /\*\*\.parquet/);
+  assert.ok(!pqDdl.includes('logAttributes  Map(String, String)'));
 });
 
-test('both variants ran, and the Vector body says what it wrote and what it did not measure', () => {
+test('all three variants ran, and each body says which arm it is', () => {
   assert.equal(clickhouseOffloadRecipe(CH, 'otel-collector').collector.exercised, true);
   const vector = clickhouseOffloadRecipe(CH, 'vector').collector;
   assert.equal(vector.exercised, true);
   assert.ok(vector.body.includes('COPIED from the harness config that ran end to end'));
-  // The arm that ran, and the retreat on the arm that did not.
   assert.ok(vector.body.includes('VECTOR WRITES JSON HERE, AND JSON IS THE ARM THAT RAN'));
-  assert.ok(vector.body.includes('run measured nothing about Parquet in Vector'));
+  // The JSON arm carries no parquet codec of its own; it points at the variant.
   assert.ok(!/^\s*codec: parquet\s*$/m.test(vector.body));
+  assert.ok(vector.body.includes('`vector-parquet` variant'));
+
+  // The Parquet arm, exercised on 0.58.0, gap 2b, 2026-09-15.
+  const pq = clickhouseOffloadRecipe(CH, 'vector-parquet').collector;
+  assert.equal(pq.variant, 'vector-parquet');
+  assert.equal(pq.exercised, true);
+  assert.ok(/^\s*codec: parquet\s*$/m.test(pq.body));
+  // encoding stays required beside batch_encoding, or the binary refuses the file.
+  assert.ok(pq.body.includes('codec: json'));
+  assert.ok(pq.body.includes('schema_mode: auto_infer'));
+  assert.ok(pq.body.includes('algorithm: snappy'));
+  assert.ok(pq.body.includes('compression: none'));
+  // The flattening note, beside the byte figure.
+  assert.ok(pq.body.includes('THE FLATTENING, and it is not optional'));
+  assert.ok(pq.note.includes('68 Parquet objects holding 116,507 rows at 3.2MiB'));
+  assert.ok(pq.note.includes('WHAT PARQUET BUYS IS BYTES READ, NOT PRUNING'));
 });
 
 test('the collector routes on the route name as a STRING, in the syntax of each tool', () => {
@@ -105,6 +122,8 @@ test('the OTel variant carries the three hops the encoding makes necessary', () 
 
 test('the Vector sink keys the object path on service and day, in the codec it has', () => {
   const body = clickhouseOffloadRecipe(CH, 'vector').collector.body;
+  assert.ok(clickhouseOffloadRecipe(CH, 'vector-parquet').collector.body
+    .includes('key_prefix: "service={{ svc }}/day=%F/"'));
   assert.ok(body.includes('key_prefix: "service={{ svc }}/day=%F/"'));
   assert.ok(body.includes('codec: json'));
   assert.ok(body.includes('method: newline_delimited'));
@@ -160,6 +179,16 @@ test('the honesty block is present in every render and states what it must', () 
     assert.match(text, /ClickHouse issue 116888/);
     assert.match(text, /s3_list_object_keys_size, default 1000/);
     assert.match(text, /remote_read_min_bytes_for_seek, default 4194304/);
+    // wave two, republished from the close run
+    assert.match(text, /PATH PREDICATES PRUNE\. PARQUET STATISTICS DID NOT/);
+    assert.match(text, /ParquetPrunedRowGroups, ParquetPrunedPages and ParquetReadPages are ZERO/);
+    assert.match(text, /THE READ ARMS IT, NOT THE CREATE/);
+    assert.match(text, /DETACH TABLE\s+then ATTACH TABLE/);
+    assert.match(text, /charged 332 S3PutObject/);
+    assert.match(text, /replayed with timestamps seven\s+days back, behind the boundary, charged 807/);
+    assert.match(text, /the offload route wrote 68 objects on the cold side/);
+    assert.match(text, /never stored 36,372 with the shipped queue and 44,555/);
+    assert.match(text, /BOTH reported zero\s+duplicate deliveries/);
     assert.match(text, /TTL MOVES ARE THE RIGHT TOOL FOR STORAGE/);
     assert.match(text, /ClickHouse issue 85636/);
     assert.match(text, /NO PER-TYPE CPU FIGURE IS A MEASUREMENT/);
@@ -405,6 +434,23 @@ test('a Vector-only render reads the same cold table and renders no Parquet vari
   assert.ok(!text.includes("'Parquet')"));
   assert.ok(text.includes('VECTOR WRITES JSON HERE, AND JSON IS THE ARM THAT RAN'));
   assert.ok(!text.includes('Vector will not write Parquet'));
+});
+
+test('a Parquet-only render carries the Parquet cold table and no JSON one', () => {
+  const text = renderClickhouseOffloadSection(CH, 'vector-parquet');
+  assert.ok(text.includes("/tenx-cold-logs/**.parquet', '<access-key>', '<secret-key>', 'Parquet')"));
+  assert.ok(!text.includes("'JSONEachRow')\nSETTINGS use_hive_partitioning"));
+  assert.ok(!text.includes('### 2b.'));
+  assert.ok(text.includes('THE FLATTENING, and it is not optional'));
+});
+
+test('the full render shows three variants and the Parquet cold table as 2b', () => {
+  const text = renderClickhouseOffloadSection(CH);
+  assert.ok(text.includes('Three variants, one choice'));
+  assert.ok(text.includes('_Vector 0.58.0, Parquet objects (ran behind the routing collector)_'));
+  assert.ok(text.includes('### 2b. The cold table, if the Parquet variant is chosen'));
+  // the JSON cold table is still the default one in section 2
+  assert.ok(text.indexOf("'JSONEachRow')") < text.indexOf('### 2b.'));
 });
 
 test('the write-path claim is attributed to the measurement that made it', () => {

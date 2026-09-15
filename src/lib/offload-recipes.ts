@@ -1362,10 +1362,12 @@ The documented POST does work, but only in a shape the docs never show:
  * variant is a copy of the config that ran end to end on ClickStack 2.38.0 with
  * engine 1.1.79, the released image
  * `ghcr.io/log-10x/edge-10x@sha256:14357d8d570cb36ba6ca254802a1b8eedb11d8acf6916a936893f8e3babb41f4`.
- * The Vector variant is written from Vector's documented sink options and has
- * never been run.
+ * The Vector variants are copied from the runs that exercised them: the JSON
+ * arm in gap 2 and the Parquet arm in gap 2b on `timberio/vector:0.58.0-debian`,
+ * results at
+ * benchmarks/clickstack-e2e-gaps/results/clickstack-e2e-close-2026-09-15.md.
  */
-export type ClickhouseCollector = 'otel-collector' | 'vector';
+export type ClickhouseCollector = 'otel-collector' | 'vector' | 'vector-parquet';
 
 export interface ClickhouseOffloadParams {
   /** Bucket the collector writes the offloaded rows into. */
@@ -1487,8 +1489,14 @@ export function clickhouseOffloadHonesty(): string[] {
       'which is what JSONEachRow does. A columnar object large enough to seek past four ' +
       'megabytes at a time (remote_read_min_bytes_for_seek, default 4194304) pays one GET per ' +
       'skip on top. The Vector batch below is set at 33554432 bytes, eight times that ' +
-      'threshold, so the one-GET arithmetic holds for the JSON objects it writes and stops ' +
-      'holding the moment anything columnar is written at that size.',
+      'threshold, and the run never reached it: timeout_secs 5 flushed first, so the JSON ' +
+      'objects averaged about 2.5 MiB and the Parquet objects about 48 KiB, every one of ' +
+      'them under the seek threshold. S3GetObject then came back exactly equal to the ' +
+      'objects the query did not exclude, 68 on a full scan and 24 with service and day, in ' +
+      'BOTH arms, Parquet included. Keep the objects under four megabytes or expect more ' +
+      'than one GET per object: a batch that does fill 32 MiB sits on the other side of ' +
+      'that threshold, and the one-GET line would need measuring again rather than ' +
+      'assuming.',
     '- A query filtered only on time opens EVERY cold object in the bucket. Measured on the ' +
       'harness sample, which held 14 objects: time only read 37,536 rows through 14 S3 GET in ' +
       '118 ms, while the same query with a service predicate read 25,793 rows through 6 S3 GET ' +
@@ -1505,6 +1513,17 @@ export function clickhouseOffloadHonesty(): string[] {
       'internal/upload/writer.go, clock.Now). On a steady feed the two agree. After a ' +
       'backfill or a replay they do not, so a day predicate is a cost control and never a ' +
       'substitute for the time filter.',
+    '- PATH PREDICATES PRUNE. PARQUET STATISTICS DID NOT. Measured on 2026-09-15 (gap 2b, ' +
+      'Vector 0.58.0, 68 objects per arm): system.query_log was read per query, and ' +
+      'ParquetPrunedRowGroups, ParquetPrunedPages and ParquetReadPages are ZERO on every ' +
+      'query on this capture, while ParquetReadRowGroups is 68 on the three full scans, ' +
+      'one row group per object and all of them read. What Parquet bought is BYTES: the ' +
+      'time-only query read 3,594,401 bytes against the JSON arm\'s 177,418,092 and ' +
+      'answered in 137 ms against 951 ms, because only the columns the query names are ' +
+      'read. Both arms returned 157,151 rows and opened the same 68 objects. Service and ' +
+      'day took both to 24 objects and 106,917 rows read, 75 ms against 628 ms. Do not ' +
+      'sell row-group pruning on this layout: one object holds one row group, so there is ' +
+      'nothing inside an object to skip.',
     '- Count-all dashboards read the counts-per-type table, not the Merge table: count all by ' +
       'service over the counts table read 2,539 rows with zero S3 requests in 6 ms. The ' +
       'counts table is fed twice, by a materialized view on the hot inserts and by an ' +
@@ -1520,10 +1539,20 @@ export function clickhouseOffloadHonesty(): string[] {
       'enough to wait for.',
     '- THE HANDOFF IS NOT DURABLE, so "every line kept" is a claim about the POLICY and not ' +
       'about the route. Neither hop keeps a queue on disk in this recipe. Measured by a ' +
-      'sequence number inside every line: with the routing collector killed mid-feed and ' +
-      'restarted twenty seconds later, 65,269 of 197,430 input lines were never stored and ' +
-      '16,828 deliveries arrived twice; with the receiver killed instead, 84,762 were never ' +
-      'stored. Separately, the collector\'s sending queue REJECTS a batch that does not fit ' +
+      'sequence number inside every line, the routing collector killed mid-feed and ' +
+      'restarted twenty seconds later. The first pass (gap 4, 2026-09-15) never stored ' +
+      '65,269 of 197,430 input lines and saw 16,828 deliveries arrive twice; with the ' +
+      'receiver killed instead, 84,762 were never stored. Two arms rerun the same evening ' +
+      'never stored 36,372 with the shipped queue and 44,555 with the configuration the ' +
+      'collector\'s own maintainers prescribe (filelog retry_on_failure with ' +
+      'max_elapsed_time 0, no batch processor, no sending queue), and BOTH reported zero ' +
+      'duplicate deliveries. The loss reproduces and the duplication does not, because the ' +
+      'kill lands at a different point relative to the file receiver\'s checkpoint flush ' +
+      'each time, so quote the loss and treat any duplicate count as unrepeated. The ' +
+      'prescription loses MORE, not less, because the loss sits on the far side of the ' +
+      'kill in records that had already left the file receiver, and it costs objects rather ' +
+      'than throughput: 1,180 objects against 65 for a comparable number of rows, at 141 ' +
+      'seconds of feed against 150. Separately, the collector\'s sending queue REJECTS a batch that does not fit ' +
       'and only logs it, so a feed reads as finished while lines are missing unless ' +
       '`sending_queue.block_on_overflow: true` is set on the exporter into the receiver. Set ' +
       'it, and put a persistent queue behind both hops, before quoting anything about loss.',
@@ -1534,7 +1563,17 @@ export function clickhouseOffloadHonesty(): string[] {
       'file defaults, and every path predicate returns ZERO ROWS, with no error, for the ' +
       'lifetime of the table. ClickHouse issue 116888, open, filed 2026-08-28 by a ClickHouse ' +
       'member. The DDL below carries the check as its own numbered step; do not skip it and ' +
-      'do not reorder the steps.',
+      'do not reorder the steps. MEASURED on 2026-09-15 (gap 7, ClickHouse 26.5.7.64, four ' +
+      'tables over one DDL, two objects of 20,000 rows each), and the trigger is narrower ' +
+      'than the issue summary reads: THE READ ARMS IT, NOT THE CREATE. A table created ' +
+      'before any object existed and left unread until after answered 20,000 rows on a ' +
+      'service predicate and 40,000 on a day predicate, the same as a table created after ' +
+      'the first object. The same table created AND read once while the prefix was still ' +
+      'empty answered 0 on both, because the S3 engine resolves its listing during SELECT. ' +
+      'The failure is silent where it matters: count() with no predicate answered 40,000 on ' +
+      'the broken table, so the one query a reader runs to check the setup step says the ' +
+      'table is fine. DETACH TABLE then ATTACH TABLE restored every predicate on the broken ' +
+      'table without dropping it, and is the repair for a table already in that state.',
     '- TTL MOVES ARE THE RIGHT TOOL FOR STORAGE, AND THIS RECIPE DOES NOT COMPETE WITH THEM. ' +
       'A `TTL Timestamp + INTERVAL <n> DAY TO VOLUME \'cold\'` rule leaves the parts as ' +
       'MergeTree parts, so the primary index and the eight skip indexes still apply, the ' +
@@ -1546,8 +1585,22 @@ export function clickhouseOffloadHonesty(): string[] {
       '`prefer_not_to_merge` on a cold volume, the standard way to keep merges off the ' +
       'bucket, stops TTL deletes from running (ClickHouse issue 85636, open, confirmed ' +
       'independently across 25.1 to 25.8), and Mohamed Aziz of Luciq published on 2026-08-10 ' +
-      'what merges on object storage cost when they do run there. No figure of ours is ' +
-      'attached to this comparison, because no TTL arm has been run.',
+      'what merges on object storage cost when they do run there. MEASURED on 2026-09-15 ' +
+      '(gap 8), ClickStack\'s own otel_logs reissued under a hot_cold policy with a ' +
+      'MinIO-backed s3 disk and `Timestamp + INTERVAL 60 SECOND TO VOLUME \'cold\'`, the ' +
+      'whole 197,430 line capture fed with nothing offloaded, 157,096 rows: the insert cost ' +
+      '1.16 CPU seconds, and the merge and move that followed cost 5.40 CPU seconds and ' +
+      'charged 332 S3PutObject, 332 of them DiskS3PutObject, leaving one active part of ' +
+      '10,535,999 bytes on the cold volume. The same rows replayed with timestamps seven ' +
+      'days back, behind the boundary, charged 807 and left two parts. On the same capture ' +
+      'the offload route wrote 68 objects on the cold side. Two things belong beside those ' +
+      'figures. The bucket\'s own object count, 3,837 and then 4,318, is ClickHouse\'s s3 ' +
+      'disk layout with intermediate merge outputs still present rather than what the move ' +
+      'charged; 332 and 807 are what it charged. And the capture spans seven seconds as ' +
+      'inserted, so the table held one partition and moved as one: the part of the recipe ' +
+      'that does the work, insertion landing in a new partition while older partitions move ' +
+      'after their merges settle, is not exercised by this arm. What the arm measures is ' +
+      'what a move costs once it fires.',
     '- THIS RECIPE REQUIRES ENGINE 1.1.79 OR NEWER. The three OpenTelemetry return-path ' +
       'defects that blocked it are fixed and released in 1.1.79 (pipeline-extensions ' +
       '8ebaf793, engine b9074b9a, engine PR #150). On an older image a record whose message ' +
@@ -1776,11 +1829,11 @@ function clickhouseVectorCollector(p: ClickhouseOffloadParams): ClickhouseOffloa
 #
 # Vector ALSO writes Parquet on the \`aws_s3\` sink, under
 # \`batch_encoding.codec: parquet\`, added in v0.55.0 (2026-04-22) and available
-# in official release builds from v0.56.0 (2026-06-03). That option is not
-# rendered here: the run behind this recipe pinned Vector 0.50.0, which predates
-# it, and probed \`encoding.codec\`, which is not where the option lives, so the
-# run measured nothing about Parquet in Vector. A Parquet variant is rendered
-# once a run exists, and not before.
+# in official release builds from v0.56.0 (2026-06-03). That option is now the
+# \`vector-parquet\` variant, run on \`timberio/vector:0.58.0-debian\` on
+# 2026-09-15: off the same stream, this JSON arm wrote 169MiB and the Parquet
+# arm wrote 3.2MiB, both 68 objects and both 116,507 rows. Pick that variant for
+# the bytes a cold read pays; pick this one to keep the attribute map whole.
 #
 # What differs from the file that ran: the bucket, the region and the S3
 # endpoint carry this deployment's values (the run wrote to MinIO at
@@ -1865,23 +1918,173 @@ sinks:
       'took the returned stream, made the same routing decision on `routeState`, and ' +
       'wrote 50 JSON objects holding 113,732 rows, which the SAME S3 table and the ' +
       'SAME Merge table below read with no change to either, answering the same ' +
-      'queries with the same numbers. What the run did NOT settle is Parquet. Vector ' +
-      'writes Parquet on the `aws_s3` sink under `batch_encoding.codec: parquet`, added ' +
-      'in v0.55.0 and available in official builds from v0.56.0; the run pinned 0.50.0 ' +
-      'and probed `encoding.codec`, which is not where the option lives, so it measured ' +
-      'nothing about Parquet in Vector, and no Parquet variant is rendered until a run ' +
-      'exists. The OpenTelemetry collector\'s S3 exporter has no Parquet marshaler at ' +
-      'all, and the request for one (contrib issue 45103) was closed unplanned in May ' +
-      '2026. A Parquet copy of exactly those rows, written by ClickHouse rather than by ' +
-      'a collector, held them in 3 objects and 1.3 MiB against 50 objects and 165 MiB ' +
-      'of JSON.',
+      'queries with the same numbers. Parquet is now settled too, and it is the ' +
+      '`vector-parquet` variant below rather than a caveat here: on `0.58.0-debian`, ' +
+      'gap 2b, 2026-09-15, Vector wrote both containers off one transform and this JSON ' +
+      'arm held 116,507 rows in 68 objects at 169MiB against the Parquet arm\'s 68 ' +
+      'objects at 3.2MiB. The OpenTelemetry collector\'s S3 exporter still has no ' +
+      'Parquet marshaler at all, and the request for one (contrib issue 45103) was ' +
+      'closed unplanned in May 2026, so the Parquet option is Vector\'s alone.',
+  };
+}
+
+/**
+ * The Vector Parquet variant, copied from the run that exercised it
+ * (benchmarks/clickstack-e2e-gaps/gap2b_vector058_parquet.sh, 2026-09-15, on
+ * `timberio/vector:0.58.0-debian`, digest
+ * `sha256:1c1ea358c617ea0b23003d5af87f7a678b30f8f7096437e680380c47fc13d2d9`).
+ */
+function clickhouseVectorParquetCollector(p: ClickhouseOffloadParams): ClickhouseOffloadRecipeParts['collector'] {
+  const n = chNames(p);
+  const endpoint = p.s3Endpoint ?? `https://s3.${p.region}.amazonaws.com`;
+  return {
+    variant: 'vector-parquet',
+    exercised: true,
+    language: 'yaml',
+    body: `# COPIED from the harness config that ran
+# (benchmarks/clickstack-e2e-gaps/gap2b_vector058_parquet.sh). Vector sits
+# BEHIND the routing collector, exactly as the JSON variant does: the collector
+# makes the split and forwards the marked stream here over OTLP.
+#
+# THE THREE KEYS THAT MAKE PARQUET VALIDATE, and the run put all three to
+# \`vector validate\` on this build. \`encoding.codec: parquet\` is refused, and
+# the binary names the thirteen per-event codecs it does take. \`batch_encoding\`
+# alone is refused for a missing \`encoding\`. \`batch_encoding.codec: parquet\`
+# WITH \`encoding.codec: json\` validates, exit 0. So \`encoding\` stays required
+# and ignored for the batch, \`compression\` at the sink is \`none\` because
+# Parquet compresses per column page, and snappy goes inside the file.
+#
+# Build that ran: vector 0.58.0 (x86_64-unknown-linux-gnu 2bcad9b 2026-08-26).
+# The option landed in v0.55.0 (2026-04-22) and is in the official release
+# binaries from v0.56.0 (2026-06-03), upstream issue 1374.
+#
+# What differs from the file that ran: the bucket, the region and the S3
+# endpoint carry this deployment's values (the run wrote to MinIO at
+# \`http://cse-minio:9000\` with its root credentials, which is why the endpoint
+# and the auth block are here at all; on AWS S3 both come out and the sink takes
+# the instance's own credentials).
+
+data_dir: /vector-data
+
+sources:
+  otlp:
+    type: opentelemetry
+    # End to end acknowledgements hold the gRPC response until the S3 batch
+    # flushes, and the collector's exporter then holds the WHOLE route behind
+    # it, hot side included.
+    acknowledgements:
+      enabled: false
+    grpc:
+      address: 0.0.0.0:4319
+    http:
+      address: 0.0.0.0:4320
+      keepalive:
+        max_connection_age_secs: 600
+
+transforms:
+  # Route on the stamped action. The marker is a STRING, never a boolean.
+  split:
+    type: route
+    inputs: [ otlp.logs ]
+    route:
+      cold: '.attributes.routeState == "offload"'
+
+  shape:
+    type: remap
+    inputs: [ split.cold ]
+    source: |
+      svc = string!(.resources."service.name" || .attributes.k8s_container || "unknown")
+      stamp = now()
+      if is_timestamp(.timestamp) { stamp = timestamp!(.timestamp) }
+      ts = to_unix_timestamp(stamp)
+      attrs = object!(.attributes || {})
+      attrs.ServiceName = svc
+      attrs.SeverityText = string(.severity_text) ?? ""
+      attrs.TimestampSec = to_string(ts)
+      attrs.TimestampNano = to_string(ts * 1000000000)
+      body = string(.message) ?? string(.body) ?? ""
+      . = { "body": body, "logAttributes": attrs, "svc": svc }
+
+  # THE FLATTENING, and it is not optional. A schema inferred from a free
+  # attribute map carries one field per attribute key the batch happened to
+  # see, so the fields the queries name are lifted into columns of their own
+  # here and the cold table names them. Add any further attribute the cold
+  # queries read to BOTH this transform and the table, the pattern text
+  # included: the arm that ran carried the hash and not the text.
+  columns:
+    type: remap
+    inputs: [ shape ]
+    source: |
+      attrs = object!(.logAttributes)
+      . = {
+        "body":          string!(.body),
+        "ServiceName":   string!(.svc),
+        "SeverityText":  string(attrs.SeverityText) ?? "",
+        "TimestampSec":  string(attrs.TimestampSec) ?? "0",
+        "TimestampNano": string(attrs.TimestampNano) ?? "0",
+        "${n.hashField}":     string(attrs.${n.hashField}) ?? "",
+        "svc":           string!(.svc)
+      }
+
+sinks:
+  cold:
+    type: aws_s3
+    inputs: [ columns ]
+    bucket: ${p.bucket}
+    region: ${p.region}
+    # MinIO only. Delete both on AWS S3.
+    endpoint: ${endpoint}
+    auth:
+      access_key_id: <access-key>
+      secret_access_key: <secret-key>
+    key_prefix: "service={{ svc }}/day=%F/"
+    filename_extension: parquet
+    compression: none
+    encoding:
+      codec: json
+      except_fields: [ svc ]
+    batch_encoding:
+      codec: parquet
+      schema_mode: auto_infer
+      compression:
+        algorithm: snappy
+    # OBJECT COUNT IS THE QUERY-COST MULTIPLIER, and object SIZE decides whether
+    # one GET per object still holds. The run never reached max_bytes because
+    # timeout_secs flushed first, so its Parquet objects averaged about 48 KiB,
+    # well under the 4 MiB remote_read_min_bytes_for_seek default at which
+    # ClickHouse starts seeking inside an object rather than reading it end to
+    # end, and S3GetObject came back equal to the object count. Batches that do
+    # fill 32 MiB sit on the other side of that threshold.
+    batch:
+      max_bytes: 33554432
+      timeout_secs: 5`,
+    note:
+      'Ran in benchmarks/clickstack-e2e-gaps (gap 2b, 2026-09-15) beside the JSON arm, ' +
+      'both sinks fed off one transform in one Vector process, from 157,151 records the ' +
+      'receiver returned. Vector wrote 68 Parquet objects holding 116,507 rows at 3.2MiB, ' +
+      'against 68 JSON objects holding the same 116,507 rows at 169MiB, and every query ' +
+      'answered the same number through both. WHAT PARQUET BUYS IS BYTES READ, NOT ' +
+      'PRUNING: the time-only query read 3,594,401 bytes here against 177,418,092 through ' +
+      'JSON and answered in 137 ms against 951 ms, while ParquetPrunedRowGroups, ' +
+      'ParquetPrunedPages and ParquetReadPages read ZERO on every query in ' +
+      'system.query_log and ParquetReadRowGroups read 68, one row group per object, all ' +
+      'of them read. The path predicates are what prune, the same as on the JSON arm: ' +
+      'service and day took both arms to 24 objects, 106,917 rows read, 75 ms here ' +
+      'against 628 ms through JSON. The cold table below differs from the JSON one, ' +
+      'because this arm writes named columns rather than a Map(String, String).',
   };
 }
 
 /** The ClickHouse side. SQL the operator runs. One shape reads what either
  * collector writes, because both write body plus a flat attribute map. */
-function clickhouseDdl(p: ClickhouseOffloadParams): ClickhouseRecipePart {
+function clickhouseDdl(
+  p: ClickhouseOffloadParams,
+  variant: ClickhouseCollector = 'otel-collector',
+): ClickhouseRecipePart {
   const n = chNames(p);
+  const parquet = variant === 'vector-parquet';
+  const glob = parquet ? '**.parquet' : '**.json';
+  const format = parquet ? 'Parquet' : 'JSONEachRow';
   const key = `'<access-key>', '<secret-key>'`;
   const coldJson = `-- COPIED from the harness (benchmarks/clickstack-e2e/conf/schema_cold.sql).
 -- Substituted: the S3 URL and the key pair (the run read
@@ -1916,6 +2119,50 @@ SELECT toDateTime64(toUInt64OrZero(logAttributes['TimestampSec']), 9) AS Timesta
        CAST(logAttributes['SeverityText'] AS LowCardinality(String))  AS SeverityText,
        logAttributes                                                  AS LogAttributes,
        day                                                            AS day
+FROM ${n.db}.${n.coldTable};`;
+
+  const coldParquet = `-- COPIED from the harness
+-- (benchmarks/clickstack-e2e-gaps/gap2b_vector058_parquet.sh, the arm that ran
+-- on Vector 0.58.0 on 2026-09-15). Substituted: the S3 URL and the key pair
+-- (the run read 'http://cse-minio:9000/coldparquetv/**.parquet' with the MinIO
+-- root credentials), the database, and the table names, because the run held
+-- both arms side by side and called these otel_logs_coldpq and
+-- otel_logs_coldpqv.
+--
+-- THIS TABLE IS NOT THE JSON ONE. The Parquet arm writes named columns, not a
+-- Map(String, String), because a schema inferred from a free attribute map
+-- carries one field per attribute key the batch happened to see. The columns
+-- here are the columns the \`columns\` transform in the Vector config writes, and
+-- the two lists are edited together or the cold rows lose a field. \`service\`
+-- and \`day\` are still not in the file: they come from the object path, which
+-- is why use_hive_partitioning is on.
+DROP TABLE IF EXISTS ${n.db}.${n.coldTable};
+CREATE TABLE ${n.db}.${n.coldTable}
+(
+  body           String,
+  ServiceName    String,
+  SeverityText   String,
+  TimestampSec   String,
+  TimestampNano  String,
+  ${n.hashField}${' '.repeat(Math.max(1, 15 - n.hashField.length))}String,
+  service        LowCardinality(String),
+  day            Date
+) ENGINE = S3('${n.s3Endpoint}/${p.bucket}/**.parquet', ${key}, 'Parquet')
+SETTINGS use_hive_partitioning = 1;
+
+-- The S3 engine REJECTS ALIAS COLUMNS here too, so the rename is a view.
+-- THE ARM THAT RAN CARRIED THE TYPE HASH AND NOT THE PATTERN TEXT, so the cold
+-- side of the counts table in step 6 names types by hash alone until
+-- message_pattern is added to the transform, to the table above and to the map
+-- below.
+DROP VIEW IF EXISTS ${n.db}.${n.coldView};
+CREATE VIEW ${n.db}.${n.coldView} AS
+SELECT toDateTime64(toUInt64OrZero(TimestampSec), 9)          AS Timestamp,
+       CAST(service AS LowCardinality(String))                AS ServiceName,
+       body                                                   AS Body,
+       CAST(SeverityText AS LowCardinality(String))           AS SeverityText,
+       map('${n.hashField}', ${n.hashField})${' '.repeat(Math.max(1, 46 - 2 * n.hashField.length))}AS LogAttributes,
+       day                                                    AS day
 FROM ${n.db}.${n.coldTable};`;
 
   const body = `-- 1) The counts-per-type table and its materialized view. RUN THIS FIRST,
@@ -1960,14 +2207,23 @@ ALTER TABLE ${n.db}.${n.hot} ADD COLUMN IF NOT EXISTS day Date MATERIALIZED toDa
 --    call time and caches nothing, so it is safe to run before the table
 --    exists. Wait for a non-zero count. A bucket listing answers the same
 --    question:  aws s3 ls s3://${p.bucket}/ --recursive | head
+--
+--    MEASURED, and the trigger is narrower than the issue's summary reads: the
+--    CREATE alone arms nothing, because the S3 engine resolves its listing
+--    during SELECT. Reading the table ONCE while the prefix is still empty is
+--    what arms it, which is what a reader who runs the CREATE and then a count
+--    to check the step worked does. On an armed table count() with no
+--    predicate still answers in full, so that check says the table is fine
+--    while every path predicate is dead. A table already in that state is
+--    repaired by DETACH TABLE then ATTACH TABLE, without dropping it.
 SELECT count() AS objects_ready
-FROM s3('${n.s3Endpoint}/${p.bucket}/**.json', ${key}, 'JSONEachRow');
+FROM s3('${n.s3Endpoint}/${p.bucket}/${glob}', ${key}, '${format}');
 
 -- 4) The offloaded objects, read in place. Create this only after step 3
---    returned a non-zero count. The same table reads what either collector
+--    returned a non-zero count.${parquet ? '' : ` The same table reads what either JSON collector
 --    writes: the OpenTelemetry Collector's JSON encoding extension and Vector's
---    remap both produce {"body": ..., "logAttributes": {...}}.
-${coldJson}
+--    remap both produce {"body": ..., "logAttributes": {...}}.`}
+${parquet ? coldParquet : coldJson}
 
 -- 5) Hot and cold as one table. \`_table\` names the side a row came from.
 DROP TABLE IF EXISTS ${n.db}.${n.mergeTable};
@@ -2005,7 +2261,12 @@ GROUP BY Minute, ServiceName, ${n.hashField}, message_pattern;`;
       'first object, because a table created over an empty prefix with ' +
       'use_hive_partitioning = 1 caches the empty listing and answers every path ' +
       'predicate with zero rows, silently, for the life of the table (ClickHouse issue ' +
-      '116888). Step 3 is the guard; run it until it returns a non-zero count. The rest ' +
+      '116888). Step 3 is the guard; run it until it returns a non-zero count. The ' +
+      'trigger is the READ, not the CREATE: a table created over an empty prefix and ' +
+      'left unread until objects exist answers every predicate correctly, and a table ' +
+      'read once while the prefix is empty answers zero on every path predicate ' +
+      'afterwards while count() with no predicate still answers in full. DETACH TABLE ' +
+      'then ATTACH TABLE repairs one that is already in that state. The rest ' +
       'is idempotent. Two findings from the run are baked into the shape above and are ' +
       'easy to lose in a rewrite: the S3 table engine rejects ALIAS columns, so the ' +
       "rename to ClickStack's column names is a VIEW and the Merge table reads the " +
@@ -2064,10 +2325,12 @@ export function clickhouseOffloadRecipe(
 ): ClickhouseOffloadRecipeParts {
   return {
     collector:
-      collector === 'vector'
-        ? clickhouseVectorCollector(params)
-        : clickhouseOtelCollector(params),
-    ddl: clickhouseDdl(params),
+      collector === 'vector-parquet'
+        ? clickhouseVectorParquetCollector(params)
+        : collector === 'vector'
+          ? clickhouseVectorCollector(params)
+          : clickhouseOtelCollector(params),
+    ddl: clickhouseDdl(params, collector),
     hyperdx: clickhouseHyperdx(params),
     honesty: clickhouseOffloadHonesty(),
   };
@@ -2084,7 +2347,9 @@ export function renderClickhouseOffloadSection(
   collector?: ClickhouseCollector,
 ): string {
   const n = chNames(params);
-  const variants: ClickhouseCollector[] = collector ? [collector] : ['otel-collector', 'vector'];
+  const variants: ClickhouseCollector[] = collector
+    ? [collector]
+    : ['otel-collector', 'vector', 'vector-parquet'];
   const lines: string[] = [
     '**ClickHouse offload: the rows marked `offload` are written to the customer\'s own ' +
       'bucket and read back beside the hot table.**',
@@ -2115,17 +2380,27 @@ export function renderClickhouseOffloadSection(
 
   if (variants.length > 1) {
     lines.push(
-      'Two variants, one choice. Both have been run: the OpenTelemetry Collector variant ' +
-        'end to end, and the Vector variant over the returned stream behind that same ' +
-        'collector. Both write JSON, and one cold table reads either.',
+      'Three variants, one choice, and every one of them has been run: the OpenTelemetry ' +
+        'Collector variant end to end, and two Vector variants over the returned stream ' +
+        'behind that same collector, writing JSON and writing Parquet. The two JSON ' +
+        'variants share one cold table. The Parquet variant writes named columns instead ' +
+        'of an attribute map and takes the cold table in section 2b. On one run off one ' +
+        'transform the JSON arm held 116,507 rows in 68 objects at 169MiB and the Parquet ' +
+        'arm held the same rows in 68 objects at 3.2MiB.',
       '',
     );
   }
 
   for (const v of variants) {
     const r = clickhouseOffloadRecipe(params, v).collector;
+    const label =
+      v === 'vector-parquet'
+        ? 'Vector 0.58.0, Parquet objects (ran behind the routing collector)'
+        : v === 'vector'
+          ? 'Vector, JSON objects (ran behind the routing collector)'
+          : 'OpenTelemetry Collector, JSON objects (ran end to end)';
     lines.push(
-      `_${v === 'vector' ? 'Vector, JSON objects (ran behind the routing collector)' : 'OpenTelemetry Collector, JSON objects (ran end to end)'}_`,
+      `_${label}_`,
       '',
       '```' + r.language,
       r.body,
@@ -2136,13 +2411,18 @@ export function renderClickhouseOffloadSection(
     );
   }
 
-  const ddl = clickhouseDdl(params);
+  const onlyParquet = variants.length === 1 && variants[0] === 'vector-parquet';
+  const ddl = clickhouseDdl(params, onlyParquet ? 'vector-parquet' : 'otel-collector');
   lines.push(
     '### 2. The ClickHouse side',
     '',
-    'Reads the JSON objects either collector writes. The OpenTelemetry Collector\'s ' +
-      'JSON encoding extension and Vector\'s remap both produce a body and a flat ' +
-      'attribute map, so the same table, view and Merge table cover both paths.',
+    onlyParquet
+      ? 'Reads the Parquet objects Vector writes, with the columns the transform lifts ' +
+          'out of the attribute map named here.'
+      : 'Reads the JSON objects either JSON collector writes. The OpenTelemetry ' +
+          'Collector\'s JSON encoding extension and Vector\'s remap both produce a body ' +
+          'and a flat attribute map, so the same table, view and Merge table cover both ' +
+          'paths.',
     '',
     '```sql',
     ddl.body,
@@ -2150,9 +2430,28 @@ export function renderClickhouseOffloadSection(
     '',
     ddl.note,
     '',
-    '### 3. HyperDX',
-    '',
   );
+
+  if (!onlyParquet && variants.includes('vector-parquet')) {
+    const pq = clickhouseDdl(params, 'vector-parquet');
+    const start = pq.body.indexOf('-- COPIED from the harness\n-- (benchmarks/clickstack-e2e-gaps/gap2b');
+    const end = pq.body.indexOf('-- 5) Hot and cold as one table.');
+    lines.push(
+      '### 2b. The cold table, if the Parquet variant is chosen',
+      '',
+      'Steps 1, 2, 3, 5 and 6 above are unchanged. Step 4 becomes this, because the ' +
+        'Parquet arm writes named columns rather than a Map(String, String), and step 3 ' +
+        'reads `\'**.parquet\'` with the `Parquet` format instead of `\'**.json\'` with ' +
+        '`JSONEachRow`.',
+      '',
+      '```sql',
+      pq.body.slice(start, end).trimEnd(),
+      '```',
+      '',
+    );
+  }
+
+  lines.push('### 3. HyperDX', '');
 
   const hdx = clickhouseHyperdx(params);
   lines.push('```bash', hdx.body, '```', '', hdx.note, '', '### 4. Before quoting any of this', '');
