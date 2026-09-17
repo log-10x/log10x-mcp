@@ -251,8 +251,8 @@ test('no other destination reaches the ClickHouse recipe', () => {
  * intentional.
  */
 const BASELINE: Record<string, string> = {
-  datadogFlexRecipe: 'b3b45e52c6a24626',
-  cloudwatchIaRecipe: '71daf19b1ff60147',
+  datadogFlexRecipe: '6582ed4b4f191f5f',
+  cloudwatchIaRecipe: '633b8867c697a37c',
   'azureLogsTierRecipe.basic': '9a0c878895b4dfca',
   'azureLogsTierRecipe.aux': 'de87bc671d7264ff',
   elasticFrozenTierRecipe: 'e9b1e55c341a7060',
@@ -260,16 +260,16 @@ const BASELINE: Record<string, string> = {
   coralogixTcoApiContract: '835216577057de80',
   'offloadRecipe.vector': '0d706eb3869c241e',
   'offloadRecipe.fluentd': '78d0249acf9f1cc5',
-  'offloadRecipe.fluent-bit': 'd25142048eb7cc73',
+  'offloadRecipe.fluent-bit': 'a26a53c5fddcf4c3',
   'offloadRecipe.otel-collector': 'd12563720dda1c89',
   'offloadRecipe.logstash': 'c724edcc895a7f6e',
   'offloadRecipe.cribl': '617a7ef8a96e455a',
-  'renderOffloadSection.none': '359fe8db2834b632',
-  'renderOffloadSection.nofwd.none': '8e31f26af8e3465b',
-  'renderOffloadSection.datadog': '6eddaa0847ae4df9',
-  'renderOffloadSection.nofwd.datadog': '6320b51ae98aea31',
-  'renderOffloadSection.cloudwatch': '57b34b496d634791',
-  'renderOffloadSection.nofwd.cloudwatch': '32c78915bfdaf9c6',
+  'renderOffloadSection.none': '34643c598e3c9292',
+  'renderOffloadSection.nofwd.none': '809d68fc2190077b',
+  'renderOffloadSection.datadog': '7a222ba94682e21e',
+  'renderOffloadSection.nofwd.datadog': '976f23db88d79fe2',
+  'renderOffloadSection.cloudwatch': '122fa49f70c56b75',
+  'renderOffloadSection.nofwd.cloudwatch': 'dfc0da69622ca820',
   'renderOffloadSection.azure-monitor': 'a53491e6c52d1be4',
   'renderOffloadSection.nofwd.azure-monitor': '1660741eeb677ae5',
   'renderOffloadSection.coralogix': '8f2628944a16400e',
@@ -281,6 +281,22 @@ const BASELINE: Record<string, string> = {
   forwarderWriteTerraform: '33fbf1f20045b799',
 };
 
+// REBASELINED 2026-09-17, deliberately. Nine entries moved, and every one of
+// them is the CloudWatch IA and Datadog Flex tier_down correction:
+//
+//   - datadogFlexRecipe / cloudwatchIaRecipe now key on `tier_down`, not
+//     `drop`. `drop` is the slice every forwarder recipe here routes to a null
+//     sink, so both were provisioning a cheap tier for events that had already
+//     been discarded, while the `tier_down` slice they were built for went
+//     nowhere. azureLogsTierRecipe has always keyed on `tier_down` and is
+//     unchanged, which is what the correct shape looks like.
+//   - offloadRecipe.fluent-bit gained the narrowed `routeState` strip, emitted
+//     only when the DESTINATION reads the marker (Datadog's Flex index filter).
+//   - cloudwatchIaRecipe's note gained what the down-tiered slice loses, and
+//     that the saving is ingest-only.
+//
+// The four renderOffloadSection entries that did NOT move (azure-monitor,
+// coralogix, elasticsearch, splunk) are the check that this stayed scoped.
 test('every pre-existing recipe is byte-identical to the parent commit', () => {
   const P = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
   const h = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);

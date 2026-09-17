@@ -180,14 +180,83 @@ test('forwarder-write IAM grants PutObject scoped to the offload prefix', () => 
   assert.ok(iam.attachmentNote.includes('IRSA'), 'no IRSA attachment guidance');
 });
 
-test('Datadog Flex recipe routes @routeState:drop via the retention waterfall', () => {
+test('Datadog Flex recipe routes @routeState:tier_down via the retention waterfall', () => {
   const r = datadogFlexRecipe();
   assert.equal(r.target, 'datadog-flex');
-  assert.match(r.body, /@routeState:drop/);
+  assert.match(r.body, /@routeState:tier_down/);
+  // Not `drop`. See the tier-keying test below for why this is the whole point.
+  assert.ok(
+    !/query\s*=\s*"@routeState:drop"/.test(r.body),
+    'Flex index keyed on the suppressed slice',
+  );
   assert.match(r.body, /retention_days\s*=\s*0/);
   assert.match(r.body, /flex_retention_days\s*=\s*30/);
   assert.ok(r.note.toLowerCase().includes('index'), 'should clarify index-not-ingest saving');
   assert.ok(!r.note.toLowerCase().includes('cuts the ingest'), 'must not claim ingest saving');
+});
+
+// The defect these two tests exist for: `drop` and `tier_down` are different
+// slices with opposite fates. Every forwarder recipe in offload-recipes.ts
+// sends `tenx.drop` to a null sink and reserves `tenx.tier_down` for the cheap
+// tier. A destination recipe keyed on `drop` therefore provisions an IA log
+// group or a Flex index for events that were already thrown away, while the
+// slice it was built for goes nowhere. Both halves apply cleanly and nothing
+// tiers. azureLogsTierRecipe has always keyed on tier_down.
+test('every tier_down destination recipe keys on tier_down, never on the suppressed slice', () => {
+  const tiers: Array<[string, { body: string }]> = [
+    ['datadogFlexRecipe', datadogFlexRecipe()],
+    ['cloudwatchIaRecipe', cloudwatchIaRecipe()],
+    ['azureLogsTierRecipe', azureLogsTierRecipe()],
+  ];
+  for (const [name, r] of tiers) {
+    assert.match(
+      r.body,
+      /tier_down/,
+      `${name}: a tier_down recipe must name the tier_down slice`,
+    );
+    // A recipe may MENTION drop while explaining why it is not the target, so
+    // assert on the directive forms rather than on any occurrence of the word.
+    assert.ok(
+      !/query\s*=\s*"@routeState:drop"/.test(r.body),
+      `${name}: routes the suppressed slice to a paid tier`,
+    );
+    assert.ok(
+      !/split on routeState == "drop"/.test(r.body),
+      `${name}: tells the operator to split on the suppressed slice`,
+    );
+  }
+});
+
+// Datadog reads the marker AT THE DESTINATION: the Flex index filter is the
+// only thing selecting the down-tiered slice. The generic strip is
+// `Match tenx.*`, which takes routeState off the SIEM path too, so the filter
+// matches nothing and the apply still succeeds. Coralogix gets a bespoke
+// shipper for this same property; Datadog gets the narrowed strip.
+test('the Datadog section keeps routeState on the wire, stripping only the S3 slice', () => {
+  const md = renderOffloadSection(PARAMS, 'fluent-bit', 'datadog');
+  const strips = [...md.matchAll(/Match\s+(\S+)\s*\n\s*Remove_key routeState/g)].map(m => m[1]);
+  assert.ok(strips.length > 0, 'expected the offload-path strip');
+  for (const tag of strips) {
+    assert.equal(
+      tag,
+      'tenx.offload',
+      `routeState stripped on '${tag}' — the Flex index filter has nothing to match`,
+    );
+  }
+});
+
+// The narrowing is Datadog-specific. Everywhere else the split is
+// forwarder-side (the tag already carries the decision), so the marker is
+// removed on every path and does not reach the destination as a stray field.
+test('non-Datadog destinations keep the broad strip', () => {
+  for (const dest of ['cloudwatch', 'azure-monitor', undefined]) {
+    const md = renderOffloadSection(PARAMS, 'fluent-bit', dest as string | undefined);
+    assert.match(
+      md,
+      /Match\s+tenx\.\*\s*\n\s*Remove_key routeState/,
+      `destination=${dest} lost the broad strip`,
+    );
+  }
 });
 
 test('Datadog Flex recipe includes index_order companion + provider pin (first-match-wins)', () => {

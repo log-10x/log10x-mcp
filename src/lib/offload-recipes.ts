@@ -95,6 +95,20 @@ export interface OffloadParams {
   region: string;
   /** The engine's `symbolMessageHashField` value. Defaults to `tenx_hash`. */
   hashField?: string;
+  /**
+   * Keep `routeState` on the wire for every path except the S3 offload slice.
+   *
+   * Set this when the DESTINATION is what reads the marker to make the routing
+   * decision. Datadog is the case: the Flex index selects the down-tiered slice
+   * with an index filter on `@routeState:tier_down`, so a strip on the SIEM
+   * path removes the only field that filter can match and nothing ever tiers,
+   * with HTTP 200 and no error anywhere. Coralogix has the same property and
+   * gets a bespoke shipper (`fluentBitCoralogixRecipe`) for it.
+   *
+   * The offload slice is stripped either way: those objects land in the
+   * customer's bucket, and the Retriever should not index internal markers.
+   */
+  keepMarkerAtDestination?: boolean;
 }
 
 const DEFAULT_PREFIX = 'app';
@@ -344,13 +358,31 @@ function recipeFluentBit(p: OffloadParams): OffloadRecipe {
     Match   tenx.app
     Regex   _route ^siem$
 
-# 4) strip both markers on every path (tenx_hash kept). tenx.* spans the
-#    retagged tags and the kept tenx.app (the wildcard crosses dots).
+# 4) strip the markers (tenx_hash kept).
+${p.keepMarkerAtDestination
+  ? `#    NARROWED: routeState is removed from the S3 slice ONLY. The destination
+#    reads it to route (a Datadog Flex index filters @routeState:tier_down), so
+#    a \`Match tenx.*\` strip here would delete the one field that filter can
+#    match and nothing would ever tier, with HTTP 200 and no error.
+[FILTER]
+    Name       record_modifier
+    Match      tenx.offload
+    Remove_key routeState
+    Remove_key _route
+
+#    _route is ours either way; it never belongs on the wire.
+[FILTER]
+    Name       record_modifier
+    Match      tenx.*
+    Remove_key _route`
+  : `#    tenx.* spans the retagged tags and the kept tenx.app (the wildcard
+#    crosses dots). Safe here because the split is forwarder-side: the routing
+#    decision is already carried by the tag, not by a field the destination reads.
 [FILTER]
     Name       record_modifier
     Match      tenx.*
     Remove_key routeState
-    Remove_key _route
+    Remove_key _route`}
 
 # 5) offload slice -> customer-owned S3 as JSONL
 [OUTPUT]
@@ -790,7 +822,7 @@ export interface SiemTierRecipe {
   note: string;
 }
 
-/** Datadog: route `@routeState:drop` to a Flex-only index (cheaper queryable
+/** Datadog: route `@routeState:tier_down` to a Flex-only index (cheaper queryable
  * tier) instead of the premium Standard index. In-platform Terraform. */
 export function datadogFlexRecipe(opts: { flexRetentionDays?: number } = {}): SiemTierRecipe {
   const flex = opts.flexRetentionDays ?? 30;
@@ -810,8 +842,11 @@ resource "datadog_logs_index" "tenx_offload_flex" {
   name = "tenx-offload"
 
   filter {
-    query = "@routeState:drop"   # the slice 10x marked as low-value
-    # D1d end state: @routeState:tier_down once the engine stamps tier_down
+    query = "@routeState:tier_down"   # the slice 10x marked for the cheaper tier
+    # NOT @routeState:drop. The "drop" slice is SUPPRESSED: every forwarder
+    # recipe in this file sends it to a null sink, so a Flex index keyed on it
+    # would be provisioned for events that no longer exist. "tier_down" is the
+    # slice that is kept and moved, which is what Flex is for.
   }
 
   # retention waterfall: 0 days Standard, then ${flex} days TOTAL (= ${flex} in Flex).
@@ -844,7 +879,7 @@ resource "datadog_logs_index_order" "tenx_offload_order" {
   };
 }
 
-/** CloudWatch: route `routeState == "drop"` to an Infrequent-Access log group
+/** CloudWatch: route `routeState == "tier_down"` to an Infrequent-Access log group
  * (~50% cheaper ingest, still Logs-Insights queryable). The split is
  * forwarder-side (events go to a different log group); this is the TF for the
  * IA group. */
@@ -858,15 +893,31 @@ export function cloudwatchIaRecipe(opts: { logGroupName?: string } = {}): SiemTi
   log_group_class = "INFREQUENT_ACCESS"   # ~50% cheaper ingest, still Insights-queryable
 }
 
-# Forwarder side: split on routeState == "drop" today (== "tier_down" after
-# D1d): send the marked events to "${name}",
-# everything else to your Standard log group.`,
+# Forwarder side: split on routeState == "tier_down": send the marked events
+# to "${name}", everything else to your Standard log group.
+#
+# NOT routeState == "drop". The "drop" slice is SUPPRESSED, routed to a null
+# sink by every forwarder recipe in this file, so an IA group keyed on it
+# receives nothing while the tier_down slice it was built for goes nowhere.
+# azureLogsTierRecipe() has always keyed on tier_down; this is the same shape.`,
     note:
       'IA is a create-time-only, immutable log-group property; AWS ships no ' +
       'auto-router, so the stamped forwarder log-group split is the missing ' +
       'automation (10x is not redundant here). HARDENING: a stamp-miss routes to ' +
       'the Standard fallback and bills at full rate, so the recipe should fail ' +
-      'toward the IA group on the offload path only when `routeState` is present.',
+      'toward the IA group on the offload path only when `routeState` is present. ' +
+      'THE SAVING IS INGEST ONLY: AWS bills Standard and IA the same for storage ' +
+      'and for Logs Insights queries, so size the win on the $0.50 -> $0.25/GB ' +
+      'ingest delta and on nothing else. ' +
+      'WHAT THE SLICE LOSES: an IA log group serves Logs Insights, but it does ' +
+      'NOT support subscription filters, metric filters, Live Tail, field ' +
+      'indexing, Facets, anomaly detection, embedded metrics format, Container ' +
+      'or Lambda Insights ingestion, or the GetLogEvents and FilterLogEvents ' +
+      'APIs. Anything downstream of this group that reads it through a ' +
+      'subscription filter or FilterLogEvents stops returning events, with no ' +
+      'error. Check what consumes the log group before down-tiering it, and ' +
+      'note the class cannot be changed afterwards: undoing this means a new ' +
+      'log group.',
   };
 }
 
@@ -2612,7 +2663,26 @@ export function renderOffloadSection(
       );
     }
   } else if (forwarder) {
-    lines.push(...renderRecipeBlock(forwarder, params), '');
+    // Datadog reads the marker at the DESTINATION: the Flex index selects the
+    // down-tiered slice with an index filter on `@routeState:tier_down`. The
+    // generic strip is `Match tenx.*`, which takes the marker off the SIEM path
+    // too, so the filter has nothing to match and nothing tiers, with HTTP 200
+    // and no error. Same failure Coralogix gets its own shipper to avoid.
+    // fluent-bit carries the narrowed strip; the other generators still strip
+    // on every path, so say so rather than emit a config that cannot work.
+    const keepMarker = destination === 'datadog';
+    if (keepMarker && forwarder !== 'fluent-bit') {
+      lines.push(
+        `**Datadog: the \`${forwarder}\` recipe below cannot drive Flex as written.** ` +
+          'It strips `routeState` on every output path, and the Flex index filter ' +
+          '(`@routeState:tier_down`) is the only thing that selects the down-tiered ' +
+          'slice, so the marker has to reach Datadog. Narrow the strip to the S3 ' +
+          'offload path before applying it, the way the fluent-bit recipe does, or ' +
+          'use fluent-bit here. Left as is, the apply succeeds and nothing ever tiers.',
+        ''
+      );
+    }
+    lines.push(...renderRecipeBlock(forwarder, { ...params, keepMarkerAtDestination: keepMarker }), '');
     const others = otherOffloadForwarders(forwarder);
     lines.push(`Other supported forwarders: ${others.join(', ')}.`, '');
   } else {
