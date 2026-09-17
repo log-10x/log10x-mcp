@@ -866,7 +866,19 @@ export function cloudwatchIaRecipe(opts: { logGroupName?: string } = {}): SiemTi
       'auto-router, so the stamped forwarder log-group split is the missing ' +
       'automation (10x is not redundant here). HARDENING: a stamp-miss routes to ' +
       'the Standard fallback and bills at full rate, so the recipe should fail ' +
-      'toward the IA group on the offload path only when `routeState` is present.',
+      'toward the IA group on the offload path only when `routeState` is present. ' +
+      'THE SAVING IS INGEST ONLY: AWS bills Standard and IA the same for storage ' +
+      'and for Logs Insights queries, so size the win on the $0.50 -> $0.25/GB ' +
+      'ingest delta and on nothing else. ' +
+      'WHAT THE SLICE LOSES: an IA log group serves Logs Insights, but it does ' +
+      'NOT support subscription filters, metric filters, Live Tail, field ' +
+      'indexing, Facets, anomaly detection, embedded metrics format, Container ' +
+      'or Lambda Insights ingestion, or the GetLogEvents and FilterLogEvents ' +
+      'APIs. Anything downstream of this group that reads it through a ' +
+      'subscription filter or FilterLogEvents stops returning events, with no ' +
+      'error. Check what consumes the log group before down-tiering it, and ' +
+      'note the class cannot be changed afterwards: undoing this means a new ' +
+      'log group.',
   };
 }
 

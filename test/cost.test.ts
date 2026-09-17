@@ -100,6 +100,28 @@ test('coralogix models Monitoring as the tier_down target', () => {
   );
 });
 
+// CloudWatch IA saves on INGEST ONLY. AWS's log classes page states it
+// outright: "the Standard and Infrequent Access log classes differ in
+// ingestion costs only. Storage charges and CloudWatch Logs Insights charges
+// are the same in each log class." A cheaper storage rate here is not a
+// tuning choice, it is a saving the platform does not sell, and it inflates
+// every CloudWatch tier_down projection in proportion to retention_months.
+test('cloudwatch IA discounts ingest and leaves storage at the Standard rate', () => {
+  const m = COST_MODEL_BY_DESTINATION.cloudwatch;
+  const tier = m.tier_down_target_tier;
+  assert.ok(tier, 'tier_down_target_tier must be present or tier_down is a no-op');
+  assert.equal(tier.ingest_rate_usd_per_gb, 0.25, 'IA ingest is half of Standard');
+  assert.equal(
+    tier.storage_rate_usd_per_gb_month,
+    m.storage_per_gb_month,
+    'IA storage must equal Standard storage: AWS bills the two classes the same on storage',
+  );
+  // The override path scales a customer-supplied storage rate by
+  // tier/standard. Equal rates make that factor exactly 1, so a customer who
+  // supplies an accurate rate is not silently handed a discount.
+  assert.equal(tier.storage_rate_usd_per_gb_month / m.storage_per_gb_month, 1);
+});
+
 test('getDestinationCostModel returns the default ES model when pruned', () => {
   const m = getDestinationCostModel('elasticsearch', { esPruned: true });
   assert.equal(m.compact_mode, 'index-pruned');

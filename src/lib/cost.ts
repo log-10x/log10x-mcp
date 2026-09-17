@@ -639,14 +639,25 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
-    // CloudWatch Logs Infrequent Access (IA) tier:
+    // CloudWatch Logs Infrequent Access (IA) tier. The saving is INGEST ONLY.
     // $0.25/GB ingest (50% reduction vs standard $0.50)
-    // $0.0075/GB-month storage (75% reduction vs standard $0.03)
+    // $0.03/GB-month storage, the SAME as Standard. AWS's log classes page:
+    //   "For charges, the Standard and Infrequent Access log classes differ in
+    //    ingestion costs only. Storage charges and CloudWatch Logs Insights
+    //    charges are the same in each log class."
+    // This previously carried $0.0075 as a 75%-off-storage figure. AWS does not
+    // sell that, and its own worked examples price both classes at $0.03, so
+    // every CloudWatch tier_down projection overstated the saving by the whole
+    // storage axis. The error scaled with retention_months: ~8% of the saving
+    // at the default 1 month, and roughly double the saving at 12. It also
+    // reached customers who supplied an accurate rate of their own, because the
+    // override path scales by tier/standard (0.0075/0.03 = 0.25). Keeping the
+    // rates equal makes that factor 1 and the override honest.
     // Destination-side routing rule required (keyed on the routeState marker)
     tier_down_target_tier: {
       name: 'CloudWatch Logs Infrequent Access',
       ingest_rate_usd_per_gb: 0.25,
-      storage_rate_usd_per_gb_month: 0.0075,
+      storage_rate_usd_per_gb_month: 0.03,
     },
   },
   'azure-monitor': {
