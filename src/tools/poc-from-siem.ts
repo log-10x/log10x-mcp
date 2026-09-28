@@ -961,10 +961,17 @@ export async function runPipeline(
   }
   const pullWallTimeMs = Date.now() - pullStart;
   snapshot.partialEventsPulled = pullResult.events.length;
-  snapshot.partialBytesPulled = pullResult.events.reduce<number>(
-    (s, e) => s + (typeof e === 'string' ? e.length : JSON.stringify(e).length),
-    0,
-  );
+  // Message text, the same bytes the engine then analyzes, so this figure
+  // and the report's "(N MB)" agree. Serialized records counted every
+  // connector's metadata (timestamps, ids, ingestion time) and reported
+  // 27 MB pulled for a 6 MB sample.
+  snapshot.partialBytesPulled = pullResult.events.reduce<number>((s, e) => {
+    if (typeof e === 'string') return s + e.length;
+    if (e && typeof e === 'object' && typeof (e as { message?: string }).message === 'string') {
+      return s + (e as { message: string }).message.length;
+    }
+    return s + JSON.stringify(e).length;
+  }, 0);
   snapshot.partialStopReason = pullResult.metadata.reasonStopped;
 
   // Zero events with request errors is a failed pull, whatever stop reason the
