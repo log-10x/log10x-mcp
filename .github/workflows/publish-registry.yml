@@ -59,6 +59,21 @@ jobs:
             exit 1
           fi
 
+      # The npm job reports success as soon as the upload is accepted, but the
+      # registry reads the package from npm, which serves a new version only
+      # minutes later. Chained runs for 1.30.21 and 1.30.22 both failed
+      # validation on that gap. Wait for npm to serve this exact version.
+      - name: Wait until npm serves this version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          for i in $(seq 1 40); do
+            got=$(curl -sS "https://registry.npmjs.org/log10x-mcp/$v" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version||"")}catch(e){console.log("")}})')
+            if [ "$got" = "$v" ]; then echo "npm serves log10x-mcp@$v"; exit 0; fi
+            sleep 15
+          done
+          echo "::error::npm did not serve log10x-mcp@$v within 10 minutes"
+          exit 1
+
       - name: Install mcp-publisher
         run: |
           curl -sSLf "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
@@ -71,8 +86,15 @@ jobs:
       - name: Log in with GitHub OIDC
         run: ./mcp-publisher login github-oidc
 
+      # The registry has answered 504 on a publish that then needed a rerun.
       - name: Publish
-        run: ./mcp-publisher publish
+        run: |
+          for i in 1 2 3; do
+            ./mcp-publisher publish && exit 0
+            echo "publish attempt $i failed; retrying in 30 s"
+            sleep 30
+          done
+          exit 1
 
       - name: Verify the listing is live
         run: |
