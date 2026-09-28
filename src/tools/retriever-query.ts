@@ -52,6 +52,7 @@ import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { getOffloadStatusBatch } from '../lib/offload-status.js';
 import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
+import { previewText } from '../lib/retriever-preview.js';
 import {
   resolveClusterConfig,
   pickActiveOffload,
@@ -195,7 +196,10 @@ interface RetrieverQuerySummary {
     timestamp?: string | number;
     severity?: string;
     service?: string;
+    /** The whole event; see text_truncated for the rare multi-kilobyte case. */
     text?: string;
+    text_truncated?: true;
+    text_chars?: number;
   }>;
   /**
    * Per-`tenx_hash` offload status for hashes that appear on the returned
@@ -996,7 +1000,7 @@ async function executeRetrieverQueryInner(
           timestamp: ev.timestamp as string | number | undefined,
           severity: ev.severity_level as string | undefined,
           service: ev.tenx_user_service as string | undefined,
-          text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+          ...previewText(ev.text),
         }));
     // Worker files that failed download after retries make the event set
     // (and event-derived rollups) incomplete — same agent-facing semantics
