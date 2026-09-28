@@ -685,7 +685,7 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       // multiplier when present, else collapses to a single point.
       dailyProjection = computeDailyProjection(
         s.renderInput,
-        patterns as unknown as ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+        patterns as unknown as ReadonlyArray<{ bytes: number; projectedSavings: number; costPerWindow?: number }>,
       );
     } catch (e) {
       // Fall back silently — v2 envelope is best-effort; the snapshot
@@ -1289,14 +1289,21 @@ interface DailyProjection {
 
 function computeDailyProjection(
   ri: RenderInput,
-  patterns: ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+  patterns: ReadonlyArray<{ bytes: number; projectedSavings: number; costPerWindow?: number }>,
 ): DailyProjection {
   const analyzerCost = ri.analyzerCostPerGb;
   const totalBytes = ri.extraction?.totalBytes ?? 0;
   const totalCostWindow = (totalBytes / 1024 ** 3) * analyzerCost;
   const projectedSavingsWindow = patterns.reduce((s, p) => s + p.projectedSavings, 0);
-  const pctExpected = totalCostWindow > 0
-    ? Math.min(100, Math.max(0, (projectedSavingsWindow / totalCostWindow) * 100))
+  // The percent must divide savings by a total on the SAME scale. The
+  // enriched patterns' savings are volume-scaled when a daily volume is
+  // known, while totalCostWindow is the raw sample, so their ratio grew
+  // with the scale factor and clamped at 100 (a real run reported 100%
+  // here while the report said 36%). Use the patterns' own cost total.
+  const patternCostWindow = patterns.reduce((s, p) => s + (p.costPerWindow ?? 0), 0);
+  const pctDenominator = patternCostWindow > 0 ? patternCostWindow : totalCostWindow;
+  const pctExpected = pctDenominator > 0
+    ? Math.min(100, Math.max(0, (projectedSavingsWindow / pctDenominator) * 100))
     : 0;
 
   // Dollar axis: scale the window cost to a daily figure using the

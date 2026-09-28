@@ -1530,12 +1530,14 @@ export function renderPocReport(input: RenderInput): RenderResult {
       lines.push('');
       lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');
       lines.push('|---|---|---|---|---|');
-      // Daily-scale the saved-dollars column with the SAME factor enrichPatterns
-      // uses, so these match the rest of the report instead of showing the raw
-      // sub-cent sample figure.
+      // Window-scale the saved-dollars column with the SAME factor enrichPatterns
+      // uses, so these match the rest of the report ("$ saved /window") instead
+      // of showing the raw sub-cent sample figure.
       const sampleGbForScale = input.extraction.totalBytes / (1024 ** 3);
       const scaleFactor =
-        input.totalDailyGb && sampleGbForScale > 0 ? input.totalDailyGb / sampleGbForScale : 1;
+        input.totalDailyGb && sampleGbForScale > 0 && input.windowHours > 0
+          ? (input.totalDailyGb * (input.windowHours / 24)) / sampleGbForScale
+          : 1;
       for (const p of measured) {
         const encBytes = p.encodedBytes ?? 0;
         const ratio = p.bytes > 0 ? p.bytes / Math.max(1, encBytes) : 1;
@@ -1776,16 +1778,21 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
   const severityUsable = severityAttributionSufficient(severityCoverage);
 
   // When the caller provides the customer's real daily volume, scale each
-  // pattern's bytes from "sample-observed" to "projected-daily" by
-  // multiplying by (totalDailyGb / sampleGb). This is valid when the
+  // pattern's bytes from "sample-observed" to the volume the PULL WINDOW
+  // carries: (totalDailyGb x windowHours/24) / sampleGb. costPerWindow is
+  // then a true window cost, and every projectBilling(window -> day/week/
+  // year) below is right for any window. Scaling to a full day here (the
+  // old factor, totalDailyGb / sampleGb) made each figure a daily cost that
+  // projectBilling scaled AGAIN: 24x high on a 1h pull, 14x low on the 14d
+  // default, right only at exactly 24h. This is valid when the
   // sample is random (which every connector's default ordering gives us —
   // Datadog sort=timestamp, ES @timestamp asc, Splunk job sample). It
   // breaks down if the caller narrows to a specific service via `query`;
   // in that case the scaling overstates cost because only a fraction of
   // the daily volume matches the filter. Documented caveat.
   const sampleGb = totalBytes / (1024 ** 3);
-  const scaleFactor = input.totalDailyGb && sampleGb > 0
-    ? input.totalDailyGb / sampleGb
+  const scaleFactor = input.totalDailyGb && sampleGb > 0 && input.windowHours > 0
+    ? (input.totalDailyGb * (input.windowHours / 24)) / sampleGb
     : 1;
 
   const enriched: EnrichedPattern[] = input.extraction.patterns.map((p) => {
@@ -1882,9 +1889,8 @@ function enrichPatterns(input: RenderInput): EnrichedPattern[] {
     }
 
     // Savings = this pattern's window cost times the lever's removed
-    // fraction. Because costPerWindow is already daily-scaled when
-    // totalDailyGb is set, compact savings now scale exactly like the
-    // old mute savings did (fixes the sample-only scaling bug). keep → 0.
+    // fraction. costPerWindow is window-scaled when totalDailyGb is set, so
+    // savings project to day/week/year exactly like cost does. keep -> 0.
     const projectedSavings = costPerWindow * leverFraction;
 
     let confidence: Confidence = 'medium';

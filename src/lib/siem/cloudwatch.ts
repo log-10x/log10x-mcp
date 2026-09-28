@@ -24,6 +24,7 @@ import {
   type FilteredLogEvent,
   type LogGroup,
 } from '@aws-sdk/client-cloudwatch-logs';
+import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 
 import type {
@@ -256,6 +257,51 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     }
   }
 
+  // Fill pass. The stratified pass reads 24 child windows that together cover
+  // a quarter of the parent window, so when those run dry below target the
+  // pull used to stop and call the source exhausted after reading about a
+  // quarter of it (5,228 of 20,160 events on a 1h window). Read the rest of
+  // the window, skipping events already taken, before saying so.
+  if (reasonStopped === 'source_exhausted' && events.length < opts.targetEventCount) {
+    const seen = new Set(events.map((e) => e.eventId).filter(Boolean) as string[]);
+    fillLoop: for (const logGroupName of logGroups) {
+      let nextToken: string | undefined;
+      for (;;) {
+        if (shouldStop(deadline, events.length, opts.targetEventCount)) {
+          reasonStopped = events.length >= opts.targetEventCount ? 'target_reached' : 'time_exhausted';
+          break fillLoop;
+        }
+        try {
+          const resp = await retryWithBackoff(() =>
+            client.send(
+              new FilterLogEventsCommand({
+                logGroupName,
+                startTime: fromMs,
+                endTime: toMs,
+                filterPattern,
+                limit: CLOUDWATCH_PAGE_LIMIT,
+                nextToken,
+              })
+            )
+          );
+          for (const ev of resp.events ?? []) {
+            if (ev.eventId && seen.has(ev.eventId)) continue;
+            if (ev.eventId) seen.add(ev.eventId);
+            events.push(ev);
+            if (events.length >= opts.targetEventCount) break;
+          }
+          nextToken = resp.nextToken;
+          if (!nextToken) break;
+        } catch (e) {
+          notes.push(`fill_${logGroupName}_error: ${((e as Error).message || '').slice(0, 200)}`);
+          break;
+        }
+        opts.onProgress({ step: `cloudwatch fill ${logGroupName}`, pct: 50, eventsFetched: events.length });
+      }
+    }
+    if (events.length >= opts.targetEventCount) reasonStopped = 'target_reached';
+  }
+
   client.destroy();
 
   const truncated = reasonStopped !== 'source_exhausted' && events.length < opts.targetEventCount;
@@ -277,9 +323,60 @@ async function _settleMs(ms: number): Promise<void> {
 }
 
 /**
+ * Billed daily ingest from the AWS/Logs `IncomingBytes` metric: the exact
+ * uncompressed bytes CloudWatch charges ingestion on, per log group. Averaged
+ * over the last 7 full days that carry data. Returns null when the metric is
+ * unreadable (no cloudwatch:GetMetricData permission) or empty, so the caller
+ * falls back to the storedBytes estimate.
+ */
+export async function incomingBytesDailyAverage(
+  groupNames: string[],
+  region: string,
+  now: number = Date.now(),
+  client: { send: (cmd: GetMetricDataCommand) => Promise<{ MetricDataResults?: Array<{ Values?: number[] }> }> } =
+    new CloudWatchClient({ region, maxAttempts: 3 }),
+): Promise<{ dailyBytes: number; days: number } | null> {
+  const names = groupNames.slice(0, 500);
+  if (names.length === 0) return null;
+  const end = new Date(Math.floor(now / 86_400_000) * 86_400_000); // midnight UTC, full days only
+  const start = new Date(end.getTime() - 7 * 86_400_000);
+  const perDay = new Map<number, number>(); // day index -> bytes across groups
+  try {
+    for (let i = 0; i < names.length; i += 100) {
+      const batch = names.slice(i, i + 100);
+      const resp = await client.send(
+        new GetMetricDataCommand({
+          StartTime: start,
+          EndTime: end,
+          MetricDataQueries: batch.map((g, j) => ({
+            Id: `g${i + j}`,
+            MetricStat: {
+              Metric: { Namespace: 'AWS/Logs', MetricName: 'IncomingBytes', Dimensions: [{ Name: 'LogGroupName', Value: g }] },
+              Period: 86_400,
+              Stat: 'Sum',
+            },
+          })),
+        })
+      );
+      for (const r of resp.MetricDataResults ?? []) {
+        (r.Values ?? []).forEach((v, k) => perDay.set(k, (perDay.get(k) ?? 0) + (v || 0)));
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    (client as { destroy?: () => void }).destroy?.();
+  }
+  const days = [...perDay.values()].filter((v) => v > 0);
+  if (days.length === 0) return null;
+  return { dailyBytes: days.reduce((a, b) => a + b, 0) / days.length, days: days.length };
+}
+
+/**
  * Detect CloudWatch daily ingest volume.
  *
- * Approach: DescribeLogGroups returns `storedBytes` per log group (total
+ * Preferred: the AWS/Logs IncomingBytes metric (billed, uncompressed bytes).
+ * Fallback approach: DescribeLogGroups returns `storedBytes` per log group (total
  * on-disk bytes, INCLUDING historical data across the retention window).
  * Divide by retention days to get a daily-ingest estimate.
  *
@@ -346,6 +443,20 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
         neverExpireCount++;
       }
     }
+    // Billed ingest first. storedBytes is COMPRESSED storage, so dividing it
+    // by retention understates what CloudWatch bills for ingestion (measured
+    // 11x low on /log10x/otel-demo: 49.7 MB/day from storedBytes against
+    // 560.8 MB/day of IncomingBytes).
+    const incoming = await incomingBytesDailyAverage(
+      groups.map((g) => g.logGroupName ?? '').filter(Boolean),
+      region,
+    );
+    if (incoming) {
+      return {
+        dailyGb: incoming.dailyBytes / (1024 ** 3),
+        source: `CloudWatch IncomingBytes metric (${groups.length} group${groups.length === 1 ? '' : 's'}, ${incoming.days}-day average of billed ingest)`,
+      };
+    }
     if (totalBytes === 0) {
       return { errorNote: 'CloudWatch: matching log groups have 0 storedBytes (cold / empty)' };
     }
@@ -366,7 +477,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       neverExpireCount > 0 ? { low: 0.3, high: 3 } : undefined;
     return {
       dailyGb,
-      source: `CloudWatch DescribeLogGroups (${groups.length} group${groups.length === 1 ? '' : 's'}, ~${Math.round(days)}d retention)${neverExpireNote}`,
+      source: `CloudWatch DescribeLogGroups (${groups.length} group${groups.length === 1 ? '' : 's'}, ~${Math.round(days)}d retention; stored bytes are compressed, so billed ingest is higher; grant cloudwatch:GetMetricData for the exact IncomingBytes figure)${neverExpireNote}`,
       ...(rangeMultiplier ? { rangeMultiplier } : {}),
     };
   } catch (e) {
