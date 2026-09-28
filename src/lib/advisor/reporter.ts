@@ -76,7 +76,8 @@ export interface ReporterAdviseArgs {
   /**
    * Log10x license JWT — mints from `POST /api/v1/license/demo` (anonymous)
    * or `POST /api/v1/license` (Auth0-authed). Maps to the chart's
-   * `log10xLicenseJwt` value. Required for a complete install plan.
+   * `log10xLicenseJwt` value. An install plan needs either this or
+   * `builtinLicense: true`.
    */
   licenseJwt?: string;
   /**
@@ -86,6 +87,14 @@ export interface ReporterAdviseArgs {
    * out-of-band Kubernetes Secret the user creates before `helm upgrade`.
    */
   isDemoLicense?: boolean;
+  /**
+   * True when the plan deliberately carries no licence (the install
+   * wizard's default). The engine then runs its built-in evaluation
+   * licence: 10 nodes, 30 days from each start, airgapped. The plan emits
+   * no licence Secret step, and no overlay names TENX_LICENSE_FILE or a
+   * licence volume. Ignored when `licenseJwt` is set.
+   */
+  builtinLicense?: boolean;
   /** Output destination flavor. Default: 'mock' (safe for dogfooding). */
   destination?: OutputDestination;
   /** Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). */
@@ -139,11 +148,9 @@ export interface ReporterAdviseArgs {
    * this to top-level `airgapped: true`; Receiver wires it via the
    * `TENX_AIRGAPPED=true` env var on the engine sidecar.
    *
-   * Hard product constraint surfaced at plan-render time, NOT blocked:
-   * demo / limited licenses cannot actually run airgapped — the engine
-   * logs a warning and downgrades to online mode. The wizard surfaces
-   * this softly and lets the user proceed without airgapped if they
-   * decline to sign in.
+   * Every licence runs airgapped on engine 1.1.61+, including the
+   * built-in evaluation licence (which is airgapped by construction) and
+   * a demo JWT: both verify offline.
    */
   airgapped?: boolean;
   /** Skip install — for users who just want verify or teardown guidance. */
@@ -249,9 +256,13 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // post-render.cmd} via the per-step `files[]` model and tells `helm
   // upgrade` to use `--post-renderer ./tenx-kustomize/post-render.sh`.
   // No blocker.
-  if (!args.licenseJwt && !args.skipInstall) {
+  // No licence is a supported install: the engine runs its built-in
+  // evaluation licence. The blocker only fires when the caller made no
+  // licence choice at all.
+  const builtinLicense = !args.licenseJwt && args.builtinLicense === true;
+  if (!args.licenseJwt && !builtinLicense && !args.skipInstall) {
     blockers.push(
-      'Log10x license JWT is required to produce an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token for a user-scoped one). Teardown and verify plans work without it.'
+      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Teardown and verify plans work without either.'
     );
   }
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
@@ -265,7 +276,9 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     namespace,
     spec,
     app,
-    installMode
+    installMode,
+    builtinLicense,
+    (args.backends ?? ['log10x']).includes('log10x')
   );
 
   // The expander installs on the DESTINATION, not in this cluster, and is
@@ -355,7 +368,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   const teardown: PlanStep[] = [];
 
   if (spec && !args.skipInstall && blockers.length === 0) {
-    install.push(...buildInstallSteps({ ...args, spec, releaseName, namespace, destination, app, optimize: effectiveOptimize, readOnly: effectiveReadOnly, installMode }));
+    install.push(...buildInstallSteps({ ...args, builtinLicense, spec, releaseName, namespace, destination, app, optimize: effectiveOptimize, readOnly: effectiveReadOnly, installMode }));
   }
   // When the wizard is upgrading the user's existing forwarder release
   // (the canonical Receiver path), surface a note so the agent flags
@@ -387,6 +400,8 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // AdvisePlanSummary.license_kind so agents don't grep `notes` for
   // "demo license".
   //
+  //   - no licenseJwt, builtinLicense              → 'builtin'
+  //     (the engine runs its built-in evaluation licence)
   //   - no licenseJwt at all                       → 'placeholder'
   //     (skipInstall mode, or fetch failed and the plan emitted the
   //     REPLACE_WITH_LICENSE_JWT default)
@@ -398,7 +413,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   //     (caller supplied a JWT without declaring its kind; treated as
   //     opaque)
   const licenseKind: AdvisePlan['licenseKind'] = !args.licenseJwt
-    ? 'placeholder'
+    ? builtinLicense ? 'builtin' : 'placeholder'
     : args.isDemoLicense === true
       ? 'demo'
       : args.isDemoLicense === false
@@ -535,7 +550,9 @@ async function runPreflight(
   namespace: string,
   spec: ForwarderSpec | undefined,
   app: AdvisorApp,
-  installMode: 'upgrade-existing' | 'fresh-release'
+  installMode: 'upgrade-existing' | 'fresh-release',
+  builtinLicense = false,
+  reportsToLog10x = false
 ): Promise<PreflightCheck[]> {
   const checks: PreflightCheck[] = [];
 
@@ -641,13 +658,30 @@ async function runPreflight(
   // constants that already shipped. If a chart ref drifts, helm install
   // surfaces it meaningfully on its own.
 
-  // License JWT hint.
-  checks.push({
-    name: 'license JWT',
-    status: 'unknown',
-    detail:
-      'bring your own log10x license JWT via the `license_jwt` argument (mint via `POST /api/v1/license/demo` or `POST /api/v1/license`). The plan fails closed without it.',
-  });
+  // Licence. No licence is a supported install, so this row states what
+  // the engine will run on rather than demanding a JWT. The one thing the
+  // built-in licence cannot do is report to the log10x metrics backend: the
+  // launcher runs it airgapped (no outbound call to log10x at all), and the
+  // log10x push authenticates with a licence JWT there is none of. That
+  // combination is a warn, with the way out named.
+  checks.push(
+    builtinLicense
+      ? {
+          name: 'license',
+          status: reportsToLog10x ? 'warn' : 'ok',
+          detail:
+            'no licence configured: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped) and logs that it does at startup. Nothing to mint, store or mount. ' +
+            (reportsToLog10x
+              ? 'Because it runs airgapped, the engine sends nothing to log10x, so the `log10x` metrics backend receives no metrics on this licence; other backends are unaffected. To report to log10x, re-run the wizard with `license_source: "signin"` or `"paste"`; the plan then adds a step that creates the licence Secret.'
+              : 'To license it later, re-run the wizard with `license_source: "signin"` or `"paste"`; the plan then adds a step that creates the licence Secret.'),
+        }
+      : {
+          name: 'license JWT',
+          status: 'unknown',
+          detail:
+            'the plan delivers the licence JWT you chose through a Kubernetes Secret. To run without one, re-run with `license_source: "builtin"`: the engine then runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped).',
+        }
+  );
 
   return checks;
 }
@@ -658,6 +692,8 @@ function buildInstallSteps(opts: {
   namespace: string;
   licenseJwt?: string;
   isDemoLicense?: boolean;
+  /** No licence: no Secret step, and overlays name no licence env or volume. */
+  builtinLicense?: boolean;
   destination: OutputDestination;
   outputHost?: string;
   splunkHecToken?: string;
@@ -692,6 +728,7 @@ function buildInstallSteps(opts: {
     isDemoLicense,
     installMode,
   } = opts;
+  const builtinLicense = !opts.licenseJwt && opts.builtinLicense === true;
   const licenseJwt = opts.licenseJwt ?? 'REPLACE_WITH_LICENSE_JWT';
   const licenseSecretName = 'log10x-license';
   const licenseSecretKey = 'license-jwt';
@@ -729,8 +766,9 @@ function buildInstallSteps(opts: {
   // this step on the log10x charts (transient JWT, fine inline), but a
   // Receiver overlay has no inline slot: it always mounts this Secret, so a
   // demo plan without the step left the pod waiting on a Secret that never
-  // existed.
-  if (isDemoLicense === false || (app === 'receiver' && opts.licenseJwt)) {
+  // existed. With no licence (builtin) there is nothing to store, and no
+  // overlay mounts a Secret, so the step is left out.
+  if (!builtinLicense && (isDemoLicense === false || (app === 'receiver' && opts.licenseJwt))) {
     steps.push({
       title: 'Create license Secret',
       rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret — create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
@@ -769,6 +807,7 @@ function buildInstallSteps(opts: {
       isDemoLicense,
       licenseSecretName,
       licenseSecretKey,
+      builtinLicense,
       releaseName,
       destination,
       outputHost,
@@ -794,6 +833,7 @@ function buildInstallSteps(opts: {
         airgapped,
         licenseSecretName,
         licenseSecretKey,
+        builtinLicense,
       })
     : [];
   const allFiles = [valuesPlanFile, ...extraFiles];

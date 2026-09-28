@@ -202,3 +202,18 @@ test('teardown does not touch AWS infra (Terraform concern)', async () => {
   assert.ok(!/aws\s+s3\s+rb|aws\s+sqs\s+delete-queue|aws\s+iam\s+delete-role/.test(teardownText),
     `teardown must not invoke destructive AWS CLI verbs; got: ${teardownText.slice(0, 400)}`);
 });
+
+test('builtinLicense: no licence is a supported retriever install, and nothing is written as a key', async () => {
+  const plan = await buildRetrieverPlan({ snapshot: richSnapshot(), builtinLicense: true });
+  assert.ok(
+    !plan.blockers.some((b) => b.toLowerCase().includes('license jwt')),
+    `builtin must not block on a missing JWT: ${plan.blockers.join(' | ')}`
+  );
+  assert.equal(plan.licenseKind, 'builtin');
+  const text = JSON.stringify(plan.install);
+  assert.ok(!/apiKey: "/.test(text), 'no key written into the values file');
+  assert.ok(
+    plan.notes.some((n) => /10 nodes, 30 days from each start, airgapped/.test(n)),
+    'the plan names the evaluation limits'
+  );
+});

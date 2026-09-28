@@ -238,3 +238,19 @@ test('lambdaEstateCdkConstruct: attach() wires per-pattern only when a mute file
   // read-only fs: without this the log4j appender kills pipeline launch
   assert.ok(cdk.body.includes("addEnvironment('TENX_LOG_PATH', '/tmp/tenx/')"));
 });
+
+// The public layer carries no licence file. A function with no licence env
+// runs the built-in evaluation licence; a TENX_LICENSE_FILE naming a missing
+// file stops the engine, so neither the recipe nor the construct sets one.
+test('serverless: no licence env by default; TENX_LICENSE_KEY licenses a function', () => {
+  const r = lambdaOtelExtensionRecipe({ region: 'us-east-1', bucket: 'acme-offload' });
+  assert.ok(!/^TENX_LICENSE_FILE=/m.test(r.engine.body), 'the engine env must not point at a licence file');
+  const pre = r.executionEnvironment.prerequisites.join(' ');
+  assert.match(pre, /Without TENX_LICENSE_KEY each function runs the engine's built-in evaluation license \(10 nodes, 30 days from each start, airgapped\)/);
+
+  const cdk = lambdaEstateCdkConstruct({ region: 'us-east-1', coralogixRegion: 'us2' });
+  assert.ok(!cdk.body.includes("addEnvironment('TENX_LICENSE_FILE'"), 'the construct must not set TENX_LICENSE_FILE');
+  assert.ok(cdk.body.includes("if (this.licenseKey) fn.addEnvironment('TENX_LICENSE_KEY', this.licenseKey)"));
+  assert.ok(cdk.body.includes('ssm.StringParameter.valueForStringParameter'));
+  assert.ok(cdk.body.includes('aws_ssm as ssm'));
+});

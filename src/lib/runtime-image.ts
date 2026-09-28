@@ -69,9 +69,12 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * all answer at 1.1.79 on Docker Hub, checked 2026-09-15. Pin to what is
  * pullable, not to what is tagged in git. 1.1.81: all five answer, checked
  * 2026-09-28, and the Fluent Bit sidecar pairing ran on it (1.1.80 has no
- * edge-10x image).
+ * edge-10x image). 1.1.85: all five answer, checked 2026-09-28. With no
+ * licence configured, edge-10x runs its built-in evaluation licence (10
+ * nodes, 30 days from each start, airgapped), which is what an install plan
+ * emits by default.
  */
-export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.81';
+export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.85';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

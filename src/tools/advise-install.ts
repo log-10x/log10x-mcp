@@ -7,8 +7,10 @@
  *
  *   1. Asks the next missing question (returning markdown that the agent
  *      surfaces to the user), or
- *   2. Once all answers are in, emits a concrete install plan with the
- *      license JWT pre-filled (auto-fetched from the gateway if absent).
+ *   2. Once all answers are in, emits a concrete install plan. By default
+ *      the plan carries no licence and the engine runs its built-in
+ *      evaluation licence; a signed-in, pasted or demo JWT is wired in
+ *      only when the caller asks for one via `license_source`.
  *
  * The five decisions, by dependency order:
  *
@@ -22,20 +24,22 @@
  *   Q4. (Backend ≠ log10x only) Airgapped — opt-in for CISO-friction
  *       reduction. Skipped silently when backend=log10x (SaaS implies
  *       not-airgapped).
- *   Q5. License — auto-fetched from `/api/v1/license/demo` if the user
- *       hasn't signed in. When `airgapped=true` and the only available
- *       license is a demo, the wizard surfaces a soft warning that
- *       demo licenses can't run airgapped (engine downgrades silently
- *       to online mode), and offers sign-in or proceed-without-airgapped.
+ *   Q5. License — not asked. The default (`license_source: "builtin"`)
+ *       puts no licence in the plan: the engine runs its built-in
+ *       evaluation licence (10 nodes, 30 days from each start,
+ *       airgapped), so there is nothing to mint, store or mount.
+ *       `signin` (user-scoped JWT), `paste` (a JWT the user holds) and
+ *       `demo` (1-node, 14-day JWT) stay available as explicit choices,
+ *       and each adds a step that creates the licence Secret.
  *
  * State retention is via WizardSession on the snapshot store — the
  * MCP itself is stateless per call, but the snapshot store's 30-min TTL
  * gives the agent a coherent conversation thread.
  *
- * **Credential note.** The wizard mints a LICENSE JWT (not an api_key)
- * for the install plan. The license JWT is the credential the deployed
- * engine pods consume — it goes into the helm chart's `log10xLicenseJwt`
- * value. The wizard never touches the user's api_key; the api_key stays
+ * **Credential note.** When asked to (`signin` / `demo`), the wizard mints
+ * a LICENSE JWT (not an api_key) for the install plan. The license JWT is
+ * the credential the deployed engine pods consume: it goes into the helm
+ * chart's `log10xLicenseJwt` value or a mounted Secret. The wizard never touches the user's api_key; the api_key stays
  * with the MCP for user-action calls (queries, env management, etc.).
  * See `../lib/auth-model.ts` for the full split.
  */
@@ -150,16 +154,20 @@ export const adviseInstallSchema = {
     .describe(
       'Per-backend credential configuration, keyed by backend kind (must be one of: log10x, datadog, elastic, cloudwatch, prometheus). **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
     ),
+  // Optional rather than `.default()`: an omitted value keeps whatever the
+  // session already chose (so the re-invoke after log10x_signin_start, or
+  // the call carrying license_jwt_paste, stays on signin / paste), and only
+  // a session that never chose falls to 'builtin'.
   license_source: z
-    .enum(['signin', 'demo', 'paste'])
-    .default('signin')
+    .enum(['builtin', 'signin', 'demo', 'paste'])
+    .optional()
     .describe(
-      'How the wizard should acquire the engine\'s license JWT. **Defaults to `"signin"`** when omitted — the wizard tries to mint a user-scoped license via the user\'s Auth0 session, and emits `signin_required` mode (chain through `log10x_signin_start` then re-invoke) when no session exists. Pass **`"demo"`** ONLY when the user explicitly asks for a quick 14-day anonymous demo (transient, can\'t run airgapped). Pass **`"paste"`** with `license_jwt_paste: "<jwt>"` when the user already has a JWT.'
+      'How the engine is licensed. **Defaults to `"builtin"`** when omitted: the plan carries no licence and the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Nothing is minted or stored, and no licence Secret is created. Pass **`"signin"`** when the user wants their own user-scoped licence: the wizard mints it via the user\'s Auth0 session and emits `signin_required` mode (chain through `log10x_signin_start`, then re-invoke) when no session exists. Pass **`"paste"`** with `license_jwt_paste: "<jwt>"` when the user already has a JWT. Pass **`"demo"`** only when the user explicitly asks for the anonymous 1-node, 14-day demo JWT. Every choice other than `builtin` adds a step that creates the licence Secret. Omitting this arg on a later call keeps the earlier choice.'
     ),
   license_jwt_paste: z
     .string()
     .optional()
-    .describe('License JWT supplied by the user when `license_source: "paste"`. Mints from `POST /api/v1/license` (signed-in) or `POST /api/v1/license/demo` (anonymous). Maps to the chart\'s license Secret.'),
+    .describe('License JWT supplied by the user when `license_source: "paste"` (passing it alone implies `paste`). Minted from `POST /api/v1/license` (signed-in) or `POST /api/v1/license/demo` (anonymous). Maps to the chart\'s license Secret.'),
   namespace: z.string().optional().describe('Target namespace. Default: snapshot.recommendations.suggestedNamespace.'),
   release_name: z
     .string()
@@ -297,11 +305,11 @@ const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string
     headline: 'Wizard Q5: run the engine fully airgapped (zero outbound calls to log10x.com)?',
     answer_field: 'airgapped',
   },
-  // 'license-source' is intentionally absent. The wizard no longer
-  // elicits the license source — signin is the implicit default and the
-  // wizard emits `signin_required` mode when no Auth0 session exists.
-  // Demo and paste remain accessible via the explicit `license_source`
-  // arg but never as a wizard-rendered question.
+  // 'license-source' is intentionally absent. The wizard does not elicit
+  // the license source: 'builtin' (the engine's built-in evaluation
+  // licence) is the implicit default. Signin, paste and demo remain
+  // accessible via the explicit `license_source` arg but never as a
+  // wizard-rendered question.
   'license-paste': {
     headline: 'Wizard Q6: paste the license JWT you already have.',
     answer_field: 'license_jwt_paste',
@@ -448,7 +456,7 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
     case 'next_question':
       return `Install wizard needs an answer to question "${data.question_id}" before it can emit a plan. Re-invoke log10x_advise_install with the answer in tool args and the same snapshot_id. Answers already given are remembered.`;
     case 'missing_snapshot_id':
-      return `Install wizard needs a snapshot_id and none was supplied. Run log10x_discover_env (no args) to mint one, then re-invoke log10x_advise_install with it. The wizard asks for app, forwarder, backends and licence one question at a time from there.`;
+      return `Install wizard needs a snapshot_id and none was supplied. Run log10x_discover_env (no args) to mint one, then re-invoke log10x_advise_install with it. The wizard asks for app, forwarder and backends one question at a time from there.`;
     case 'missing_snapshot':
       return `Install wizard refused: snapshot ${data.snapshot_id} is missing or expired (snapshots live 30 minutes). Run log10x_discover_env again and re-invoke with the new snapshot_id.`;
     case 'session_error':
@@ -760,7 +768,7 @@ function wizardEnvelopeMeta(data: WizardData): {
           `pairing plan instead of the Kubernetes wizard.`,
         actions: [],
         warnings: [
-          'a public layer carries no license: set TENX_LICENSE_KEY on each function before deploying',
+          'without TENX_LICENSE_KEY each function runs the engine\'s built-in evaluation license (10 nodes, 30 days from each start, airgapped); set TENX_LICENSE_KEY on each function to license it',
         ],
       };
     case 'license_error':
@@ -789,10 +797,10 @@ function wizardEnvelopeMeta(data: WizardData): {
         headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install — every prior answer is preserved.`,
         actions: [
           { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license). Must complete before the next action.', role: 'required-next' },
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'after signin_start completes, re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist', role: 'required-next' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, license_source: 'signin' }, reason: 'after signin_start completes, re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist', role: 'required-next' },
         ],
         warnings: [
-          'plan NOT emitted yet — the user picked sign-in, but the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT proceed without it; do NOT silently fall back to demo.',
+          'plan NOT emitted yet: the user picked sign-in, and the wizard cannot proceed until log10x_signin_start has been called and completed successfully. Do NOT silently fall back to demo. If the user would rather not sign in, re-invoke with license_source: "builtin" to run on the engine\'s built-in evaluation licence (10 nodes, 30 days from each start, airgapped).',
         ],
       };
     case 'unknown_args': {
@@ -838,13 +846,23 @@ function wizardEnvelopeMeta(data: WizardData): {
         data.license_kind === 'demo' ||
         (data.license_kind === undefined && data.notes.some((n) => /demo license/i.test(n)));
       if (isDemoLicense) {
-        warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires to get a user-scoped one');
+        warnings.push('plan emitted with a demo license: 1 node, expires 14 days after it was minted. Re-run with `license_source: "signin"` before then for a user-scoped one, or with `license_source: "builtin"` to drop the JWT and run the engine\'s built-in evaluation licence (10 nodes, 30 days from each start, airgapped).');
         // The demo license runs airgapped (engine 1.1.61+ verifies offline
         // and never reads the license type), so an airgapped plan is emitted
         // rather than refused. What still bites is scale and the clock, and
         // an operator reading the plan has to see both.
         if (data.notes.some((n) => /airgapped/i.test(n))) {
-          warnings.push('airgapped on a demo license works — the engine verifies offline (proven on a live Lambda estate) — but the license is single-node and expires in 14 days, so an isolated estate stops processing when it lapses. Mint a user license and place it before the window closes.');
+          warnings.push('airgapped on a demo license works, since the engine verifies it offline, but the license covers 1 node and expires 14 days after minting, so an isolated estate stops processing when it lapses. Place a user license before then.');
+        }
+      }
+      // No licence in the plan: not a fault, but the limits are real and an
+      // operator reading the plan has to see them.
+      if (data.license_kind === 'builtin') {
+        warnings.push('no licence in the plan: the engine runs its built-in evaluation licence, 10 nodes, 30 days from each start, airgapped. To license it, re-run with `license_source: "signin"` or `license_source: "paste"`; the plan then adds a step that creates the licence Secret.');
+        // Airgapped means nothing reaches log10x, including the log10x
+        // metrics backend. The preflight row carries the detail.
+        if (data.preflight.some((c) => c.name === 'license' && c.status === 'warn')) {
+          warnings.push('the `log10x` metrics backend receives nothing on the built-in evaluation licence: the engine runs airgapped and sends nothing to log10x. Your other backends are unaffected. Sign in or paste a licence to report to log10x.');
         }
       }
       const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
@@ -852,7 +870,9 @@ function wizardEnvelopeMeta(data: WizardData): {
       actions.push({
         tool: 'log10x_doctor',
         args: {},
-        reason: 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+        reason: data.license_kind === 'builtin'
+          ? 'verify the install once the helm release rolls out: checks engine pods Ready and metrics flowing'
+          : 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
         role: 'optional-followup',
       });
       // Receiver path: post-install pattern-mitigation is the natural follow-up.
@@ -964,7 +984,7 @@ export async function executeAdviseInstall(
       '{ "snapshot_id": "<id from log10x_discover_env>" }',
       '```',
       '',
-      'The wizard asks for app, forwarder, backends and licence one question at a time from there, so the ' +
+      'The wizard asks for app, forwarder and backends one question at a time from there, so the ' +
         'first call carries the snapshot_id alone.',
     ].join('\n');
     return wizardReturn({
@@ -1014,6 +1034,14 @@ export async function executeAdviseInstall(
   // already there rather than replacing the whole map — the user might
   // answer credentials for one backend at a time across multiple turns.
   const prior = getWizardSession(snapshotId);
+  // Licence source: an explicit arg wins; a pasted JWT alone means paste;
+  // otherwise keep the session's earlier choice, and a session that never
+  // chose runs on the engine's built-in evaluation licence.
+  const licenseSource: NonNullable<WizardSession['licenseSource']> =
+    args.license_source ??
+    (args.license_jwt_paste ? 'paste' : undefined) ??
+    prior?.licenseSource ??
+    'builtin';
   const mergedBackendCredentials = args.backend_credentials
     ? {
         ...(prior?.backendCredentials ?? {}),
@@ -1026,10 +1054,11 @@ export async function executeAdviseInstall(
     backends: args.backends as MetricsBackendKind[] | undefined,
     backendCredentials: mergedBackendCredentials,
     airgapped: args.airgapped,
-    licenseSource: args.license_source,
+    licenseSource,
     // license_jwt_paste fills licenseJwt directly — it's the actual JWT
     // the user supplied. The session's licenseJwt is overwritten below
-    // by acquireLicenseForWizard() for the signin/demo paths.
+    // by acquireLicenseForWizard() for the signin/demo paths, and ignored
+    // on the builtin path.
     licenseJwt: args.license_jwt_paste,
     releaseName: args.release_name,
     namespace: args.namespace,
@@ -1098,7 +1127,10 @@ export async function executeAdviseInstall(
     }
   }
 
-  // License acquisition. Three paths driven by session.licenseSource:
+  // License acquisition. Four paths driven by session.licenseSource:
+  //   - 'builtin' — the default. Nothing to acquire: the plan carries no
+  //     licence and the engine runs its built-in evaluation licence (10
+  //     nodes, 30 days from each start, airgapped). No gateway call.
   //   - 'signin' — the user said "sign me in". We require a real
   //     user-scoped license; if acquireLicenseForWizard would return a
   //     demo (because the user isn't actually signed in via the device
@@ -1110,7 +1142,8 @@ export async function executeAdviseInstall(
   //   - 'demo' — explicit demo. Skip the signed-in check, mint a demo.
   //   - 'paste' — the user supplied license_jwt_paste; session.licenseJwt
   //     is already populated from that arg. Nothing to do here.
-  if (!session.licenseJwt && session.licenseSource !== 'paste') {
+  const builtinLicense = session.licenseSource === 'builtin';
+  if (!builtinLicense && !session.licenseJwt && session.licenseSource !== 'paste') {
     try {
       const lic = await acquireLicenseForWizard();
       const isRealUserLicense =
@@ -1159,6 +1192,7 @@ export async function executeAdviseInstall(
         `> ${msg}`,
         ``,
         `Options:`,
+        `- Re-invoke with \`license_source: "builtin"\` to install with no licence: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped)`,
         `- Sign in via \`log10x_signin_start\` if you haven't already`,
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
         `- Retry — the gateway may have been transiently unavailable`,
@@ -1190,6 +1224,7 @@ export async function executeAdviseInstall(
   // licenses to online mode.
   if (
     process.env.LOG10X_DEMO_AIRGAPPED_REFUSE === '1' &&
+    !builtinLicense &&
     session.airgapped === true &&
     session.isDemoLicense === true
   ) {
@@ -1445,9 +1480,11 @@ async function elicitMissingAnswers(
       session.airgapped = false;
     }
 
-    // Q6: license source — IMPLICIT 'signin'.
+    // Q6: license source — IMPLICIT 'builtin' (no licence; the engine runs
+    // its built-in evaluation licence). Not elicited.
     //
-    // We deliberately do NOT elicit this. Three attempts to get Claude
+    // History: when sign-in was the implicit default,
+    // it was deliberately NOT elicited: three attempts to get Claude
     // Desktop's UI to mark "sign in" as the recommended choice all
     // failed: regardless of enumNames text, `default:` field, or
     // "(Recommended)" suffix, the host's auto-rephraser keeps stripping
@@ -1456,18 +1493,13 @@ async function elicitMissingAnswers(
     // host overrule our intent means users routinely pick demo without
     // realizing it's the wrong path for real installs.
     //
-    // Resolution: signin is the IMPLICIT default. If acquireLicense
-    // can't mint a real user-scoped license, the wizard emits
-    // `signin_required` and stops — the agent chains through
-    // log10x_signin_start, then re-invokes. Demo and paste remain
-    // reachable via the schema's `license_source` arg, but as
-    // explicit escape hatches (the agent passes them when the USER
-    // says "I just want to play with demo" or "I have a JWT").
-    //
-    // The Zod schema `.default('signin')` on license_source already
-    // populates args.license_source on every call, and the session
-    // merge below folds it into session.licenseSource — no explicit
-    // defaulting needed here.
+    // Now the default needs no choice at all: an install with no licence
+    // runs. Signin, paste and demo remain reachable via the schema's
+    // `license_source` arg as explicit choices (the agent passes them when
+    // the USER says "use my licence", "I have a JWT" or "give me the
+    // demo"). The session merge in executeAdviseInstall resolves the
+    // effective source (explicit arg, else pasted JWT, else the session's
+    // earlier choice, else 'builtin'), so no defaulting is needed here.
 
     // Q7: paste path — ask for the JWT itself.
     if (session.licenseSource === 'paste' && !session.licenseJwt) {
@@ -1757,12 +1789,10 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
     session.airgapped = false;
   }
 
-  // Q6 (license source) — IMPLICIT 'signin'. Not elicited. See the
-  // matching block in elicitMissingAnswers() above for the rationale.
-  // Demo / paste remain accessible as explicit `license_source` args.
-  // No explicit defaulting needed — the Zod schema's `.default('signin')`
-  // already populates args.license_source and the session merge folds
-  // it into session.licenseSource on every call.
+  // Q6 (license source) — IMPLICIT 'builtin'. Not elicited. See the
+  // matching block in elicitMissingAnswers() above. Signin / paste / demo
+  // remain accessible as explicit `license_source` args; the session
+  // merge in executeAdviseInstall resolves the effective source.
 
   // Q7: when license_source=paste and the JWT hasn't been provided yet,
   // ask for it. (The agent passes it via `license_jwt_paste`, which the
@@ -1972,9 +2002,10 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
 }
 
 // There is no askLicenseSource(): the wizard does not surface the
-// license-source choice as a question. Sign-in is the implicit default
-// (see signin_required mode); demo / paste remain accessible via the
-// explicit `license_source` arg on advise_install.
+// license-source choice as a question. 'builtin' (no licence; the engine
+// runs its built-in evaluation licence) is the implicit default; signin /
+// paste / demo remain accessible via the explicit `license_source` arg on
+// advise_install.
 
 function askLicensePaste(): string {
   return [
@@ -2146,9 +2177,10 @@ async function renderInstallPlan(
   // Demo + airgapped: at this point either the user opted out of
   // airgapped OR signed in. If we still see demo+airgapped together,
   // the engine will downgrade — emit a banner.
-  if (session.airgapped && session.isDemoLicense) {
+  const builtinLicense = session.licenseSource === 'builtin';
+  if (!builtinLicense && session.airgapped && session.isDemoLicense) {
     lines.push(
-      '> ⚠ Plan emitted with `airgapped: true` and a **demo license**. The engine verifies the license offline, so the pods stay airgapped, but the demo license is single-node and expires in 14 days: an isolated install stops processing when it lapses. Place a user license before then.'
+      '> ⚠ Plan emitted with `airgapped: true` and a **demo license**. The engine verifies the license offline, so the pods stay airgapped, but the demo license covers 1 node and expires 14 days after it was minted: an isolated install stops processing when it lapses. Place a user license before then, or re-run with `license_source: "builtin"` to run the engine\'s built-in evaluation licence instead (10 nodes, 30 days from each start, airgapped).'
     );
     lines.push('');
   }
@@ -2169,8 +2201,11 @@ async function renderInstallPlan(
     forwarder: session.forwarder,
     releaseName: session.releaseName,
     namespace: session.namespace,
-    licenseJwt: session.licenseJwt,
-    isDemoLicense: session.isDemoLicense,
+    // Builtin: no JWT reaches the plan even if an earlier turn stored one,
+    // so no Secret step and no licence mount are emitted.
+    licenseJwt: builtinLicense ? undefined : session.licenseJwt,
+    isDemoLicense: builtinLicense ? undefined : session.isDemoLicense,
+    builtinLicense,
     destination,
     backends: session.backends,
     backendCredentials: session.backendCredentials,
@@ -2192,7 +2227,24 @@ function renderChoiceSummary(session: WizardSession): string {
   const backendList = (session.backends ?? ['log10x']).map((b) => `\`${b}\``).join(' + ');
   rows.push(`- **Metrics backends**: ${backendList}`);
   if (session.airgapped) rows.push(`- **Airgapped**: yes (engine emits only to user-owned backends)`);
-  if (session.isDemoLicense) rows.push(`- **License**: anonymous 14-day demo (sign in for a user-scoped one)`);
+  rows.push(`- **License**: ${licenseSummary(session)}`);
   return rows.join('\n');
+}
+
+/** One line on what the engine will run on, with the limits as numbers. */
+function licenseSummary(session: WizardSession): string {
+  if (session.licenseSource === 'builtin') {
+    const toLog10x = (session.backends ?? ['log10x']).includes('log10x')
+      ? ' Airgapped means the engine sends nothing to log10x, so the `log10x` metrics backend receives no metrics until the engine is licensed.'
+      : '';
+    return 'none in the plan. The engine runs its built-in evaluation licence: 10 nodes, 30 days from each start, airgapped. Nothing is minted or stored and no licence Secret is created.' +
+      toLog10x +
+      ' To license it later, re-run with `license_source: "signin"` or `license_source: "paste"`; the plan then adds the step that creates the licence Secret.';
+  }
+  if (session.isDemoLicense) {
+    return 'anonymous demo JWT: 1 node, expires 14 days after it was minted. Sign in for a user-scoped one, or re-run with `license_source: "builtin"` for the built-in evaluation licence (10 nodes, 30 days from each start, airgapped).';
+  }
+  if (session.licenseSource === 'paste') return 'the JWT you pasted, delivered to the engine through a Kubernetes Secret.';
+  return 'your user-scoped licence, delivered to the engine through a Kubernetes Secret.';
 }
 

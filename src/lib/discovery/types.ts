@@ -436,15 +436,17 @@ export interface WizardSession {
     | 'refresh-failed'
     | 'user-license-fetch-failed';
   /**
-   * How the user chose to get the license JWT:
-   *   - 'signin' — sign in to log10x first, then re-invoke (the
-   *     recommended path; produces a real user-scoped license)
-   *   - 'demo' — mint an anonymous 14-day demo JWT (transient, can't
-   *     run airgapped)
+   * How the user chose to license the engine:
+   *   - 'builtin' — no licence at all (the default). The engine runs its
+   *     built-in evaluation licence: 10 nodes, 30 days from each start,
+   *     airgapped. Nothing is minted, stored or mounted.
+   *   - 'signin' — sign in to log10x first, then re-invoke; produces a
+   *     user-scoped license
+   *   - 'demo' — mint an anonymous 1-node, 14-day demo JWT
    *   - 'paste' — the user supplied a JWT they already have, via
    *     `license_jwt_paste`
    */
-  licenseSource?: 'signin' | 'demo' | 'paste';
+  licenseSource?: 'builtin' | 'signin' | 'demo' | 'paste';
   /**
    * `true` once a native elicitation form was dismissed or errored in this
    * session. Some clients (certain Claude Desktop builds) declare the

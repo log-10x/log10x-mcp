@@ -139,8 +139,10 @@ export interface AdvisePlan {
    *   - 'user-pasted' — user supplied via license_jwt_paste; opaque
    *   - 'placeholder' — REPLACE_WITH_LICENSE_JWT (skipInstall mode or
    *     license fetch deferred)
+   *   - 'builtin'     — no licence configured; the engine runs its built-in
+   *     evaluation licence (10 nodes, 30 days from each start, airgapped)
    */
-  licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
+  licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder' | 'builtin';
   /**
    * How the helm command lands:
    *   - 'upgrade-existing' — `helm upgrade --reuse-values <release>` against
