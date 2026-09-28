@@ -42,6 +42,7 @@ import { isLambdaFunctionUrl, signedLambdaUrlPost } from './lambda-url-sign.js';
 import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
 import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { s3GetObjectText, s3ListBuckets, s3ListObjects } from './s3-read.js';
 
 const execFileP = promisify(execFile);
 
@@ -747,12 +748,7 @@ async function tryDetectRetrieverBucketFromAws(): Promise<{ bucket?: string; rea
     return { reason: 'no AWS_REGION / AWS_PROFILE in env' };
   }
   try {
-    const { stdout } = await execFileP('aws', ['s3api', 'list-buckets', '--output', 'json'], {
-      timeout: 8_000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    const parsed = JSON.parse(stdout) as { Buckets?: Array<{ Name: string }> };
-    const names = (parsed.Buckets || []).map((b) => b.Name);
+    const names = await s3ListBuckets({ timeout: 8_000 });
     const matches = names.filter(
       (n) =>
         n.startsWith('log10x-retriever-') ||
@@ -1052,24 +1048,13 @@ interface S3ListEntry {
 // NOTE on pagination: `aws s3api list-objects-v2` AUTO-PAGINATES by default —
 // the CLI follows NextContinuationToken internally and merges all pages into
 // one Contents array (54,597 keys returned on a single call vs 1,000 with
-// --no-paginate). Do NOT add manual token loops here. The real
-// ceiling is maxBuffer: ~150 bytes/key JSON means 32 MB covers ~200k keys.
+// --no-paginate). s3-read.ts keeps that on the CLI side and follows the token
+// itself on the SDK side. The real ceiling is maxBuffer: ~150 bytes/key JSON
+// means 32 MB covers ~200k keys.
 async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
   try {
-    const { stdout } = await execFileP('aws', [
-      's3api',
-      'list-objects-v2',
-      '--bucket',
-      bucket,
-      '--prefix',
-      prefix,
-      '--output',
-      'json',
-    ], { maxBuffer: 32 * 1024 * 1024 });
-
-    if (!stdout.trim()) return [];
-    const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
-    return parsed.Contents || [];
+    const listed = await s3ListObjects(bucket, prefix, { maxBuffer: 32 * 1024 * 1024 });
+    return listed.map((o) => ({ Key: o.Key, Size: o.Size ?? 0 }));
   } catch (e) {
     // list-objects-v2 returns empty stdout when the prefix has no keys;
     // only real failures raise.
@@ -1083,13 +1068,7 @@ async function s3List(bucket: string, prefix: string): Promise<S3ListEntry[]> {
 }
 
 async function s3Get(bucket: string, key: string): Promise<string> {
-  const { stdout } = await execFileP('aws', [
-    's3',
-    'cp',
-    `s3://${bucket}/${key}`,
-    '-',
-  ], { maxBuffer: 64 * 1024 * 1024 });
-  return stdout;
+  return s3GetObjectText(bucket, key, { maxBuffer: 64 * 1024 * 1024 });
 }
 
 /**
