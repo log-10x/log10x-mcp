@@ -32,6 +32,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import { s3GetObjectText, s3ListObjects } from './s3-read.js';
+
 const execFileP = promisify(execFile);
 
 /** The offload destination types this module can read. */
@@ -247,17 +249,11 @@ async function listS3Objects(
   target: ObjectStoreTarget,
   prefix: string,
 ): Promise<StoreObjectMeta[]> {
-  // `aws s3api list-objects-v2` AUTO-PAGINATES (the CLI follows
-  // NextContinuationToken internally and merges all pages). Do NOT add a
-  // manual token loop. The ceiling is maxBuffer.
-  let stdout: string;
+  // The CLI when it is on PATH, the SDK when it is not (s3-read.ts). The
+  // CLI auto-paginates and the SDK side follows the token itself; the
+  // ceiling is maxBuffer either way.
   try {
-    const res = await execFileP(
-      'aws',
-      ['s3api', 'list-objects-v2', '--bucket', target.container, '--prefix', prefix, '--output', 'json'],
-      { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 },
-    );
-    stdout = res.stdout;
+    return await s3ListObjects(target.container, prefix, { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 });
   } catch (e) {
     const stderr = azStderr(e);
     if (stderr.includes('NoSuchBucket')) {
@@ -265,9 +261,6 @@ async function listS3Objects(
     }
     throw new Error(`aws s3api list-objects-v2 failed: ${stderr.slice(0, 300)}`);
   }
-  if (!stdout.trim()) return [];
-  const parsed = JSON.parse(stdout) as { Contents?: StoreObjectMeta[] };
-  return parsed.Contents ?? [];
 }
 
 /** List objects under `prefix`. Throws on a store-level error (missing container, denied read). */
@@ -309,9 +302,5 @@ export async function getStoreObject(target: ObjectStoreTarget, key: string): Pr
       15_000,
     );
   }
-  const { stdout } = await execFileP('aws', ['s3', 'cp', `s3://${target.container}/${key}`, '-'], {
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 10_000,
-  });
-  return stdout;
+  return s3GetObjectText(target.container, key, { maxBuffer: 64 * 1024 * 1024, timeout: 10_000 });
 }

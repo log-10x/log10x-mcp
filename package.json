@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.30.26",
+  "version": "1.30.27",
   "description": "Rank log patterns by cost, then compact, tier down or offload them. No log data reaches log10x.",
   "mcpName": "io.github.log-10x/log10x-mcp",
   "type": "module",
@@ -49,6 +49,7 @@
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-cloudwatch": "^3.1037.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1032.0",
+    "@aws-sdk/client-s3": "^3.1141.0",
     "@aws-sdk/client-sqs": "^3.1062.0",
     "@aws-sdk/client-ssm": "^3.1063.0",
     "@aws-sdk/credential-providers": "^3.1032.0",
