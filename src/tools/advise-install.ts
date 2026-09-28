@@ -760,7 +760,7 @@ function wizardEnvelopeMeta(data: WizardData): {
           `pairing plan instead of the Kubernetes wizard.`,
         actions: [],
         warnings: [
-          'the engine extension layer is not published yet — this plan declares the shape and configuration, not a deployable artifact',
+          'a public layer carries no license: set TENX_LICENSE_KEY on each function before deploying',
         ],
       };
     case 'license_error':
@@ -996,7 +996,12 @@ export async function executeAdviseInstall(
   // Kubernetes wizard's every question (helm release, namespace, sidecar
   // forwarder) is meaningless here — emit the OTel-extension pairing plan
   // instead of walking the user into a helm plan they cannot apply.
-  if (snapshot.recommendations.estateShape === 'serverless') {
+  // A forwarder named in the call is a Kubernetes sidecar request, and wins
+  // over the estate guess: an account with Lambdas and no reachable cluster
+  // from this machine answered `forwarder: "fluentbit"` with a Lambda plan.
+  // otel-collector stays ambiguous (it is also the Lambda extension's collector).
+  const namedSidecar = args.forwarder !== undefined && args.forwarder !== 'otel-collector';
+  if (snapshot.recommendations.estateShape === 'serverless' && !namedSidecar) {
     return serverlessPlanReturn(snapshot);
   }
   if (snapshot.recommendations.estateShape === 'azure_serverless') {
@@ -2143,7 +2148,7 @@ async function renderInstallPlan(
   // the engine will downgrade — emit a banner.
   if (session.airgapped && session.isDemoLicense) {
     lines.push(
-      '> ⚠ Plan emitted with `airgapped: true` and a **demo license** — the engine will detect this combo and downgrade to online mode at startup. The plan below leaves `airgapped` set to true so you can sign in later and the chart will then enforce it for real.'
+      '> ⚠ Plan emitted with `airgapped: true` and a **demo license**. The engine verifies the license offline, so the pods stay airgapped, but the demo license is single-node and expires in 14 days: an isolated install stops processing when it lapses. Place a user license before then.'
     );
     lines.push('');
   }

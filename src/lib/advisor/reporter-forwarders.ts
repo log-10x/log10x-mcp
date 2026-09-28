@@ -565,10 +565,15 @@ function renderLog10xSidecar(opts: {
   licenseSecretName: string;
   /** Key inside the Secret whose value is the JWT. */
   licenseSecretKey: string;
+  /** Metrics backends; each non-log10x one gets its output module and env. */
+  backends?: MetricsBackendKind[];
+  backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
 }): string {
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
   const argLines: string[] = [
     `      - "@run/input/forwarder/${opts.forwarderKind}"`,
     `      - "@apps/receiver"`,
+    ...nonLog10xBackends.map((b) => `      - "@run/output/metric/${b}"`),
   ];
   if (opts.optimize) {
     argLines.push(`      - "receiverOptimize"`);
@@ -581,6 +586,28 @@ function renderLog10xSidecar(opts: {
   if (opts.airgapped) {
     envLines.push(`      - name: TENX_AIRGAPPED`);
     envLines.push(`        value: "true"`);
+  }
+  // Same env the Reporter path renders (renderTenxExtraArgsAndEnv): secret
+  // keys by secretKeyRef, the rest as plain values. Without it a sidecar
+  // plan asked for `backends: ["prometheus"]` carried no remote-write URL.
+  for (const b of nonLog10xBackends) {
+    const spec = BACKEND_ENV_SPECS[b];
+    if (!spec) continue;
+    const creds = opts.backendCredentials?.[b];
+    const secretName = creds?.secretName ?? defaultSecretNameFor(b);
+    const plainOverrides = creds?.plainValues ?? {};
+    for (const sec of spec.secret) {
+      envLines.push(`      - name: ${sec.envVar}`);
+      envLines.push(`        valueFrom:`);
+      envLines.push(`          secretKeyRef:`);
+      envLines.push(`            name: ${secretName}`);
+      envLines.push(`            key: ${sec.secretKey}`);
+    }
+    for (const pl of spec.plain) {
+      const v = plainOverrides[pl.envVar] ?? pl.default ?? pl.placeholder ?? '';
+      envLines.push(`      - name: ${pl.envVar}`);
+      envLines.push(`        value: "${v}"`);
+    }
   }
   envLines.push(...renderPolicyPullEnvLines('      '));
   return `extraContainers:
@@ -624,8 +651,10 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        backends,
+        backendCredentials,
         forwarderKind: 'fluentbit',
         optimize,
         airgapped,
@@ -1437,8 +1466,10 @@ ${indent(destOutput, 6)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        backends,
+        backendCredentials,
         forwarderKind: 'vector',
         optimize,
         airgapped,
@@ -1569,8 +1600,10 @@ ${indent(destSink, 4)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        backends,
+        backendCredentials,
         forwarderKind: 'otel-collector',
         optimize,
         airgapped,

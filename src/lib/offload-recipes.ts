@@ -2866,7 +2866,8 @@ export interface LambdaExtensionParams {
   domain?: string;
   /** applicationName stamped on shipped events. Default `tenx`. */
   applicationName?: string;
-  /** ARN of the engine extension layer once published. Placeholder until then. */
+  /** ARN of the engine extension layer. Default names the public layer with a
+   * version placeholder; versions differ by region. */
   engineLayerArn?: string;
 }
 
@@ -2899,7 +2900,7 @@ export function lambdaOtelExtensionRecipe(p: LambdaExtensionParams): ServerlessE
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   const app = p.applicationName ?? 'tenx';
   const domain = p.domain ?? '<your-coralogix-domain>';
-  const layerArn = p.engineLayerArn ?? '<tenx-receive-extension-layer-arn (unpublished — see prerequisites)>';
+  const layerArn = p.engineLayerArn ?? `arn:aws:lambda:${p.region}:351939435334:layer:tenx-receive:<version>`;
 
   const offloadBlock = p.bucket
     ? `
@@ -2922,7 +2923,9 @@ export function lambdaOtelExtensionRecipe(p: LambdaExtensionParams): ServerlessE
     language: 'yaml',
     body: `# Merge these blocks into the collector-extension config the functions
 # already run (OPENTELEMETRY_COLLECTOR_CONFIG_FILE / _URI). Existing
-# receivers, processors, and the Coralogix exporter stay untouched.
+# receivers, processors, and exporter stay untouched. The exporter is shown
+# as "coralogix", the destination this pairing was measured with; use the
+# name of your own.
 
 receivers:
   # Return path from the engine extension (loopback, same sandbox).
@@ -2982,8 +2985,7 @@ processors:
       - set(log.body, log.attributes)
       - set(log.body["message"], log.cache["message"])
 
-exporters: {}  # (merge marker — your existing coralogix exporter is reused below)
-
+# Your existing exporter is reused in the pipelines below, not redefined here.
 service:
   pipelines:
     # Splice: whatever pipeline your receivers feed today now exports to the
@@ -3121,8 +3123,8 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
       'long-polls the Runtime API (ROLE=receive handles CloudWatch ' +
       'subscription envelopes there — the remainder path).',
     prerequisites: [
-      'The engine extension layer is NOT published yet. The bootstrap is implemented and lifecycle-proven (engine PR #120: ReceiveExtension + the CloudWatch-remainder receive handler; layer build script in packaging/lambda-layer/) — pending merge, release, and layer publish. No availability claims until then and until the one-shot real-Lambda confirmation has run.',
-      'Architecture: build the layer for the estate architecture (x86_64 measured; arm64 needs its own native build).',
+      'The engine extension layer is public: `tenx-receive` (x86_64) and `tenx-receive-arm64` in account 351939435334, in eight regions. The version differs by region; take the ARN from https://doc.log10x.com/engine/launcher/extension/',
+      'A public layer carries no license: set TENX_LICENSE_KEY on each function.',
     ],
   };
 

@@ -521,7 +521,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
     },
     caveats: [
       EXPANDER_PREREQUISITE_GENERAL,
-      'The default `paths` glob in `pipelines/gitops/config.yaml` is hardcoded to `test/*.csv` for local testing. Override either by forking the config repo and editing the glob, or by setting `GH_PATH=pipelines/run/receive/compact/*` (Gap A — env override is being wired up).',
+      'The `paths` glob in `pipelines/gitops/config.yaml` is `test/*.csv`, and it is a YAML list, which does not read environment variables, so `GH_PATH` does not change it. Fork the config repo and edit `paths` to cover `pipelines/run/receive/compact/*`.',
       'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
       'Hot-reload requires in-place writes (the gitops pattern). Do not source the cap-file via a Kubernetes ConfigMap mount — CM swaps the file via a symlink rename, which the engine\'s stat-based watcher will not see.',
     ],
@@ -726,8 +726,11 @@ function buildInstallSteps(opts: {
 
   // Real (user) licenses are kept out of values.yaml — the chart reads them
   // from an out-of-band Secret the user creates here. Demo licenses skip
-  // this step (transient JWT, fine inline).
-  if (isDemoLicense === false) {
+  // this step on the log10x charts (transient JWT, fine inline), but a
+  // Receiver overlay has no inline slot: it always mounts this Secret, so a
+  // demo plan without the step left the pod waiting on a Secret that never
+  // existed.
+  if (isDemoLicense === false || (app === 'receiver' && opts.licenseJwt)) {
     steps.push({
       title: 'Create license Secret',
       rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret — create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
@@ -830,7 +833,7 @@ function buildInstallSteps(opts: {
       title: 'Install via Helm',
       rationale: extraHelmFlags.length > 0
         ? `Deploys the ${spec.label} chart with the 10x Receiver sidecar injected via the kustomize post-renderer (\`--post-renderer\` flag).`
-        : `Deploys the ${spec.label} chart with the 10x Reporter sidecar enabled.`,
+        : `Deploys the ${spec.label} chart with the 10x ${app === 'receiver' ? 'Receiver' : 'Reporter'} sidecar enabled.`,
       commands: [
         ...extraInstallCmds,
         `helm upgrade --install ${releaseName} ${spec.chartRef} \\\n  -n ${namespace} --create-namespace \\\n  -f ${valuesFile}${helmFlagSuffix}`,
