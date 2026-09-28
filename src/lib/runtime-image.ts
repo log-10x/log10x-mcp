@@ -73,8 +73,11 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * licence configured, edge-10x runs its built-in evaluation licence (10
  * nodes, 30 days from each start, airgapped), which is what an install plan
  * emits by default.
+ * 1.1.86 (2026-09-28): all five images answer; the Receiver's receive-mode
+ * pass-through fix (config #74) ships in this image, checked with a Fluent
+ * Bit sidecar: 0 fullText fallbacks, 2,000 of 2,000 lines.
  */
-export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.85';
+export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.86';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
