@@ -63,7 +63,7 @@ test('lambdaOtelExtensionRecipe: three parts, loopback pairing, routeState routi
   // the layer is public (tenx-receive / tenx-receive-arm64, 1.1.68+); versions differ by region
   const pre = r.executionEnvironment.prerequisites.join(' ');
   assert.ok(!/not published/i.test(pre), 'the layer is public; the plan must not say otherwise');
-  assert.ok(pre.includes('https://doc.log10x.com/engine/launcher/extension/'));
+  assert.match(pre, /doc\.log10x\.com\/engine\/launcher\/extension\//);
   assert.ok(pre.includes('tenx-receive-arm64'));
   assert.ok(r.executionEnvironment.body.includes('arn:aws:lambda:us-east-1:351939435334:layer:tenx-receive:'));
 });
