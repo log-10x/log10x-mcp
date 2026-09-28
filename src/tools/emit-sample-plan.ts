@@ -174,8 +174,16 @@ function humanSummary(plan: SamplePlan, fenced: boolean, scriptPath?: string): s
   lines.push('### Then');
   lines.push('');
   lines.push(`1. \`chmod +x ${plan.filename} && ./${plan.filename}\``);
+  // Step 2 names where the container comes from. There is no published
+  // image: it is built once from this repo, so a user told only to "start
+  // the fenced container" had nothing to start.
   lines.push(
-    `2. Start the fenced container over \`${plan.outputDir}\` and call ` +
+    '2. Build the offline image once: `git clone https://github.com/log-10x/log10x-mcp && log10x-mcp/scripts/build-poc-image.sh` ' +
+      '(it tags `log10x/poc:local`; nothing is pushed).',
+  );
+  lines.push(
+    `3. Start it over \`${plan.outputDir}\` with the run line in the ` +
+      '[offline POC guide](https://github.com/log-10x/log10x-mcp/blob/main/docs/fenced-poc.md), and call ' +
       '`log10x_poc_from_local` with the arguments in `data.next_call`.',
   );
   lines.push('');
