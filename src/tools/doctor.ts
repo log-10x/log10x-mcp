@@ -399,7 +399,7 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
         'The overflow bucket holds the cohort the engine routed out of the stack, so these events are not in the SIEM at any tier. For events the SIEM still holds, query the SIEM directly; do not block on retriever setup.\n' +
         formatRetrieverTrace(retrieverRes.trace),
       fix:
-        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
+        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/retriever/',
     });
   }
 

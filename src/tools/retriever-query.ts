@@ -1283,7 +1283,7 @@ export function retrieverNotConfiguredMessage(): string {
     '',
     '**Options for the agent right now**:',
     '',
-    "- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/cloud/retriever/",
+    "- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/retriever/",
     "- (b) Point the customer's own pipeline at the offload bucket and re-ingest the held-back cohort, slow, but preserves the current setup",
     "- (c) Rescope the question to what the SIEM still holds and use the SIEM MCP directly",
     '',
