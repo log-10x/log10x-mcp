@@ -18,9 +18,12 @@
  *       "plug into existing forwarder" (Receiver). The biggest fork.
  *   Q2. (Receiver only) Which forwarder — auto-uses the snapshot's
  *       detected forwarder when there's exactly one; asks if multiple.
- *   Q3. Backend — where TenXSummary metrics go. Default suggestion:
- *       log10x SaaS unless airgapped or a backend agent is already
- *       detected in the cluster.
+ *   Q3. Backend — where TenXSummary metrics go: the user's own TSDB
+ *       (prometheus, datadog, elastic, cloudwatch). Backends whose agent
+ *       discovery detected are listed first. The log10x-hosted backend is
+ *       for the public demo, not customer installs, so it is never offered
+ *       or defaulted; it is accepted only when passed explicitly, and then
+ *       needs a user licence (signin / paste) to receive anything.
  *   Q4. (Backend ≠ log10x only) Airgapped — opt-in for CISO-friction
  *       reduction. Skipped silently when backend=log10x (SaaS implies
  *       not-airgapped).
@@ -99,6 +102,23 @@ const SUPPORTED_BACKENDS: MetricsBackendKind[] = [
   'prometheus',
 ];
 
+/**
+ * The backends the wizard OFFERS: the user's own TSDBs. `log10x` stays in
+ * SUPPORTED_BACKENDS so an explicit `backends: ["log10x"]` still validates,
+ * but the log10x-hosted TSDB serves the public demo, not customer installs
+ * (customer data stays off the hosted backend), so no question lists it and
+ * nothing defaults to it.
+ */
+const OFFERED_BACKENDS: MetricsBackendKind[] = SUPPORTED_BACKENDS.filter((b) => b !== 'log10x');
+
+/** Offered backends with the ones discovery detected first, order otherwise kept. */
+function offeredBackendsDetectedFirst(detected: ReadonlySet<string>): MetricsBackendKind[] {
+  return [
+    ...OFFERED_BACKENDS.filter((b) => detected.has(b)),
+    ...OFFERED_BACKENDS.filter((b) => !detected.has(b)),
+  ];
+}
+
 export const adviseInstallSchema = {
   // Required in substance, optional in the schema on purpose: a first call
   // with `{}` then reaches the handler, which answers with the
@@ -127,7 +147,7 @@ export const adviseInstallSchema = {
     .array(z.enum(SUPPORTED_BACKENDS as unknown as [string, ...string[]]))
     .optional()
     .describe(
-      'Where the engine emits TenXSummary metrics. Multi-destination — a user can report to log10x SaaS AND their own backend simultaneously, e.g. `["log10x", "datadog"]`. Choices: **log10x** (optional Log10x-hosted backend, for evaluation), **datadog**, **elastic**, **cloudwatch**, **prometheus** (customer-owned). The wizard pre-fills detected backends from the snapshot. The only mutual exclusion is `airgapped: true` + `"log10x"` in this list.'
+      'Where the engine emits TenXSummary metrics: the user\'s own TSDB(s), one or more of **prometheus**, **datadog**, **elastic**, **cloudwatch**. When omitted, the wizard asks, listing any backend whose agent discovery detected first. **log10x** (the Log10x-hosted TSDB) is for the public demo, not customer installs: it is never suggested, and is accepted only when the user explicitly asks for it. It then needs a user licence (`license_source: "signin"` or `"paste"`); on the default built-in evaluation licence it receives nothing. `airgapped: true` + `"log10x"` is rejected.'
     ),
   airgapped: z
     .boolean()
@@ -152,7 +172,7 @@ export const adviseInstallSchema = {
     )
     .optional()
     .describe(
-      'Per-backend credential configuration, keyed by backend kind (must be one of: log10x, datadog, elastic, cloudwatch, prometheus). **Only set for non-`log10x` backends** — `log10x` SaaS uses the license JWT and needs no extra credentials. Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
+      'Per-backend credential configuration, keyed by backend kind (one of: datadog, elastic, cloudwatch, prometheus; `log10x` needs none, since it authenticates with the licence JWT). Each entry has a `secretName` (the Kubernetes Secret the user creates out-of-band holding sensitive env vars like `DD_API_KEY`; default per backend is `<backend>-credentials`) and optional `plainValues` (overrides for non-sensitive env vars like `DD_SITE`). Example: `{ "datadog": { "secretName": "datadog-secret", "plainValues": { "DD_SITE": "us5.datadoghq.com" } } }`.'
     ),
   // Optional rather than `.default()`: an omitted value keeps whatever the
   // session already chose (so the re-invoke after log10x_signin_start, or
@@ -1367,7 +1387,7 @@ async function elicitMissingAnswers(
     if (!session.backends || session.backends.length === 0) {
       const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
       const result = await (server as any).server.elicitInput({
-        message: 'The engine emits event statistics, cost attribution, and per-pattern enrichments as time-series metrics — and we need to know where to publish them. Pick the TSDB(s) where you want to read these metrics from (the MCP and your dashboards query them back from here). You can publish to multiple backends at the same time.',
+        message: 'The engine emits event statistics, cost attribution, and per-pattern enrichments as time-series metrics, and we need to know where to publish them. Pick your own TSDB(s) to read these metrics from (the MCP and your dashboards query them back from there). You can publish to more than one at the same time.',
         requestedSchema: {
           type: 'object',
           properties: {
@@ -1376,15 +1396,9 @@ async function elicitMissingAnswers(
               title: 'Metrics backends',
               minItems: 1,
               items: {
-                anyOf: SUPPORTED_BACKENDS.map((b) => ({
+                anyOf: offeredBackendsDetectedFirst(detectedSet).map((b) => ({
                   const: b,
-                  title:
-                    BACKEND_LABEL[b] +
-                    (b === 'log10x'
-                      ? ' (recommended for first install)'
-                      : detectedSet.has(b)
-                        ? ' (detected in your cluster)'
-                        : ''),
+                  title: BACKEND_LABEL[b] + (detectedSet.has(b) ? ' (detected in your cluster)' : ''),
                 })),
               },
             },
@@ -1678,7 +1692,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
   if (!session.backends || session.backends.length === 0) {
     const detectedSet = new Set(snapshot.kubectl.backendAgents.map((a) => a.kind));
     const backendDetails: Record<MetricsBackendKind, string> = {
-      log10x: 'Log10x-managed Prometheus — no infra to run; the MCP queries metrics straight from here.',
+      log10x: 'Log10x-hosted TSDB, used by the public demo. Not offered for customer installs.',
       datadog: 'Datadog metric API (DD-API-KEY auth).',
       elastic: 'Elasticsearch metric ingest API.',
       cloudwatch: 'AWS CloudWatch metric streams.',
@@ -1693,7 +1707,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
         type: 'multi-choice',
         answer_field: 'backends',
         min_items: 1,
-        choices: SUPPORTED_BACKENDS.map((b) => {
+        choices: offeredBackendsDetectedFirst(detectedSet).map((b) => {
           const detected = detectedSet.has(b as MetricsBackendKind);
           const detail = backendDetails[b as MetricsBackendKind] ?? '';
           return {
@@ -1722,7 +1736,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
           },
           {
             args: { snapshot_id: session.snapshotId, airgapped: false },
-            description: 'Keep "log10x" in backends, drop airgapped — engine reports to log10x SaaS + your own backend(s).',
+            description: 'Keep "log10x" in backends and drop airgapped. The log10x-hosted TSDB is for the public demo, and it receives metrics only on a user licence (license_source "signin" or "paste").',
           },
         ],
       },
@@ -1891,7 +1905,7 @@ function askForwarder(detected: DetectedForwarder[]): string {
  * as the option text.
  */
 const BACKEND_LABEL: Record<MetricsBackendKind, string> = {
-  log10x: 'Log10x SaaS',
+  log10x: 'Log10x-hosted TSDB (public demo)',
   datadog: 'Datadog',
   elastic: 'Elasticsearch',
   cloudwatch: 'AWS CloudWatch',
@@ -1908,7 +1922,7 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   );
   lines.push('');
   lines.push(
-    'You can ship the same metrics to **multiple backends in parallel** — for example, to Log10x SaaS for MCP queries AND your existing Datadog for unified dashboards.'
+    'The metrics go to a TSDB you already run. You can ship the same metrics to **more than one in parallel**, for example Prometheus and Datadog.'
   );
   lines.push('');
   lines.push('Options (pick one or more):');
@@ -1920,20 +1934,19 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   // "Other backends:" line causes those UIs to collapse them into a
   // single "Something else" option, hiding choices.
   const detectedSet = new Set(detectedAgents.map((a) => a.kind));
-  for (const kind of SUPPORTED_BACKENDS) {
+  for (const kind of offeredBackendsDetectedFirst(detectedSet)) {
     const label = BACKEND_LABEL[kind];
     const annotations: string[] = [];
-    if (kind === 'log10x') annotations.push('optional Log10x-hosted backend, for evaluation');
     if (detectedSet.has(kind)) annotations.push('detected in your cluster');
     const suffix = annotations.length > 0 ? ` — ${annotations.join(', ')}` : '';
     lines.push(`- **${label}** (\`${kind}\`)${suffix}`);
   }
 
   lines.push('');
-  lines.push('Re-invoke `log10x_advise_install` with `backends: ["<choice>", ...]` — one or more. Examples:');
-  lines.push('- `backends: ["log10x"]` — just SaaS, default for first install');
-  lines.push('- `backends: ["datadog"]` — your own backend only');
-  lines.push('- `backends: ["log10x", "datadog"]` — both, side-by-side');
+  const first = offeredBackendsDetectedFirst(detectedSet)[0] ?? 'prometheus';
+  lines.push('Re-invoke `log10x_advise_install` with `backends: ["<choice>", ...]`, one or more. Examples:');
+  lines.push(`- \`backends: ["${first}"]\`: one backend`);
+  lines.push('- `backends: ["prometheus", "datadog"]`: two, side by side');
   return lines.join('\n');
 }
 
@@ -2034,11 +2047,11 @@ function airgappedLog10xConflict(backends: MetricsBackendKind[]): string {
   return [
     '# Install wizard — airgapped + log10x is impossible',
     '',
-    `You picked \`airgapped: true\` AND included \`"log10x"\` in \`backends\` (\`${backends.map((b) => `"${b}"`).join(', ')}\`). These conflict: airgapped means the engine sends NOTHING to log10x.com, but \`"log10x"\` is the SaaS Prometheus endpoint at log10x.com.`,
+    `You picked \`airgapped: true\` AND included \`"log10x"\` in \`backends\` (\`${backends.map((b) => `"${b}"`).join(', ')}\`). These conflict: airgapped means the engine sends NOTHING to log10x.com, and \`"log10x"\` is the Log10x-hosted TSDB at log10x.com, which serves the public demo.`,
     '',
     'Pick one:',
     `- **Keep airgapped, drop log10x**: re-invoke with \`backends: [${backends.filter((b) => b !== 'log10x').map((b) => `"${b}"`).join(', ') || '"<your-backend>"'}]\` (engine emits only to your own backend(s))`,
-    `- **Keep log10x, drop airgapped**: re-invoke with \`airgapped: false\` (engine reports to both log10x SaaS AND your own backend(s))`,
+    `- **Keep log10x, drop airgapped**: re-invoke with \`airgapped: false\` and a user licence (\`license_source: "signin"\` or \`"paste"\`); on the built-in evaluation licence the engine still sends nothing to log10x`,
   ].join('\n');
 }
 
@@ -2224,7 +2237,7 @@ function renderChoiceSummary(session: WizardSession): string {
   if (session.app === 'receiver' && session.forwarder) {
     rows.push(`- **Forwarder**: \`${session.forwarder}\``);
   }
-  const backendList = (session.backends ?? ['log10x']).map((b) => `\`${b}\``).join(' + ');
+  const backendList = (session.backends ?? []).map((b) => `\`${b}\``).join(' + ') || 'none chosen';
   rows.push(`- **Metrics backends**: ${backendList}`);
   if (session.airgapped) rows.push(`- **Airgapped**: yes (engine emits only to user-owned backends)`);
   rows.push(`- **License**: ${licenseSummary(session)}`);
@@ -2234,7 +2247,7 @@ function renderChoiceSummary(session: WizardSession): string {
 /** One line on what the engine will run on, with the limits as numbers. */
 function licenseSummary(session: WizardSession): string {
   if (session.licenseSource === 'builtin') {
-    const toLog10x = (session.backends ?? ['log10x']).includes('log10x')
+    const toLog10x = (session.backends ?? []).includes('log10x')
       ? ' Airgapped means the engine sends nothing to log10x, so the `log10x` metrics backend receives no metrics until the engine is licensed.'
       : '';
     return 'none in the plan. The engine runs its built-in evaluation licence: 10 nodes, 30 days from each start, airgapped. Nothing is minted or stored and no licence Secret is created.' +

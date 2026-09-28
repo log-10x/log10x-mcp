@@ -623,25 +623,24 @@ for (const fw of wizardSupportedReceivers) {
     const lic = plan.preflight.find((c) => c.name === 'license');
     assert.ok(lic, 'the preflight names the licence the engine runs on');
     assert.match(lic!.detail, /10 nodes, 30 days from each start, airgapped/);
-    // Default backends are ['log10x'], which the airgapped evaluation
-    // licence cannot report to: a warn that names the way out.
-    assert.equal(lic!.status, 'warn');
-    assert.match(lic!.detail, /`log10x` metrics backend receives no metrics/);
+    // No backends given means no log10x backend: a clean row.
+    assert.equal(lic!.status, 'ok');
+    assert.ok(!/log10x` metrics backend/.test(lic!.detail));
   });
 }
 
-test('receiver/fluentbit: builtin with only user-owned backends is a clean preflight row', async () => {
+test('receiver/fluentbit: builtin with an explicit log10x backend warns that it receives nothing', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'receiver',
     forwarder: 'fluentbit',
     builtinLicense: true,
-    backends: ['prometheus'],
+    backends: ['log10x', 'prometheus'],
     destination: 'mock',
   });
   const lic = plan.preflight.find((c) => c.name === 'license');
-  assert.equal(lic?.status, 'ok');
-  assert.ok(!/log10x` metrics backend/.test(lic!.detail));
+  assert.equal(lic?.status, 'warn');
+  assert.match(lic!.detail, /`log10x` metrics backend receives no metrics/);
 });
 
 test('receiver/fluentbit: a builtin plan keeps the sidecar, its env and airgapped wiring', async () => {

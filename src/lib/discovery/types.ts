@@ -24,7 +24,8 @@ export type Log10xAppKind = 'reporter' | 'receiver' | 'retriever' | 'compiler' |
 /**
  * Metrics backends the engine can emit TenXSummary to.
  * Mirrors the modules in `config/pipelines/run/output/metric/`.
- * - `log10x` is the SaaS Prometheus default (requires online egress)
+ * - `log10x` is the Log10x-hosted TSDB used by the public demo; never
+ *   suggested for customer installs, accepted only when passed explicitly
  * - `prometheus` covers all three sub-flavors (remote-write, push-gateway,
  *   scrape); the wizard picks the sub-flavor at install time
  */
@@ -230,7 +231,8 @@ export interface KubectlProbes {
    * Metrics-backend agents detected in the cluster (Datadog Agent, Splunk
    * OTel Collector, Elastic Agent, Prometheus Operator, CloudWatch Agent,
    * etc.). The wizard uses this to pre-fill "where should metrics go".
-   * Empty list = no agents detected; the wizard falls back to log10x SaaS.
+   * Empty list = no agents detected; the wizard lists the user-owned
+   * backends in their default order. It never falls back to log10x.
    */
   backendAgents: DetectedMetricsBackend[];
 }
@@ -380,8 +382,9 @@ export interface WizardSession {
   /** Receiver-only: which forwarder kind to sidecar into. */
   forwarder?: ForwarderKind;
   /**
-   * Where TenXSummary metrics go. Multi-destination — a user can report
-   * to log10x SaaS AND their own Datadog/Prom/etc. simultaneously. The
+   * Where TenXSummary metrics go: one or more of the user's own TSDBs
+   * (Datadog/Prom/etc.). `log10x` (the hosted TSDB behind the public demo)
+   * is set only when passed explicitly. The
    * only mutual exclusion is `airgapped: true` + `'log10x'` in this list
    * (airgapped means the engine sends NOTHING to log10x).
    */

@@ -75,13 +75,19 @@ test('schema: license_source offers builtin and leaves the default to the wizard
   assert.match(field.description ?? '', /10 nodes, 30 days from each start, airgapped/);
 });
 
+const PROM_ANSWERS = {
+  backends: ['prometheus'],
+  backend_credentials: { prometheus: { secretName: 'prom-creds', plainValues: { PROMETHEUS_REMOTE_WRITE_URL: 'https://prom.example/api/v1/write' } } },
+  airgapped: false,
+};
+
 for (const forwarder of ['fluentbit', 'otel-collector'] as const) {
   test(`wizard default: a ${forwarder} receiver plan carries no licence and calls no gateway`, async () => {
     const id = `snap-builtin-${forwarder}`;
     putSnapshot(k8sSnapshot(id));
     const out = await withNoNetwork(() =>
       executeAdviseInstall(
-        { snapshot_id: id, app: 'receiver', forwarder, backends: ['log10x'] } as Args,
+        { snapshot_id: id, app: 'receiver', forwarder, ...PROM_ANSWERS } as Args,
         {} as Environments
       )
     );
@@ -100,10 +106,70 @@ for (const forwarder of ['fluentbit', 'otel-collector'] as const) {
     const warnings = ((out as { warnings?: string[] }).warnings ?? []).join('\n');
     assert.match(warnings, /built-in evaluation licence, 10 nodes, 30 days from each start, airgapped/);
     assert.ok(!/demo license/i.test(warnings), 'no demo warning on the default path');
-    // backends: ['log10x'] cannot be reached from an airgapped evaluation.
-    assert.match(warnings, /`log10x` metrics backend receives nothing on the built-in evaluation licence/);
+    assert.ok(!/`log10x` metrics backend/.test(warnings), 'no log10x-backend warning when log10x was never chosen');
   });
 }
+
+// The log10x-hosted TSDB serves the public demo, not customer installs, so
+// the wizard never offers it and never defaults to it.
+test('wizard: with no backends given, the question offers only user-owned backends, detected first', async () => {
+  const id = 'snap-backends-question';
+  const snap = k8sSnapshot(id);
+  snap.kubectl.backendAgents = [{ kind: 'datadog', confidence: 'helm-release', evidence: 'datadog-agent' }];
+  putSnapshot(snap);
+  const out = await executeAdviseInstall(
+    { snapshot_id: id, app: 'receiver', forwarder: 'fluentbit' } as Args,
+    {} as Environments
+  );
+  const d = data(out);
+  assert.equal(d.mode, 'next_question');
+  assert.equal(d.question_id, 'backends');
+  const shape = d.shape as { choices: Array<{ value: string; recommended?: boolean }> };
+  const values = shape.choices.map((c) => c.value);
+  assert.ok(!values.includes('log10x'), `log10x must not be offered: ${values.join(', ')}`);
+  assert.deepEqual([...values].sort(), ['cloudwatch', 'datadog', 'elastic', 'prometheus']);
+  assert.equal(values[0], 'datadog', 'the detected backend is listed first');
+  const md = String(d.markdown);
+  assert.ok(!md.includes('`log10x`'), `the question must not list log10x:\n${md}`);
+  assert.ok(!/SaaS/.test(md), `no SaaS suggestion in the question:\n${md}`);
+});
+
+test('wizard: a plan answered with only user-owned backends names no log10x backend', async () => {
+  const id = 'snap-no-log10x-backend';
+  putSnapshot(k8sSnapshot(id));
+  const out = await withNoNetwork(() =>
+    executeAdviseInstall(
+      { snapshot_id: id, app: 'receiver', forwarder: 'fluentbit', ...PROM_ANSWERS } as Args,
+      {} as Environments
+    )
+  );
+  const d = data(out);
+  assert.equal(d.mode, 'plan');
+  const md = String(d.markdown);
+  assert.match(md, /\*\*Metrics backends\*\*: `prometheus`\n/);
+  assert.ok(!md.includes('`log10x`'), 'log10x never appears as a backend');
+  assert.ok(!md.includes('@run/output/metric/log10x'));
+  assert.match(md, /"@run\/output\/metric\/prometheus"/);
+});
+
+test('wizard: an explicit log10x backend still works, with the licence warning', async () => {
+  const id = 'snap-explicit-log10x';
+  putSnapshot(k8sSnapshot(id));
+  const out = await withNoNetwork(() =>
+    executeAdviseInstall(
+      { snapshot_id: id, app: 'receiver', forwarder: 'fluentbit', backends: ['log10x'] } as Args,
+      {} as Environments
+    )
+  );
+  const d = data(out);
+  assert.equal(d.mode, 'plan');
+  assert.equal(d.license_kind, 'builtin');
+  const warnings = ((out as { warnings?: string[] }).warnings ?? []).join('\n');
+  assert.match(warnings, /`log10x` metrics backend receives nothing on the built-in evaluation licence/);
+  assert.match(String(d.markdown), /the `log10x` metrics backend receives no metrics until the engine is licensed/);
+  const lic = (d.preflight as Array<{ name: string; status: string }>).find((c) => c.name === 'license');
+  assert.equal(lic?.status, 'warn');
+});
 
 test('wizard: a paste choice sticks when the follow-up call carries only the JWT', async () => {
   const id = 'snap-paste-sticky';

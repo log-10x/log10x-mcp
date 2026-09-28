@@ -161,9 +161,10 @@ export interface ForwarderSpec {
      */
     readOnly?: boolean;
     /**
-     * Metrics backends the engine emits TenXSummary to. `['log10x']` is
-     * the chart default (SaaS Prometheus); additional / replacement
-     * backends are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
+     * Metrics backends the engine emits TenXSummary to: the user's own
+     * TSDBs. `log10x` (the hosted TSDB behind the public demo) adds no
+     * output module here and appears only when passed explicitly. Backends
+     * are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
      * and `tenx.extraEnv` (vendor-specific env vars).
      */
     backends?: MetricsBackendKind[];
@@ -361,10 +362,10 @@ export function defaultSecretNameFor(kind: MetricsBackendKind): string {
 
 /**
  * Render the `tenx.extraArgs` + `tenx.extraEnv` blocks that wire up
- * additional metrics backends (beyond the chart-default `log10x`) and
+ * the user's metrics backends (`log10x` adds no module) and
  * the `TENX_AIRGAPPED` env var for Receiver inline overlays.
  *
- * Emits nothing when there's nothing to add (default `['log10x']` and
+ * Emits nothing when there's nothing to add (no non-log10x backend and
  * not airgapped). Always emits 2-space-indented YAML to nest under
  * `tenx:`.
  *
@@ -1160,8 +1161,7 @@ bash "%~dp0post-render.sh"
       // Build TENX_RUN_ARGS. Default args wire the filebeat input and
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
-      // the in-container engine emits metrics to those backends in
-      // addition to log10x SaaS (the chart default).
+      // the in-container engine emits metrics to those backends.
       const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x');
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');

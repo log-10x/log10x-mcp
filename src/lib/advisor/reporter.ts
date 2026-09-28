@@ -123,12 +123,13 @@ export interface ReporterAdviseArgs {
    */
   readOnly?: boolean;
   /**
-   * Metrics backends the engine emits TenXSummary to. Multi-destination
-   * — a user can report to log10x SaaS AND their own Datadog/Prom/etc.
-   * simultaneously. Each entry maps to a `@run/output/metric/<backend>`
+   * Metrics backends the engine emits TenXSummary to: one or more of the
+   * user's own TSDBs (Datadog/Prom/etc.). Each entry maps to a `@run/output/metric/<backend>`
    * CLI arg appended to the engine's launch args, plus any vendor-
    * specific env vars (DD_API_KEY for datadog, ELASTIC_HOST for elastic,
-   * etc.). Default: `['log10x']`. When `airgapped=true`, `'log10x'`
+   * etc.). No default: the wizard always passes the user's own backends;
+   * `'log10x'` (the Log10x-hosted TSDB, for the public demo) appears only
+   * when passed explicitly. When `airgapped=true`, `'log10x'`
    * MUST NOT be in this list (engine sends nothing to log10x.com).
    */
   backends?: MetricsBackendKind[];
@@ -278,7 +279,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     app,
     installMode,
     builtinLicense,
-    (args.backends ?? ['log10x']).includes('log10x')
+    (args.backends ?? []).includes('log10x')
   );
 
   // The expander installs on the DESTINATION, not in this cluster, and is
