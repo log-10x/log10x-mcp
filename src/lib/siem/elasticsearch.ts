@@ -34,6 +34,17 @@ export const ELASTICSEARCH_PAGE_SIZE = 1000;
 /** Default index pattern when the caller gives no scope. */
 export const ELASTICSEARCH_DEFAULT_INDEX = 'logs-*';
 
+/**
+ * The v9 client sends `compatible-with=9`, which every Elasticsearch 8.x
+ * cluster rejects ("Accept version must be either version 8 or 7, but found
+ * 9"), so a POC against 8.17 pulled nothing. `compatible-with=8` is accepted
+ * by 8.x natively and by 9.x through REST API compatibility.
+ */
+const COMPAT_8_HEADERS = {
+  accept: 'application/vnd.elasticsearch+json; compatible-with=8',
+  'content-type': 'application/vnd.elasticsearch+json; compatible-with=8',
+};
+
 interface Conn {
   url: string;
   apiKey?: string;
@@ -96,6 +107,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
       : conn.username && conn.password
       ? { auth: { username: conn.username, password: conn.password } }
       : {}),
+    headers: COMPAT_8_HEADERS,
   });
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
@@ -233,6 +245,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       : conn.username && conn.password
       ? { auth: { username: conn.username, password: conn.password } }
       : {}),
+    headers: COMPAT_8_HEADERS,
   });
   const indexPattern = opts.scope || ELASTICSEARCH_DEFAULT_INDEX;
   try {
