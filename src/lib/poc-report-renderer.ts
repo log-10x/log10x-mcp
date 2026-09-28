@@ -837,22 +837,33 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     // (top cardinality), Age (first-seen from engine or `(unknown)`).
     // Action (refined from dep-check + severity) and Slot fan-out (top
     // cardinality). No Age column: see the note above the emergence summary.
-    lines.push('| # | Pattern | Service | Sev | % | Action | Slot fan-out | Annual savings |');
+    // The rows are in cost order (enrichPatterns sorts by costPerWindow), so
+    // the share column is the share of cost, not of events: a pattern with
+    // 0.7% of the events and long lines sat above one with 1.0% and the
+    // table read as unsorted.
+    const summaryTotalCost = patterns.reduce((s, p) => s + p.costPerWindow, 0);
+    lines.push('| # | Pattern | Service | Sev | % of cost | Action | Slot fan-out | Annual savings |');
     lines.push('|---|---|---|---|---|---|---|---|');
+    let anyClusterMark = false;
     for (let i = 0; i < top.length; i++) {
       const p = top[i];
       const name = resolveName(p.identity, p.template, input.aiPrettyNames, setDiff.get(p.identity));
       const annualSavings = projectBilling(p.projectedSavings, input.windowHours, 24 * 365);
       const flag = needsReview(p) ? ' ⚠' : '';
       const cluster = p.poc.incidentClusterId !== null ? ` 🔗${p.poc.incidentClusterId + 1}` : '';
+      if (cluster) anyClusterMark = true;
       const action = renderActionCell(p);
       const slot = renderSlotCell(p);
+      const costShare = summaryTotalCost > 0 ? (p.costPerWindow / summaryTotalCost) * 100 : 0;
       lines.push(
-        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtPct(p.pctOfTotal * 100)} | ${action} | ${slot} | ${fmtCostDisclosed(input, annualSavings)} |`,
+        `| ${i + 1} | ${name}${flag}${cluster} | ${p.service || '-'} | ${p.severity || '-'} | ${fmtPct(costShare)} | ${action} | ${slot} | ${fmtCostDisclosed(input, annualSavings)} |`,
       );
     }
     lines.push('');
-    if (clusters.length > 0) {
+    // Only when a row above carries the mark: an incident can exist whose
+    // members all sit below the top N, and then the legend explained a
+    // symbol that was nowhere on the page.
+    if (anyClusterMark) {
       lines.push('_🔗N marks a row that belongs to incident #N above._');
       lines.push('');
     }
