@@ -54,6 +54,9 @@ export function randomTimeBuckets(
     throw new Error(`randomTimeBuckets: count must be >= 1, got ${count}`);
   }
   const span = toMs - fromMs;
+  // One bucket is a request for the whole window, not a random quarter of it.
+  // The POC's fill pass relies on this to read what the stratified pass skipped.
+  if (count === 1) return [{ fromMs, toMs, index: 0 }];
   const parentSpan = span / count;
   const childSpan = parentSpan * CHILD_RATIO;
   const buckets: SamplingBucket[] = [];

@@ -111,7 +111,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // Stratified random sampling: 24 child sub-windows scattered across
   // the parent window with per-run RNG. Each bucket is its own
   // search_after pagination scope, capped at perBucketCap.
-  const BUCKET_COUNT = ELASTICSEARCH_BUCKET_COUNT;
+  const BUCKET_COUNT = Math.max(1, opts.buckets ?? ELASTICSEARCH_BUCKET_COUNT);
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const pageSize = ELASTICSEARCH_PAGE_SIZE;

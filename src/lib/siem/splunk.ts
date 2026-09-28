@@ -38,6 +38,7 @@ export const SPLUNK_BUCKET_COUNT = 12;
 export const SPLUNK_PAGE_SIZE = 1000;
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
+import https from 'node:https';
 import { join } from 'path';
 
 interface Conn {
@@ -106,9 +107,74 @@ function authHeader(conn: Conn): string {
   return 'Basic ' + Buffer.from(`${conn.username}:${conn.password}`).toString('base64');
 }
 
+/**
+ * SPLUNK_INSECURE=1 skips certificate verification for the search head only.
+ * A default Splunk install serves port 8089 with its own self-signed
+ * certificate, issued to "SplunkServerDefaultCert", so neither the system CA
+ * store nor NODE_EXTRA_CA_CERTS can verify it (the hostname never matches).
+ * Global fetch cannot relax verification per request without a newer undici
+ * than Node 20 ships, and NODE_TLS_REJECT_UNAUTHORIZED would relax it for
+ * every connection this process makes, so this path uses node:https with
+ * rejectUnauthorized:false for Splunk requests alone. Opt-in, never default;
+ * the emitted export script offers the same choice (--insecure).
+ */
+export function splunkInsecure(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.SPLUNK_INSECURE ?? '');
+}
+
+function insecureFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+    const body = init.body == null ? undefined : String(init.body);
+    if (body !== undefined && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-length')) {
+      headers['Content-Length'] = String(Buffer.byteLength(body));
+    }
+    const req = https.request(new URL(url), { method: init.method ?? 'GET', headers, rejectUnauthorized: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('error', reject);
+      res.on('end', () => {
+        const status = res.statusCode ?? 0;
+        const h = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (v !== undefined) h.set(k, Array.isArray(v) ? v.join(', ') : String(v));
+        }
+        const nullBody = status === 204 || status === 205 || status === 304;
+        resolve(new Response(nullBody ? null : Buffer.concat(chunks), { status, headers: h }));
+      });
+    });
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+function doFetch(url: string, init: RequestInit): Promise<Response> {
+  return splunkInsecure() && url.startsWith('https:') ? insecureFetch(url, init) : fetch(url, init);
+}
+
+/**
+ * "fetch failed" alone says nothing; the reason is on the cause chain
+ * (a certificate the process does not trust, a refused connection, DNS).
+ * Name it, and say what fixes the common ones.
+ */
+export function describeSplunkError(e: unknown): string {
+  const err = e as Error & { cause?: { code?: string; message?: string } };
+  const code = err?.cause?.code ?? (err as { code?: string })?.code;
+  const causeMsg = err?.cause?.message;
+  const base = `${err?.message ?? String(e)}${code || causeMsg ? ` (${[code, causeMsg].filter(Boolean).join(': ')})` : ''}`;
+  if (code && /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ALTNAME/.test(code)) {
+    return `${base}. The search head's certificate is not trusted by this process; a default Splunk install serves a self-signed certificate on 8089. Set SPLUNK_INSECURE=1 in the MCP's environment to skip verification for Splunk only, or install a trusted certificate.`;
+  }
+  if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return `${base}. Nothing answered at SPLUNK_HOST; check the host and that the management port (8089 by default) is reachable from this machine.`;
+  }
+  return base;
+}
+
 async function splunkFetch(conn: Conn, path: string, init: RequestInit = {}): Promise<Response> {
   const url = `${conn.host}${path}`;
-  const res = await fetch(url, {
+  const res = await doFetch(url, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -164,7 +230,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // the parent window with per-run RNG. Splunk dispatches one search
   // job per bucket sequentially — concurrent dispatches risk hitting
   // the search head's per-user concurrency cap (default 6).
-  const BUCKET_COUNT = SPLUNK_BUCKET_COUNT;
+  const BUCKET_COUNT = Math.max(1, opts.buckets ?? SPLUNK_BUCKET_COUNT);
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const pageSize = SPLUNK_PAGE_SIZE;
@@ -198,7 +264,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
       if (!job.sid) throw new Error('splunk did not return a sid');
       sid = job.sid;
     } catch (e) {
-      notes.push(`bucket_${bucket.index}_create_failed: ${(e as Error).message.slice(0, 200)}`);
+      notes.push(`bucket_${bucket.index}_create_failed: ${describeSplunkError(e).slice(0, 400)}`);
       // Per-bucket failure is non-fatal; move on.
       continue;
     }
@@ -236,7 +302,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         pollAttempts++;
         await sleep(wait);
       } catch (e) {
-        notes.push(`bucket_${bucket.index}_poll_error: ${(e as Error).message.slice(0, 200)}`);
+        notes.push(`bucket_${bucket.index}_poll_error: ${describeSplunkError(e).slice(0, 400)}`);
         pollFailed = true;
         break;
       }
@@ -283,7 +349,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         offset += results.length;
         if (results.length < count) break;
       } catch (e) {
-        notes.push(`bucket_${bucket.index}_page_error offset=${offset}: ${(e as Error).message.slice(0, 200)}`);
+        notes.push(`bucket_${bucket.index}_page_error offset=${offset}: ${describeSplunkError(e).slice(0, 400)}`);
         break;
       }
     }
@@ -305,7 +371,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 }
 
 async function cancelJob(conn: Conn, sid: string): Promise<void> {
-  await fetch(`${conn.host}/services/search/jobs/${sid}`, {
+  await doFetch(`${conn.host}/services/search/jobs/${sid}`, {
     method: 'DELETE',
     headers: { Authorization: authHeader(conn), Accept: 'application/json' },
   }).catch(() => undefined);
@@ -361,7 +427,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       source: `Splunk _internal license_usage.log (${days}d avg)`,
     };
   } catch (e) {
-    return { errorNote: `Splunk volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+    return { errorNote: `Splunk volume detection failed: ${describeSplunkError(e).slice(0, 400)}` };
   }
 }
 

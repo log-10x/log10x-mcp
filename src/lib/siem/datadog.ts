@@ -103,7 +103,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   // same window draw non-overlapping samples (sample-overlap ≈ 0%
   // instead of the prior 100%). Per-bucket event cap keeps any single
   // bucket from monopolizing the global target.
-  const BUCKET_COUNT = DATADOG_BUCKET_COUNT;
+  const BUCKET_COUNT = Math.max(1, opts.buckets ?? DATADOG_BUCKET_COUNT);
   const buckets = randomTimeBuckets(fromMs, toMs, BUCKET_COUNT);
   const bucketCap = perBucketCap(opts.targetEventCount, BUCKET_COUNT);
   const pageLimit = Math.min(DATADOG_PAGE_LIMIT, bucketCap);
