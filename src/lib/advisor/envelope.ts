@@ -27,7 +27,7 @@ import { buildEnvelope, type StructuredOutput } from '../output-types.js';
   *     it is not introspected.
  *     failed and the plan was emitted with REPLACE_WITH_LICENSE_JWT).
  */
-export type PlanLicenseKind = 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder';
+export type PlanLicenseKind = 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder' | 'builtin';
 
 export interface AdvisePlanSummary {
   ok: boolean;

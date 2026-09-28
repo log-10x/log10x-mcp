@@ -64,6 +64,7 @@ import {
   aws_events as events,
   aws_events_targets as targets,
   aws_iam as iam,
+  aws_ssm as ssm,
   custom_resources as cr,
 } from 'aws-cdk-lib';
 
@@ -74,10 +75,13 @@ export interface TenxServerlessProps {
    */
   engineLayerArn?: string;
   /**
-   * Full (non-demo, non-limited) license. The engine validates it OFFLINE
-   * (ES256, embedded public keys) when TENX_AIRGAPPED=true, which this
-   * construct always sets: a Lambda estate must not carry a boot-time
-   * dependency on an external licensing endpoint.
+   * SSM parameter holding a license JWT, set as TENX_LICENSE_KEY on each
+   * attached function. Optional: without it each function runs the
+   * engine's built-in evaluation license (10 nodes, 30 days from each
+   * start, airgapped). A key is validated OFFLINE (ES256, embedded public
+   * keys) because this construct always sets TENX_AIRGAPPED=true: a Lambda
+   * estate must not carry a boot-time dependency on an external licensing
+   * endpoint.
    */
   licenseSsmParameterName?: string;
   /** The receive-role Lambda for the CloudWatch remainder (optional). */
@@ -99,11 +103,16 @@ export interface TenxServerlessProps {
 export class TenxServerless extends Construct {
   readonly engineLayer?: lambda.ILayerVersion;
   private readonly muteFile?: string;
+  private readonly licenseKey?: string;
 
   constructor(scope: Construct, id: string, props: TenxServerlessProps = {}) {
     super(scope, id);
 
     this.muteFile = props.muteFile;
+    if (props.licenseSsmParameterName) {
+      this.licenseKey = ssm.StringParameter.valueForStringParameter(
+        this, props.licenseSsmParameterName);
+    }
 
     if (props.engineLayerArn) {
       this.engineLayer = lambda.LayerVersion.fromLayerVersionArn(
@@ -177,7 +186,10 @@ export class TenxServerless extends Construct {
     fn.addEnvironment('symbolMessageHashField', 'tenx_hash');
     fn.addEnvironment('log10xMetricsEnabled', 'false');
     fn.addEnvironment('TENX_AIRGAPPED', 'true');
-    fn.addEnvironment('TENX_LICENSE_FILE', '/opt/tenx/license.jwt');
+    // No license env unless a key was given: the public layer carries no
+    // license file, and a TENX_LICENSE_FILE naming a missing file stops the
+    // engine. Without a key the engine runs its built-in evaluation license.
+    if (this.licenseKey) fn.addEnvironment('TENX_LICENSE_KEY', this.licenseKey);
     fn.addEnvironment('TENX_LOG_PATH', '/tmp/tenx/');
 
     // Per-pattern dispositions, on only when the layer carries a mute file.

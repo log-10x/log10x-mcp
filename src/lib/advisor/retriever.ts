@@ -82,6 +82,12 @@ export interface RetrieverAdviseArgs {
    * caller that passes `licenseJwt` still gets it wired.
    */
   licenseSupplied?: boolean;
+  /**
+   * True when the plan deliberately carries no licence (the wizard's
+   * default): the engine runs its built-in evaluation licence, 10 nodes,
+   * 30 days from each start, airgapped. Suppresses the missing-JWT blocker.
+   */
+  builtinLicense?: boolean;
   /** Override: input S3 bucket name. Default: from snapshot. */
   inputBucket?: string;
   /** Override: index bucket (with prefix). Default: `<inputBucket>/indexing-results/`. */
@@ -343,7 +349,8 @@ export function licenseNotEmittedNote(storageProvider: RetrieverStorageProvider)
       ? '`--set-string log10xApiKey="$LOG10X_API_KEY"`'
       : '`--set-string tenx.apiKey="$LOG10X_API_KEY"`';
   return (
-    'No licence key is written into the values file. The engine runs on its built-in evaluation licence until ' +
+    'No licence key is written into the values file. The engine runs on its built-in evaluation licence (10 nodes, ' +
+    '30 days from each start, airgapped) until ' +
     `a key is supplied, and a key is supplied at install time with ${flag} so it stays out of any file on disk.`
   );
 }
@@ -489,9 +496,9 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   };
 
   const blockers: string[] = [];
-  if (!args.licenseJwt && !args.skipInstall) {
+  if (!args.licenseJwt && args.builtinLicense !== true && !args.skipInstall) {
     blockers.push(
-      'Log10x license JWT is required for an install plan. Pass `license_jwt` (fetch one from `POST /api/v1/license/demo` for anonymous demo, or `POST /api/v1/license` with an Auth0 access token). Verify and teardown plans work without it.'
+      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Verify and teardown plans work without either.'
     );
   }
   if (isAzure && !args.skipInstall) {
@@ -732,6 +739,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     offloadMarkdown,
     retrieverAccessMarkdown,
     blockers,
+    ...(args.builtinLicense === true && !args.licenseJwt ? { licenseKind: 'builtin' as const } : {}),
   };
 }
 

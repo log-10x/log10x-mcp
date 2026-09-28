@@ -183,11 +183,13 @@ export const adviseRetrieverSchema = {
       'Azure Storage Queue names on the storage account (azure only). Default: tenx-index / tenx-query / tenx-subquery / tenx-stream, matching the provisioning script.'
     ),
   // License fields — same pattern as advise_install.
+  // Optional rather than `.default()`: an omitted value keeps the session's
+  // earlier choice, and a session that never chose falls to 'builtin'.
   license_source: z
-    .enum(['signin', 'demo', 'paste'])
-    .default('signin')
+    .enum(['builtin', 'signin', 'demo', 'paste'])
+    .optional()
     .describe(
-      'How the wizard acquires the engine license JWT. Defaults to `"signin"` — emits `signin_required` mode when no Auth0 session exists. Pass `"demo"` for a 14-day anonymous JWT. Pass `"paste"` with `license_jwt_paste` to supply an existing JWT.'
+      'How the engine is licensed. Defaults to `"builtin"`: nothing is minted and no key is written, and the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Pass `"paste"` with `license_jwt_paste` to wire a licence you hold into the values file. `"signin"` mints a user-scoped JWT (emits `signin_required` when no Auth0 session exists) and `"demo"` mints a 1-node, 14-day JWT; a minted JWT is never written to disk, so it is supplied at install time with `--set-string`. Omitting this arg on a later call keeps the earlier choice.'
     ),
   license_jwt_paste: z
     .string()
@@ -245,7 +247,7 @@ export interface RetrieverWizardSession {
    */
   licenseSupplied?: boolean;
   isDemoLicense?: boolean;
-  licenseSource?: 'signin' | 'demo' | 'paste';
+  licenseSource?: 'builtin' | 'signin' | 'demo' | 'paste';
   licenseReason?: WizardSession['licenseReason'];
   /** Release/namespace overrides. */
   releaseName?: string;
@@ -642,7 +644,7 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
         headline: `Retriever wizard cannot mint a real license without sign-in. CHAIN: log10x_signin_start THEN re-invoke.`,
         actions: [
           { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x', role: 'required-next' },
-          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id }, reason: 'after signin_start completes, re-invoke the wizard — every prior answer is preserved', role: 'required-next' },
+          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id, license_source: 'signin' }, reason: 'after signin_start completes, re-invoke the wizard — every prior answer is preserved', role: 'required-next' },
         ],
         warnings: ['plan NOT emitted yet — complete log10x_signin_start before re-invoking'],
       };
@@ -667,7 +669,7 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
       }
       const isDemoLicense = data.license_kind === 'demo';
       if (isDemoLicense) {
-        warnings.push('plan emitted with a demo license — re-run with `license_source: "signin"` before the 14-day window expires');
+        warnings.push('plan emitted with a demo license: 1 node, expires 14 days after it was minted. Re-run with `license_source: "signin"` before then, or with `license_source: "builtin"` to run the engine\'s built-in evaluation licence (10 nodes, 30 days from each start, airgapped).');
       }
       const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
       actions.push({
@@ -1836,6 +1838,15 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     return wizardReturn({ mode: 'missing_snapshot', ok: false, snapshot_id: args.snapshot_id, markdown: md });
   }
 
+  // Licence source: an explicit arg wins; a pasted JWT alone means paste;
+  // otherwise keep the session's earlier choice, and a session that never
+  // chose runs on the engine's built-in evaluation licence.
+  const licenseSource: NonNullable<RetrieverWizardSession['licenseSource']> =
+    args.license_source ??
+    (args.license_jwt_paste ? 'paste' : undefined) ??
+    getRetrieverSession(args.snapshot_id)?.licenseSource ??
+    'builtin';
+
   // Merge answers into the Retriever wizard session.
   const session = updateRetrieverSession(args.snapshot_id, {
     infraMode: args.infra_mode,
@@ -1846,7 +1857,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     sqsQueryUrl: args.query_queue_url,
     sqsSubqueryUrl: args.subquery_queue_url,
     sqsStreamUrl: args.stream_queue_url,
-    licenseSource: args.license_source,
+    licenseSource,
     licenseJwt: args.license_jwt_paste,
     // A pasted licence is the caller's own. Anything the wizard mints below
     // sets this false, and a file the plan emits then carries no key.
@@ -1959,7 +1970,12 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     (session as { _licenseGateSkipNote?: string })._licenseGateSkipNote =
       'License gate skipped (verify mode on installed retriever).';
   }
-  if (!session.licenseJwt && session.licenseSource !== 'paste' && !skipLicenseGate) {
+  // Builtin (the default): nothing to acquire. The Retriever chart runs with
+  // no key (log10xApiKey empty) and the engine uses its built-in evaluation
+  // licence, which is also what a minted JWT led to, since a minted JWT is
+  // never written into the values file.
+  const builtinLicense = session.licenseSource === 'builtin';
+  if (!builtinLicense && !session.licenseJwt && session.licenseSource !== 'paste' && !skipLicenseGate) {
     try {
       const lic = await acquireLicenseForWizard();
       const isRealUserLicense =
@@ -1996,6 +2012,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         `> ${msg}`,
         '',
         `Options:`,
+        `- Re-invoke with \`license_source: "builtin"\` to install with no key: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped)`,
         `- Sign in via \`log10x_signin_start\``,
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\``,
         `- Retry — the gateway may have been transiently unavailable`,
@@ -2080,8 +2097,9 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     snapshot,
     releaseName: session.releaseName ?? args.release_name,
     namespace: session.namespace ?? args.namespace,
-    licenseJwt: session.licenseJwt,
-    licenseSupplied: session.licenseSupplied === true,
+    licenseJwt: builtinLicense ? undefined : session.licenseJwt,
+    licenseSupplied: !builtinLicense && session.licenseSupplied === true,
+    builtinLicense,
     inputBucket: isAzurePlan ? azureInputContainer : resolvedInputBucket,
     indexBucket: isAzurePlan
       ? session.indexContainer ?? args.index_bucket

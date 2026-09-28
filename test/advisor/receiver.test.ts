@@ -589,3 +589,165 @@ for (const fw of ['fluentbit', 'otel-collector'] as ForwarderKind[]) {
     assert.match(values, /value: "https:\/\/prom\.example\/api\/v1\/write"/);
   });
 }
+
+// The install wizard's default (2026-09-28): no licence in the plan. The
+// engine runs its built-in evaluation licence (10 nodes, 30 days from each
+// start, airgapped), so the overlay must name no licence at all. A
+// TENX_LICENSE_FILE pointing at a missing file, or a volume naming a Secret
+// nobody created, keeps the pod from starting.
+for (const fw of wizardSupportedReceivers) {
+  test(`receiver/${fw}: a builtin-licence plan names no licence env, volume or Secret`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      builtinLicense: true,
+      destination: 'mock',
+    });
+    assert.deepEqual(plan.blockers, [], `no licence is a supported install: ${plan.blockers.join(' | ')}`);
+    assert.equal(plan.licenseKind, 'builtin');
+    const emitted = findAllEmittedContent(plan);
+    assert.ok(emitted.length > 0, 'the plan must still emit the overlay');
+    assert.ok(!emitted.includes('TENX_LICENSE_FILE'), `${fw}: no TENX_LICENSE_FILE on the builtin path`);
+    assert.ok(!emitted.includes('tenx-license'), `${fw}: no tenx-license volume or mount on the builtin path`);
+    assert.ok(!emitted.includes('secretMounts:'), `${fw}: no secretMounts on the builtin path`);
+    assert.ok(!emitted.includes('log10x-license'), `${fw}: no licence Secret named on the builtin path`);
+    assert.ok(
+      !plan.install.some((s) => s.title === 'Create license Secret'),
+      `${fw}: no step creates a licence Secret on the builtin path`
+    );
+    assert.ok(
+      !plan.install.flatMap((s) => s.commands ?? []).some((c) => /create secret generic/.test(c)),
+      `${fw}: no kubectl create secret on the builtin path`
+    );
+    const lic = plan.preflight.find((c) => c.name === 'license');
+    assert.ok(lic, 'the preflight names the licence the engine runs on');
+    assert.match(lic!.detail, /10 nodes, 30 days from each start, airgapped/);
+    // No backends given means no log10x backend: a clean row.
+    assert.equal(lic!.status, 'ok');
+    assert.ok(!/log10x` metrics backend/.test(lic!.detail));
+  });
+}
+
+test('receiver/fluentbit: builtin with an explicit log10x backend warns that it receives nothing', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    builtinLicense: true,
+    backends: ['log10x', 'prometheus'],
+    destination: 'mock',
+  });
+  const lic = plan.preflight.find((c) => c.name === 'license');
+  assert.equal(lic?.status, 'warn');
+  assert.match(lic!.detail, /`log10x` metrics backend receives no metrics/);
+});
+
+test('receiver/fluentbit: a builtin plan keeps the sidecar, its env and airgapped wiring', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    builtinLicense: true,
+    airgapped: true,
+    backends: ['prometheus'],
+    destination: 'mock',
+  });
+  const values = findValuesContents(plan);
+  assert.match(values, /name: log10x\b/);
+  assert.match(values, /image: log10x\/edge-10x:/);
+  assert.match(values, /name: TENX_AIRGAPPED/);
+  assert.match(values, /name: K8S_ENABLED/);
+  assert.ok(!/volumeMounts:/.test(values), 'nothing to mount without a licence');
+  assert.ok(!/extraVolumes:/.test(values), 'no extraVolumes without a licence');
+});
+
+// A JWT the caller supplied keeps today's path: the Secret step and the mount.
+for (const fw of ['fluentbit', 'otel-collector'] as ForwarderKind[]) {
+  test(`receiver/${fw}: a pasted JWT still creates the Secret and mounts it`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'pasted.jwt.value',
+      destination: 'mock',
+    });
+    assert.equal(plan.licenseKind, 'user-pasted');
+    const values = findValuesContents(plan);
+    assert.match(values, /name: TENX_LICENSE_FILE/);
+    assert.match(values, /name: tenx-license/);
+    assert.match(values, /secretName: log10x-license/);
+    const secretStep = plan.install.find((s) => s.title === 'Create license Secret');
+    assert.ok(secretStep, 'the Secret the values mount must be created by the plan');
+    assert.match(secretStep!.commands!.join('\n'), /pasted\.jwt\.value/);
+  });
+
+  test(`receiver/${fw}: a JWT wins over builtinLicense`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'user.jwt.value',
+      isDemoLicense: false,
+      builtinLicense: true,
+      destination: 'mock',
+    });
+    assert.equal(plan.licenseKind, 'user-scoped');
+    assert.ok(plan.install.some((s) => s.title === 'Create license Secret'));
+    assert.match(findValuesContents(plan), /name: TENX_LICENSE_FILE/);
+  });
+}
+
+test('receiver/fluentd: the kustomize patch carries no licence volume on the builtin path', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentd',
+    builtinLicense: true,
+    destination: 'mock',
+  });
+  const patch = plan.install
+    .flatMap((s) => s.files ?? [])
+    .find((f) => f.path === 'tenx-kustomize/sidecar-patch.yaml');
+  assert.ok(patch, 'the sidecar patch is still emitted');
+  assert.match(patch!.contents, /name: log10x\b/);
+  assert.ok(!/volumes:/.test(patch!.contents), 'no pod volume without a licence');
+  assert.ok(!/volumeMounts:/.test(patch!.contents), 'no mount without a licence');
+});
+
+test('reporter (standalone): a builtin plan sets no licence value, so chart 1.2.0+ renders no Secret', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    builtinLicense: true,
+    destination: 'mock',
+  });
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.licenseKind, 'builtin');
+  const values = findValuesContents(plan);
+  // Only a comment may mention the key; no value line sets it.
+  assert.ok(!/^log10xLicenseJwt:/m.test(values), `no log10xLicenseJwt value: ${values}`);
+  assert.ok(!/^licenseSecret:/m.test(values), `no licenseSecret block: ${values}`);
+  assert.match(values, /built-in evaluation license \(10 nodes,/);
+  assert.ok(!plan.install.some((s) => s.title === 'Create license Secret'));
+});
+
+test('reporter (standalone): a pasted JWT is still inlined for the chart to store', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'reporter',
+    licenseJwt: 'pasted.jwt.value',
+    destination: 'mock',
+  });
+  assert.match(findValuesContents(plan), /log10xLicenseJwt: "pasted\.jwt\.value"/);
+});
+
+test('a plan with neither a JWT nor builtinLicense still blocks', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    destination: 'mock',
+  });
+  assert.ok(plan.blockers.some((b) => /builtinLicense: true/.test(b)), plan.blockers.join(' | '));
+});

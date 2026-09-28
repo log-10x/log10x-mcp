@@ -8,9 +8,12 @@
  *      the user's existing forwarder pod via a values overlay
  *      (`extraContainers` + `extraVolumes` + per-chart config rewiring).
  *      The forwarder chart is always the UPSTREAM one (no Log10x
- *      repackages). The sidecar reads its license JWT from a
+ *      repackages). With a licence JWT, the sidecar reads it from a
  *      Kubernetes Secret mounted at `/etc/tenx/license/license.jwt`
- *      via `TENX_LICENSE_FILE`. Each forwarder has a different
+ *      via `TENX_LICENSE_FILE`. With none (the default), the overlay
+ *      carries no licence env, volume or mount, and the engine runs its
+ *      built-in evaluation licence: 10 nodes, 30 days from each start,
+ *      airgapped. Each forwarder has a different
  *      config-rewiring shape (Fluent Bit replaces `config:`, OTel
  *      deep-merges `config:`, Vector replaces `customConfig`, Logstash
  *      uses `logstashConfig` + `logstashPipeline`, Fluentd needs a
@@ -27,8 +30,11 @@
  *      Read-only, zero-touch. The chart uses a flat values layout with
  *      `log10xLicenseJwt` at the top level and a `tenx:` block ONLY for
  *      engine resource overrides / extraArgs / extraEnv. License
- *      delivery: chart-managed Secret by default (JWT inlined into
- *      `log10xLicenseJwt`), or user-supplied Secret via
+ *      delivery: none by default (chart 1.2.0+ renders no Secret, env or
+ *      mount when `log10xLicenseJwt` is empty, and the engine runs its
+ *      built-in evaluation licence), a chart-managed Secret for a demo
+ *      or pasted JWT (inlined into `log10xLicenseJwt`), or a
+ *      user-supplied Secret via
  *      `licenseSecret.{create:false, existingSecret, secretKey}` for
  *      real (non-demo) licenses.
  *
@@ -128,6 +134,14 @@ export interface ForwarderSpec {
     licenseSecretName?: string;
     /** Key inside the Secret whose value is the JWT (when isDemoLicense=false). */
     licenseSecretKey?: string;
+    /**
+     * True when the plan carries no licence at all. The engine then runs its
+     * built-in evaluation licence (10 nodes, 30 days from each start,
+     * airgapped), and the overlay must name no licence: a TENX_LICENSE_FILE
+     * pointing at a file that is not there, or a volume naming a Secret that
+     * does not exist, keeps the pod from starting.
+     */
+    builtinLicense?: boolean;
     releaseName: string;
     destination: OutputDestination;
     outputHost?: string;
@@ -147,9 +161,10 @@ export interface ForwarderSpec {
      */
     readOnly?: boolean;
     /**
-     * Metrics backends the engine emits TenXSummary to. `['log10x']` is
-     * the chart default (SaaS Prometheus); additional / replacement
-     * backends are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
+     * Metrics backends the engine emits TenXSummary to: the user's own
+     * TSDBs. `log10x` (the hosted TSDB behind the public demo) adds no
+     * output module here and appears only when passed explicitly. Backends
+     * are wired via `tenx.extraArgs` (`@run/output/metric/<b>`)
      * and `tenx.extraEnv` (vendor-specific env vars).
      */
     backends?: MetricsBackendKind[];
@@ -207,6 +222,8 @@ export interface ForwarderSpec {
     airgapped?: boolean;
     licenseSecretName: string;
     licenseSecretKey: string;
+    /** No licence: the patch carries no licence env, volume or mount. */
+    builtinLicense?: boolean;
   }) => import('./types.js').PlanFile[];
   /**
    * Optional: extra command-line flags appended to the
@@ -345,10 +362,10 @@ export function defaultSecretNameFor(kind: MetricsBackendKind): string {
 
 /**
  * Render the `tenx.extraArgs` + `tenx.extraEnv` blocks that wire up
- * additional metrics backends (beyond the chart-default `log10x`) and
+ * the user's metrics backends (`log10x` adds no module) and
  * the `TENX_AIRGAPPED` env var for Receiver inline overlays.
  *
- * Emits nothing when there's nothing to add (default `['log10x']` and
+ * Emits nothing when there's nothing to add (no non-log10x backend and
  * not airgapped). Always emits 2-space-indented YAML to nest under
  * `tenx:`.
  *
@@ -438,12 +455,14 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
  * it at column 0 of the values overlay. The two top-level keys it emits
  * are `extraContainers:` and `extraVolumes:`.
  *
- * License delivery: always via the Secret-mounted file pattern
- * (`TENX_LICENSE_FILE=/etc/tenx/license/license.jwt`). For demo licenses
- * the caller's pre-install step still has to create the Secret — there
- * is no "inline JWT" path for the Receiver. The chart values belong to
- * the user's upstream chart, which interprets no Log10x-specific
- * top-level field.
+ * License delivery: with a JWT, always via the Secret-mounted file
+ * pattern (`TENX_LICENSE_FILE=/etc/tenx/license/license.jwt`). For demo
+ * licenses the caller's pre-install step still has to create the Secret,
+ * since there is no "inline JWT" path for the Receiver. The chart values
+ * belong to the user's upstream chart, which interprets no
+ * Log10x-specific top-level field. With `builtinLicense`, the block
+ * carries no licence env, no volumeMounts and no extraVolumes, and the
+ * engine runs its built-in evaluation licence.
  */
 /** Name of the policy ConfigMap the engine's kubernetes pull lane reads
  * (matches the engine's $K8S_CONFIGMAP default and configure_engine's
@@ -565,6 +584,8 @@ function renderLog10xSidecar(opts: {
   licenseSecretName: string;
   /** Key inside the Secret whose value is the JWT. */
   licenseSecretKey: string;
+  /** No licence: emit no licence env, volume or mount. */
+  builtinLicense?: boolean;
   /** Metrics backends; each non-log10x one gets its output module and env. */
   backends?: MetricsBackendKind[];
   backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
@@ -579,10 +600,12 @@ function renderLog10xSidecar(opts: {
     argLines.push(`      - "receiverOptimize"`);
     argLines.push(`      - "true"`);
   }
-  const envLines: string[] = [
-    `      - name: TENX_LICENSE_FILE`,
-    `        value: /etc/tenx/license/license.jwt`,
-  ];
+  const envLines: string[] = opts.builtinLicense
+    ? []
+    : [
+        `      - name: TENX_LICENSE_FILE`,
+        `        value: /etc/tenx/license/license.jwt`,
+      ];
   if (opts.airgapped) {
     envLines.push(`      - name: TENX_AIRGAPPED`);
     envLines.push(`        value: "true"`);
@@ -610,21 +633,18 @@ function renderLog10xSidecar(opts: {
     }
   }
   envLines.push(...renderPolicyPullEnvLines('      '));
-  return `extraContainers:
-  - name: log10x
-    image: ${EDGE_MANIFEST_IMAGE}
-    imagePullPolicy: IfNotPresent
-    args:
-${argLines.join('\n')}
-    env:
-${envLines.join('\n')}
+  // No licence: no mount and no volume. The container then has nothing to
+  // wait on, and the engine logs that it runs the built-in evaluation licence.
+  const mountBlock = opts.builtinLicense
+    ? ''
+    : `
     volumeMounts:
       - name: tenx-license
         mountPath: /etc/tenx/license
-        readOnly: true
-    resources:
-      requests: { cpu: 100m, memory: 256Mi }
-      limits:   { cpu: 500m, memory: 512Mi }
+        readOnly: true`;
+  const volumeBlock = opts.builtinLicense
+    ? ''
+    : `
 
 extraVolumes:
   - name: tenx-license
@@ -633,6 +653,17 @@ extraVolumes:
       items:
         - key: ${opts.licenseSecretKey}
           path: license.jwt`;
+  return `extraContainers:
+  - name: log10x
+    image: ${EDGE_MANIFEST_IMAGE}
+    imagePullPolicy: IfNotPresent
+    args:
+${argLines.join('\n')}
+    env:
+${envLines.join('\n')}${mountBlock}
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 512Mi }${volumeBlock}`;
 }
 
 // ── The spec map ──
@@ -651,7 +682,7 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
         backends,
         backendCredentials,
@@ -660,6 +691,7 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
         airgapped,
         licenseSecretName: licenseSecretName ?? 'log10x-license',
         licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+        builtinLicense,
       });
       const destOutput = renderFluentBitDestinationOutput(destination, outputHost, splunkHecToken);
       return `# Receiver overlay for Fluent Bit (upstream fluent/fluent-bit chart).
@@ -944,7 +976,7 @@ podSecurityPolicy:
 # on :24225 and writes them to your destinations.
 ${fileConfigsBlock}`;
     },
-    renderExtraFiles: ({ releaseName, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderExtraFiles: ({ releaseName, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
       const deploymentName = `${releaseName}-fluentd`;
       // engine args for the sidecar — same convention as
       // renderLog10xSidecar but inline because the patch YAML lives
@@ -958,15 +990,36 @@ ${fileConfigsBlock}`;
         argLines.push(`                    - "receiverOptimize"`);
         argLines.push(`                    - "true"`);
       }
-      const envLines: string[] = [
-        `                    - name: TENX_LICENSE_FILE`,
-        `                      value: /etc/tenx/license/license.jwt`,
-      ];
+      const envLines: string[] = builtinLicense
+        ? []
+        : [
+            `                    - name: TENX_LICENSE_FILE`,
+            `                      value: /etc/tenx/license/license.jwt`,
+          ];
       if (airgapped) {
         envLines.push(`                    - name: TENX_AIRGAPPED`);
         envLines.push(`                      value: "true"`);
       }
       envLines.push(...renderPolicyPullEnvLines('                    '));
+      // No licence: the patch adds the container only, with no licence
+      // mount and no pod volume (see renderLog10xSidecar).
+      const patchMounts = builtinLicense
+        ? ''
+        : `
+          volumeMounts:
+            - name: tenx-license
+              mountPath: /etc/tenx/license
+              readOnly: true`;
+      const patchVolumes = builtinLicense
+        ? ''
+        : `
+      volumes:
+        - name: tenx-license
+          secret:
+            secretName: ${licenseSecretName}
+            items:
+              - key: ${licenseSecretKey}
+                path: license.jwt`;
       return [
         {
           path: 'tenx-kustomize/kustomization.yaml',
@@ -999,21 +1052,10 @@ spec:
           args:
 ${argLines.join('\n')}
           env:
-${envLines.join('\n')}
-          volumeMounts:
-            - name: tenx-license
-              mountPath: /etc/tenx/license
-              readOnly: true
+${envLines.join('\n')}${patchMounts}
           resources:
             requests: { cpu: 100m, memory: 256Mi }
-            limits:   { cpu: 500m, memory: 512Mi }
-      volumes:
-        - name: tenx-license
-          secret:
-            secretName: ${licenseSecretName}
-            items:
-              - key: ${licenseSecretKey}
-                path: license.jwt
+            limits:   { cpu: 500m, memory: 512Mi }${patchVolumes}
 `,
         },
         {
@@ -1115,28 +1157,30 @@ bash "%~dp0post-render.sh"
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderValues: ({ optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
       // Build TENX_RUN_ARGS. Default args wire the filebeat input and
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
-      // the in-container engine emits metrics to those backends in
-      // addition to log10x SaaS (the chart default).
+      // the in-container engine emits metrics to those backends.
       const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x');
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');
       if (readOnly) runArgs.push('receiverReadOnly', 'true');
       for (const b of nonLog10xBackends) runArgs.push(`@run/output/metric/${b}`);
 
-      // Build the daemonset.extraEnvs block. Always emits
-      // TENX_LICENSE_FILE + TENX_RUN_ARGS; appends TENX_AIRGAPPED and
+      // Build the daemonset.extraEnvs block. Emits TENX_RUN_ARGS, plus
+      // TENX_LICENSE_FILE when the plan carries a licence (the
+      // log10x/filebeat-10x image sets no licence env of its own, so with
+      // none the engine runs its built-in evaluation licence); appends TENX_AIRGAPPED and
       // per-backend env vars (secret + plain) when applicable. The
       // backend env-var contract is identical to the sidecar path: the
       // same BACKEND_ENV_SPECS entries, so DD_API_KEY/ELASTIC_API_KEY/etc.
       // come from the same Kubernetes Secret the user creates
       // out-of-band.
       const envLines: string[] = [
-        `    - name: TENX_LICENSE_FILE`,
-        `      value: /etc/tenx/license/license.jwt`,
+        ...(builtinLicense
+          ? []
+          : [`    - name: TENX_LICENSE_FILE`, `      value: /etc/tenx/license/license.jwt`]),
         `    - name: TENX_RUN_ARGS`,
         `      value: "${runArgs.join(' ')}"`,
       ];
@@ -1167,6 +1211,22 @@ bash "%~dp0post-render.sh"
 
       const secretName = licenseSecretName ?? 'log10x-license';
       const secretKey = licenseSecretKey ?? 'license-jwt';
+      const licenseVolumes = builtinLicense
+        ? ''
+        : `
+
+  extraVolumes:
+    - name: tenx-license
+      secret:
+        secretName: ${secretName}
+        items:
+          - key: ${secretKey}
+            path: license.jwt
+
+  extraVolumeMounts:
+    - name: tenx-license
+      mountPath: /etc/tenx/license
+      readOnly: true`;
 
       return `# Receiver overlay for Filebeat (upstream elastic/filebeat chart).
 # Layer on top of your existing values:
@@ -1189,20 +1249,7 @@ imagePullPolicy: IfNotPresent
 
 daemonset:
   extraEnvs:
-${envLines.join('\n')}
-
-  extraVolumes:
-    - name: tenx-license
-      secret:
-        secretName: ${secretName}
-        items:
-          - key: ${secretKey}
-            path: license.jwt
-
-  extraVolumeMounts:
-    - name: tenx-license
-      mountPath: /etc/tenx/license
-      readOnly: true
+${envLines.join('\n')}${licenseVolumes}
 
   # filebeat.config.inputs loads the unix-socket input that receives
   # processed events back from the engine; the script processor on each
@@ -1285,7 +1332,7 @@ ${envLines.join('\n')}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
       // Logstash chart quirks (vs the other receiver overlays):
       //   - `extraContainers` is a YAML pipe-string, not a list, so the
       //     log10x container block is inlined here rather than taken from
@@ -1304,16 +1351,38 @@ ${envLines.join('\n')}
         argLines.push(`      - "receiverOptimize"`);
         argLines.push(`      - "true"`);
       }
-      const envLines: string[] = [
-        `      - name: TENX_LICENSE_FILE`,
-        `        value: /etc/tenx/license/license.jwt`,
-      ];
+      const envLines: string[] = builtinLicense
+        ? []
+        : [
+            `      - name: TENX_LICENSE_FILE`,
+            `        value: /etc/tenx/license/license.jwt`,
+          ];
       if (airgapped) {
         envLines.push(`      - name: TENX_AIRGAPPED`);
         envLines.push(`        value: "true"`);
       }
       envLines.push(...renderPolicyPullEnvLines('      '));
       const destOutput = renderLogstashDestinationOutput(destination, outputHost);
+      // No licence: no mount and no secretMounts entry (see renderLog10xSidecar).
+      const licenseMount = builtinLicense
+        ? ''
+        : `
+    volumeMounts:
+      - name: tenx-license
+        mountPath: /etc/tenx/license/license.jwt
+        subPath: license.jwt
+        readOnly: true`;
+      const licenseSecretMounts = builtinLicense
+        ? ''
+        : `
+
+# License via the chart's secretMounts (not extraVolumes). subPath
+# projects the Secret's \`${secretKey}\` key to a single file.
+secretMounts:
+  - name: tenx-license
+    secretName: ${secretName}
+    path: /etc/tenx/license/license.jwt
+    subPath: ${secretKey}`;
       return `# Receiver overlay for Logstash (upstream elastic/logstash chart).
 # Layer on top of your existing values:
 #   helm upgrade --install <release> elastic/logstash \\
@@ -1328,23 +1397,10 @@ extraContainers: |
     args:
 ${argLines.join('\n')}
     env:
-${envLines.join('\n')}
-    volumeMounts:
-      - name: tenx-license
-        mountPath: /etc/tenx/license/license.jwt
-        subPath: license.jwt
-        readOnly: true
+${envLines.join('\n')}${licenseMount}
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-      limits:   { cpu: 500m, memory: 512Mi }
-
-# License via the chart's secretMounts (not extraVolumes). subPath
-# projects the Secret's \`${secretKey}\` key to a single file.
-secretMounts:
-  - name: tenx-license
-    secretName: ${secretName}
-    path: /etc/tenx/license/license.jwt
-    subPath: ${secretKey}
+      limits:   { cpu: 500m, memory: 512Mi }${licenseSecretMounts}
 
 # Two-pipeline driver: ingest runs your filters and hands off to the
 # sidecar; destinations consumes returning events filter-free, so
@@ -1466,7 +1522,7 @@ ${indent(destOutput, 6)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
         backends,
         backendCredentials,
@@ -1475,6 +1531,7 @@ ${indent(destOutput, 6)}
         airgapped,
         licenseSecretName: licenseSecretName ?? 'log10x-license',
         licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+        builtinLicense,
       });
       const destSink = renderVectorDestinationSink(destination, outputHost);
       return `# Receiver overlay for Vector (upstream vector/vector chart).
@@ -1600,7 +1657,7 @@ ${indent(destSink, 4)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
         backends,
         backendCredentials,
@@ -1609,6 +1666,7 @@ ${indent(destSink, 4)}
         airgapped,
         licenseSecretName: licenseSecretName ?? 'log10x-license',
         licenseSecretKey: licenseSecretKey ?? 'license-jwt',
+        builtinLicense,
       });
       // OTel destination exporter declaration + the exporter name(s) the
       // from-tenx pipeline references. `mock` uses the chart's built-in
@@ -1748,7 +1806,7 @@ export const STANDALONE_SPEC: ForwarderSpec = {
   hasTenxSidecar: true,
   selectorStyle: 'k8s-recommended',
   selectorLabel: (r) => k8sRecommendedSelector(r),
-  renderValues: ({ licenseJwt, isDemoLicense, licenseSecretName, licenseSecretKey, releaseName, backends, backendCredentials, airgapped }) => {
+  renderValues: ({ licenseJwt, isDemoLicense, licenseSecretName, licenseSecretKey, builtinLicense, releaseName, backends, backendCredentials, airgapped }) => {
     // reporter-10x uses a flat values layout: top-level log10xLicenseJwt
     // + runtimeName (NOT nested under `tenx:`). The chart turns the JWT
     // into a Kubernetes Secret and mounts it as a file pointed at by
@@ -1762,6 +1820,11 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     // Instead, point the chart at an existing Secret the user creates
     // out-of-band. The chart's `licenseSecret.create=false` mode skips
     // the auto-Secret generation and mounts the user's existing one.
+    //
+    // No licence (builtin, the default): emit no licence value at all.
+    // Chart 1.2.0+ renders no Secret, no TENX_LICENSE_FILE and no mount when
+    // `log10xLicenseJwt` is empty and `licenseSecret.create` keeps its
+    // default, and the engine runs its built-in evaluation licence.
     //
     // `gitToken` and `config.git` defaults are deliberately not emitted:
     // both match chart defaults, and the chart's secret-template only
@@ -1779,7 +1842,11 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     const tenxBlock = extras
       ? `\ntenx:${extras}\n`
       : '';
-    const licenseBlock = isDemoLicense === false
+    const licenseBlock = builtinLicense
+      ? `# No license: the engine runs its built-in evaluation license (10 nodes,
+# 30 days from each start, airgapped). To license it, set log10xLicenseJwt,
+# or point licenseSecret at a Secret holding the JWT.`
+      : isDemoLicense === false
       ? `log10xLicenseJwt: ""          # Provided via the Secret below (create it before \`helm upgrade\`)
 licenseSecret:
   create: false
