@@ -29,6 +29,7 @@ import {
 import type { ChassisStatus } from '../lib/chassis-envelope.js';
 import { wrapBackendError } from '../lib/primitive-errors.js';
 import { run } from '../lib/discovery/shell.js';
+import { previewText } from '../lib/retriever-preview.js';
 
 const execFileP = promisify(execFile);
 
@@ -691,7 +692,7 @@ export async function executeRetrieverQueryStatus(
     let fetched:
       | {
           events_matched: number;
-          events_preview: Array<{ timestamp?: string | number; severity?: string; service?: string; text?: string }>;
+          events_preview: Array<{ timestamp?: string | number; severity?: string; service?: string; text?: string; text_truncated?: true; text_chars?: number }>;
           results_location: { bucket: string; prefix: string; uri: string };
           truncated: boolean;
           worker_files: number;
@@ -711,7 +712,7 @@ export async function executeRetrieverQueryStatus(
             timestamp: ev.timestamp as string | number | undefined,
             severity: ev.severity_level as string | undefined,
             service: ev.tenx_user_service as string | undefined,
-            text: typeof ev.text === 'string' ? (ev.text as string).slice(0, 240) : undefined,
+            ...previewText(ev.text),
           })),
           results_location: loc,
           truncated: existing.truncated,
