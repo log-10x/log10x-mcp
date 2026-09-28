@@ -685,7 +685,7 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
       // multiplier when present, else collapses to a single point.
       dailyProjection = computeDailyProjection(
         s.renderInput,
-        patterns as unknown as ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+        patterns as unknown as ReadonlyArray<{ bytes: number; projectedSavings: number; costPerWindow?: number }>,
       );
     } catch (e) {
       // Fall back silently — v2 envelope is best-effort; the snapshot
@@ -908,6 +908,57 @@ export async function runPipeline(
     snapshot.finishedAt = new Date().toISOString();
     return;
   }
+  // Fill pass. The stratified samplers (Splunk, Elasticsearch, Datadog) read
+  // child windows that cover a quarter of the window, so when those run dry
+  // below target the pull says "source_exhausted" after reading about a
+  // quarter of it (4,802 of 20,403 events on a 1h Splunk index). One more
+  // pull over the whole window (buckets: 1), deduplicated, reads the rest.
+  // CloudWatch runs its own fill inside the connector.
+  if (
+    FILL_PASS_CONNECTORS.has(connector.id) &&
+    pullResult.metadata.reasonStopped === 'source_exhausted' &&
+    pullResult.events.length > 0 &&
+    pullResult.events.length < args.target_event_count
+  ) {
+    const elapsedMin = (Date.now() - pullStart) / 60_000;
+    const leftMin = (args.max_pull_minutes ?? 10) - elapsedMin;
+    if (leftMin > 0.2) {
+      try {
+        snapshot.stepDetail = `reading the rest of the window from ${connector.id}`;
+        const more = await connector.pullEvents({
+          window: args.window,
+          scope: args.scope,
+          query: args.query,
+          targetEventCount: args.target_event_count,
+          maxPullMinutes: leftMin,
+          buckets: 1,
+          onProgress: () => undefined,
+        });
+        const seen = new Set(pullResult.events.map((e) => (typeof e === 'string' ? e : JSON.stringify(e))));
+        const merged = [...pullResult.events];
+        for (const e of more.events) {
+          if (merged.length >= args.target_event_count) break;
+          const k = typeof e === 'string' ? e : JSON.stringify(e);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          merged.push(e);
+        }
+        pullResult = {
+          events: merged,
+          metadata: {
+            ...pullResult.metadata,
+            actualCount: merged.length,
+            reasonStopped: merged.length >= args.target_event_count ? 'target_reached' : more.metadata.reasonStopped,
+            notes: [...(pullResult.metadata.notes ?? []), ...(more.metadata.notes ?? [])].length
+              ? [...(pullResult.metadata.notes ?? []), ...(more.metadata.notes ?? [])]
+              : undefined,
+          },
+        };
+      } catch {
+        // the stratified sample stands on its own; the fill is best effort
+      }
+    }
+  }
   const pullWallTimeMs = Date.now() - pullStart;
   snapshot.partialEventsPulled = pullResult.events.length;
   snapshot.partialBytesPulled = pullResult.events.reduce<number>(
@@ -916,9 +967,17 @@ export async function runPipeline(
   );
   snapshot.partialStopReason = pullResult.metadata.reasonStopped;
 
-  if (pullResult.metadata.reasonStopped === 'error' && pullResult.events.length === 0) {
+  // Zero events with request errors is a failed pull, whatever stop reason the
+  // connector chose: a Splunk whose every search failed on a self-signed
+  // certificate used to finish "complete, 0 events" with the cause buried in
+  // the report appendix.
+  const pullNotes = pullResult.metadata.notes ?? [];
+  const everyRequestFailed =
+    pullResult.events.length === 0 && pullNotes.length > 0 && pullNotes.every((n) => /fail|error/i.test(n));
+  if ((pullResult.metadata.reasonStopped === 'error' || everyRequestFailed) && pullResult.events.length === 0) {
     snapshot.status = 'failed';
-    snapshot.error = `pull_errored: ${pullResult.metadata.notes?.join('; ') || 'no events retrieved'}`;
+    const distinct = [...new Set(pullNotes.map((n) => n.replace(/^[a-z]+_\d+_[a-z_]+?_?(create_failed|error|failed):\s*/i, '')))];
+    snapshot.error = `pull_errored: ${distinct.join('; ') || 'no events retrieved'}`;
     snapshot.retryHint = 'Check SIEM credentials with log10x_doctor; verify scope/query syntax.';
     snapshot.finishedAt = new Date().toISOString();
     return;
@@ -1289,14 +1348,21 @@ interface DailyProjection {
 
 function computeDailyProjection(
   ri: RenderInput,
-  patterns: ReadonlyArray<{ bytes: number; projectedSavings: number }>,
+  patterns: ReadonlyArray<{ bytes: number; projectedSavings: number; costPerWindow?: number }>,
 ): DailyProjection {
   const analyzerCost = ri.analyzerCostPerGb;
   const totalBytes = ri.extraction?.totalBytes ?? 0;
   const totalCostWindow = (totalBytes / 1024 ** 3) * analyzerCost;
   const projectedSavingsWindow = patterns.reduce((s, p) => s + p.projectedSavings, 0);
-  const pctExpected = totalCostWindow > 0
-    ? Math.min(100, Math.max(0, (projectedSavingsWindow / totalCostWindow) * 100))
+  // The percent must divide savings by a total on the SAME scale. The
+  // enriched patterns' savings are volume-scaled when a daily volume is
+  // known, while totalCostWindow is the raw sample, so their ratio grew
+  // with the scale factor and clamped at 100 (a real run reported 100%
+  // here while the report said 36%). Use the patterns' own cost total.
+  const patternCostWindow = patterns.reduce((s, p) => s + (p.costPerWindow ?? 0), 0);
+  const pctDenominator = patternCostWindow > 0 ? patternCostWindow : totalCostWindow;
+  const pctExpected = pctDenominator > 0
+    ? Math.min(100, Math.max(0, (projectedSavingsWindow / pctDenominator) * 100))
     : 0;
 
   // Dollar axis: scale the window cost to a daily figure using the
@@ -1340,6 +1406,8 @@ function projectBilling(windowCost: number, windowHours: number, targetHours: nu
 }
 
 // Exposed for tests.
+const FILL_PASS_CONNECTORS = new Set(['splunk', 'elasticsearch', 'datadog']);
+
 export function _resetSnapshots(): void {
   SNAPSHOTS.clear();
 }

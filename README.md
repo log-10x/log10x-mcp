@@ -79,7 +79,9 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 | `LOG10X_CUSTOMER_METRICS_URL` / `_TYPE` / `_AUTH` | Point at your own metrics backend (Prometheus, Grafana Cloud, Mimir, Thanos, AMP) for BYO-metrics setups. |
 | `DD_API_KEY` / `DD_APP_KEY` / `DD_SITE` | Datadog credentials for backfilling per-pattern metrics into Datadog. |
 | `PROMETHEUS_REMOTE_WRITE_URL` / `PROMETHEUS_URL` | Prometheus endpoints for backfilling and reading per-pattern series. |
-| `LOG10X_RETRIEVER_URL` | Base URL of your deployed Retriever query endpoint, for fetch-back (or set it with `log10x_retriever_register`). |
+| `__SAVE_LOG10X_RETRIEVER_URL__` / `__SAVE_LOG10X_RETRIEVER_BUCKET__` | Retriever query endpoint and the bucket it indexes, for fetch-back. Both are needed; `log10x_retriever_register` sets the same pair. A Lambda function URL is signed with your AWS credentials. |
+| `__SAVE_LOG10X_RETRIEVER_TARGET__` | Default target app prefix for fetch-back queries, e.g. `app`. |
+| `LOG10X_RETRIEVER_LOG_GROUP` | CloudWatch log group the Retriever writes query events to, the value of its `TENX_QUERY_LOG_GROUP`. With it, a zero-result query says which stage matched nothing. |
 | `LOG10X_RETRIEVER_TIMEOUT_MS` / `LOG10X_RETRIEVER_POLL_MS` | Fetch-back query timeout (default 90000) and poll interval (default 1500). |
 | `LOG10X_RETRIEVER_AUTH_HEADER` / `LOG10X_RETRIEVER_AUTH_VALUE` | Override the fetch-back auth header (defaults derive from the active environment). |
 | `LOG10X_OFFLOAD_BUCKET` / `LOG10X_STREAMER_BUCKET` | S3 bucket names the offload tools manage. |

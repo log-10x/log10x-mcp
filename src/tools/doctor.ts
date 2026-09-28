@@ -16,6 +16,7 @@
  */
 
 import { z } from 'zod';
+import { DEMO_ENV, isDemoFallbackActive } from '../lib/demo-env.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { boundedFanout } from '../lib/concurrency.js';
 import {
@@ -201,7 +202,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         name: 'environment_config',
         status: 'fail',
         message:
-          `**DEMO FALLBACK** — your configured LOG10X_API_KEY failed validation, so the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
+          `**DEMO FALLBACK** — ${process.env.LOG10X_API_KEY && process.env.LOG10X_API_KEY !== DEMO_ENV.apiKey && !isDemoFallbackActive() ? 'your configured LOG10X_API_KEY failed validation, so ' : ''}the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
           `All API-hitting tools will return demo data, NOT your account. ` +
           `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. Default: ${envs.default.nickname}.`,
         fix: 'Easiest fix: run `log10x_signin_start` (the model will chain to `log10x_signin_complete` automatically) for the Auth0 Device Flow with GitHub or Google, or call `log10x_signin_complete` directly with `{ api_key: "<key>" }` to paste an existing key from https://console.log10x.com → Profile → API Settings. Either path mints / validates the key and auto-clears the bad `LOG10X_API_KEY` from this MCP server\'s process so the new key takes effect immediately, no host restart needed. Alternatively: re-check `LOG10X_API_KEY` at https://console.log10x.com → Profile → API Settings, update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset `LOG10X_API_KEY` entirely to keep demo mode without the warning. See `log10x_login_status` for the full breakdown.',
@@ -398,7 +399,7 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
         'The overflow bucket holds the cohort the engine routed out of the stack, so these events are not in the SIEM at any tier. For events the SIEM still holds, query the SIEM directly; do not block on retriever setup.\n' +
         formatRetrieverTrace(retrieverRes.trace),
       fix:
-        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/cloud/retriever/',
+        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/retriever/',
     });
   }
 

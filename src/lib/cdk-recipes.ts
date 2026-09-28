@@ -27,7 +27,7 @@ export interface LambdaEstateCdkParams {
   region: string;
   /** Coralogix regional API host segment, e.g. `us2` -> api.us2.coralogix.com. */
   coralogixRegion?: string;
-  /** ARN of the engine extension layer once published. Placeholder until then. */
+  /** ARN of the engine extension layer; versions differ by region. */
   engineLayerArn?: string;
   /** Log-group name prefix that the auto-subscription rule covers. */
   logGroupPrefix?: string;
@@ -45,7 +45,7 @@ export interface CdkRecipe {
 
 export function lambdaEstateCdkConstruct(p: LambdaEstateCdkParams): CdkRecipe {
   const cxRegion = p.coralogixRegion ?? '<cx-region e.g. us2>';
-  const layerArn = p.engineLayerArn ?? 'arn:aws:lambda:REGION:ACCOUNT:layer:tenx-receive:VERSION';
+  const layerArn = p.engineLayerArn ?? `arn:aws:lambda:${p.region}:351939435334:layer:tenx-receive:VERSION`;
   const lgPrefix = p.logGroupPrefix ?? '/aws/lambda/';
   const route = p.tierDownRoute ?? 'tier_down';
 
@@ -69,9 +69,8 @@ import {
 
 export interface TenxServerlessProps {
   /**
-   * The engine extension layer. Published per region + architecture.
-   * NOT YET PUBLISHED at generation time — replace with the real ARN when
-   * the layer ships (tracked in the log10x serverless build).
+   * The engine extension layer, public per region + architecture
+   * (tenx-receive, tenx-receive-arm64). ARNs: https://doc.log10x.com/engine/launcher/extension/
    */
   engineLayerArn?: string;
   /**
@@ -327,7 +326,7 @@ export class CoralogixTcoPolicies extends Construct {
       `remainder subscribes named groups now and covers new \`${lgPrefix}*\` groups via a ` +
       'CreateLogGroup rule. The Terraform path (coralogixMonitoringRecipe) remains available.',
     prerequisites: [
-      `Engine extension layer is NOT published yet — the construct references ${layerArn} as a placeholder; do not deploy before the layer ships and the placement is confirmed on a real function.`,
+      `The construct references ${layerArn}: fill in the region and version from https://doc.log10x.com/engine/launcher/extension/ (use \`tenx-receive-arm64\` for arm64 functions).`,
       'CreateLogGroup only reaches EventBridge when a CloudTrail trail records management events in the region — most accounts have this; verify before relying on auto-subscription.',
       'The Coralogix upsert merges the 10x entry FIRST in the list (first match wins); reorder in the handler if the customer needs their own catch-alls evaluated first.',
       'The Coralogix API key needs LOGS.TCO:UPDATEPOLICIES and lives in Secrets Manager, never in code.',

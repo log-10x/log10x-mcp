@@ -8,6 +8,7 @@
  */
 
 import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { DEMO_ENV, isDemoFallbackActive } from './lib/demo-env.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -560,12 +561,32 @@ function isAuthRecoverableError(e: unknown): boolean {
  * trigger conditions and wording as applyDemoBanner; just a different
  * surface.
  */
+/**
+ * What failed, when something did. A demoFallbackReason is also set when
+ * nothing failed (a persisted demo license redirected to the shared demo
+ * dataset); telling a user with no key that "your LOG10X_API_KEY failed
+ * validation" sends them looking for a key they never set.
+ */
+// The keyless boot writes the public demo key into LOG10X_API_KEY, so the
+// variable being set does not mean the user set one.
+function userSetApiKey(): boolean {
+  const k = process.env.LOG10X_API_KEY;
+  return Boolean(k) && k !== DEMO_ENV.apiKey && !isDemoFallbackActive();
+}
+
+function failedCredentialLabel(reason: string): string | null {
+  if (userSetApiKey()) return 'your LOG10X_API_KEY failed validation';
+  if (/^~\/\.log10x\/credentials/.test(reason)) return 'your saved log10x sign-in failed validation';
+  return null;
+}
+
 function maybeAddDemoBannerWarning(warnings: string[]): string[] {
   if (!envs?.isDemoMode) return warnings;
-  if (envs.demoFallbackReason) {
+  const failed = envs.demoFallbackReason ? failedCredentialLabel(envs.demoFallbackReason) : null;
+  if (envs.demoFallbackReason && failed) {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return [
-      `DEMO MODE — your LOG10X_API_KEY failed validation. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
+      `DEMO MODE — ${failed}. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
       ...warnings,
     ];
   }
@@ -625,10 +646,11 @@ function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string 
 
 function applyDemoBanner(text: string): string {
   if (!envs?.isDemoMode) return text;
-  if (envs.demoFallbackReason) {
+  const failed = envs.demoFallbackReason ? failedCredentialLabel(envs.demoFallbackReason) : null;
+  if (envs.demoFallbackReason && failed) {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return (
-      `> ⚠ **DEMO MODE — your LOG10X_API_KEY failed validation.** ` +
+      `> ⚠ **DEMO MODE — ${failed}.** ` +
       `Account-scoped tools (top_patterns, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
       `Local-only tools (resolve_batch, extract_templates) are unaffected. ` +
       `Reason: ${reason} ` +

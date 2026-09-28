@@ -55,7 +55,7 @@ export class RetrieverNotConfiguredError extends Error {
         'to the retriever query handler URL (e.g., the NLB) and __SAVE_LOG10X_RETRIEVER_BUCKET__ to the ' +
         'offload bucket, then restart the MCP client.\n' +
         '  2. Retriever is NOT deployed for this customer. Fix: deploy per ' +
-        'https://doc.log10x.com/apps/cloud/retriever/\n\n' +
+        'https://doc.log10x.com/apps/retriever/\n\n' +
         'Workaround for the current request: if the events you need are inside SIEM hot retention ' +
         '(typically <7 days for Datadog/Splunk/Elastic), tell the user to query the SIEM directly ' +
         'with the relevant service + time filter — that is the fastest path. For events outside ' +
@@ -1444,21 +1444,27 @@ async function waitForMarkerStability(
     pollMs * 2,
     parseInt(process.env.LOG10X_RETRIEVER_QUIET_MS || '12000', 10)
   );
+  // A query that matches nothing writes no markers at all, so an empty set
+  // must be allowed to settle too, or every zero-result query waits out the
+  // whole budget (180 s by default). Measured on the demo Lambda retriever
+  // over 29 queries that did write markers: the first landed at most 15 s
+  // after _DONE.json. 45 s is 3x that. Override with
+  // LOG10X_RETRIEVER_EMPTY_QUIET_MS.
+  const emptyQuietMs = Math.max(
+    quietMs,
+    parseInt(process.env.LOG10X_RETRIEVER_EMPTY_QUIET_MS || '45000', 10)
+  );
 
   while (Date.now() - started < timeoutMs) {
     const entries = await s3List(bucket, markerPrefix);
     const keys = entries.map((e) => e.Key).sort();
 
+    if (markerSetSettled(keys, previous, Date.now() - lastChangeAt, quietMs, emptyQuietMs)) {
+      return entries;
+    }
     const unchanged =
-      keys.length > 0 &&
-      keys.length === previous.length &&
-      keys.every((k, i) => k === previous[i]);
-
-    if (unchanged) {
-      if (Date.now() - lastChangeAt >= quietMs) {
-        return entries;
-      }
-    } else {
+      keys.length === previous.length && keys.every((k, i) => k === previous[i]);
+    if (!unchanged) {
       lastChangeAt = Date.now();
     }
     previous = keys;
@@ -1468,6 +1474,38 @@ async function waitForMarkerStability(
   // Timed out — return whatever we saw last so the caller can surface a
   // partial result rather than a hard failure.
   return previous.map((key) => ({ Key: key, Size: 0 }));
+}
+
+/**
+ * True when the marker set has stopped changing for long enough to call the
+ * fan-out complete: `quietMs` once any marker exists, `emptyQuietMs` while
+ * none has landed.
+ */
+export function markerSetSettled(
+  keys: string[],
+  previous: string[],
+  quietForMs: number,
+  quietMs: number,
+  emptyQuietMs: number
+): boolean {
+  const unchanged =
+    keys.length === previous.length && keys.every((k, i) => k === previous[i]);
+  if (!unchanged) return false;
+  return quietForMs >= (keys.length > 0 ? quietMs : emptyQuietMs);
+}
+
+/**
+ * Whether a probe's verdict says anything about the full query. EMPTY_RANGE
+ * does not: the probe samples a few seconds, and an index written in batches
+ * (every 30 min on the demo retriever) has no blobs in most such windows, so
+ * reporting it would tell the user the whole range is unindexed when the
+ * worker logs say `bloom-miss`.
+ */
+export function probeVerdictLocalizes(verdict: string | undefined): boolean {
+  return verdict !== undefined &&
+    verdict !== 'DISPATCHED_BLIND' &&
+    verdict !== 'NO_MARKER' &&
+    verdict !== 'EMPTY_RANGE';
 }
 
 /**
@@ -1513,7 +1551,9 @@ async function localizeBlindQuery(
     } catch {
       continue; // probe errored — try a smaller window
     }
-    if (pf && pf.verdict !== 'DISPATCHED_BLIND' && pf.verdict !== 'NO_MARKER') {
+    // The smaller windows sit inside this one, so they are empty too.
+    if (pf?.verdict === 'EMPTY_RANGE') return null;
+    if (pf && probeVerdictLocalizes(pf.verdict)) {
       return {
         ...pf,
         explanation: `[localized by a ${windowSec}s local-dispatch probe over ${w.from} .. ${w.to}] ${pf.explanation}`,

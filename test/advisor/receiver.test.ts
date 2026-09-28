@@ -548,3 +548,44 @@ test('reporter (standalone) plan has no policy seed step and no pull env', async
     'reporter (report-mode, no regulator) needs no policy ConfigMap'
   );
 });
+
+// Measured 2026-09-28 by driving log10x_advise_install as a new user
+// (fluentbit, backends: ["prometheus"], license_source: "demo"): the plan
+// mounted a `log10x-license` Secret that no step created, so the pod would
+// wait on it forever, and the sidecar carried no Prometheus output or
+// remote-write URL, so the chosen backend received nothing.
+for (const fw of ['fluentbit', 'otel-collector'] as ForwarderKind[]) {
+  test(`receiver/${fw}: a demo-license plan creates the Secret its sidecar mounts`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'demo.jwt.value',
+      isDemoLicense: true,
+      destination: 'mock',
+    });
+    const values = findValuesContents(plan);
+    assert.match(values, /secretName: log10x-license/);
+    const secretStep = plan.install.find((s) => s.title === 'Create license Secret');
+    assert.ok(secretStep, 'the Secret the values mount must be created by the plan');
+    assert.match(secretStep!.commands!.join('\n'), /demo\.jwt\.value/);
+  });
+
+  test(`receiver/${fw}: a non-log10x backend reaches the sidecar`, async () => {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder: fw,
+      licenseJwt: 'test',
+      destination: 'mock',
+      backends: ['prometheus'],
+      backendCredentials: {
+        prometheus: { secretName: 'prom-creds', plainValues: { PROMETHEUS_REMOTE_WRITE_URL: 'https://prom.example/api/v1/write' } },
+      },
+    });
+    const values = findValuesContents(plan);
+    assert.match(values, /"@run\/output\/metric\/prometheus"/);
+    assert.match(values, /name: prom-creds/);
+    assert.match(values, /value: "https:\/\/prom\.example\/api\/v1\/write"/);
+  });
+}

@@ -67,9 +67,11 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * return-path fix the ClickHouse offload recipe requires, and its images are
  * pullable: edge-10x, compiler-10x, pipeline-10x, quarkus-10x and lambda-10x
  * all answer at 1.1.79 on Docker Hub, checked 2026-09-15. Pin to what is
- * pullable, not to what is tagged in git.
+ * pullable, not to what is tagged in git. 1.1.81: all five answer, checked
+ * 2026-09-28, and the Fluent Bit sidecar pairing ran on it (1.1.80 has no
+ * edge-10x image).
  */
-export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.79';
+export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.81';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

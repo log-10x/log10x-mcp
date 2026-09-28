@@ -201,6 +201,8 @@ export function fencedVerification(): FencedVerification {
 export interface FencedOfferArgs {
   /** What the POC read, for the first half of the disclosure. */
   read: string;
+  /** Full disclosure sentence, for sources the default wording does not fit. */
+  disclosure?: string;
   /** Args to pre-fill on `log10x_emit_sample_plan`, so the agent need not remember the submit call. */
   planArgs: Record<string, unknown>;
 }
@@ -231,7 +233,7 @@ export interface FencedOffer {
  * should not have to scroll past it to reach their cost numbers.
  */
 export function fencedOffer(opts: FencedOfferArgs): FencedOffer {
-  const disclosure = `This POC read ${opts.read} over the network. The same POC runs with no network at all.`;
+  const disclosure = opts.disclosure ?? `This POC read ${opts.read} over the network. The same POC runs with no network at all.`;
   return {
     disclosure,
     action: {
@@ -246,7 +248,7 @@ export function fencedOffer(opts: FencedOfferArgs): FencedOffer {
     markdown: [
       '---',
       '',
-      `_${disclosure} See \`actions[]\` for \`log10x_emit_sample_plan\`, or \`docs/fenced-poc.md\`._`,
+      `_${disclosure} To run it offline, see \`actions[]\` for \`log10x_emit_sample_plan\`, or the [offline POC guide](https://github.com/log-10x/log10x-mcp/blob/main/docs/fenced-poc.md)._`,
     ].join('\n'),
   };
 }

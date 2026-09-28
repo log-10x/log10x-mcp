@@ -335,7 +335,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
   // identically in the agent's chat. The byte-range framing remains for the
   // no-target exploratory run.
   const pl = inner.plan;
-  const sampledNote = `Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}, projected to a 30-day month.`;
+  const sampledNote = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}, projected to a 30-day month.`;
   const fmtBudgetUsd = (v: number) => '$' + Number(v.toFixed(2)).toString();
   const headline = hasData && pl
     ? (pl.target.kind === 'usd_budget'
@@ -351,10 +351,10 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
                 ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo, keeping everything. ${sampledNote}`
                 : `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. ${pl.gap ? pl.gap.message : ''}`)
         : pl.met
-          ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
+          ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
           : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
-    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
+    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : inner.source === 'file'
       ? 'POC from files: no log lines pulled. Check the paths / glob patterns.'
       : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
@@ -390,7 +390,7 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  const base = `Sampled ${inner.events_pulled.toLocaleString()} log lines from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
   if (inner.report_path) {
     return `${base} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
   }
@@ -603,7 +603,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('_Rate source: list price (vendors.json). Pass `effective_ingest_per_gb` on `log10x_estimate_savings` or `log10x_savings` once your real $/GB is known to convert these projections into a customer-specific quote._');
   lines.push('');
   lines.push(
-    `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns — candidates for muting or sampling.`
+    `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns — candidates for compacting, tiering down or offloading, each of which keeps every line.`
   );
   lines.push('');
   lines.push(
@@ -867,7 +867,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     lines.push(fenced_verification.markdown);
   } else {
     fenced_offer = fencedOffer({
-      read: 'local files, but this server had network access throughout',
+      read: 'local files',
+      disclosure: 'This POC read local files on a machine with network access. The same POC runs with no network at all.',
       planArgs: { siem: args.siem ?? 'cloudwatch', window: opts.window ?? '1h' },
     });
     lines.push('');
