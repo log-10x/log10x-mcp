@@ -23,7 +23,7 @@ import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
-import { COST_MODEL_BY_DESTINATION, getAllowedActionsForDestination } from '../lib/cost.js';
+import { COST_MODEL_BY_DESTINATION, getAllowedActionsForDestination, describeCompactReadback } from '../lib/cost.js';
 import { loadEnvironments, type EnvConfig, type Environments } from '../lib/environments.js';
 import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
 import { type StructuredOutput } from '../lib/output-types.js';
@@ -380,17 +380,20 @@ function buildModes(
   // observe-only baseline. The non-lossy options are the value proposition,
   // so they come first; sample and drop are presented as choices the user
   // opts into, never as the default.
+  // How compact events read back is per destination (lib/cost.ts), never a
+  // bare "losslessly" or "fully searchable".
+  const compactReadback = describeCompactReadback(effectiveDestination);
   return [
     {
       id: 'compact',
-      label: 'Compact (keeps everything): minify events losslessly. Every event still lands in the stack, fully searchable.',
+      label: 'Compact (keeps everything): minify events. Every event still lands in the stack.',
       description:
-        'Engine encodes events into the 10x compact wire format, losslessly. All events arrive in the stack; fields stay searchable. How much smaller depends on the destination and the events; log10x_measure_compaction measures it on the real stream.',
+        "Engine encodes events into the 10x compact wire format, and the destination's expander rebuilds them at read time. All events arrive in the stack; " +
+        `${compactReadback}. How much smaller depends on the destination and the events; log10x_measure_compaction measures it on the real stream.`,
       who_enforces: 'engine',
       applicable: compactApplicable,
       gated_reason: compactGatedReason,
-      what_survives:
-        'All events reach the stack, each smaller. Fully searchable.',
+      what_survives: `All events reach the stack, each smaller; ${compactReadback}.`,
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('compact') },
     },
     {

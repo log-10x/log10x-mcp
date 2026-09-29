@@ -252,6 +252,13 @@ export interface DestinationCostModel {
    */
   compact_ratio_basis?: { short: string; full: string };
   /**
+   * How compact events read back here, stated to what is verified: how
+   * exactly they expand and which searches see the full text. Every sentence
+   * that would otherwise say "losslessly" or "fully searchable" renders this
+   * through describeCompactReadback().
+   */
+  compact_readback?: string;
+  /**
    * Body-size below which compaction efficiency degrades (envelope overhead
    * dominates). Default 100 bytes.
    */
@@ -489,6 +496,14 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
         'log-10x/benchmarks#18); 57.86% to 69.27% per container. One capture, not a forecast for this ' +
         'estate: log10x_measure_compaction reads the ratio off the stream itself',
     },
+    // splunk-app default/props.conf: TRUNCATE = 262144 on tenx_encoded (#33).
+    // A longer compact event is cut by Splunk with no marker and rebuilds
+    // shorter. The search page loads no app JavaScript, so a search-bar query
+    // reaches the full text only wrapped in the app's tenxsearch command;
+    // classic dashboards go through its hook, alerts through Compile Alert.
+    compact_readback:
+      'on Splunk each event expands exactly up to 256 KB with the current 10x app (a longer one comes back cut), ' +
+      "and a search-bar query needs the app's tenxsearch command to see the full text",
     small_event_floor_bytes: 100,
   },
   datadog: {
@@ -547,6 +562,12 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
         `${ES_ON_DISK_BASIS}. That run pruned nothing from _source; pruning removes more and is ` +
         'unmeasured, so for a pruned index this figure is a floor. One capture, not a forecast for this estate',
     },
+    // elasticsearch-plugin: query_rewrite_enabled rewrites match, match_phrase
+    // and multi_match (so Kibana and KQL work); other query types reach the
+    // stored, encoded text. Carried to the unpruned variant by the spread.
+    compact_readback:
+      'on Elasticsearch the l1es plugin rebuilds each event, and match, match_phrase and multi_match queries ' +
+      '(so Kibana and KQL) search the full text while other query types see the encoded form',
     small_event_floor_bytes: 100,
     // Frozen tier via searchable snapshots. On Elastic Cloud Hosted the
     // marked slice routes to its own index, ILM mounts it as
@@ -1198,6 +1219,27 @@ export function describeCompactFigure(model: DestinationCostModel): string | nul
       ? `${less(model.compact_ratio_expected)}% smaller`
       : `${less(model.compact_ratio_high)}-${less(model.compact_ratio_low)}% smaller`;
   return model.compact_ratio_basis ? `${figure}, ${model.compact_ratio_basis.short}` : figure;
+}
+
+const COMPACT_READBACK_UNKNOWN_DESTINATION =
+  "how exactly each event reads back, and which searches see its full text, depends on the destination's expander";
+
+/**
+ * How compact events read back on a destination, for any sentence that would
+ * otherwise say "losslessly" or "fully searchable": the verified limits where
+ * the destination has an expander, a no-op statement where it has none, and a
+ * destination-neutral clause when the destination is unknown or unmodeled.
+ */
+export function describeCompactReadback(dest?: string | null, opts?: { esPruned?: boolean }): string {
+  if (!dest) return COMPACT_READBACK_UNKNOWN_DESTINATION;
+  let model: DestinationCostModel;
+  try {
+    model = getDestinationCostModel(dest.toLowerCase() as SiemId, opts);
+  } catch {
+    return COMPACT_READBACK_UNKNOWN_DESTINATION;
+  }
+  if (model.compact_mode === 'no-op') return `compact is a no-op on ${dest}, where nothing expands the events`;
+  return model.compact_readback ?? COMPACT_READBACK_UNKNOWN_DESTINATION;
 }
 
 export interface ProjectActionArgs {

@@ -14,6 +14,7 @@ import {
   getAllowedActionsForDestination,
   compactsInPlace,
   getDestinationCostModel,
+  describeCompactReadback,
   type Action as CostAction,
   type DollarSource,
   type DisclosedDollarValue,
@@ -1536,7 +1537,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       );
       lines.push('');
       lines.push(
-        'The compacted line carries the full template plus every captured variable, so the original line reconstructs exactly. This is lossless: nothing is summarized away or dropped.',
+        `The compact line carries the full template plus every captured variable, so the original line reconstructs exactly from it; nothing is summarized away or dropped. Reading it back is the destination's expander: ${describeCompactReadback(input.siem)}.`,
       );
       lines.push('');
       lines.push('| pattern | raw bytes | compact bytes | ratio | $ saved /window |');

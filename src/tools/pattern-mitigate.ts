@@ -40,6 +40,7 @@ import { agentOnly } from '../lib/agent-only.js';
 import { fmtPattern, normalizePattern } from '../lib/format.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { resolveSiemSelection } from '../lib/siem/resolve.js';
+import { describeCompactReadback } from '../lib/cost.js';
 import { getConnector } from '../lib/siem/index.js';
 import { probeReceiverInPath, eventHasTenxHash } from '../lib/receiver-probe.js';
 import { resolvePatternRefInMetrics } from '../lib/resolve-pattern-hash.js';
@@ -825,7 +826,7 @@ async function executePatternMitigateInner(
   // Option 4 — Compact at 10x edge. Same gating as option 3.
   if (caps.canCompact) {
     const sourceTag = caps.gitopsSource ? ` (PR target resolved from ${caps.gitopsSource})` : '';
-    lines.push(`**4. Shrink it instead of dropping it.** Same PR + merge flow as option 3, against \`${caps.gitopsRepo}\`${sourceTag}, but the events keep flowing. The 10x engine minifies each one losslessly so it lands at your analyzer smaller, still fully searchable. Pick this when you actually need the data (compliance, dashboards rely on the raw fields, etc.).`);
+    lines.push(`**4. Shrink it instead of dropping it.** Same PR + merge flow as option 3, against \`${caps.gitopsRepo}\`${sourceTag}, but the events keep flowing. The 10x engine minifies each one so it lands at your analyzer smaller; ${describeCompactReadback(caps.analyzerVendor)}. Pick this when you actually need the data (compliance, dashboards rely on the raw fields, etc.).`);
   } else {
     lines.push('**4. Shrink it instead of dropping it.** _Not available in this env — same setup as option 3._');
   }
