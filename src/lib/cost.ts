@@ -1412,8 +1412,12 @@ function projectActionWithRatio(
         bytes_out = args.bytes_in * effective;
         // The static band names its source, as the measured override above does.
         if (model.compact_ratio_basis) {
+          const band =
+            model.compact_ratio_low === model.compact_ratio_high
+              ? ''
+              : ` (band ${model.compact_ratio_low.toFixed(3)}-${model.compact_ratio_high.toFixed(3)})`;
           notes.push(
-            `compact ratio ${expectedCompactRatio(model).toFixed(3)} (band ${model.compact_ratio_low.toFixed(3)}-${model.compact_ratio_high.toFixed(3)}), ${model.compact_ratio_basis.short}`
+            `compact ratio ${expectedCompactRatio(model).toFixed(3)}${band}, ${model.compact_ratio_basis.short}`
           );
         }
         if (

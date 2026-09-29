@@ -2898,7 +2898,7 @@ function buildForecastHumanSummary(
   let compactClause = '';
   if (result.per_pattern.some((r) => r.action === 'compact')) {
     try {
-      const m = getDestinationCostModel(destination as SiemId);
+      const m = getDestinationCostModel(destination as SiemId, { esPruned: result.es_pruned });
       if (m.compact_mode !== 'no-op' && m.compact_ratio_basis) {
         compactClause = ` Compact figure: ${m.compact_ratio_basis.short}.`;
       }
