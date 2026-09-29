@@ -11,13 +11,21 @@
  *     uncertainty bands, and degrades savings for small events where
  *     envelope overhead dominates.
  *
- * Compact-ratio numbers come from the ES/Splunk PoC findings:
+ * Compact-ratio numbers, and where each comes from. The model's
+ * `compact_ratio_basis` carries the same statement into every output that
+ * quotes the figure:
+ *   - Splunk: measured once, in Splunk's own licence meter (E21,
+ *     log-10x/benchmarks#18, splunk-license/results/results.md). One
+ *     OpenTelemetry demo capture, 214,841,731 licence-metered bytes without
+ *     compact and 80,653,626 with it: 62.46% less. Per container 57.86% (ad)
+ *     to 69.27% (opensearch). Modeled as 0.3073..0.4214, expected 0.3754.
  *   - Elasticsearch pruned (compactable fields excluded from _source):
- *     45-73% reduction range. Modeled as compact_ratio 0.30..0.40.
- *   - Elasticsearch unpruned: ~45-55% post/pre. Returned via
+ *     modeled as compact_ratio 0.30..0.40.
+ *   - Elasticsearch unpruned: modeled as 0.45..0.55. Returned via
  *     getDestinationCostModel(dest, {esPruned:false}).
- *   - Splunk envelope-in-event: ~92% reduction on the OUTER stream.
- *     Modeled as 0.08..0.15.
+ *     No recorded Elasticsearch run stands behind either band. The one
+ *     Elasticsearch measurement is 28.6 MB raw against 13.8 MB compact plus
+ *     templates on disk, about 52% smaller (ES 8.17.0, one capture).
  *   - Datadog/CW/Azure/GCP/Sumo/Coralogix/ClickHouse: no-op. compact_ratio =
  *     1.0..1.0; a caveat is emitted by callers. On ClickHouse the reason is
  *     measured rather than structural: the text index and the column codecs
@@ -231,6 +239,19 @@ export interface DestinationCostModel {
   compact_ratio_low: number;
   compact_ratio_high: number;
   /**
+   * The expected ratio when it is not the band's midpoint: a measured total
+   * can sit off-centre of the per-slice spread measured with it. Read it
+   * through expectedCompactRatio(), never directly.
+   */
+  compact_ratio_expected?: number;
+  /**
+   * Where the band comes from, rendered beside every figure quoted from it.
+   * `short` fits one line of a reason; `full` names the run and its
+   * denominator. A band with no run behind it says so here, so it never reads
+   * as measured.
+   */
+  compact_ratio_basis?: { short: string; full: string };
+  /**
    * Body-size below which compaction efficiency degrades (envelope overhead
    * dominates). Default 100 bytes.
    */
@@ -436,8 +457,25 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
     compact_requires: 'the 10x Splunk app installed (it auto-expands compacted events at search time)',
-    compact_ratio_low: 0.08,
-    compact_ratio_high: 0.15,
+    // Measured once, in Splunk's own licence meter (E21, log-10x/benchmarks#18,
+    // splunk-license/results/results.md): one OpenTelemetry demo capture
+    // indexed with and without compact, Splunk 10.4.3, Universal Forwarder.
+    // The expected figure is the whole run, template dictionary and the app's
+    // re-index of it included. The band is the per-container spread; the
+    // dictionary is not split per container, so each slice reads slightly
+    // better than it would deployed. This replaced 0.08..0.15, a band with no
+    // run behind it that the meter contradicts.
+    compact_ratio_low: 197_426 / 642_494, // 69.27% less, opensearch
+    compact_ratio_expected: 80_653_626 / 214_841_731, // 62.46% less, whole run
+    compact_ratio_high: 2_864_638 / 6_798_676, // 57.86% less, ad
+    compact_ratio_basis: {
+      short: "measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate",
+      full:
+        "measured once in Splunk's own licence meter: one OpenTelemetry demo capture, 214,841,731 " +
+        'licence-metered bytes without compact and 80,653,626 with it, 62.46% less (Splunk 10.4.3, ' +
+        'log-10x/benchmarks#18); 57.86% to 69.27% per container. One capture, not a forecast for this ' +
+        'estate: log10x_measure_compaction reads the ratio off the stream itself',
+    },
     small_event_floor_bytes: 100,
   },
   datadog: {
@@ -482,6 +520,14 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
       'frozen searchable snapshots — an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
     compact_ratio_low: 0.3,
     compact_ratio_high: 0.4,
+    // Carried to the unpruned variant by getDestinationCostModel's spread.
+    compact_ratio_basis: {
+      short: 'modeled, not measured on Elasticsearch',
+      full:
+        'modeled, not measured: no recorded Elasticsearch run stands behind this band. The one ' +
+        'Elasticsearch measurement is 28.6 MB raw against 13.8 MB compact plus templates on disk, ' +
+        'about 52% smaller (ES 8.17.0, best_compression, one OpenTelemetry demo capture)',
+    },
     small_event_floor_bytes: 100,
     // Frozen tier via searchable snapshots. On Elastic Cloud Hosted the
     // marked slice routes to its own index, ILM mounts it as
@@ -1106,6 +1152,30 @@ function midpoint(a: number, b: number): number {
   return (a + b) / 2;
 }
 
+/**
+ * The compact ratio a projection's `expected` leg uses: the measured total
+ * where the model carries one, else the band's midpoint.
+ */
+export function expectedCompactRatio(model: DestinationCostModel): number {
+  return model.compact_ratio_expected ?? midpoint(model.compact_ratio_low, model.compact_ratio_high);
+}
+
+/**
+ * The compact figure as a reader sees it, basis attached: "62% smaller,
+ * measured once in ..." or "60-70% smaller, modeled, ...". Every tool that
+ * quotes a compact figure renders it through here, so none can quote a number
+ * without saying where it comes from. Null on a no-op destination.
+ */
+export function describeCompactFigure(model: DestinationCostModel): string | null {
+  if (model.compact_mode === 'no-op') return null;
+  const less = (ratio: number) => Math.round((1 - ratio) * 100);
+  const figure =
+    model.compact_ratio_expected !== undefined
+      ? `${less(model.compact_ratio_expected)}% smaller`
+      : `${less(model.compact_ratio_high)}-${less(model.compact_ratio_low)}% smaller`;
+  return model.compact_ratio_basis ? `${figure}, ${model.compact_ratio_basis.short}` : figure;
+}
+
 export interface ProjectActionArgs {
   action: Action;
   bytes_in: number;
@@ -1305,6 +1375,12 @@ function projectActionWithRatio(
           model.small_event_floor_bytes
         );
         bytes_out = args.bytes_in * effective;
+        // The static band names its source, as the measured override above does.
+        if (model.compact_ratio_basis) {
+          notes.push(
+            `compact ratio ${expectedCompactRatio(model).toFixed(3)} (band ${model.compact_ratio_low.toFixed(3)}-${model.compact_ratio_high.toFixed(3)}), ${model.compact_ratio_basis.short}`
+          );
+        }
         if (
           args.avg_event_size_bytes !== undefined &&
           args.avg_event_size_bytes < model.small_event_floor_bytes
@@ -1498,11 +1574,11 @@ function projectActionWithRatio(
 
 /**
  * Project the destination cost of one (action, bytes_in) pair using the
- * expected (mid-band) compact ratio for the destination.
+ * expected compact ratio for the destination (expectedCompactRatio).
  *
  * Examples:
  *   projectAction({ action:'compact', bytes_in:1e9, destination:'splunk' })
- *     → total_dollars ≈ 1.0 * 6 * 0.115 ≈ $0.69 (i.e. ~88.5% savings on $6).
+ *     → total_dollars ≈ 0.3754 * ($6 + $0.10) ≈ $2.29, the measured 62.46% off.
  *   projectAction({ action:'compact', bytes_in:1e9, destination:'datadog' })
  *     → bytes_out === bytes_in, notes includes
  *       'compact not supported on datadog'.
@@ -1511,8 +1587,7 @@ export function projectAction(args: ProjectActionArgs): SavingsProjection {
   const model = getDestinationCostModel(args.destination, {
     esPruned: args.esPruned,
   });
-  const ratio = midpoint(model.compact_ratio_low, model.compact_ratio_high);
-  return projectActionWithRatio(args, ratio, 'expected');
+  return projectActionWithRatio(args, expectedCompactRatio(model), 'expected');
 }
 
 /**
@@ -1536,11 +1611,7 @@ export function projectActionRange(args: ProjectActionArgs): {
     esPruned: args.esPruned,
   });
   const low = projectActionWithRatio(args, model.compact_ratio_high, 'low');
-  const expected = projectActionWithRatio(
-    args,
-    midpoint(model.compact_ratio_low, model.compact_ratio_high),
-    'expected'
-  );
+  const expected = projectActionWithRatio(args, expectedCompactRatio(model), 'expected');
   const high = projectActionWithRatio(args, model.compact_ratio_low, 'high');
   const pct = percentReduction(args.bytes_in, {
     // 'high' compact ratio means MORE bytes through, i.e. LESS reduction —
