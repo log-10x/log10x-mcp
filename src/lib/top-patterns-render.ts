@@ -58,6 +58,8 @@ import type { TrendDelta } from './trend-delta.js';
 import { detectIncidents as detectIncidentsGeneric } from './detectors/incident-cluster.js';
 import type { DepCheckResult } from './siem/deps/index.js';
 import { fmtBytes as fmtBytesShared } from './format.js';
+import { getDestinationCostModel, describeCompactFigure, describeCompactReadback } from './cost.js';
+import type { SiemId } from './siem/pricing.js';
 
 export interface TopPatternRow {
   rank: number;
@@ -330,6 +332,18 @@ export function renderTopPatterns(
  * changes — so each card just shows its hash and points back here.
  * Collapsing that 5x repeat is the signal-to-noise win the per-card
  * form was bleeding. */
+/** compact beside drop, in the analyzer's own figure and read-back terms. */
+function compactVersusDrop(analyzer: string | null): string {
+  let figure: string | null = null;
+  try {
+    if (analyzer) figure = describeCompactFigure(getDestinationCostModel(analyzer.toLowerCase() as SiemId));
+  } catch {
+    // unmodeled analyzer: no figure to quote
+  }
+  const readback = describeCompactReadback(analyzer);
+  return figure ? `compact keeps every event, ${figure} (${readback})` : `compact keeps every event, smaller (${readback})`;
+}
+
 function renderSnippetTemplate(
   forwarder: ForwarderId,
   hashField: string,
@@ -372,7 +386,7 @@ function renderSnippetTemplate(
     );
   }
   lines.push(
-    `- **drop vs compact vs sample:** the snippet above drops. compact keeps every event ~10x smaller (lossless); sample keeps 1-in-N. for either, ask with the pattern's hash.`
+    `- **drop vs compact vs sample:** the snippet above drops. ${compactVersusDrop(analyzer)}; sample keeps 1-in-N. for either, ask with the pattern's hash.`
   );
   const others = otherForwarders(forwarder);
   lines.push(

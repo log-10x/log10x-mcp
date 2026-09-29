@@ -31,6 +31,7 @@ import {
   getDestinationCostModel,
   expectedCompactRatio,
   describeCompactFigure,
+  describeCompactReadback,
   tierDownRateDelta,
   type DestinationCostModel,
 } from '../lib/cost.js';
@@ -68,7 +69,7 @@ export const explainModeSchema = {
     .enum(EXPLAIN_MODES)
     .describe(
       'Which enforcement mode to explain. Keep-everything levers come first, then the lossy opt-ins. ' +
-      '`compact` = keeps everything: engine minifies events losslessly; all events still reach the stack. ' +
+      "`compact` = keeps everything: engine minifies events; all events still reach the stack, and the destination's expander rebuilds them (how exactly, and which searches see the full text, is per destination). " +
       '`offload` = keeps everything: engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
       '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       '`sample` = lossy opt-in: engine passes 1-in-N events through to the stack; the rest are discarded. ' +
@@ -198,8 +199,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   compact: {
     what_it_does:
       'All events reach the stack, each smaller. ' +
-      'Engine encodes events into the 10x compact wire format, losslessly. ' +
-      'All events arrive in the stack; fields stay searchable. ' +
+      "Engine encodes events into the 10x compact wire format, and the destination's expander rebuilds them at read time. " +
       'Run log10x_measure_compaction to see the ratio on the real stream.',
     what_you_need:
       'The 10x Receiver sidecar must be installed in-path. ' +
@@ -208,7 +208,7 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'compact' }),
-    what_survives: 'All events reach the stack, each smaller. Fully searchable.',
+    what_survives: "All events reach the stack, each smaller; how exactly they read back is per destination.",
   },
   tier_down: {
     what_it_does:
@@ -298,10 +298,14 @@ function renderVerbatim(args: {
   const { service, mode, destination, meta, bytesPerMonth, costPerMonth } = args;
   const destPhrase = destination ? ` (${destination})` : '';
 
-  // Section 1: What it does — no mechanism jargon, just effect
+  // Section 1: What it does — no mechanism jargon, just effect. compact adds
+  // how its events read back on this destination (lib/cost.ts).
+  const readback =
+    mode === 'compact' ? describeCompactReadback(destination) : '';
   const whatItDoes =
     `What it does\n` +
-    `  ${meta.what_it_does}`;
+    `  ${meta.what_it_does}` +
+    (readback ? `\n  ${readback.charAt(0).toUpperCase()}${readback.slice(1)}.` : '');
 
   // Section 2: What you need — prerequisites
   const whatYouNeed =

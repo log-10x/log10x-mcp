@@ -20,7 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, tierDownRateDelta, type Action as CostAction } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { isProtectedSeverity } from './severity-policy.js';
@@ -972,13 +972,13 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
       // and the dollars beside it rest on the same number.
       if (siem === 'splunk') {
         return {
-          text: `Splunk, envelope-compacted via the 10x app (queryable as-is; ${describeCompactFigure(getDestinationCostModel(siem))})`,
+          text: `Splunk, envelope-compacted via the 10x app (${describeCompactFigure(getDestinationCostModel(siem))}; ${describeCompactReadback(siem)})`,
           recoverable: true, recoverVia: null,
         };
       }
       if (siem === 'elasticsearch') {
         return {
-          text: `Elasticsearch, envelope-compacted via the 10x plugin (queryable as-is; ${describeCompactFigure(getDestinationCostModel(siem))})`,
+          text: `Elasticsearch, envelope-compacted via the 10x plugin (${describeCompactFigure(getDestinationCostModel(siem))}; ${describeCompactReadback(siem)})`,
           recoverable: true, recoverVia: null,
         };
       }
@@ -992,7 +992,7 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
           recoverVia: null,
         };
       }
-      return { text: `${siem} losslessly compacted (queryable as-is)`, recoverable: true, recoverVia: null };
+      return { text: `${siem}, compact through its expander (${describeCompactReadback(siem)})`, recoverable: true, recoverVia: null };
     }
     case 'sample': {
       return {

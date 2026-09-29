@@ -363,6 +363,9 @@ test('destination text: splunk compact quotes the E21 figure with its source; da
     compactRow.actions.consequence.destination_description,
     /62% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/,
   );
+  // Read-back in Splunk's own terms, not "queryable as-is".
+  assert.match(compactRow.actions.consequence.destination_description, /exactly up to 256 KB/);
+  assert.match(compactRow.actions.consequence.destination_description, /tenxsearch/);
   // Priced on the same measured figure: 1 - 80,653,626 / 214,841,731.
   const compactSlot = splunk.output.feasibility!.achievable_by_action.find((a) => a.action === 'compact')!;
   const expectedAchievable = (compactSlot.monthly_cost_usd * (1 - 80_653_626 / 214_841_731) * 100) /
