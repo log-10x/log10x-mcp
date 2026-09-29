@@ -82,10 +82,11 @@ test('cloudwatch auto-recommends tier_down (it has a priced IA tier)', () => {
 
 // ─── 3. compact-vs-offload discriminator on a compactable destination ─
 
-test('splunk: modeled band (0.115) is below threshold -> compact', () => {
+test('splunk: measured E21 band (0.375) is below threshold -> compact, and the reason names its source', () => {
   const { decision } = resolve('splunk');
   assert.equal(decision.action, 'compact');
   assert.equal(decision.ratio_source, 'static_band');
+  assert.match(decision.reason, /62% compaction, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/);
 });
 
 test('splunk: measured-poor compressibility (0.9) -> offload', () => {

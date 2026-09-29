@@ -350,3 +350,47 @@ test('a splunk envelope marks nothing modeled', () => {
   assert.equal(envelope.input.dollars_modeled_note, undefined);
   assert.ok(!/MODELED/.test(envelope.output.commitment_artifact!.markdown));
 });
+
+test('destination text: splunk compact quotes the E21 figure with its source; datadog flex carries no percentage', () => {
+  const pins = { payments: 'compact' as const, auth: 'compact' as const };
+  const splunk = buildPocEnvelopeV2(makeRenderInput('splunk'), makePatterns(), [], [], 10, {
+    targetPercentReduction: 50,
+    pinServices: pins,
+  });
+  const compactRow = splunk.output.patterns.find((p) => p.actions.recommended_action === 'compact');
+  assert.ok(compactRow, 'a compact row exists');
+  assert.match(
+    compactRow.actions.consequence.destination_description,
+    /62% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/,
+  );
+  // Priced on the same measured figure: 1 - 80,653,626 / 214,841,731.
+  const compactSlot = splunk.output.feasibility!.achievable_by_action.find((a) => a.action === 'compact')!;
+  const expectedAchievable = (compactSlot.monthly_cost_usd * (1 - 80_653_626 / 214_841_731) * 100) /
+    splunk.output.feasibility!.achievable_by_action.reduce((s, a) => s + a.monthly_cost_usd, 0);
+  assert.ok(
+    Math.abs(splunk.output.feasibility!.max_achievable_percent - expectedAchievable) < 0.01,
+    `${splunk.output.feasibility!.max_achievable_percent} vs ${expectedAchievable}`,
+  );
+
+  const datadog = buildPocEnvelopeV2(makeRenderInput('datadog'), makePatterns(), [], [], 10, {
+    targetPercentReduction: 50,
+    pinServices: { payments: 'tier_down', auth: 'tier_down' },
+  });
+  // tier_down is priced at each destination's own delta: CloudWatch IA is half
+  // the Standard ingest rate, so its tier_down row saves half its cost.
+  const cloudwatch = buildPocEnvelopeV2(makeRenderInput('cloudwatch'), makePatterns(), [], [], 10, {
+    targetPercentReduction: 50,
+    pinServices: { payments: 'tier_down', auth: 'tier_down' },
+  });
+  const cwSlot = cloudwatch.output.feasibility!.achievable_by_action.find((a) => a.action === 'tier_down')!;
+  const cwTotal = cloudwatch.output.feasibility!.achievable_by_action.reduce((s, a) => s + a.monthly_cost_usd, 0);
+  assert.ok(
+    Math.abs(cloudwatch.output.feasibility!.max_achievable_percent - (cwSlot.monthly_cost_usd * 0.5 * 100) / cwTotal) < 0.01,
+    `${cloudwatch.output.feasibility!.max_achievable_percent}`,
+  );
+
+  for (const p of datadog.output.patterns.filter((r) => r.actions.recommended_action === 'tier_down')) {
+    assert.match(p.actions.consequence.destination_description, /Flex/);
+    assert.ok(!/\d\s*%/.test(p.actions.consequence.destination_description), p.actions.consequence.destination_description);
+  }
+});

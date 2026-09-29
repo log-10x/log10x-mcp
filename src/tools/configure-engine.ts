@@ -103,6 +103,7 @@ import {
   getDefaultActionForDestination,
   getAllowedActionsForDestination,
   projectActionRange,
+  expectedCompactRatio,
   type Action,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
@@ -2786,18 +2787,22 @@ export function _resolveServiceAction(params: {
   // compressibility decides compact-vs-offload within the legal set.
   const compactLegal = isLegal('compact');
   const offloadLegal = isLegal('offload');
-  const effectiveRatio = measuredRatio ?? (model.compact_ratio_low + model.compact_ratio_high) / 2;
+  const effectiveRatio = measuredRatio ?? expectedCompactRatio(model);
   const savedPct = Math.round((1 - effectiveRatio) * 100);
   const measured = ratioSource === 'static_band' ? 'modeled' : 'measured';
+  // A static band names where it comes from; a live ratio is this service's own.
+  const basis = ratioSource === 'static_band' ? model.compact_ratio_basis?.short : undefined;
+  const figure = basis ? `${savedPct}% compaction, ${basis}` : `${measured} ${savedPct}% compaction`;
+  const sep = basis ? ';' : ',';
 
   if (compactLegal && (effectiveRatio <= compactWorthItRatio || keepQueryable)) {
     const why = effectiveRatio <= compactWorthItRatio
-      ? `${measured} ${savedPct}% compaction, stays queryable in ${destination}`
-      : `keep_queryable set; compact stays in ${destination} at ${savedPct}% compaction`;
+      ? `${figure}${sep} stays queryable in ${destination}`
+      : `keep_queryable set; compact stays in ${destination} at ${figure}`;
     return mk('compact', 'auto', `auto: compact (${why})`);
   }
   if (compactLegal && offloadLegal) {
-    return mk('offload', 'auto', `auto: offload (only ${measured} ${savedPct}% compaction; S3 takes the larger cut)`);
+    return mk('offload', 'auto', `auto: offload (only ${figure}${sep} S3 takes the larger cut)`);
   }
   // compact illegal on this destination -> its first legal+saving lever
   // (cloudwatch -> tier_down; datadog -> offload, since Flex tier_down is
@@ -2889,7 +2894,9 @@ function computeCapBytesPerWindow(action: Action, monthlyBytes: number): number 
       // ~1/10 of bytes get through.
       return Math.max(1, perWindow / 10);
     case 'compact':
-      // After compact, ~10-15% of bytes remain on the wire (envelope mid).
+      // A regulator threshold, not a compaction ratio: bytes under the cap
+      // pass as they are, bytes past it are compacted. 0.15 is the engine
+      // behaviour as shipped; how much compact saves is cost.ts's figure.
       return Math.max(1, perWindow * 0.15);
     case 'tier_down':
       // No on-wire change; cap = full throughput.

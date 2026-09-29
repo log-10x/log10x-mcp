@@ -34,6 +34,7 @@ import {
   getAvailableActions,
   getDestinationCostModel,
   compactsInPlace,
+  describeCompactFigure,
   projectAction,
   type Action,
 } from './cost.js';
@@ -593,11 +594,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       `${model.tier_down_target_tier.name} ingest ${rate(model.tier_down_target_tier.ingest_rate_usd_per_gb)}/GB`,
     );
   }
-  if (lever === 'compact' && model.compact_mode !== 'no-op') {
-    structureParts.push(
-      `compact assumed ${Math.round(model.compact_ratio_low * 100)}-${Math.round(model.compact_ratio_high * 100)}% of original size`,
-    );
-  }
+  const compactFigure = lever === 'compact' ? describeCompactFigure(model) : null;
+  if (compactFigure) structureParts.push(`compact ${compactFigure}`);
   // Prerequisites for the levers this plan actually uses — not the menu.
   const usedActions = new Set(planned.map((r) => r.action));
   const prerequisites: string[] = [];

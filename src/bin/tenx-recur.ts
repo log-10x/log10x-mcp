@@ -116,6 +116,7 @@ function printRunSummary(result: Awaited<ReturnType<typeof runTick>>): void {
     ts: new Date().toISOString(),
     status: result.status,
     projected_savings_pct: parseFloat(result.projected_savings_pct.toFixed(2)),
+    ...(result.projected_savings_basis ? { projected_savings_basis: result.projected_savings_basis } : {}),
     delta_patterns: result.delta_patterns,
     delta_pp: parseFloat(result.delta_pp.toFixed(2)),
     message: result.message,

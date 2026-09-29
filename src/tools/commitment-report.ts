@@ -690,6 +690,8 @@ export interface DigestTickEntry {
   status: 'no_change' | 'applied' | 'dry_run' | 'error';
   /** Projected savings percentage at tick time. */
   projected_savings_pct: number;
+  /** The assumption the projection leans on, when it leans on one. */
+  projected_savings_basis?: string;
   /** Number of patterns whose action changed vs. prior state. */
   delta_patterns: number;
   /** Change in savings pp. */
@@ -899,9 +901,10 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
   lines.push('');
 
   // Summary beat
+  const latestBasis = env.tick_history[env.tick_history.length - 1]?.projected_savings_basis;
   const savingsBeat =
     env.total_projected_savings_pct != null
-      ? `**Projected savings:** ${env.total_projected_savings_pct.toFixed(1)}% (latest tick).`
+      ? `**Projected savings:** ${env.total_projected_savings_pct.toFixed(1)}% (latest tick${latestBasis ? `; ${latestBasis}` : ''}).`
       : '_No tick runs in window — no projection available._';
   lines.push(savingsBeat);
   lines.push('');
@@ -935,8 +938,14 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
     for (const t of env.tick_history) {
       const ts = t.ts.slice(0, 19).replace('T', ' ');
       lines.push(
-        `| ${ts} | ${t.status} | ${t.projected_savings_pct.toFixed(1)}% | ${t.delta_patterns} | ${t.delta_pp >= 0 ? '+' : ''}${t.delta_pp.toFixed(1)}pp |`
+        `| ${ts} | ${t.status} | ${t.projected_savings_pct.toFixed(1)}%${t.projected_savings_basis ? '*' : ''} | ${t.delta_patterns} | ${t.delta_pp >= 0 ? '+' : ''}${t.delta_pp.toFixed(1)}pp |`
       );
+    }
+    // A projection that leans on an assumption is marked, and the assumption stated.
+    const tickBases = [...new Set(env.tick_history.map((t) => t.projected_savings_basis).filter(Boolean))];
+    if (tickBases.length > 0) {
+      lines.push('');
+      lines.push(`\* ${tickBases.join('; ')}.`);
     }
     lines.push('');
   } else {
@@ -1093,6 +1102,7 @@ async function executeWeeklyDigest(
     ts: r.ts,
     status: r.status,
     projected_savings_pct: r.projected_savings_pct,
+    ...(r.projected_savings_basis ? { projected_savings_basis: r.projected_savings_basis } : {}),
     delta_patterns: r.delta_patterns,
     delta_pp: r.delta_pp,
     changed: r.status === 'applied',
@@ -1101,7 +1111,7 @@ async function executeWeeklyDigest(
   // Human summary
   const savingsLine =
     totalProjectedSavingsPct != null
-      ? `Latest projected savings: ${totalProjectedSavingsPct.toFixed(1)}%.`
+      ? `Latest projected savings: ${totalProjectedSavingsPct.toFixed(1)}%${latestRun?.projected_savings_basis ? ` (${latestRun.projected_savings_basis})` : ''}.`
       : 'No savings projection available.';
   const actionLine =
     Object.keys(actionDistribution).length > 0

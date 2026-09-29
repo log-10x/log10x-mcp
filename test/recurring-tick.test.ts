@@ -180,6 +180,8 @@ test('decision: INFO high volume → drop', async () => {
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-big');
   assert.ok(d);
   assert.equal(d.action, 'drop', `expected drop for 1GB INFO; got ${d.action}`);
+  // Nothing compacted, nothing assumed.
+  assert.equal(result.projected_savings_basis, undefined);
 });
 
 test('decision: INFO moderate volume → sample', async () => {
@@ -226,6 +228,12 @@ test('decision: explicit severity_rules compact → compact', async () => {
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-compact');
   assert.ok(d);
   assert.equal(d.action, 'compact', `expected compact for INFO:compact rule; got ${d.action}`);
+  // The tick has no destination and so no measurement: the 75% it applies to
+  // compacted bytes is stated as an assumption wherever the percentage renders.
+  assert.equal(result.projected_savings_basis, 'assumes 75% compaction, unmeasured for this estate');
+  if (result.status === 'dry_run') {
+    assert.match(result.message, /projected savings [\d.]+% \(assumes 75% compaction, unmeasured for this estate\)/);
+  }
 });
 
 test('decision: INFO below threshold → pass', async () => {

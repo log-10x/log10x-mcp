@@ -20,7 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, type Action as CostAction } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, tierDownRateDelta, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { isProtectedSeverity } from './severity-policy.js';
@@ -564,7 +564,7 @@ export function buildPocEnvelopeV2(
     const effectivePin = resolvedPin.action;
     const monthlyBytes = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
     const desc = describeDestination(siem, effectivePin);
-    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(effectivePin);
+    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(effectivePin, siem);
     p.actions = {
       recommended_action: effectivePin,
       reason: resolvedPin.substitutedFrom
@@ -714,8 +714,13 @@ export function buildPocEnvelopeV2(
  * Reducibility coefficients (multiply pattern monthly cost):
  *   drop      → 1.00 (full removal)
  *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
- *   compact   → 0.70 (Splunk envelope; matches cost.ts mid-band)
- *   tier_down → 0.60 (Datadog Flex / CW IA; conservative cost-tier delta)
+ *   compact   → 1 - the destination's expected compact ratio (cost.ts):
+ *               0.6246 on Splunk, measured in its licence meter (E21);
+ *               0.5175 on Elasticsearch, measured on disk; 0 where compact
+ *               is a no-op
+ *   tier_down → the destination's list-price delta to its cheaper tier
+ *               (cost.ts tierDownRateDelta): 0.6 Datadog Flex, 0.5 CloudWatch
+ *               IA, 0.78 Azure Basic; 0 where no cheaper tier is priced
  *   sample    → 0.90 (1-in-10 default keep rate is the common config)
  *   pass      → 0.00 (no reduction)
  */
@@ -778,7 +783,7 @@ function computeFeasibility(
       }
     }
 
-    const coefficient = reductionCoefficient(action);
+    const coefficient = reductionCoefficient(action, siem);
     achievableMonthly += monthly * coefficient;
 
     const slot = byAction.get(action) ?? { monthly: 0, count: 0 };
@@ -883,12 +888,29 @@ function modeledDollarNote(siem: SiemId): string | null {
   );
 }
 
-function reductionCoefficient(action: CostAction): number {
+function reductionCoefficient(action: CostAction, siem: SiemId): number {
   switch (action) {
     case 'drop': return 1.0;
     case 'offload': return 1.0;
-    case 'compact': return 0.7;
-    case 'tier_down': return 0.6;
+    case 'compact': {
+      // The destination's own compact figure (cost.ts), so this envelope and
+      // estimate_savings price compact identically. A no-op destination
+      // carries ratio 1.0 and so saves 0, as does one with no cost model.
+      let model;
+      try {
+        model = getDestinationCostModel(siem);
+      } catch {
+        return 0;
+      }
+      return model.compact_mode === 'no-op' ? 0 : 1 - expectedCompactRatio(model);
+    }
+    case 'tier_down': {
+      try {
+        return tierDownRateDelta(getDestinationCostModel(siem));
+      } catch {
+        return 0;
+      }
+    }
     case 'sample': return 0.9;
     case 'pass': return 0.0;
   }
@@ -918,8 +940,10 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
   switch (action) {
     case 'tier_down': {
       if (siem === 'datadog') {
+        // Mechanism only. No Flex percentage, bare or qualified: the compute
+        // add-on is unpriced, so the net saving cannot be stated.
         return {
-          text: 'Datadog Flex tier (in-place query, ~70% cheaper than indexed)',
+          text: 'Datadog Flex Logs (in-place query in Log Explorer, a cheaper tier than Standard indexing)',
           recoverable: true, recoverVia: null,
         };
       }
@@ -944,15 +968,17 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
       };
     }
     case 'compact': {
+      // The figure and its basis come from the cost model, so the text here
+      // and the dollars beside it rest on the same number.
       if (siem === 'splunk') {
         return {
-          text: 'Splunk, envelope-compacted via the 10x app (queryable as-is, ~80-90% smaller)',
+          text: `Splunk, envelope-compacted via the 10x app (queryable as-is; ${describeCompactFigure(getDestinationCostModel(siem))})`,
           recoverable: true, recoverVia: null,
         };
       }
       if (siem === 'elasticsearch') {
         return {
-          text: 'Elasticsearch, envelope-compacted via the 10x plugin (queryable as-is, ~60-70% smaller)',
+          text: `Elasticsearch, envelope-compacted via the 10x plugin (queryable as-is; ${describeCompactFigure(getDestinationCostModel(siem))})`,
           recoverable: true, recoverVia: null,
         };
       }
@@ -1408,7 +1434,7 @@ function buildActions(
   }
 
   // 2) Project savings from the action coefficient (matches feasibility).
-  const expectedSavings = monthlyCost * reductionCoefficient(action) * (action === 'sample' && sampleN ? (1 - 1 / sampleN) / 0.9 : 1);
+  const expectedSavings = monthlyCost * reductionCoefficient(action, siem) * (action === 'sample' && sampleN ? (1 - 1 / sampleN) / 0.9 : 1);
 
   // 3) Cap bytes per 4-minute reset window. Matches the math in
   // configure-engine.ts:computeCapBytesPerWindow so configure_engine

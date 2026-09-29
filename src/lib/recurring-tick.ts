@@ -76,6 +76,11 @@ export interface TickResult {
   message: string;
   /** Cumulative projected savings as a % of total observed bytes. */
   projected_savings_pct: number;
+  /**
+   * Set when the projection leans on an assumption rather than a measurement:
+   * the assumption, stated. Every place the percentage renders carries it.
+   */
+  projected_savings_basis?: string;
   /** All per-pattern decisions the tick made (including 'pass'). */
   applied_changes: PatternDecision[];
   /** How many patterns changed vs. the prior state. */
@@ -352,6 +357,19 @@ function fmtBytes(b: number): string {
 
 // ─── savings calculation ───────────────────────────────────────────────────
 
+/**
+ * The compact saving the tick assumes. The tick has no destination, so it
+ * has no platform measurement to use, and every percentage it prints that
+ * leans on this says so.
+ */
+const COMPACT_ASSUMED_SAVING = 0.75;
+export const COMPACT_ASSUMPTION_NOTE = `assumes ${COMPACT_ASSUMED_SAVING * 100}% compaction, unmeasured for this estate`;
+
+/** The assumption behind a projection, or undefined when none is compacted. */
+function savingsBasis(decisions: PatternDecision[]): string | undefined {
+  return decisions.some((d) => d.action === 'compact') ? COMPACT_ASSUMPTION_NOTE : undefined;
+}
+
 function projectedSavingsBytes(decisions: PatternDecision[]): number {
   let saved = 0;
   for (const d of decisions) {
@@ -364,7 +382,7 @@ function projectedSavingsBytes(decisions: PatternDecision[]): number {
         saved += d.bytes * 0.9; // keep 10%
         break;
       case 'compact':
-        saved += d.bytes * 0.75; // rough 75% compact savings
+        saved += d.bytes * COMPACT_ASSUMED_SAVING;
         break;
       default:
         break;
@@ -464,7 +482,8 @@ export function writeRunReport(
   totalBytes: number,
   projectedSavingsPct: number,
   deltaPatterns: number,
-  deltaPp: number
+  deltaPp: number,
+  basis?: string
 ): void {
   const now = new Date().toISOString();
   const goal =
@@ -483,7 +502,7 @@ export function writeRunReport(
     `- **Goal**: ${goal}`,
     `- **Scope**: ${scope} · lookback ${policy.lookback_window}`,
     `- **Observed**: ${fmtBytes(totalBytes)} across ${decisions.length} pattern rows`,
-    `- **Acted on**: ${acted.length} rows (${actionMix}) · projected ${projectedSavingsPct.toFixed(1)}% of lookback volume`,
+    `- **Acted on**: ${acted.length} rows (${actionMix}) · projected ${projectedSavingsPct.toFixed(1)}% of lookback volume${basis ? ` (${basis})` : ''}`,
     `- **Delta vs previous applied state**: ${deltaPatterns} pattern change(s), ${deltaPp.toFixed(1)}pp`,
     `- **Severity floor**: every ERROR/CRITICAL row passed untouched`,
     ``,
@@ -517,14 +536,15 @@ async function commitToConfigPlane(
   policy: Policy,
   decisions: PatternDecision[],
   projectedPct: number,
-  opts: TickOptions
+  opts: TickOptions,
+  basis?: string
 ): Promise<void> {
   const strategy = policy.config_plane.commit_strategy ?? 'pr';
   const base = policy.config_plane.base_branch ?? 'main';
   const branchName = `log10x-recur-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
 
   const reducedCount = decisions.filter((d) => d.action !== 'pass').length;
-  const commitMsg = `chore(log10x): recurring tick — ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings`;
+  const commitMsg = `chore(log10x): recurring tick — ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings${basis ? ` (${basis})` : ''}`;
 
   // Stage the three changed paths.
   const filesToAdd = [
@@ -606,6 +626,7 @@ function appendHistory(result: TickResult): void {
     ts: new Date().toISOString(),
     status: result.status,
     projected_savings_pct: result.projected_savings_pct,
+    ...(result.projected_savings_basis ? { projected_savings_basis: result.projected_savings_basis } : {}),
     delta_patterns: result.delta_patterns,
     delta_pp: result.delta_pp,
     message: result.message,
@@ -771,6 +792,9 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   const projectedSavedBytes = projectedSavingsBytes(decisions);
   const projectedSavingsPct =
     totalBytes > 0 ? (projectedSavedBytes / totalBytes) * 100 : 0;
+  const basis = savingsBasis(decisions);
+  const basisNote = basis ? ` (${basis})` : '';
+  const basisField = basis ? { projected_savings_basis: basis } : {};
 
   // ── step 4: compute delta vs. current applied state ──────────────────────
 
@@ -799,7 +823,7 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   if (verbose) {
     process.stderr.write(
       `[tenx-recur] prior_savings=${priorSavingsPct.toFixed(1)}% ` +
-      `projected=${projectedSavingsPct.toFixed(1)}% ` +
+      `projected=${projectedSavingsPct.toFixed(1)}%${basisNote} ` +
       `delta=${deltaPp.toFixed(1)}pp ` +
       `min_delta=${policy.min_delta_pp}pp\n`
     );
@@ -812,6 +836,7 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
       status: 'no_change',
       message: `delta ${deltaPp.toFixed(1)}pp is below min_delta_pp=${policy.min_delta_pp} — no change needed`,
       projected_savings_pct: projectedSavingsPct,
+      ...basisField,
       applied_changes: decisions,
       delta_patterns: deltaPatterns,
       delta_pp: deltaPp,
@@ -825,8 +850,9 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
       status: 'dry_run',
       message:
         `dry-run: would apply ${deltaPatterns} pattern change(s), ` +
-        `projected savings ${projectedSavingsPct.toFixed(1)}%`,
+        `projected savings ${projectedSavingsPct.toFixed(1)}%${basisNote}`,
       projected_savings_pct: projectedSavingsPct,
+      ...basisField,
       applied_changes: decisions,
       delta_patterns: deltaPatterns,
       delta_pp: deltaPp,
@@ -837,20 +863,21 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
 
   // Write output files.
   writeOutputFiles(repoPath, decisions, verbose);
-  writeRunReport(repoPath, policy, decisions, totalBytes, projectedSavingsPct, deltaPatterns, deltaPp);
+  writeRunReport(repoPath, policy, decisions, totalBytes, projectedSavingsPct, deltaPatterns, deltaPp, basis);
 
   // Commit to the config plane — git for a repo plane, object puts for S3.
   try {
     if (isS3ConfigPlane(policy.config_plane.repo)) {
       await pushStateToS3(policy.config_plane.repo, repoPath);
     } else {
-      await commitToConfigPlane(repoPath, policy, decisions, projectedSavingsPct, opts);
+      await commitToConfigPlane(repoPath, policy, decisions, projectedSavingsPct, opts, basis);
     }
   } catch (err) {
     const result: TickResult = {
       status: 'error',
       message: `commit failed: ${String(err)}`,
       projected_savings_pct: projectedSavingsPct,
+      ...basisField,
       applied_changes: decisions,
       delta_patterns: deltaPatterns,
       delta_pp: deltaPp,
@@ -863,8 +890,9 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
     status: 'applied',
     message:
       `applied ${deltaPatterns} pattern change(s), ` +
-      `projected savings ${projectedSavingsPct.toFixed(1)}%`,
+      `projected savings ${projectedSavingsPct.toFixed(1)}%${basisNote}`,
     projected_savings_pct: projectedSavingsPct,
+    ...basisField,
     applied_changes: decisions,
     delta_patterns: deltaPatterns,
     delta_pp: deltaPp,

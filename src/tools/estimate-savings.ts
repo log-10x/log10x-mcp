@@ -59,6 +59,7 @@ import {
   getAllowedActionsForDestination,
   annualizeDollars,
   projectComputeSaving,
+  expectedCompactRatio,
   type Action,
   type ComputeSavingProjection,
 } from '../lib/cost.js';
@@ -1261,8 +1262,7 @@ export async function runEstimateForecast(
         expectedReductionPerByte = 0.5;
       }
     } else if (solverAction === 'compact' && model.compact_mode !== 'no-op') {
-      expectedReductionPerByte =
-        1 - (model.compact_ratio_low + model.compact_ratio_high) / 2;
+      expectedReductionPerByte = 1 - expectedCompactRatio(model);
     }
     let saved = 0;
     for (const row of sorted) {
@@ -1663,6 +1663,12 @@ export async function runEstimateForecast(
     caveats.push(
       `${noOpCompactCount} pattern${noOpCompactCount !== 1 ? 's' : ''} use action=compact on ${args.destination}, where compact is a no-op. Consider ${leversInsteadOfCompact(args.destination).join(', ')}.`
     );
+  }
+  // Every compact figure on this page comes from the destination's band, so
+  // the page says where the band comes from.
+  const compactBasis = forecastModel.compact_mode !== 'no-op' ? forecastModel.compact_ratio_basis : undefined;
+  if (compactBasis && per_pattern.some((r) => r.action === 'compact')) {
+    caveats.push(`Compact figures on ${args.destination} are ${compactBasis.full}.`);
   }
   if (per_pattern_truncated) {
     caveats.push(
@@ -2887,6 +2893,19 @@ function buildForecastHumanSummary(
   const bytePctReduced = result.totals.bytes_in_monthly > 0
     ? `${((result.totals.bytes_saved_monthly / result.totals.bytes_in_monthly) * 100).toFixed(0)}% reduction`
     : '0% reduction';
+  // Where compact is in the plan, the reduction leans on the destination's
+  // compact band; the summary names where that band comes from.
+  let compactClause = '';
+  if (result.per_pattern.some((r) => r.action === 'compact')) {
+    try {
+      const m = getDestinationCostModel(destination as SiemId, { esPruned: result.es_pruned });
+      if (m.compact_mode !== 'no-op' && m.compact_ratio_basis) {
+        compactClause = ` Compact figure: ${m.compact_ratio_basis.short}.`;
+      }
+    } catch {
+      // unmodeled destination: no band, nothing to name
+    }
+  }
 
   // When action mix is uniformly tier_down (or bytes_saved is 0 and tier_down
   // dominates), use the tier-down framing so callers understand savings come
@@ -2915,7 +2934,7 @@ function buildForecastHumanSummary(
       const mixLead = leadDollar
         ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo total savings, ${fmtDollar(byteReducingDollars)} via byte-reducing actions (${bytesPct} reduced), ${fmtDollar(actionMix.tier_down.dollars)} via tier_down (no bytes change)`
         : `${savedVol}/mo (${bytesPct} reduced) via byte-reducing actions plus tier_down (no bytes change)`;
-      return `estimate_savings forecast on ${destination}${serviceClause}: ${mixLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+      return `estimate_savings forecast on ${destination}${serviceClause}: ${mixLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}${compactClause}`;
     }
   }
 
@@ -2941,7 +2960,7 @@ function buildForecastHumanSummary(
         : `estimate_savings forecast on ${destination}${serviceClause} projects ${savedVol}/mo (${bytePctReduced}) expected reduction`;
   }
   const disclosureSuffix = result.rate_disclosure ? ` ${result.rate_disclosure}.` : '.';
-  return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+  return `${lead} across ${patternWord} covering ${envCoverage}, using ${rateTag}${disclosureSuffix}${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}${compactClause}`;
 }
 
 function buildVerifyHumanSummary(
