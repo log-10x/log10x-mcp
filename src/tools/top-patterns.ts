@@ -7,6 +7,9 @@
  *   2. Inline cost trend chart (24h) for the top-3 + NEW rows
  *   3. Field-variation block from real SIEM events (not slot-cardinality
  *      heuristics) — answers "what does this hash actually group?"
+ * The summary envelope, the only view since `view` became summary-only,
+ * carries neither the cards nor the field-variation block, so the tool no
+ * longer pulls SIEM events for them (see Phase 2).
  */
 
 import { z } from 'zod';
@@ -22,10 +25,8 @@ import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } fr
 import { resolveMetricsEnv, resolveMetricsEnvFiltered } from '../lib/resolve-env.js';
 import { parseTimeframe, fmtDisclosedDollar, fmtBytes as fmtBytesShared, fmtPct, fmtDollar } from '../lib/format.js';
 import { type NextAction } from '../lib/next-actions.js';
-import { fetchEventsByHashes } from '../lib/siem/sample.js';
 import { tenxHash } from '../lib/pattern-hash.js';
 import { fetchFirstSeenBatch } from '../lib/first-seen.js';
-import { fieldVariation } from '../lib/field-variation.js';
 import { type TopPatternRow } from '../lib/top-patterns-render.js';
 import {
   getEnvDfContext,
@@ -67,7 +68,7 @@ export const topPatternsSchema = {
   offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
   analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
-  siemScope: z.string().optional().describe('stack scope for the verbatim sample line on the top rows.'),
+  siemScope: z.string().optional().describe('Ignored: the summary envelope carries no verbatim sample line. Accepted so existing callers still validate.'),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s list rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
@@ -533,9 +534,13 @@ export async function executeTopPatterns(
   const rawRowsAll = rawRows.slice(); // full sorted list kept for heuristic fallback
   if (offset > 0) rawRows.splice(0, offset);
 
-  // --- Phase 2: first_seen + 24h trend + SIEM events + baseline bytes +
-  //              services breadth + per-hash deps + analyzer detection
-  //              (all parallel) ---
+  // --- Phase 2: first_seen + 24h trend + baseline bytes + services
+  //              breadth + per-hash deps + analyzer detection (all parallel) ---
+  // No SIEM event pull. It fed only the per-row `sample` and `fieldVar`,
+  // which nothing in the summary envelope reads, and it ran to its time
+  // budget every call: measured on the public demo (CloudWatch), 30.0 s of
+  // a 31.2 s 7d call, ~12 s at 24h, ~2.5 s at 1h. Without it the 7d call
+  // takes 3.0 s and the envelope is unchanged but for byte drift between runs.
   const hashes = rawRows.map(r => r.hash).filter(Boolean);
   const now = Math.floor(Date.now() / 1000);
   const trendWindowSec = 24 * 3600;
@@ -572,7 +577,6 @@ export async function executeTopPatterns(
   const [
     [
       firstSeenByHash,
-      eventsByHash,
       baselineByKey,
       serviceBreadthByHash,
       depsByHash,
@@ -581,10 +585,6 @@ export async function executeTopPatterns(
   ] = await Promise.all([
     Promise.all([
       fetchFirstSeenBatch(env, hashes),
-      fetchEventsByHashes(
-        rawRows.map(r => ({ hash: r.hash, service: r.service, severity: r.severity })),
-        { scope: args.siemScope, perHash: 250, window: args.timeRange }
-      ),
       // Baseline bytes at 7d/14d/21d offsets — drives the trajectory
       // badge (NEW / ACUTE / GROWING / STABLE / SHRINKING). Mirrors
       // whats_changing's 3-window baseline so the badge tells the same
@@ -620,8 +620,6 @@ export async function executeTopPatterns(
         return (Number.isFinite(n) ? n : 0) * volScale;
       });
     }
-    const events = eventsByHash.get(r.hash) ?? [];
-    const fv = events.length > 0 ? fieldVariation(events) : undefined;
     const fsRes = firstSeenByHash.get(r.hash);
     // When rate is unset, every per-row dollar field collapses to null. The
     // renderer + envelope below gate every $ surface on rate_source so the
@@ -684,8 +682,6 @@ export async function executeTopPatterns(
       events: r.events,
       firstSeenAgeSeconds: fsRes?.ageSeconds ?? null,
       trendBytesPerSec: trendVals,
-      sample: events[0],
-      fieldVar: fv,
       state,
       badgeInfo,
       trendDelta,
