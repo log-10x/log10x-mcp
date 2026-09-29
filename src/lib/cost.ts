@@ -19,13 +19,13 @@
  *     OpenTelemetry demo capture, 214,841,731 licence-metered bytes without
  *     compact and 80,653,626 with it: 62.46% less. Per container 57.86% (ad)
  *     to 69.27% (opensearch). Modeled as 0.3073..0.4214, expected 0.3754.
- *   - Elasticsearch pruned (compactable fields excluded from _source):
- *     modeled as compact_ratio 0.30..0.40.
- *   - Elasticsearch unpruned: modeled as 0.45..0.55. Returned via
- *     getDestinationCostModel(dest, {esPruned:false}).
- *     No recorded Elasticsearch run stands behind either band. The one
- *     Elasticsearch measurement is 28.6 MB raw against 13.8 MB compact plus
- *     templates on disk, about 52% smaller (ES 8.17.0, one capture).
+ *   - Elasticsearch unpruned: measured once on disk (ES_ON_DISK_RATIO): one
+ *     OpenTelemetry demo capture, 28.6 MB raw against 13.8 MB compact plus
+ *     templates, 51.7% less, ES 8.17.0, nothing pruned from _source. Returned
+ *     via getDestinationCostModel(dest, {esPruned:false}).
+ *   - Elasticsearch pruned (compactable fields excluded from _source): no run.
+ *     Carries the unpruned measurement as a floor and says so; pruning
+ *     removes more, unmeasured.
  *   - Datadog/CW/Azure/GCP/Sumo/Coralogix/ClickHouse: no-op. compact_ratio =
  *     1.0..1.0; a caveat is emitted by callers. On ClickHouse the reason is
  *     measured rather than structural: the text index and the column codecs
@@ -435,6 +435,19 @@ export type Action =
   | 'drop';
 
 /**
+ * The one Elasticsearch compact measurement, on disk in Elasticsearch's own
+ * store.size: an index of the raw capture against the compact events plus
+ * their template index, ES 8.17.0, best_compression, one segment, no replicas.
+ * The `message` field was replaced and nothing was pruned from _source. MB as
+ * recorded, one decimal (blog post cutting-elasticsearch-log-storage).
+ */
+const ES_ON_DISK_RATIO = (13.2 + 0.6) / 28.6; // 51.7% less
+const ES_ON_DISK_BASIS =
+  'measured once on disk in Elasticsearch: one OpenTelemetry demo capture, 28.6 MB raw against ' +
+  '13.2 MB compact plus a 0.6 MB template index, 51.7% less (ES 8.17.0, best_compression, one ' +
+  'segment, no replicas)';
+
+/**
  * Per-destination cost & compaction model.
  *
  * Note: $/GB ingest values intentionally match
@@ -518,15 +531,21 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
       'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0)',
     tier_down_requires:
       'frozen searchable snapshots — an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
-    compact_ratio_low: 0.3,
-    compact_ratio_high: 0.4,
-    // Carried to the unpruned variant by getDestinationCostModel's spread.
+    // The one Elasticsearch measurement, taken without pruning, stands in for
+    // the pruned mode as a floor: pruning removes more, and that is unmeasured.
+    // The unpruned variant (getDestinationCostModel) carries the same figure
+    // under its own basis. This replaced 0.30..0.40 here and 0.45..0.55
+    // unpruned, bands with no run behind them.
+    compact_ratio_low: ES_ON_DISK_RATIO,
+    compact_ratio_expected: ES_ON_DISK_RATIO,
+    compact_ratio_high: ES_ON_DISK_RATIO,
     compact_ratio_basis: {
-      short: 'modeled, not measured on Elasticsearch',
+      short:
+        'measured once on disk in Elasticsearch without pruning, on one OpenTelemetry capture, not on ' +
+        'this estate; pruning removes more, unmeasured',
       full:
-        'modeled, not measured: no recorded Elasticsearch run stands behind this band. The one ' +
-        'Elasticsearch measurement is 28.6 MB raw against 13.8 MB compact plus templates on disk, ' +
-        'about 52% smaller (ES 8.17.0, best_compression, one OpenTelemetry demo capture)',
+        `${ES_ON_DISK_BASIS}. That run pruned nothing from _source; pruning removes more and is ` +
+        'unmeasured, so for a pruned index this figure is a floor. One capture, not a forecast for this estate',
     },
     small_event_floor_bytes: 100,
     // Frozen tier via searchable snapshots. On Elastic Cloud Hosted the
@@ -974,9 +993,9 @@ export function compactsInPlace(destination: string): boolean {
 /**
  * Returns the cost model for a destination, with ES-unpruned override.
  *
- * ES-unpruned ratios default to the 0.45-0.55 band. Pruning detection is
- * the caller's job: read the customer's index template or helm values for
- * `_source.excludes`.
+ * Both ES modes carry the one on-disk measurement (ES_ON_DISK_RATIO); they
+ * differ in the basis they state. Pruning detection is the caller's job:
+ * read the customer's index template or helm values for `_source.excludes`.
  *
  * @param dest      destination SIEM id
  * @param opts      esPruned: when destination is 'elasticsearch' and this
@@ -1023,8 +1042,13 @@ export function getDestinationCostModel(
     return {
       ...base,
       compact_mode: 'index-unpruned',
-      compact_ratio_low: 0.45,
-      compact_ratio_high: 0.55,
+      compact_ratio_low: ES_ON_DISK_RATIO,
+      compact_ratio_expected: ES_ON_DISK_RATIO,
+      compact_ratio_high: ES_ON_DISK_RATIO,
+      compact_ratio_basis: {
+        short: 'measured once on disk in Elasticsearch on one OpenTelemetry capture, not on this estate',
+        full: `${ES_ON_DISK_BASIS}. One capture, not a forecast for this estate`,
+      },
     };
   }
   return base;
@@ -1292,6 +1316,17 @@ export function resolveTierDownTier(
   if (!needle) return fallback;
   const all = [...(defaultTier ? [defaultTier] : []), ...alts];
   return all.find((t) => t.name.toLowerCase().includes(needle)) ?? fallback;
+}
+
+/**
+ * tier_down's saving as a fraction of the standard ingest rate: the
+ * destination's list-price delta to its cheaper tier (CloudWatch IA 0.5,
+ * Datadog Flex 0.6, Azure Basic 0.78). 0 where no cheaper tier is priced.
+ */
+export function tierDownRateDelta(model: DestinationCostModel, planSelector?: string | null): number {
+  const tier = resolveTierDownTier(model, planSelector);
+  if (!tier || model.ingest_per_gb <= 0) return 0;
+  return Math.max(0, (model.ingest_per_gb - tier.ingest_rate_usd_per_gb) / model.ingest_per_gb);
 }
 
 function projectActionWithRatio(

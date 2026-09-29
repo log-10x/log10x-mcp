@@ -51,6 +51,8 @@ export interface RecurRun {
   status: 'no_change' | 'applied' | 'dry_run' | 'error';
   /** Projected savings percentage at tick time. */
   projected_savings_pct: number;
+  /** The assumption the projection leans on, when it leans on one. */
+  projected_savings_basis?: string;
   /** Number of patterns whose action changed vs. prior state. */
   delta_patterns: number;
   /** Change in savings percentage points vs. prior state. */
@@ -103,6 +105,8 @@ function parseLine(raw: string): RecurRun | undefined {
       typeof obj['projected_savings_pct'] === 'number'
         ? obj['projected_savings_pct']
         : 0,
+    projected_savings_basis:
+      typeof obj['projected_savings_basis'] === 'string' ? obj['projected_savings_basis'] : undefined,
     delta_patterns:
       typeof obj['delta_patterns'] === 'number' ? obj['delta_patterns'] : 0,
     delta_pp: typeof obj['delta_pp'] === 'number' ? obj['delta_pp'] : 0,

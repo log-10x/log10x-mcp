@@ -376,6 +376,19 @@ test('destination text: splunk compact quotes the E21 figure with its source; da
     targetPercentReduction: 50,
     pinServices: { payments: 'tier_down', auth: 'tier_down' },
   });
+  // tier_down is priced at each destination's own delta: CloudWatch IA is half
+  // the Standard ingest rate, so its tier_down row saves half its cost.
+  const cloudwatch = buildPocEnvelopeV2(makeRenderInput('cloudwatch'), makePatterns(), [], [], 10, {
+    targetPercentReduction: 50,
+    pinServices: { payments: 'tier_down', auth: 'tier_down' },
+  });
+  const cwSlot = cloudwatch.output.feasibility!.achievable_by_action.find((a) => a.action === 'tier_down')!;
+  const cwTotal = cloudwatch.output.feasibility!.achievable_by_action.reduce((s, a) => s + a.monthly_cost_usd, 0);
+  assert.ok(
+    Math.abs(cloudwatch.output.feasibility!.max_achievable_percent - (cwSlot.monthly_cost_usd * 0.5 * 100) / cwTotal) < 0.01,
+    `${cloudwatch.output.feasibility!.max_achievable_percent}`,
+  );
+
   for (const p of datadog.output.patterns.filter((r) => r.actions.recommended_action === 'tier_down')) {
     assert.match(p.actions.consequence.destination_description, /Flex/);
     assert.ok(!/\d\s*%/.test(p.actions.consequence.destination_description), p.actions.consequence.destination_description);

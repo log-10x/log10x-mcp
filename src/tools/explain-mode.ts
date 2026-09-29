@@ -31,6 +31,8 @@ import {
   getDestinationCostModel,
   expectedCompactRatio,
   describeCompactFigure,
+  tierDownRateDelta,
+  type DestinationCostModel,
 } from '../lib/cost.js';
 import { resolveRate } from '../lib/rate-resolution.js';
 import type { SiemId } from '../lib/siem/pricing.js';
@@ -323,21 +325,25 @@ function renderVerbatim(args: {
       sample: 0.9,
       compact: 0,
       offload: 1.0,
-      tier_down: 0.6,
+      tier_down: 0,
     };
-    // compact's fraction is the destination's own band (lib/cost.ts), so this
-    // line quotes no compact figure the cost model does not hold, and names
-    // where the one it quotes comes from.
-    let compactFigure: string | null = null;
-    if (mode === 'compact' && destination) {
+    // compact and tier_down are the destination's own figures (lib/cost.ts):
+    // compact its band, named with its source; tier_down its list-price delta
+    // to the cheaper tier. Neither is quoted without a destination.
+    let model: DestinationCostModel | undefined;
+    if (destination) {
       try {
-        const model = getDestinationCostModel(destination.toLowerCase() as SiemId);
-        compactFigure = describeCompactFigure(model);
-        if (compactFigure) savingsFrac.compact = 1 - expectedCompactRatio(model);
+        model = getDestinationCostModel(destination.toLowerCase() as SiemId);
       } catch {
-        // unmodeled destination: no compact figure to quote
+        // unmodeled destination: no compact or tier_down figure to quote
       }
     }
+    let compactFigure: string | null = null;
+    if (mode === 'compact' && model) {
+      compactFigure = describeCompactFigure(model);
+      if (compactFigure) savingsFrac.compact = 1 - expectedCompactRatio(model);
+    }
+    if (mode === 'tier_down' && model) savingsFrac.tier_down = tierDownRateDelta(model);
     const frac = savingsFrac[mode];
     if (frac > 0) {
       const gb = (bytesPerMonth / (1e9));
@@ -351,6 +357,10 @@ function renderVerbatim(args: {
       savingsLine = destination
         ? `  compact is a no-op on ${destination}, so it saves nothing there.`
         : `  How much compact saves depends on the destination, and none is set. log10x_measure_compaction measures the stream itself.`;
+    } else if (mode === 'tier_down') {
+      savingsLine = destination
+        ? `  No cheaper ${destination} tier is priced in the cost model, so there is no figure to show.`
+        : `  How much tier_down saves depends on the destination's cheaper tier, and none is set.`;
     } else {
       savingsLine = `  observe_only makes no change to cost — it is an observation-only mode.`;
     }

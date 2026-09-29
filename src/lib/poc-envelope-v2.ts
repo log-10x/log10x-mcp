@@ -20,7 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, type Action as CostAction } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, tierDownRateDelta, type Action as CostAction } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { isProtectedSeverity } from './severity-policy.js';
@@ -716,8 +716,11 @@ export function buildPocEnvelopeV2(
  *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
  *   compact   → 1 - the destination's expected compact ratio (cost.ts):
  *               0.6246 on Splunk, measured in its licence meter (E21);
- *               0.65 on Elasticsearch, modeled; 0 where compact is a no-op
- *   tier_down → 0.60 (Datadog Flex / CW IA; conservative cost-tier delta)
+ *               0.5175 on Elasticsearch, measured on disk; 0 where compact
+ *               is a no-op
+ *   tier_down → the destination's list-price delta to its cheaper tier
+ *               (cost.ts tierDownRateDelta): 0.6 Datadog Flex, 0.5 CloudWatch
+ *               IA, 0.78 Azure Basic; 0 where no cheaper tier is priced
  *   sample    → 0.90 (1-in-10 default keep rate is the common config)
  *   pass      → 0.00 (no reduction)
  */
@@ -901,7 +904,13 @@ function reductionCoefficient(action: CostAction, siem: SiemId): number {
       }
       return model.compact_mode === 'no-op' ? 0 : 1 - expectedCompactRatio(model);
     }
-    case 'tier_down': return 0.6;
+    case 'tier_down': {
+      try {
+        return tierDownRateDelta(getDestinationCostModel(siem));
+      } catch {
+        return 0;
+      }
+    }
     case 'sample': return 0.9;
     case 'pass': return 0.0;
   }

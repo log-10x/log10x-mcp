@@ -2894,7 +2894,9 @@ function computeCapBytesPerWindow(action: Action, monthlyBytes: number): number 
       // ~1/10 of bytes get through.
       return Math.max(1, perWindow / 10);
     case 'compact':
-      // After compact, ~10-15% of bytes remain on the wire (envelope mid).
+      // A regulator threshold, not a compaction ratio: bytes under the cap
+      // pass as they are, bytes past it are compacted. 0.15 is the engine
+      // behaviour as shipped; how much compact saves is cost.ts's figure.
       return Math.max(1, perWindow * 0.15);
     case 'tier_down':
       // No on-wire change; cap = full throughput.
