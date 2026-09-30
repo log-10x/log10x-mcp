@@ -128,7 +128,9 @@ test('cloudwatch IA discounts ingest and leaves storage at the Standard rate', (
 test('tierDownRateDelta is each destination\'s own list-price delta, not a flat 0.6', () => {
   const d = (dest: Parameters<typeof getDestinationCostModel>[0]) => tierDownRateDelta(getDestinationCostModel(dest));
   assert.equal(d('cloudwatch'), 0.5); // IA $0.25 of Standard $0.50
-  assert.ok(Math.abs(d('datadog') - 0.6) < 1e-12); // Flex $1.00 of $2.50
+  // Datadog Flex is billed per event: it has no per-GB fraction, and the
+  // retired $1.00/GB (a 0.6 fraction of the bill) must never come back.
+  assert.equal(d('datadog'), 0);
   assert.ok(Math.abs(d('azure-monitor') - (2.3 - 0.5) / 2.3) < 1e-12); // Basic $0.50 of $2.30
   assert.ok(Math.abs(d('coralogix') - (1.15 - 0.5) / 1.15) < 1e-12); // Monitoring $0.50 of $1.15
   assert.equal(d('splunk'), 0); // no cheaper tier priced

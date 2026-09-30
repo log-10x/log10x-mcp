@@ -20,10 +20,18 @@
  *                                          compact is rejected and the solver
  *                                          falls back to the destination's
  *                                          FIRST LEGAL SAVING LEVER, never to
- *                                          drop: cloudwatch ⇒ tier_down,
- *                                          datadog ⇒ offload (Flex tier_down
- *                                          is unpriced), clickhouse ⇒ offload,
- *                                          offload-only destinations ⇒ offload.
+ *                                          drop: cloudwatch ⇒ tier_down (IA),
+ *                                          datadog ⇒ tier_down (Flex Logs, still
+ *                                          searchable in Datadog), clickhouse ⇒
+ *                                          offload, offload-only destinations ⇒
+ *                                          offload.
+ *
+ * On Datadog `target_percent` is the share of volume moved OUT OF THE
+ * STANDARD INDEX (to Flex, or out of Datadog), and a Flex move is reported as
+ * the events and GB moved, the Standard indexing line avoided and the Flex
+ * storage line added, both at Datadog list, with Flex compute unpriced and
+ * excluded. No share of the Datadog bill is stated for it and the dollar axis
+ * of isPlanFeasible is not used there (lib/cost.ts projectPerEventTierMove).
  *
  * ClickHouse is in the no-op list on a measurement rather than a missing
  * expander: compaction there was worth about 7% of table bytes, and table
@@ -104,7 +112,10 @@ import {
   getAllowedActionsForDestination,
   projectActionRange,
   expectedCompactRatio,
+  perEventTierPricing,
+  sumPerEventTierMoves,
   type Action,
+  type PerEventTierMove,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
 import {
@@ -140,6 +151,14 @@ export function isPlanFeasible(p: {
   currentMonthlyUsd: number;
   targetPercent: number;
   achievedSavedUsd: number;
+  /**
+   * false on a destination whose cheaper tier is billed per event (Datadog
+   * Flex): its dollars are priced lines with the compute line excluded, so
+   * judging them against a share of the bill would state the Flex percentage
+   * the claims charter bars. The byte axis there counts the volume moved out
+   * of the Standard index. Default true.
+   */
+  dollarAxis?: boolean;
 }): { feasible: boolean; bytesFeasible: boolean; dollarsFeasible: boolean } {
   const achievedShedBytes = p.targetShedBytes - Math.max(0, p.remainingBytesToShed);
   const bytesFeasible =
@@ -148,8 +167,9 @@ export function isPlanFeasible(p: {
       FEASIBILITY_TOLERANCE_PCT;
   const targetShedUsd = p.currentMonthlyUsd * (p.targetPercent / 100);
   const dollarsFeasible =
-    targetShedUsd <= 0 ||
-    p.achievedSavedUsd >= targetShedUsd * (1 - FEASIBILITY_TOLERANCE_PCT);
+    p.dollarAxis !== false &&
+    (targetShedUsd <= 0 ||
+      p.achievedSavedUsd >= targetShedUsd * (1 - FEASIBILITY_TOLERANCE_PCT));
   return { feasible: bytesFeasible || dollarsFeasible, bytesFeasible, dollarsFeasible };
 }
 
@@ -483,7 +503,16 @@ export interface PerPatternRow {
   // A `pass` row sheds nothing, so both are 0 — pass is never credited as
   // savings. Summed into the headline totals so they reconcile with the plan.
   saved_bytes_monthly: number;
+  /**
+   * On a Datadog Flex row this is the Standard indexing line the move avoids,
+   * at list, and added_dollars_monthly is the Flex storage line it adds.
+   * Neither is a net: Flex compute is unpriced and excluded.
+   */
   saved_dollars_monthly: number;
+  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  added_dollars_monthly?: number;
+  /** Datadog Flex rows only: the move as stated lines. */
+  per_event_move?: PerEventTierMove;
   projected_monthly_usd_low: number;
   projected_monthly_usd_expected: number;
   projected_monthly_usd_high: number;
@@ -508,6 +537,8 @@ interface PerServiceSummaryRow {
   bytes_share_pct: number;
   saved_bytes_monthly: number;
   saved_dollars_monthly: number;
+  /** Datadog Flex only: Flex storage this service's moves add, at list, $/mo. */
+  added_dollars_monthly?: number;
   /** Measured compaction (1 - optimized/input) as a percent, or null when no measurement was available and the static band was used. */
   measured_compression_pct: number | null;
   ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
@@ -542,7 +573,11 @@ interface ConfigureEngineData {
     current_monthly_bytes: number;
     current_monthly_usd: number;
     target_monthly_bytes: number;
-    target_monthly_usd: number;
+    /** Absent on Datadog: target bytes at the all-in blend would state the
+     *  Flex move as a share of the bill. */
+    target_monthly_usd?: number;
+    /** What target_monthly_bytes counts, when it is not the billed bytes. */
+    target_basis?: string;
     floor_count: number;
     actions_used: Partial<Record<Action, number>>;
   };
@@ -1165,6 +1200,10 @@ export async function executeConfigureEngine(
   };
   const targetShedBytes = Math.max(0, currentMonthlyBytes - targetMonthlyBytes);
   let remainingBytesToShed = targetShedBytes;
+  // Datadog Flex is billed per event: a tier_down row keeps every byte in
+  // Datadog and takes all of them out of the Standard index, which is what
+  // target_percent counts there.
+  const perEvent = perEventTierPricing(model);
   let floorCount = 0;
   let coveredBytes = 0;
   // Standard-tier rows whose final action is the destination-compat
@@ -1282,8 +1321,10 @@ export async function executeConfigureEngine(
           : undefined,
     });
 
-    // Track shed bytes.
-    const shed = monthlyBytes - range.expected.bytes_out;
+    // Track shed bytes. On Datadog a Flex row sheds nothing off the wire but
+    // moves its whole volume out of the Standard index.
+    const flexMove = range.expected.per_event_move;
+    const shed = flexMove ? monthlyBytes : monthlyBytes - range.expected.bytes_out;
     if (
       action !== 'pass' &&
       floorHit === undefined &&
@@ -1324,9 +1365,13 @@ export async function executeConfigureEngine(
       // Actual per-pattern shed. 0 bytes for pass / tier_down (no on-wire
       // reduction); tier_down's saving shows up in dollars via the rate delta.
       saved_bytes_monthly: Math.round(Math.max(0, monthlyBytes - range.expected.bytes_out)),
-      saved_dollars_monthly: roundCents(
-        Math.max(0, baselineExpectedUsd - (range.expected.total_dollars ?? 0))
-      ),
+      // A Flex row states its two priced lines apart, never their net.
+      saved_dollars_monthly: flexMove
+        ? roundCents(flexMove.standard_indexing_avoided_usd)
+        : roundCents(Math.max(0, baselineExpectedUsd - (range.expected.total_dollars ?? 0))),
+      ...(flexMove
+        ? { added_dollars_monthly: roundCents(flexMove.tier_storage_added_usd), per_event_move: flexMove }
+        : {}),
       // total_dollars is nullable on SavingsProjection — null means the
       // destination has no list rate and no customer override.
       projected_monthly_usd_low: roundCents(range.low.total_dollars ?? 0),
@@ -1338,10 +1383,19 @@ export async function executeConfigureEngine(
 
     if (range.expected.notes) {
       for (const n of range.expected.notes) {
+        // One Flex statement for the whole plan follows the loop, not one per row.
+        if (flexMove && n === flexMove.text) continue;
         if (!warnings.includes(n)) warnings.push(n);
       }
     }
   }
+  const flexPlanMove = perEvent
+    ? sumPerEventTierMoves(
+        perEvent,
+        rows.map((r) => r.per_event_move).filter((m): m is PerEventTierMove => !!m),
+      )
+    : undefined;
+  if (flexPlanMove) warnings.push(flexPlanMove.text);
 
   // Emit the destination-compat fallback warning IF and only IF rows
   // actually survived carrying the fallback action. When zero rows
@@ -1519,6 +1573,7 @@ export async function executeConfigureEngine(
     currentMonthlyUsd,
     targetPercent,
     achievedSavedUsd,
+    dollarAxis: !perEvent,
   });
 
   let infeasibleReason: string | undefined;
@@ -1567,7 +1622,7 @@ export async function executeConfigureEngine(
   const prCommand =
     !feasible || targetMetByCurrent
       ? null
-      : renderPrCommand(args, target.resolved, csvDiff, { actionsCsv, intentJson });
+      : renderPrCommand(args, target.resolved, csvDiff, { actionsCsv, intentJson, flexStatement: flexPlanMove?.text });
 
   // ── Auto-apply (industry-standard MCP write-tool behavior) ──
   // Convention: write-capable MCPs auto-execute by default; safety lives in
@@ -1698,13 +1753,14 @@ export async function executeConfigureEngine(
   // Fold the plan by k8s_container: each service's chosen standard-tier action,
   // its share of volume, and the savings its rows delivered. Sorted DESC by
   // volume (lead with GB, not dollars).
-  const perServiceAgg = new Map<string, { bytesIn: number; savedBytes: number; savedDollars: number }>();
+  const perServiceAgg = new Map<string, { bytesIn: number; savedBytes: number; savedDollars: number; addedDollars: number }>();
   for (const r of rows) {
     const c = r.container ?? args.service;
-    const agg = perServiceAgg.get(c) ?? { bytesIn: 0, savedBytes: 0, savedDollars: 0 };
+    const agg = perServiceAgg.get(c) ?? { bytesIn: 0, savedBytes: 0, savedDollars: 0, addedDollars: 0 };
     agg.bytesIn += r.current_bytes_30d;
     agg.savedBytes += r.saved_bytes_monthly;
     agg.savedDollars += r.saved_dollars_monthly;
+    agg.addedDollars += r.added_dollars_monthly ?? 0;
     perServiceAgg.set(c, agg);
   }
   const perServiceSummary: PerServiceSummaryRow[] = [...perServiceAgg.entries()]
@@ -1719,6 +1775,7 @@ export async function executeConfigureEngine(
           currentMonthlyBytes > 0 ? roundOne((agg.bytesIn / currentMonthlyBytes) * 100) : 0,
         saved_bytes_monthly: Math.round(agg.savedBytes),
         saved_dollars_monthly: roundCents(agg.savedDollars),
+        ...(perEvent ? { added_dollars_monthly: roundCents(agg.addedDollars) } : {}),
         measured_compression_pct: decision?.measured_compression_pct ?? null,
         ratio_source: decision?.ratio_source ?? 'static_band',
         keep_queryable: decision?.keep_queryable ?? false,
@@ -1742,10 +1799,14 @@ export async function executeConfigureEngine(
       current_monthly_bytes: Math.round(currentMonthlyBytes),
       current_monthly_usd: roundCents(currentMonthlyUsd),
       target_monthly_bytes: Math.round(targetMonthlyBytes),
-      target_monthly_usd: roundCents(
-        (targetMonthlyBytes / GB) *
-          (ingestPerGb + model.storage_per_gb_month)
-      ),
+      ...(perEvent
+        ? { target_basis: 'monthly bytes left in the Datadog Standard index after the plan' }
+        : {
+            target_monthly_usd: roundCents(
+              (targetMonthlyBytes / GB) *
+                (ingestPerGb + model.storage_per_gb_month)
+            ),
+          }),
       floor_count: floorCount,
       actions_used: actionsUsed,
     },
@@ -1798,11 +1859,19 @@ export async function executeConfigureEngine(
       remainingBytesToShed,
       applied,
       refreshMode: !!refreshState,
+      flexStatement: flexPlanMove?.text,
     }),
   };
 
+  // On Datadog the percent is volume moved out of the Standard index, and the
+  // headline says so rather than "reduction", which would read as the bill.
+  const targetNoun = perEvent
+    ? `${targetPercent.toFixed(1)}% of the volume out of the Datadog Standard index`
+    : `${targetPercent.toFixed(1)}% reduction`;
   const configHeadline = feasible
-    ? `${targetPercent.toFixed(1)}% reduction policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
+    ? perEvent
+      ? `Policy derived for ${args.service} moving ${targetNoun} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
+      : `${targetNoun} policy derived for ${args.service} (${rows.length} patterns, ${args.containers.length} container${args.containers.length === 1 ? '' : 's'}).`
     : `Cannot hit ${targetPercent.toFixed(1)}% target on ${args.service} without violating floors.`;
 
   // ── View projection ───────────────────────────────────────────────
@@ -1929,6 +1998,34 @@ function buildSummaryPayload(params: {
   const bytesSavedMonthly = rows.reduce((s, r) => s + r.saved_bytes_monthly, 0);
   const dollarsSavedMonthly = rows.reduce((s, r) => s + r.saved_dollars_monthly, 0);
   void targetMonthlyBytes;
+  // Datadog Flex: the move's lines, summed. dollars_saved_monthly then holds
+  // the Standard indexing line avoided (plus any offload/drop savings), and
+  // the Flex storage line is reported apart as added; no net is stated.
+  const perEvent = perEventTierPricing(model);
+  const flexRows = rows.map((r) => r.per_event_move).filter((m): m is PerEventTierMove => !!m);
+  const flexMove = perEvent ? sumPerEventTierMoves(perEvent, flexRows) : undefined;
+  const flexTotals = flexMove
+    ? {
+        dollars_added_monthly: roundCents(rows.reduce((s, r) => s + (r.added_dollars_monthly ?? 0), 0)),
+        dollars_note:
+          'dollars_saved_monthly counts the Standard indexing line the Flex move avoids, at Datadog list, plus any offload or drop saving; ' +
+          'dollars_added_monthly is the Flex storage line the move adds, at list; Flex compute is unpriced and excluded from both. ' +
+          'Quote the lines, not a net and not a percentage of the Datadog bill.',
+      }
+    : {};
+  const datadogFlex = flexMove
+    ? {
+        datadog_flex: {
+          events_moved_monthly: Math.round(flexMove.events_moved),
+          gb_moved_monthly: Number(flexMove.gb_moved.toFixed(1)),
+          events_basis: flexMove.events_basis,
+          standard_indexing_avoided_usd_monthly: roundCents(flexMove.standard_indexing_avoided_usd),
+          flex_storage_added_usd_monthly: roundCents(flexMove.tier_storage_added_usd),
+          flex_compute: flexMove.unpriced,
+          text: flexMove.text,
+        },
+      }
+    : {};
 
   // Top-5 cost contributors (DESC by current_bytes_30d). Descriptor
   // truncated to 60 chars per spec — uses the row's `reason` field as
@@ -2020,7 +2117,9 @@ function buildSummaryPayload(params: {
       bytes_in_monthly: Math.round(currentMonthlyBytes),
       bytes_saved_monthly: Math.round(bytesSavedMonthly),
       dollars_saved_monthly: roundCents(dollarsSavedMonthly),
+      ...flexTotals,
     },
+    ...datadogFlex,
     top_5_per_pattern: top5,
     // Phase 2: per-service advisory, capped to the top services by volume so
     // the slim view stays within budget (services << patterns; full list is
@@ -2710,10 +2809,10 @@ export function _resolveServiceAction(params: {
 
   // An action is "legal" if the destination + forwarder can honor it AND it
   // actually saves: compact only where compaction is not a no-op, tier_down
-  // only where the cost model has a cheaper target tier (cloudwatch today;
-  // datadog Flex is unpriced so tier_down there is handled by the level-1
-  // fallback, matching Phase 1, with its zero-saving surfaced by the
-  // projection notes rather than swapped here).
+  // only where the cost model has a cheaper target tier (CloudWatch IA,
+  // Datadog Flex, Azure Basic/Auxiliary, Coralogix Monitoring, the Elastic
+  // tiers). Datadog Flex is priced per event at list (cost.ts
+  // projectPerEventTierMove), so it is legal and it is Datadog's first lever.
   const isLegal = (a: Action): boolean => {
     if (a === 'pass' || a === 'sample' || a === 'drop') return true;
     if (a === 'compact') return model.compact_mode !== 'no-op' && allowed.includes('compact');
@@ -2740,11 +2839,11 @@ export function _resolveServiceAction(params: {
   });
 
   // The destination's first legal+saving lever, in the allow-list's own order:
-  // cloudwatch -> tier_down (has a cheaper IA tier); datadog -> offload (its
-  // tier_down/Flex is unpriced, so tier_down is NOT legal here); offload-only
-  // destinations -> offload. offload is the universal safety net (legal on
-  // every destination). This never returns a zero-saving action the engine
-  // would route to the SIEM at full price.
+  // cloudwatch -> tier_down (IA); datadog -> tier_down (Flex Logs, which keeps
+  // the events searchable in Datadog); offload-only destinations -> offload.
+  // offload is the universal safety net (legal on every destination). This
+  // never returns a zero-saving action the engine would route to the SIEM at
+  // full price.
   const firstLegalLever = (): Action => allowed.find(isLegal) ?? 'offload';
 
   // 1. Explicit pin wins when legal; otherwise warn and fall through to auto.
@@ -2805,9 +2904,9 @@ export function _resolveServiceAction(params: {
     return mk('offload', 'auto', `auto: offload (only ${figure}${sep} S3 takes the larger cut)`);
   }
   // compact illegal on this destination -> its first legal+saving lever
-  // (cloudwatch -> tier_down; datadog -> offload, since Flex tier_down is
-  // unpriced; offload-only destinations -> offload). Never emits a zero-saving
-  // action the engine would route to the SIEM at full price.
+  // (cloudwatch -> tier_down to IA; datadog -> tier_down to Flex; offload-only
+  // destinations -> offload). Never emits a zero-saving action the engine
+  // would route to the SIEM at full price.
   const lever = firstLegalLever();
   const why = model.compact_mode === 'no-op'
     ? `compact is a no-op on ${destination}; ${lever} is its first saving lever`
@@ -3132,7 +3231,7 @@ export function renderPrCommand(
   args: ConfigureEngineArgs,
   resolved: ResolvedTarget,
   csvDiff: string,
-  siblings?: { actionsCsv?: string; intentJson?: string }
+  siblings?: { actionsCsv?: string; intentJson?: string; flexStatement?: string }
 ): string {
   const repo = resolved.gitops_repo;
   const branch = resolved.gitops_branch;
@@ -3262,8 +3361,13 @@ export function renderPrCommand(
     `MCP-derived engine policy for service \`${args.service}\`.\n\n` +
     `- Containers (${args.containers!.length}): ${args.containers!.map((c) => `\`${c}\``).join(', ')}\n` +
     `- Destination: ${resolved.destination}\n` +
-    `- Target: ${args.target_percent !== undefined ? `${args.target_percent}% reduction` : `$${args.budget_usd}/month budget`}\n` +
+    `- Target: ${args.target_percent !== undefined
+      ? perEventTierPricing(resolved.destination)
+        ? `${args.target_percent}% of the volume moved out of the Datadog Standard index`
+        : `${args.target_percent}% reduction`
+      : `$${args.budget_usd}/month budget`}\n` +
     `- Reduction mode: ${args.reduction ?? 'hard'}\n\n` +
+    (siblings?.flexStatement ? `${siblings.flexStatement}\n\n` : '') +
     `Derived via log10x_configure_engine.`;
   out.push(`  --body ${shellQuote(body)}`);
   out.push('```');
@@ -3328,13 +3432,26 @@ function buildConfigureEngineHumanSummary(args: {
   remainingBytesToShed: number;
   applied?: ConfigureEngineData['applied'];
   refreshMode?: boolean;
+  /** Datadog Flex plans: the summed move, stated as lines. */
+  flexStatement?: string;
 }): string {
   const containerWord = `${args.containerCount} container${args.containerCount === 1 ? '' : 's'}`;
   const verb = args.refreshMode ? 'refresh re-derived' : 'derived';
+  // On Datadog the percent is volume out of the Standard index, never the bill.
+  const perEvent = perEventTierPricing(args.destination);
+  const goal = perEvent
+    ? `moving ${args.targetPercent.toFixed(1)}% of the volume out of the Standard index`
+    : `a ${args.targetPercent.toFixed(1)}% reduction`;
   if (!args.feasible) {
-    return `configure_engine ${args.refreshMode ? 'refresh' : ''} could not hit ${args.targetPercent.toFixed(1)}% reduction on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`;
+    return perEvent
+      ? `configure_engine ${args.refreshMode ? 'refresh' : ''} could not reach ${goal} on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`
+      : `configure_engine ${args.refreshMode ? 'refresh' : ''} could not hit ${args.targetPercent.toFixed(1)}% reduction on ${args.service} (${containerWord}, ${args.destination}); short by ${humanBytes(args.remainingBytesToShed)} per month. Adjust target, floors, or action defaults and re-run.`;
   }
-  const headline = `configure_engine ${verb} a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`;
+  const headline =
+    (perEvent
+      ? `configure_engine ${verb} a policy on ${args.service} ${goal} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`
+      : `configure_engine ${verb} a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`) +
+    (args.flexStatement ? ` ${args.flexStatement}` : '');
   if (args.applied?.ok && args.applied.pr_url) {
     return `${headline} PR opened at ${args.applied.pr_url}; the engine hot-reloads the cap CSV on the next gitops poll, no pipeline restart.`;
   }

@@ -338,9 +338,19 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
   // panel, we silence the customer's operations. Catch this before the
   // recommendation lands.
   const REDUCING_ACTIONS = new Set(['drop', 'offload', 'tier_down', 'compact']);
-  if (REDUCING_ACTIONS.has(p.actions.recommended_action) && p.actions.expected_savings_usd_per_month >= p.metrics.cost_per_month_usd * 0.5) {
+  // A Datadog Flex move is gated and described by the volume it moves: its
+  // dollars are list-price lines with the compute line unpriced, and setting
+  // them against the row's cost would state a share of the bill.
+  const flexMove = p.actions.per_event_move;
+  if (
+    REDUCING_ACTIONS.has(p.actions.recommended_action) &&
+    (flexMove || p.actions.expected_savings_usd_per_month >= p.metrics.cost_per_month_usd * 0.5)
+  ) {
+    const what = flexMove
+      ? `moves ${Number(flexMove.gb_moved.toFixed(1))} GB/mo out of the Standard index into ${flexMove.tier}`
+      : `$${p.actions.expected_savings_usd_per_month.toFixed(2)}/mo savings of ${p.metrics.cost_per_month_usd.toFixed(2)}/mo cost`;
     steps.push(
-      `**dependency_safety** — engine recommends \`${p.actions.recommended_action}\` ($${p.actions.expected_savings_usd_per_month.toFixed(2)}/mo savings of ${p.metrics.cost_per_month_usd.toFixed(2)}/mo cost). ` +
+      `**dependency_safety** — engine recommends \`${p.actions.recommended_action}\` (${what}). ` +
         `Before applying, grep the customer's Grafana JSON / Splunk saved searches / Datadog monitors / ` +
         `PagerDuty alert rules for the pattern identity \`${p.identity.slice(0, 60)}\` or a meaningful substring. ` +
         `If ANY reference exists, downgrade to \`pass\` or \`sample\` and flag the conflict.`,

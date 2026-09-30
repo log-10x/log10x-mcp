@@ -33,6 +33,8 @@ import {
   describeCompactFigure,
   describeCompactReadback,
   tierDownRateDelta,
+  perEventTierPricing,
+  projectPerEventTierMove,
   type DestinationCostModel,
 } from '../lib/cost.js';
 import { resolveRate } from '../lib/rate-resolution.js';
@@ -350,7 +352,12 @@ function renderVerbatim(args: {
     }
     if (mode === 'tier_down' && model) savingsFrac.tier_down = tierDownRateDelta(model);
     const frac = savingsFrac[mode];
-    if (frac > 0) {
+    // Datadog Flex has no per-GB fraction: it is priced per event at list and
+    // stated as lines, with its compute add-on unpriced and excluded.
+    const flexPricing = mode === 'tier_down' && model ? perEventTierPricing(model) : undefined;
+    if (flexPricing) {
+      savingsLine = `  ${projectPerEventTierMove(flexPricing, bytesPerMonth).text}`;
+    } else if (frac > 0) {
       const gb = (bytesPerMonth / (1e9));
       const savingsUsd = costPerMonth * frac;
       const affectedGb = gb * frac;

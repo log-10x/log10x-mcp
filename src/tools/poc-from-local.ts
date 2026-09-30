@@ -341,15 +341,24 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     ? (pl.target.kind === 'usd_budget'
         ? (pl.met && pl.planned.length === 0
             ? `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. Already under: the projected bill is ${fmtBudgetUsd(pl.billUsd)}/mo. No action needed. ${sampledNote}`
-            : pl.met
+            : (pl.met
               ? `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo (projected today: ${fmtBudgetUsd(pl.billUsd)}/mo), keeping everything. ${sampledNote}`
-              : `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo. ${pl.gap ? pl.gap.message : ''}`)
+              : `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo. ${pl.gap ? pl.gap.message : ''}`) +
+              // Datadog Flex: the landing counts priced lines only; say which.
+              (pl.perEventMove ? ` Counts priced lines only. ${pl.perEventMove.text}` : ''))
         : pl.target.kind === 'gb_budget'
           ? (pl.met && pl.planned.length === 0
               ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. Already under: projected ingest is ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. No action needed. ${sampledNote}`
               : pl.met
                 ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo, keeping everything. ${sampledNote}`
                 : `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. ${pl.gap ? pl.gap.message : ''}`)
+        : pl.percentBasis === 'standard_index_volume'
+          // Datadog: volume out of the Standard index; no share of the bill
+          // is stated for a Flex move, whose compute is unpriced.
+          ? (pl.met
+              ? `Target: move ${pl.targetPct}% of the volume out of the Datadog Standard index. This plan moves ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
+              : `Target: move ${pl.targetPct}% of the volume out of the Datadog Standard index. Keeping everything, this plan moves ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`) +
+            (pl.perEventMove ? ` ${pl.perEventMove.text}` : '')
         : pl.met
           ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
           : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
@@ -759,10 +768,13 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     );
     const maxAchievable = plan.keepEverythingCeilingPct;
     const feasible = plan.met;
+    // On Datadog every percentage is volume out of the Standard index.
+    const volumeBasis = plan.percentBasis === 'standard_index_volume';
+    const basisNoun = volumeBasis ? ' of the volume out of the Standard index' : '';
     const reasonParts = [
       `Total sample bytes ${fmtBytes(sample.totalBytes)} across ${sample.composition.length} pod(s).`,
       `Ladder plan on ${args.siem ?? 'cloudwatch'}: ${plan.keepEverythingLever ?? 'no keep-everything lever'} first; ` +
-        `achieved ${fmtPct(plan.achievedPct)} of the bill keeping everything` +
+        `achieved ${fmtPct(plan.achievedPct)}${volumeBasis ? basisNoun : ' of the bill'} keeping everything` +
         `${plan.planned.some((r) => !r.keepsEverything) ? ' plus opted-in loss' : ''}; ` +
         `keep-everything ceiling ${fmtPct(plan.keepEverythingCeilingPct)}.`,
     ];
@@ -778,16 +790,19 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     if (pinServicesLower.size > 0) {
       reasonParts.push(`${pinServicesLower.size} service pin(s) applied; max_achievable shifted accordingly.`);
     }
+    if (plan.perEventMove) reasonParts.push(plan.perEventMove.text);
     const targetLabel =
       plan.target.kind === 'usd_budget'
-        ? `the $${plan.target.value}/mo budget (derived cut ${plan.targetPct}%)`
+        ? volumeBasis
+          ? `the $${plan.target.value}/mo budget (priced lines only)`
+          : `the $${plan.target.value}/mo budget (derived cut ${plan.targetPct}%)`
         : plan.target.kind === 'gb_budget'
           ? `the ${plan.target.value} GB/mo budget (derived cut ${plan.targetPct}%)`
           : `target ${args.target_percent_reduction}%`;
     reasonParts.push(
       feasible
-        ? `Achievable ${maxAchievable.toFixed(1)}% meets ${targetLabel}.`
-        : `Achievable ${maxAchievable.toFixed(1)}% short of ${targetLabel}; trim exceptions or widen the sample.`,
+        ? `Achievable ${maxAchievable.toFixed(1)}%${basisNoun} meets ${targetLabel}.`
+        : `Achievable ${maxAchievable.toFixed(1)}%${basisNoun} short of ${targetLabel}; trim exceptions or widen the sample.`,
     );
     feasibility = {
       feasible,
@@ -802,16 +817,19 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     const artLines: string[] = [];
     artLines.push(`## Projected commitment — local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
     artLines.push('');
-    if (feasibility.budget_usd_monthly !== undefined) {
+    if (feasibility.budget_usd_monthly !== undefined && volumeBasis) {
+      artLines.push(`- **Budget**: $${feasibility.budget_usd_monthly}/mo (priced lines only; Flex compute is unpriced and excluded)`);
+    } else if (feasibility.budget_usd_monthly !== undefined) {
       artLines.push(`- **Budget**: $${feasibility.budget_usd_monthly}/mo (derived reduction ${feasibility.target_percent_reduction}%)`);
     } else if (feasibility.budget_gb_monthly !== undefined) {
       artLines.push(`- **Budget**: ${feasibility.budget_gb_monthly} GB/mo ingest (derived reduction ${feasibility.target_percent_reduction}%)`);
     } else {
-      artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%`);
+      artLines.push(`- **Target reduction**: ${feasibility.target_percent_reduction}%${basisNoun}`);
     }
     artLines.push(
-      `- **Projected max achievable**: ${feasibility.max_achievable_percent.toFixed(1)}% (${feasibility.feasible ? 'feasible' : 'short of target'})`,
+      `- **Projected max achievable**: ${feasibility.max_achievable_percent.toFixed(1)}%${basisNoun} (${feasibility.feasible ? 'feasible' : 'short of target'})`,
     );
+    if (plan.perEventMove) artLines.push(`- **Datadog Flex**: ${plan.perEventMove.text}`);
     artLines.push(`- **Sample bytes analyzed**: ${fmtBytes(sample.totalBytes)}`);
     artLines.push('');
     if (exceptions.length > 0) {

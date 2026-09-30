@@ -20,7 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, type Action as CostAction } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { isProtectedSeverity } from './severity-policy.js';
@@ -204,6 +204,13 @@ export interface FeasibilityVerdict {
   feasible: boolean;
   target_percent_reduction: number;
   max_achievable_percent: number;
+  /**
+   * What target_percent_reduction and max_achievable_percent are shares OF.
+   * 'bill' almost everywhere; 'standard_index_volume' on Datadog, where Flex
+   * is the lever and no share of the bill can be stated for it (its compute
+   * add-on is unpriced). Render the basis beside both numbers.
+   */
+  percent_basis: 'bill' | 'standard_index_volume';
   /** Plain-English explanation of how max_achievable_percent was derived. */
   reason: string;
   /** Per-action breakdown of the achievable pool (in monthly $). */
@@ -346,10 +353,17 @@ export interface PatternActions {
   /**
    * Projected monthly dollar savings if the recommendation is committed,
    * computed using the same reduction coefficients the feasibility
-   * verdict uses (drop=1.0, offload=1.0, compact=0.7, tier_down=0.6,
-   * sample=0.9, pass=0). Real dollars, rounded to cents.
+   * verdict uses (drop=1.0, offload=1.0, compact the destination's figure,
+   * tier_down the destination's list-price delta, sample=0.9, pass=0).
+   * Real dollars, rounded to cents. On a Datadog Flex row it is the Standard
+   * indexing line the move avoids at list, and flex_storage_added_usd_per_month
+   * is the line it adds; neither is a net, since Flex compute is unpriced.
    */
   expected_savings_usd_per_month: number;
+  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  flex_storage_added_usd_per_month?: number;
+  /** Datadog Flex rows only: the move as stated lines. Render its text. */
+  per_event_move?: PerEventTierMove;
   /**
    * Sample-keep denominator. Populated only when
    * `recommended_action === 'sample'`; null otherwise. Matches the
@@ -564,13 +578,27 @@ export function buildPocEnvelopeV2(
     const effectivePin = resolvedPin.action;
     const monthlyBytes = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
     const desc = describeDestination(siem, effectivePin);
-    const expectedSavings = monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(effectivePin, siem);
+    // Datadog Flex: the Standard indexing line avoided at list, per event.
+    const pinFlexPricing = effectivePin === 'tier_down' ? perEventTierPricing(siem) : undefined;
+    const pinFlexMove = pinFlexPricing
+      ? projectPerEventTierMove(
+          pinFlexPricing,
+          monthlyBytes,
+          p.metrics.events_in_window > 0 ? { avgEventBytes: p.metrics.bytes_in_window / p.metrics.events_in_window } : {},
+        )
+      : undefined;
+    const expectedSavings = pinFlexMove
+      ? pinFlexMove.standard_indexing_avoided_usd
+      : monthlyBytes / 1024 ** 3 * input.analyzerCostPerGb * reductionCoefficient(effectivePin, siem);
     p.actions = {
       recommended_action: effectivePin,
       reason: resolvedPin.substitutedFrom
         ? `${pinReason} (pinned ${resolvedPin.substitutedFrom}, which is a no-op on ${siem}; substituted ${effectivePin})`
         : pinReason,
       expected_savings_usd_per_month: dollars(expectedSavings),
+      ...(pinFlexMove
+        ? { flex_storage_added_usd_per_month: dollars(pinFlexMove.tier_storage_added_usd), per_event_move: pinFlexMove }
+        : {}),
       sample_n: effectivePin === 'sample' ? 10 : null,
       cap_bytes_per_window: Math.round(capBytesPerWindow(effectivePin, monthlyBytes, 10)),
       consequence: {
@@ -719,8 +747,15 @@ export function buildPocEnvelopeV2(
  *               0.5175 on Elasticsearch, measured on disk; 0 where compact
  *               is a no-op
  *   tier_down → the destination's list-price delta to its cheaper tier
- *               (cost.ts tierDownRateDelta): 0.6 Datadog Flex, 0.5 CloudWatch
- *               IA, 0.78 Azure Basic; 0 where no cheaper tier is priced
+ *               (cost.ts tierDownRateDelta): 0.5 CloudWatch IA, 0.78 Azure
+ *               Basic; 0 where no cheaper tier is priced
+ *
+ * Datadog is the exception. Flex is billed per event and its compute add-on
+ * is unpriced, so no share of the Datadog bill can be stated for it. There
+ * the verdict counts VOLUME moved out of the Standard index (tier_down,
+ * offload and drop take a row's whole volume, sample 0.9), and
+ * percent_basis says so. Monthly cost at the all-in blend is proportional to
+ * bytes, so the cost-weighted sum below is that volume share.
  *   sample    → 0.90 (1-in-10 default keep rate is the common config)
  *   pass      → 0.00 (no reduction)
  */
@@ -742,6 +777,8 @@ function computeFeasibility(
   const allowed = getAllowedActionsForDestination(siem);
   const level1 = allowed[0] ?? 'offload';
   const level2 = allowed[1] ?? level1;
+  const perEvent = perEventTierPricing(siem) != null;
+  const basisNoun = perEvent ? ' of the volume out of the Datadog Standard index' : '';
 
   const byAction = new Map<CostAction, { monthly: number; count: number }>();
   let exceptionMonthly = 0;
@@ -783,7 +820,7 @@ function computeFeasibility(
       }
     }
 
-    const coefficient = reductionCoefficient(action, siem);
+    const coefficient = perEvent ? standardIndexVolumeCoefficient(action, siem) : reductionCoefficient(action, siem);
     achievableMonthly += monthly * coefficient;
 
     const slot = byAction.get(action) ?? { monthly: 0, count: 0 };
@@ -829,14 +866,20 @@ function computeFeasibility(
   }
   reasonParts.push(
     feasible
-      ? `Achievable ${maxAchievablePercent.toFixed(1)}% meets target ${targetPercent}%.`
-      : `Achievable ${maxAchievablePercent.toFixed(1)}% short of target ${targetPercent}%; widen exceptions or raise destination tier coverage.`,
+      ? `Achievable ${maxAchievablePercent.toFixed(1)}%${basisNoun} meets target ${targetPercent}%.`
+      : `Achievable ${maxAchievablePercent.toFixed(1)}%${basisNoun} short of target ${targetPercent}%; widen exceptions or raise destination tier coverage.`,
   );
+  if (perEvent) {
+    reasonParts.push(
+      'On Datadog these are shares of volume, not of the bill: Flex compute is unpriced, so no share of the bill is stated for a Flex move.',
+    );
+  }
 
   return {
     feasible,
     target_percent_reduction: targetPercent,
     max_achievable_percent: ratio(maxAchievablePercent),
+    percent_basis: perEvent ? 'standard_index_volume' : 'bill',
     reason: reasonParts.join(' '),
     achievable_by_action: achievableByAction,
     exception_services: exceptionServices,
@@ -886,6 +929,25 @@ function modeledDollarNote(siem: SiemId): string | null {
     'ingest is $0 and stored bytes are a small share of the cost. The bill is compute, it follows rows inserted, ' +
     `and the modeled compute saving rests on a measured rows-to-CPU curve and a unit floor of ${model.compute.min_units} that is ASSUMED.`
   );
+}
+
+/**
+ * Share of a row's volume an action takes out of the Datadog Standard index.
+ * Flex keeps every byte in Datadog and takes all of them out of the index.
+ */
+function standardIndexVolumeCoefficient(action: CostAction, siem: SiemId): number {
+  switch (action) {
+    case 'tier_down':
+    case 'offload':
+    case 'drop':
+      return 1.0;
+    case 'sample':
+      return 0.9;
+    case 'compact':
+      return compactsInPlace(siem) ? reductionCoefficient('compact', siem) : 0;
+    case 'pass':
+      return 0;
+  }
 }
 
 function reductionCoefficient(action: CostAction, siem: SiemId): number {
@@ -1107,8 +1169,10 @@ function buildCommitmentArtifact(
   );
   lines.push('### Headline numbers');
   lines.push('');
-  lines.push(`- Target reduction: **${f.target_percent_reduction}%**`);
-  lines.push(`- Projected max achievable: **${f.max_achievable_percent.toFixed(1)}%** (${f.feasible ? 'feasible' : 'short of target'})`);
+  // On Datadog both numbers are volume out of the Standard index, never the bill.
+  const basisNoun = f.percent_basis === 'standard_index_volume' ? ' of the volume out of the Datadog Standard index' : '';
+  lines.push(`- Target reduction: **${f.target_percent_reduction}%**${basisNoun}`);
+  lines.push(`- Projected max achievable: **${f.max_achievable_percent.toFixed(1)}%**${basisNoun} (${f.feasible ? 'feasible' : 'short of target'})`);
   lines.push(`- Total bytes affected (per month): **${formatBytes(affectedBytes)}**`);
   lines.push(`- Sample monthly cost analyzed: **$${dollars(monthlyCostUsd).toFixed(2)}**`);
   const modeledNote = modeledDollarNote(input.siem);
@@ -1369,7 +1433,7 @@ function buildSparkline(
  * configure_engine uses).
  */
 function buildActions(
-  p: { service?: string; severity?: string; template: string; symbolMessage?: string; identity: string; recommendedAction: string; sampleRate: number; poc: PocEnrichment; pctOfTotal: number; bytes: number },
+  p: { service?: string; severity?: string; template: string; symbolMessage?: string; identity: string; recommendedAction: string; sampleRate: number; poc: PocEnrichment; pctOfTotal: number; bytes: number; count?: number },
   siem: SiemId,
   monthlyCost: number,
   _windowDurationSeconds: number,
@@ -1434,13 +1498,21 @@ function buildActions(
   }
 
   // 2) Project savings from the action coefficient (matches feasibility).
-  const expectedSavings = monthlyCost * reductionCoefficient(action, siem) * (action === 'sample' && sampleN ? (1 - 1 / sampleN) / 0.9 : 1);
+  // Datadog Flex is priced per event at list instead: the Standard indexing
+  // line avoided, with the Flex storage line it adds stated beside it.
+  const monthlyBytes = (p as unknown as { bytes: number }).bytes * (24 * 30) / Math.max(0.001, _windowDurationSeconds / 3600);
+  const flexPricing = action === 'tier_down' ? perEventTierPricing(siem) : undefined;
+  const flexMove = flexPricing
+    ? projectPerEventTierMove(flexPricing, monthlyBytes, p.count && p.count > 0 ? { avgEventBytes: p.bytes / p.count } : {})
+    : undefined;
+  const expectedSavings = flexMove
+    ? flexMove.standard_indexing_avoided_usd
+    : monthlyCost * reductionCoefficient(action, siem) * (action === 'sample' && sampleN ? (1 - 1 / sampleN) / 0.9 : 1);
 
   // 3) Cap bytes per 4-minute reset window. Matches the math in
   // configure-engine.ts:computeCapBytesPerWindow so configure_engine
   // can read this directly from the snapshot's cap_csv without
   // re-deriving the cap.
-  const monthlyBytes = (p as unknown as { bytes: number }).bytes * (24 * 30) / Math.max(0.001, _windowDurationSeconds / 3600);
   const cap = capBytesPerWindow(action, monthlyBytes, sampleN ?? 10);
   const desc = describeDestination(siem, action);
 
@@ -1448,6 +1520,9 @@ function buildActions(
     recommended_action: action,
     reason,
     expected_savings_usd_per_month: dollars(expectedSavings),
+    ...(flexMove
+      ? { flex_storage_added_usd_per_month: dollars(flexMove.tier_storage_added_usd), per_event_move: flexMove }
+      : {}),
     sample_n: sampleN,
     cap_bytes_per_window: Math.round(cap),
     consequence: {
