@@ -53,7 +53,7 @@ test('no rendered string sells tier_down as a cheaper storage tier or IA as chea
       .forEach((line, i) => {
         const code = line.trim();
         if (code.startsWith('//') || code.startsWith('*') || code.startsWith('/*')) return;
-        const storageTier = /cheaper storage (tier|class)|destination-side storage tier/i.test(code);
+        const storageTier = /cheaper storage (tier|class)|destination-side storage tier|ingest \+ storage rate/i.test(code);
         // An IA figure must say what it is cheaper on.
         const bareIaFigure = /Infrequent Access[^'"`]*~?\d+% cheaper than/i.test(code) && !/ingest/i.test(code);
         if (storageTier || bareIaFigure) offenders.push(`${file}:${i + 1}: ${code.slice(0, 140)}`);

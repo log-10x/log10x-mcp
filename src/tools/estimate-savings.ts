@@ -490,8 +490,8 @@ export interface ForecastResult {
      * dollar/byte contribution came from which action.
      *
      * tier_down.bytes_saved is always 0 (byte volume is unchanged); savings
-     * come from the lower per-GB rate at the cheaper destination tier, which
-     * cuts both the ingest and storage rate. cost.ts computes the full
+     * come from the cheaper tier's own rate: ingest on CloudWatch IA, where
+     * storage bills the same as Standard. cost.ts computes the full
      * standard-vs-tier rate delta.
      */
     action_mix?: ActionMix;
@@ -2512,8 +2512,8 @@ export async function executeEstimateSavings(
 
       // Check whether the mix is uniformly tier_down (or has zero combined
       // bytes_saved_monthly across all patterns). tier_down does not reduce
-      // byte volume; savings come from the lower per-GB rate at the cheaper
-      // destination tier (both ingest and storage rate).
+      // byte volume; savings come from the cheaper tier's own rate (ingest
+      // only on CloudWatch IA).
       const allTierDown =
         result.per_pattern.length > 0 &&
         result.per_pattern.every((r) => r.action === 'tier_down');
@@ -2600,8 +2600,8 @@ export async function executeEstimateSavings(
         // append the dollar only at customer_supplied.
         const tierVol = fmtBytes(result.totals.bytes_in_monthly);
         headline = leadDollar
-          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`
-          : `Forecast (${destination}): ${tierVol}/mo moved to a cheaper destination tier${serviceTag} via tier_down (lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
+          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, billed at that tier's own rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`
+          : `Forecast (${destination}): ${tierVol}/mo moved to a cheaper destination tier${serviceTag} via tier_down (billed at that tier's own rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
@@ -2921,8 +2921,8 @@ function buildForecastHumanSummary(
       // cheaper tier, append the dollar only at customer_supplied.
       const tierVol = fmtBytes(result.totals.bytes_in_monthly);
       const tierLead = leadDollar
-        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged)`
-        : `${tierVol}/mo moved to a cheaper destination tier via tier_down (lower ingest + storage rate; byte volume unchanged)`;
+        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, billed at that tier's own rate; byte volume unchanged)`
+        : `${tierVol}/mo moved to a cheaper destination tier via tier_down (billed at that tier's own rate; byte volume unchanged)`;
       return `estimate_savings forecast on ${destination}${serviceClause}: ${tierLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
     // Mixed actions: break down by byte-reducing vs tier_down.
