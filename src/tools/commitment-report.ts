@@ -2325,7 +2325,7 @@ export async function executeCommitmentReport(
   // removed from ingest. Wording mirrors cost.ts:394.
   if (agg.bytes_saved_by_action.tier_down > 0) {
     caveats.push(
-      'tier_down bytes are tagged for downstream tier swap, not removed from ingest — savings realize on the destination-side storage tier.'
+      'tier_down bytes are tagged for downstream tier swap, not removed from ingest — savings realize at the cheaper tier in the destination.'
     );
   }
 

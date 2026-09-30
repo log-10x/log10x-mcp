@@ -949,7 +949,7 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
       }
       if (siem === 'cloudwatch') {
         return {
-          text: 'CloudWatch Logs Infrequent Access tier (in-place query, ~50% cheaper than Standard)',
+          text: 'CloudWatch Logs Infrequent Access tier (in-place query, ~50% cheaper ingest than Standard; storage bills the same)',
           recoverable: true, recoverVia: null,
         };
       }
