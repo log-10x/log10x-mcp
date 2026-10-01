@@ -518,7 +518,7 @@ export async function resolveCompilerIdentity(
   const mode = await resolveMode(modeOverride);
   if (mode === 'docker') {
     const image = resolveCompilerImage();
-    return { mode, image, version: null, key: `docker:${image}` };
+    return { mode, image, version: imageTagVersion(image), key: `docker:${image}` };
   }
   const binary = process.env.LOG10X_TENX_PATH || 'tenx';
   if (!(await isBinaryOnPath(binary))) {
@@ -1430,6 +1430,20 @@ export function isCompilerFlavorOutput(output: string): boolean {
  */
 export function parseEngineVersion(output: string): string | null {
   const m = output.match(/10x engine v(\d+(?:\.\d+)+)/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * The engine version a compiler image tag names (`log10x/compiler-10x:1.1.39`,
+ * also with an `@sha256:` digest after it), or null for `latest`, a bare digest
+ * or any non-version tag. Pure / testable.
+ */
+export function imageTagVersion(image: string): string | null {
+  const ref = image.split('@')[0];
+  const slash = ref.lastIndexOf('/');
+  const colon = ref.lastIndexOf(':');
+  if (colon <= slash) return null;
+  const m = ref.slice(colon + 1).match(/^v?(\d+(?:\.\d+)+)(?:-[A-Za-z0-9]+)?$/);
   return m ? m[1] : null;
 }
 
