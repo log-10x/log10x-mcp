@@ -62,7 +62,7 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Absolute path to a local folder of source code / binaries to scan, traversed recursively. Parsed with a grammar or AST: Java, Scala, Python, Go, C/C++, C#, JavaScript, and JVM .class bytecode. Other languages in the pattern scanner\'s file list (TypeScript, Rust, Kotlin, Ruby, PHP, Lua, Groovy, Swift, bash) get quoted-string extraction only. Archives (.jar, .war, .ear, .zip, .gz, .tar and compressed tarballs) are expanded and their entries scanned; .json/.yaml/.xml/.properties/.csv/.txt and similar config/text files go through the text scanner; .so/.dylib (and .dll on Windows hosts) through `strings`. Optional when any other source is given; at least one source (source_path, github_repos, docker_images, helm_charts, or artifactory_instance + artifactory_repo) is required.',
+      'Absolute path to a local folder of source code / binaries to scan, traversed recursively. Parsed with a grammar or AST: Java, Scala, Python, Go, C/C++, C#, JavaScript, TypeScript (.ts; .tsx goes through the text scanner), Rust, and JVM .class bytecode. Other languages in the pattern scanner\'s file list (Kotlin, Ruby, PHP, Lua, Groovy, Swift, bash) get quoted-string extraction only. Archives (.jar, .war, .ear, .zip, .gz, .tar and compressed tarballs) are expanded and their entries scanned; .json/.yaml/.xml/.properties/.csv/.txt and similar config/text files go through the text scanner; .so/.dylib (and .dll on Windows hosts) through `strings`. Optional when any other source is given; at least one source (source_path, github_repos, docker_images, helm_charts, or artifactory_instance + artifactory_repo) is required.',
     ),
   github_repos: z
     .array(z.string())
@@ -74,7 +74,7 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Branch to pull for ALL github_repos. Omit to pull each repo’s default branch.',
+      'Branch to pull for ALL github_repos. Omit to pull each repo\'s default branch.',
     ),
   github_folders: z
     .array(z.string())
@@ -191,7 +191,7 @@ export const compileSchema = {
     .max(3_600_000)
     .default(1_800_000)
     .describe(
-      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min). The engine\'s own whole-scan cap (scanOperationTimeout, bundled default 10 min) is raised to 90% of this value on the command line, so a long first compile is not cut short below it (needs compiler 1.1.89+, the pinned default; an older local engine keeps its 10 min cap). A re-run over unchanged local sources skips every file whose checksum already has a unit and finishes in seconds; pulled sources (GitHub, images, Artifactory) cost a remote round-trip each run and are downloaded again only when the remote changed, Helm charts are re-rendered every run, and only the scan of unchanged files is skipped.',
+      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min). The engine\'s own whole-scan cap (scanOperationTimeout, bundled default 10 min) is raised to 90% of this value on the command line, so the engine cap follows this value (needs compiler 1.1.89+, the pinned default; an older local engine keeps its 10 min cap). A re-run over unchanged local sources skips every file whose checksum already has a unit and finishes in seconds. Pulled sources (GitHub, images, Artifactory) are re-checked remotely each run and downloaded again only when the remote changed; Helm charts are rendered again every run.',
     ),
 };
 
@@ -316,13 +316,11 @@ export function sanitizeName(name: string): string {
 /**
  * Stable per-source cache key. Re-running the SAME compile must land in the
  * SAME output folder, that is what lets the engine's checksum-based unit
- * reuse fire (the old `${name}-${Date.now()}-${pid}` temp dir was unique every
- * run, so reuse never triggered and every compile was a cold scan). Hashes the
- * inputs that determine the symbols: the sources, the runtime name, and the
- * compiler that writes them (`compilerKey`: the image ref in docker mode, the
- * engine version in local mode), so a new compiler never reuses an older
- * compiler's units for unchanged files. Credentials and timeout are excluded,
- * they don't change the produced library.
+ * reuse fire. Hashes the inputs that determine the symbols: the sources, the
+ * runtime name, and the compiler that writes them (`compilerKey`: the image
+ * ref in docker mode, the engine version in local mode), so a new compiler
+ * never reuses an older compiler's units for unchanged files. Credentials and
+ * timeout are excluded, they don't change the produced library.
  *
  * Pure (no I/O) so it is unit-testable.
  */

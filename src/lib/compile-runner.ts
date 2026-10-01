@@ -1493,13 +1493,11 @@ export function compileEnvVars(p: {
  *
  *   - `mergeExistingUnits true` for a link run; no bundled config assigns it.
  *   - `scanOperationTimeout <ms>ms` when `cfg.scanOperationTimeoutMs` is set,
- *     overriding the bundled `scan.operationTimeout: 10m`
- *     (config `pipelines/compile/scanners/advanced/config.yaml`, read by
- *     modules `pipelines/compile/units/scan/settings.yaml` as
- *     `$?scanOperationTimeout=10m`; DurationUtil accepts `ms`). A value after
- *     the app wins from engine 1.1.89 on; an older local engine rejects the
- *     repeat, so with a known older `engineVersion` the option is left out and
- *     the engine's own 10m cap stands.
+ *     overriding the bundled `scan.operationTimeout: 10m` (DurationUtil
+ *     accepts `ms`). A value after the app wins from engine 1.1.89 on; an
+ *     older local engine rejects the repeat, so with a known older
+ *     `engineVersion` the option is left out and the engine's own 10m cap
+ *     stands.
  *
  * Shared by all three invocation sites (docker argv, async local spawn, sync
  * local exec). Pure (no I/O) so it is unit-testable.

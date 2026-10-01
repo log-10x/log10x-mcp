@@ -96,8 +96,7 @@ export function preconditionEnvelope(e: unknown, tool: string): StructuredOutput
 }
 
 export async function launchCompileJob(p: LaunchParams): Promise<string | StructuredOutput> {
-  // One engine per output folder: a run still writing there is joined, not
-  // duplicated.
+  // One engine per output folder: a run still writing there is joined.
   const running = await findRunningJobForOutput(p.cfg.output.folder);
   const record = running ?? (await spawnJob(p));
   if ('schema_version' in record) return record;
@@ -194,7 +193,7 @@ function handoffEnvelope(
     : `${noun} job \`${record.job_id}\` still running after ${waitedS}s over ${p.sources}. Poll log10x_compile_status with this job_id.`;
   const human_summary = immediate
     ? `${joined ? 'Joined' : 'Started'} ${p.kind} job ${record.job_id} via ${record.mode} over ${p.sources}.${joinedClause} It runs detached; call log10x_compile_status({ job_id: "${record.job_id}" }) to watch it and collect the library when it completes.`
-    : `${noun} job ${record.job_id} is still running after ${waitedS}s (it ran past the inline wait).${joinedClause} It finishes on its own and writes to ${record.output_folder} regardless, so the work is not lost: poll log10x_compile_status({ job_id: "${record.job_id}" }) to watch it. Calling ${p.tool} again with the same arguments while it runs joins this job; after it finished, a re-run skips every unchanged local file by checksum, re-checks pulled sources remotely, and re-renders Helm charts.`;
+    : `${noun} job ${record.job_id} is still running after ${waitedS}s (it ran past the inline wait).${joinedClause} It finishes on its own and writes to ${record.output_folder} regardless, so the work is not lost: poll log10x_compile_status({ job_id: "${record.job_id}" }) to watch it. Calling ${p.tool} again with the same arguments while it runs joins this job; once it has finished, a re-run skips every unchanged local file by checksum, re-checks pulled sources remotely, and re-renders Helm charts.`;
   const actions: Action[] = [
     {
       tool: 'log10x_compile_status',

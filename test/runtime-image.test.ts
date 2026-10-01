@@ -71,8 +71,8 @@ test('compile path defaults to the compiler image, pinned by tag and digest', ()
   assert.equal(image, DEFAULT_IMAGE);
 
   // The pin is the point, not the particular version: the same compiler every
-  // run. Bumping the version is expected; a mutable tag is the regression this
-  // guards.
+  // run. Bumping the version is expected; a mutable tag is what this
+  // guards against.
   assert.doesNotMatch(image, /:latest/, 'the default compiler image must not be a mutable tag');
   assert.match(image, /^log10x\/compiler-10x:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
 });

@@ -288,7 +288,7 @@ export interface LossMarker {
 }
 
 /**
- * The engine's own loss markers, verbatim from its source (origin/main):
+ * The engine's own loss markers, verbatim from its source:
  *   - BaseSymbolScanOperation.processOutput:  " scan operation timeout: …"
  *     (the whole-scan cap hit; the scan stopped with files unscanned)
  *   - ScanThreadPoolExecutor.UNIT_TIMEOUT_MARKER:
