@@ -724,7 +724,7 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
  */
 export function forwarderWriteTerraform(): string {
   return `# Forwarder-write IAM for the offload loop. The forwarder PutObjects the
-# routeState=="drop" slice to the Retriever input bucket; the Retriever's own role only
+# routeState=="offload" slice to the Retriever input bucket; the Retriever's own role only
 # READS it, so this is a SEPARATE, additive grant.
 
 variable "bucket" {
@@ -2612,7 +2612,7 @@ export function renderOffloadSection(
   }
 
   lines.push(
-    'Route the slice 10x marks low-value (`routeState == "drop"`) to the customer\'s ' +
+    'Route the slice 10x marks for offload (`routeState == "offload"`) to the customer\'s ' +
       'own S3 before the SIEM bills it; the Retriever indexes that bucket and ' +
       'fetches it back by stamped identity. Nothing is deleted, it is relocated. ' +
       'This is lossless cost reduction, not deletion.',

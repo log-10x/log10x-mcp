@@ -125,7 +125,86 @@ export interface TierDownTargetTier {
   ingest_rate_usd_per_gb: number;
   /** Cheaper storage rate for this tier ($/GB-month). */
   storage_rate_usd_per_gb_month: number;
+  /**
+   * Present when the tier is billed per EVENT rather than per GB (Datadog
+   * Flex). The move is then priced from these list prices by
+   * projectPerEventTierMove, and the per-GB rates above are set equal to the
+   * standard ones so no per-GB consumer can derive a delta from them.
+   */
+  per_event?: PerEventTierPricing;
 }
+
+/**
+ * List prices for a cheaper tier billed per event. Datadog only today: its
+ * log bill is a $0.10/GB ingest meter plus Standard indexing per million
+ * events, and Flex Logs replaces the indexing line with Flex storage per
+ * million events stored per month plus a compute add-on Datadog does not list.
+ *
+ * So a Flex move is stated as three lines and nothing else: the Standard
+ * indexing line avoided, the Flex storage line added, and the compute line,
+ * unpriced and excluded. No per-GB Flex rate, no fraction of the bill, no net
+ * (claims charter: never a Datadog Flex percentage, bare or qualified).
+ */
+export interface PerEventTierPricing {
+  /** The line the move takes off the bill, $ per million events. */
+  standard_index_usd_per_million_events: number;
+  /** The Standard retention that indexing price is quoted at, in days. */
+  standard_index_retention_days: number;
+  /** The line the move adds, $ per million events stored per month. */
+  tier_storage_usd_per_million_events_month: number;
+  /** Months a moved event is held in the tier when the caller states none. ASSUMED. */
+  tier_retention_months: number;
+  /** Bytes per event when the caller has no event count. ASSUMED. */
+  assumed_event_bytes: number;
+  /** The line no list price covers. Rendered with every figure. */
+  unpriced_line: string;
+  /** Where every figure above comes from, with the date it was read. */
+  source: string;
+}
+
+/** One per-event tier move, as the plan states it. */
+export interface PerEventTierMove {
+  tier: string;
+  events_moved: number;
+  gb_moved: number;
+  /** 'measured' when the caller supplied an event size, 'assumed' when not. */
+  events_basis: 'measured' | 'assumed';
+  /** The Standard indexing line the move avoids, at list, $/month. */
+  standard_indexing_avoided_usd: number;
+  /** The tier storage line the move adds, at list, $/month. */
+  tier_storage_added_usd: number;
+  tier_retention_months: number;
+  /** The unpriced line, verbatim. Never a number. */
+  unpriced: string;
+  /** The move in words. Render verbatim. */
+  text: string;
+}
+
+/**
+ * Datadog Log Management list prices, from datadoghq.com/pricing
+ * (product=log-management), read 2026-09-30: "$1.70 Per million log events,
+ * per month" for Standard Indexing at 15-day retention, billed annually
+ * ($2.55 on demand); Flex Storage "Starting At $0.05 Per million events
+ * stored, per month"; Flex Compute sizes listed as "Contact Us". The same
+ * figures were read on 2026-09-08. Flex on scalable compute keeps logs 30 to
+ * 450 days (docs.datadoghq.com/logs/log_configuration/flex_logs/, read
+ * 2026-09-30); the model holds a moved event for the shortest of those, 30
+ * days, unless the caller states a retention.
+ *
+ * assumed_event_bytes is the event size PRICING.md's $2.50/GB derivation
+ * rests on ("1 million events ≈ 1 GB"). It is used only where the caller has
+ * no event count, and the move says so when it is.
+ */
+export const DATADOG_FLEX_LIST_PRICING: PerEventTierPricing = {
+  standard_index_usd_per_million_events: 1.7,
+  standard_index_retention_days: 15,
+  tier_storage_usd_per_million_events_month: 0.05,
+  tier_retention_months: 1,
+  assumed_event_bytes: 1000,
+  unpriced_line:
+    'Flex compute is unpriced (Datadog quotes compute sizes on request) and is excluded from both figures',
+  source: 'Datadog list prices, datadoghq.com/pricing, read 2026-09-30',
+};
 
 /**
  * A destination whose bill is COMPUTE, not bytes accepted or bytes stored.
@@ -392,6 +471,12 @@ export interface SavingsProjection {
    * ASSUMED. Renderers must carry the word "modeled" wherever they print these.
    */
   modeled?: boolean;
+  /**
+   * tier_down onto a per-event tier (Datadog Flex) only: the move as three
+   * stated lines. Renderers print its `text` and never derive a percentage or
+   * a net from the dollars beside it.
+   */
+  per_event_move?: PerEventTierMove;
   notes?: string[];
 }
 
@@ -518,17 +603,23 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
-    // Datadog Flex Logs — the cheaper, still-searchable tier tier_down routes to.
-    // Without this, tier_down had no cheaper tier to price against and returned
-    // $0 saving on Datadog, the destination whose whole tier_down story IS Flex.
-    // $1.00/GB is standard $2.50 × 0.40, i.e. the canonical conservative
-    // tier_down cost-delta of 0.60 (poc-envelope-v2 reducibility coefficients).
-    // Datadog bills on ingest, not separate storage, so the delta is all ingest.
+    // Datadog Flex Logs: the default tier_down route, because the moved
+    // events stay searchable in Datadog (Log Explorer, "Include Flex Logs").
+    // Flex is billed per event, so the move is priced from per_event and
+    // stated as the Standard indexing line avoided, the Flex storage line
+    // added, and Flex compute unpriced and excluded (projectPerEventTierMove).
+    // This tier used to carry $1.00/GB, which was $2.50 x 0.40: a modeled
+    // 0.6 fraction of the bill, i.e. the Flex percentage the claims charter
+    // bars. The per-GB rates below now equal the Standard ones, so any
+    // per-GB consumer computes a zero delta instead of that fraction.
     tier_down_target_tier: {
       name: 'Datadog Flex Logs',
-      ingest_rate_usd_per_gb: 1.0,
+      ingest_rate_usd_per_gb: DEFAULT_ANALYZER_COST_PER_GB.datadog,
       storage_rate_usd_per_gb_month: 0.0,
+      per_event: DATADOG_FLEX_LIST_PRICING,
     },
+    tier_down_requires:
+      'Flex Logs enabled on the Datadog account, and a Flex index whose filter keys on @routeState:tier_down',
   },
   elasticsearch: {
     destination: 'elasticsearch',
@@ -1363,12 +1454,132 @@ export function resolveTierDownTier(
 /**
  * tier_down's saving as a fraction of the standard ingest rate: the
  * destination's list-price delta to its cheaper tier (CloudWatch IA 0.5,
- * Datadog Flex 0.6, Azure Basic 0.78). 0 where no cheaper tier is priced.
+ * Azure Basic 0.78). 0 where no cheaper tier is priced, and 0 on a tier
+ * billed per event (Datadog Flex): that move has no per-GB fraction, and its
+ * dollars come from projectPerEventTierMove. Callers that need to know
+ * whether tier_down is priced at all ask perEventTierPricing() first.
  */
 export function tierDownRateDelta(model: DestinationCostModel, planSelector?: string | null): number {
   const tier = resolveTierDownTier(model, planSelector);
-  if (!tier || model.ingest_per_gb <= 0) return 0;
+  if (!tier || tier.per_event || model.ingest_per_gb <= 0) return 0;
   return Math.max(0, (model.ingest_per_gb - tier.ingest_rate_usd_per_gb) / model.ingest_per_gb);
+}
+
+/** The destination's per-event tier pricing, when its tier_down is billed per event (Datadog Flex). */
+export function perEventTierPricing(
+  destinationOrModel: string | DestinationCostModel,
+): PerEventTierPricing | undefined {
+  let model: DestinationCostModel;
+  if (typeof destinationOrModel === 'string') {
+    try {
+      model = getDestinationCostModel(destinationOrModel as SiemId);
+    } catch {
+      return undefined;
+    }
+  } else {
+    model = destinationOrModel;
+  }
+  return model.tier_down_target_tier?.per_event;
+}
+
+const fmtListUsd = (v: number): string =>
+  v >= 100
+    ? '$' + Math.round(v).toLocaleString('en-US')
+    : '$' + Number(v.toFixed(2)).toString();
+
+/** A list price as the price sheet prints it: "$1.70", "$0.05". */
+export const fmtListRate = (v: number): string => '$' + v.toFixed(2);
+
+/** "1.2 billion", "840.5 million", "12,000". */
+export function fmtEventCount(n: number): string {
+  if (n >= 1e9) return `${Number((n / 1e9).toFixed(2))} billion`;
+  if (n >= 1e6) return `${Number((n / 1e6).toFixed(1))} million`;
+  return Math.round(n).toLocaleString('en-US');
+}
+
+function fmtRetention(months: number): string {
+  if (months === 1) return '30 days';
+  return Number.isInteger(months) ? `${months} months` : `${Math.round(months * 30)} days`;
+}
+
+/**
+ * Price one per-event tier move (Datadog Flex) at list: the events moved out
+ * of the Standard index, the Standard indexing line that avoids, and the tier
+ * storage line it adds. The compute line is unpriced and is named, never
+ * counted. There is deliberately no net and no percentage here: with compute
+ * unpriced, neither can be stated, and a reader who knows Flex pricing could
+ * take either apart.
+ *
+ * Events come from the caller's measured event size when it supplies one, and
+ * from the pricing's ASSUMED event size otherwise; the text says which.
+ */
+export function projectPerEventTierMove(
+  pricing: PerEventTierPricing,
+  bytes: number,
+  opts: { avgEventBytes?: number; retentionMonths?: number; tierName?: string } = {},
+): PerEventTierMove {
+  const measured = opts.avgEventBytes != null && opts.avgEventBytes > 0;
+  const eventBytes = measured ? opts.avgEventBytes! : pricing.assumed_event_bytes;
+  const events = bytes > 0 ? bytes / eventBytes : 0;
+  const months =
+    opts.retentionMonths != null && opts.retentionMonths > 0
+      ? opts.retentionMonths
+      : pricing.tier_retention_months;
+  const avoided = (events / 1e6) * pricing.standard_index_usd_per_million_events;
+  const added = (events / 1e6) * pricing.tier_storage_usd_per_million_events_month * months;
+  const tier = opts.tierName ?? 'Datadog Flex Logs';
+  const gb = bytes / GB;
+  const text =
+    `Moves ${fmtEventCount(events)} events (${Number(gb.toFixed(1))} GB) a month out of the Standard index into ${tier}. ` +
+    `Standard indexing avoided: ${fmtListUsd(avoided)}/mo at ${fmtListRate(pricing.standard_index_usd_per_million_events)} per million events ` +
+    `(${pricing.standard_index_retention_days}-day retention). ` +
+    `Flex storage added: ${fmtListUsd(added)}/mo at ${fmtListRate(pricing.tier_storage_usd_per_million_events_month)} per million events stored per month, ` +
+    `held ${fmtRetention(months)}. ` +
+    `${pricing.unpriced_line}. ${pricing.source}.` +
+    (measured
+      ? ''
+      : ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event, since this path has no event count.`);
+  return {
+    tier,
+    events_moved: events,
+    gb_moved: gb,
+    events_basis: measured ? 'measured' : 'assumed',
+    standard_indexing_avoided_usd: avoided,
+    tier_storage_added_usd: added,
+    tier_retention_months: months,
+    unpriced: pricing.unpriced_line,
+    text,
+  };
+}
+
+/**
+ * Sum per-event moves into one, for a plan-level statement. The text is
+ * rebuilt from the summed figures, so it reads the same as a single move.
+ */
+export function sumPerEventTierMoves(
+  pricing: PerEventTierPricing,
+  moves: PerEventTierMove[],
+): PerEventTierMove | undefined {
+  if (moves.length === 0) return undefined;
+  const events = moves.reduce((s, m) => s + m.events_moved, 0);
+  const bytes = moves.reduce((s, m) => s + m.gb_moved, 0) * GB;
+  const allMeasured = moves.every((m) => m.events_basis === 'measured');
+  const months = moves[0].tier_retention_months;
+  // Re-derive through the one function so the wording cannot drift. The
+  // average event size reproduces the summed event count exactly.
+  const merged = projectPerEventTierMove(pricing, bytes, {
+    avgEventBytes: events > 0 ? bytes / events : undefined,
+    retentionMonths: months,
+    tierName: moves[0].tier,
+  });
+  if (allMeasured) return merged;
+  return {
+    ...merged,
+    events_basis: 'assumed',
+    text:
+      merged.text +
+      ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event where the path had no event count.`,
+  };
 }
 
 function projectActionWithRatio(
@@ -1408,7 +1619,10 @@ function projectActionWithRatio(
       // still set to bytes_in so the byte-reduction fields reflect 0 — the
       // savings are entirely in the rate axis, not the byte axis.
       bytes_out = args.bytes_in;
-      if (selectedTierDownTier) {
+      if (selectedTierDownTier?.per_event) {
+        // Per-event tier (Datadog Flex): the move's own statement, priced
+        // below. No per-GB rate exists to quote.
+      } else if (selectedTierDownTier) {
         notes.push(
           `tier_down: assumes ${selectedTierDownTier.name} ($${selectedTierDownTier.ingest_rate_usd_per_gb}/GB ingest + $${selectedTierDownTier.storage_rate_usd_per_gb_month}/GB-mo storage); destination-side routing rule must be configured to realize.`
         );
@@ -1540,6 +1754,28 @@ function projectActionWithRatio(
     storageSource = 'unset';
   }
 
+  // Per-event tier (Datadog Flex): the per-GB axes above priced the events at
+  // the Standard rate (the tier's per-GB rates equal the Standard ones by
+  // construction). Take the Standard indexing line off and put the Flex
+  // storage line on, both at list, so baseline minus total is exactly
+  // "indexing avoided less storage added". Compute stays out, unpriced, and
+  // the move's text says so.
+  let per_event_move: PerEventTierMove | undefined;
+  if (isTierDown && tierTarget?.per_event) {
+    per_event_move = projectPerEventTierMove(tierTarget.per_event, args.bytes_in, {
+      avgEventBytes: args.avg_event_size_bytes,
+      retentionMonths: args.retention_months,
+      tierName: tierTarget.name,
+    });
+    if (ingest_dollars != null) {
+      ingest_dollars = Math.max(0, ingest_dollars - per_event_move.standard_indexing_avoided_usd);
+    }
+    if (storage_dollars != null) {
+      storage_dollars += per_event_move.tier_storage_added_usd;
+    }
+    notes.push(per_event_move.text);
+  }
+
   // offload: net the customer's residual object-store cost. The bytes left the
   // SIEM (bytes_out=0 -> ingest+storage = 0 above) but the customer still pays
   // to store them in their own bucket. Netting here makes downstream savings =
@@ -1649,6 +1885,7 @@ function projectActionWithRatio(
     rate_source: { ingest: ingestSource, storage: storageSource },
     ...(compute_saving ? { compute_saving } : {}),
     ...(model.compute ? { modeled: true as const } : {}),
+    ...(per_event_move ? { per_event_move } : {}),
     notes: notes.length ? notes : undefined,
   };
 }

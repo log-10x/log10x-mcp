@@ -65,9 +65,10 @@ test('auto path never emits a destination-illegal action on any of the 8 destina
 
 // ─── 2. datadog auto: tier_down, now that Flex is priced ─────────────
 // (This test previously asserted offload BECAUSE Flex was unpriced — that was
-// the bug, confirmed 2026-08-19: Datadog's whole tier_down story is Flex Logs,
-// and cost.ts now carries its $1.00/GB rate. tier_down keeps the events in
-// Datadog, queryable; offload is the fallback rung of the ladder.)
+// the bug, confirmed 2026-08-19: Datadog's whole tier_down story is Flex Logs.
+// Since 2026-09-30 Flex is priced per event at Datadog list, never as a per-GB
+// rate. tier_down keeps the events in Datadog, searchable; offload is the
+// fallback rung of the ladder.)
 
 test('datadog auto-recommends tier_down (Flex Logs is priced)', () => {
   const { decision } = resolve('datadog');

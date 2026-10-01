@@ -225,16 +225,22 @@ test('destination level-1 action shifts the feasibility math', () => {
     targetPercentReduction: 50,
   });
 
-  // Datadog's level-1 is tier_down (coefficient 0.6); ClickHouse's is
-  // offload (coefficient 1.0), because compact is a no-op on its billed
-  // measure. On the same pattern set, ClickHouse should yield a larger
-  // achievable percent than Datadog.
-  assert.ok(
-    chEnvelope.output.feasibility!.max_achievable_percent >
-      ddEnvelope.output.feasibility!.max_achievable_percent,
-    `ClickHouse achievable (${chEnvelope.output.feasibility!.max_achievable_percent}) ` +
-      `should exceed Datadog (${ddEnvelope.output.feasibility!.max_achievable_percent}) ` +
-      'because offload (1.0) > tier_down (0.6) coefficient',
+  // Datadog's level-1 is tier_down to Flex, whose compute add-on is unpriced,
+  // so no share of the Datadog bill is stated for it: the verdict counts the
+  // VOLUME moved out of the Standard index, and Flex takes a row's whole
+  // volume, as offload does on ClickHouse. (This used to assert Datadog below
+  // ClickHouse on a modeled 0.6 Flex coefficient, the barred Flex percentage.)
+  assert.equal(ddEnvelope.output.feasibility!.percent_basis, 'standard_index_volume');
+  assert.equal(chEnvelope.output.feasibility!.percent_basis, 'bill');
+  assert.equal(
+    ddEnvelope.output.feasibility!.max_achievable_percent,
+    chEnvelope.output.feasibility!.max_achievable_percent,
+  );
+  assert.match(ddEnvelope.output.feasibility!.reason, /of the volume out of the Datadog Standard index/);
+  assert.match(ddEnvelope.output.feasibility!.reason, /not of the bill/);
+  assert.match(
+    ddEnvelope.output.commitment_artifact!.markdown,
+    /Projected max achievable: \*\*[\d.]+%\*\* of the volume out of the Datadog Standard index/,
   );
 
   // Reason strings should mention the level-1 action.
