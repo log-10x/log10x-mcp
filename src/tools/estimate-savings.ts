@@ -24,9 +24,10 @@
  *   We query `all_events_summaryBytes_total` segmented by the engine's
  *   `routeState` label (TenXSummary emits it on the
  *   receive aggregator):
- *     - baseline_bytes      : sum over baseline (routeState!="drop" only)
- *     - post_passed_bytes   : sum over post (routeState!="drop" only)
- *     - post_dropped_bytes  : sum over post (routeState="drop")
+ *     - baseline_bytes      : sum over baseline (routeState=~"pass|", the kept set)
+ *     - post_passed_bytes   : sum over post (the kept set)
+ *     - post_dropped_bytes  : sum over post (routeState in the acted-on set:
+ *                             offload | compact | tier_down | drop | sample)
  *   `delivered_pct = 1 - (post_passed_bytes / scale(baseline_bytes,...))`
  *   and we attribute the gap to four buckets:
  *     - cap_fired   : bytes the engine dropped for patterns that
@@ -635,7 +636,7 @@ export interface VerifyResult {
   per_action_breakdown?: ActionBytesBuckets;
   /**
    * Per-pattern attribution rows. One row per pattern_hash with
-   * non-zero routeState="drop" bytes in the post window. Action is
+   * non-zero acted-on bytes (any routeState but pass) in the post window. Action is
    * sourced from the cap-CSV via `buildPatternActionLookup`; rows
    * with no cap-CSV match are emitted with `action: 'drop'` and
    * `action_source: 'unattributed'` so the offload clamp + caveat

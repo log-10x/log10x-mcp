@@ -1,12 +1,21 @@
 /**
  * Shared offload-status lookup helper.
  *
- * The receiver stamps `routeState="drop"` on every event it routes to the
- * customer-owned offload bucket (per `project_offload_loop_handoff.md`).
- * That stamp is visible on the metric surface
- * (`all_events_summaryBytes_total{routeState="drop"}`) — so any tool that
+ * The receiver stamps each over-cap event with its service's action from
+ * actions.csv (`this.route(action)` in the cap variants of the rate
+ * regulator), so `routeState="offload"` is the slice every forwarder recipe
+ * ships to the customer-owned bucket, and the one the Retriever can fetch.
+ * `routeState="drop"` is a different slice: the mute file and the no-action
+ * default stamp it, and every recipe sends it to a null sink, so it is gone.
+ * The stamp is visible on the metric surface
+ * (`all_events_summaryBytes_total{routeState="offload"}`), so any tool that
  * has resolved a `pattern_hash` can ask "is this pattern currently being
  * offloaded?" with a single PromQL instant query.
+ *
+ * This read `routeState="drop"` until 2026-10-01, from before the engine
+ * stamped actions by name. That missed every real offload and called hard
+ * drops offloaded, which reached commitment_report as hard drops booked in
+ * the keep-everything offload bucket.
  *
  * This module is the one canonical place that question gets asked.
  * `retriever_query`, `event_lookup`, and `investigate` each call into
@@ -60,18 +69,23 @@ const DEFAULT_TIMEOUT_MS = 2000;
  */
 export interface OffloadStatus {
   /**
-   * True when the drop/offload cohort (`routeState="drop"`) has bytes in the
-   * window. NOTE: today `routeState="drop"` does NOT distinguish
-   * offload-to-S3 (fetchable via retriever_query) from hard-drop (gone,
-   * never offloaded). So `is_offloaded` means "in the engine's drop/offload
-   * cohort", NOT "confirmed offloaded/fetchable". Consumers must not promise
-   * fetchability from this alone — a true distinction needs the dedicated
-   * `routeState="offload"` setter (D1b). Until then, gate fetch-back claims
-   * on a found result / retriever-configured, not on this flag.
+   * True when the offload cohort (`routeState="offload"`) has bytes in the
+   * window: the receiver is routing this pattern to the customer's bucket.
+   * Whether the events can be fetched back still depends on the forwarder
+   * recipe being applied and the Retriever indexing that bucket, so a
+   * consumer offers the fetch and reads a zero result as "bucket not wired
+   * or not indexed yet", never as "hard-dropped".
    */
   is_offloaded: boolean;
+  /**
+   * Bytes in the OFFLOAD cohort over the window. The `dropped_*` names are
+   * kept for compatibility with existing envelopes; they count offload, not
+   * the hard-drop slice.
+   */
   dropped_bytes_in_window: number | null;
+  /** Offload cohort as a share of the pattern's bytes in the window. */
   dropped_share_pct: number | null;
+  /** Everything else this pattern emitted (`routeState!="offload"`, absence-tolerant). */
   kept_bytes_in_window: number | null;
   sample_count: number;
   /** Unix-ms of the latest dropped sample bucket; null when no dropped series exists. */
@@ -174,8 +188,10 @@ export async function getOffloadStatus(
   // emitted individually — same definitions, just inlined to keep the
   // two queries side-by-side and easy to read.
   void droppedFilter;
-  const keptDropFilter = `${'routeState'}!="drop"`;
-  const droppedDropFilter = `${'routeState'}="drop"`;
+  // The offload cohort against everything else. `!=` is absence-tolerant,
+  // so series predating the routeState label land on the rest side.
+  const keptDropFilter = `${'routeState'}!="offload"`;
+  const droppedDropFilter = `${'routeState'}="offload"`;
 
   const hashSel = `${labels.hash}="${escapeLabel(hash)}"`;
   const envSel = `${labels.env}="${escapeLabel(metricsEnv)}"`;
@@ -294,8 +310,8 @@ export async function getOffloadStatusBatch(
   const hashesRe = [...wanted].map((h) => escapeLabel(h).replace(/[.\\+*?()|[\]{}^$]/g, '\\$&')).join('|');
   const hashSel = `${labels.hash}=~"${hashesRe}"`;
   const envSel = `${labels.env}="${escapeLabel(metricsEnv)}"`;
-  const keptDropFilter = `routeState!="drop"`;
-  const droppedDropFilter = `routeState="drop"`;
+  const keptDropFilter = `routeState!="offload"`;
+  const droppedDropFilter = `routeState="offload"`;
 
   const keptQ = `sum by (${labels.hash}) (increase(${BYTES_METRIC}{${hashSel},${envSel},${keptDropFilter}}[${range}]))`;
   const droppedQ = `sum by (${labels.hash}) (increase(${BYTES_METRIC}{${hashSel},${envSel},${droppedDropFilter}}[${range}]))`;
