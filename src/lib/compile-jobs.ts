@@ -32,7 +32,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -57,6 +57,8 @@ export interface CompileJobRecord {
   mode: 'docker' | 'local';
   /** Docker image (docker mode), for the status header. */
   image?: string;
+  /** Compiler identity key (image ref / local engine version) the output folder was keyed on. */
+  compiler?: string;
   /** Container name, the docker-mode liveness + exit-code + log key. */
   container_name?: string;
   /** Child pid, the local-mode liveness key. */
@@ -118,6 +120,51 @@ export async function readJobRecord(jobId: string): Promise<CompileJobRecord | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Find an in-flight job writing to `outputFolder`: a record with no `ended_at`
+ * whose container / pid still probes as running. Lets a second call over the
+ * same sources join the running job instead of spawning a second engine into
+ * the same output folder. `root` and `probe` are injectable for tests.
+ */
+export async function findRunningJobForOutput(
+  outputFolder: string,
+  opts: {
+    root?: string;
+    probe?: (record: CompileJobRecord) => Promise<LivenessResult>;
+  } = {},
+): Promise<CompileJobRecord | null> {
+  const root = opts.root ?? JOBS_ROOT;
+  const probe = opts.probe ?? probeJobLiveness;
+  let ids: string[];
+  try {
+    ids = await readdir(root);
+  } catch {
+    return null;
+  }
+  let newest: CompileJobRecord | null = null;
+  for (const id of ids) {
+    let record: CompileJobRecord;
+    try {
+      record = JSON.parse(await readFile(join(root, id, 'job.json'), 'utf8')) as CompileJobRecord;
+    } catch {
+      continue;
+    }
+    if (record.output_folder !== outputFolder || record.ended_at !== undefined) continue;
+    if ((await probe(record)).state !== 'running') continue;
+    if (!newest || record.started_at > newest.started_at) newest = record;
+  }
+  return newest;
+}
+
+/** Liveness of a record's engine: the container in docker mode, the pid locally. */
+export async function probeJobLiveness(record: CompileJobRecord): Promise<LivenessResult> {
+  if (record.mode === 'docker' && record.container_name) {
+    return probeDockerContainer(record.container_name);
+  }
+  if (record.pid !== undefined) return probeLocalPid(record.pid);
+  return { state: 'gone', exitCode: null };
 }
 
 /** Terminal vs in-flight state of the underlying engine process. */
@@ -222,6 +269,64 @@ export function redactSecrets(text: string): string {
     )
     // Authorization values are multi-token (`Bearer <jwt>`), so mask to EOL.
     .replace(/\b(Authorization\s*:\s*).*/gi, '$1***');
+}
+
+// ── Loss markers ─────────────────────────────────────────────────────────────
+
+/** One kind of engine-side loss found in the captured log. */
+export interface LossMarker {
+  kind:
+    | 'scan_operation_timeout'
+    | 'unit_timeout'
+    | 'traverse_aborted'
+    | 'process_output_not_drained'
+    | 'antlr_parse_timeout';
+  /** How many log lines carried the marker. */
+  count: number;
+  /** The first matching line, redacted and trimmed. */
+  sample: string;
+}
+
+/**
+ * The engine's own loss markers, verbatim from its source (origin/main):
+ *   - BaseSymbolScanOperation.processOutput:  " scan operation timeout: …"
+ *     (the whole-scan cap hit; the scan stopped with files unscanned)
+ *   - ScanThreadPoolExecutor.UNIT_TIMEOUT_MARKER:
+ *     "symbol scan timed out, file dropped:" (per-file cap; no unit)
+ *   - BaseSymbolScanOperation: " traverse aborted for …" and
+ *     "traverser aborted: …" (the tree walk stopped early)
+ *   - ProcessRunner.OUTPUT_NOT_DRAINED_MARKER:
+ *     "process output not fully read:" (a scan subprocess's output was
+ *     abandoned, its units may be missing)
+ *   - SymbolScanTimeoutStopWatch: "timeout exceeded: <n>ms"
+ *     (an ANTLR parse gave up; the file failed to scan)
+ */
+const LOSS_MARKERS: ReadonlyArray<{ kind: LossMarker['kind']; re: RegExp }> = [
+  { kind: 'scan_operation_timeout', re: /\bscan operation timeout:/ },
+  { kind: 'unit_timeout', re: /\bsymbol scan timed out, file dropped:/ },
+  { kind: 'traverse_aborted', re: /\btraverser? aborted\b/ },
+  { kind: 'process_output_not_drained', re: /\bprocess output not fully read:/ },
+  { kind: 'antlr_parse_timeout', re: /\btimeout exceeded: \d+ms/ },
+];
+
+/**
+ * Scan a captured engine log for the loss markers above. A clean exit with any
+ * of these present means the library is missing symbols the sources hold, so
+ * `compile_status` reports the run as `incomplete` rather than `completed`.
+ *
+ * Pure (no I/O) so it is unit-testable.
+ */
+export function detectLossMarkers(logText: string): LossMarker[] {
+  const found = new Map<LossMarker['kind'], LossMarker>();
+  for (const line of logText.split('\n')) {
+    for (const { kind, re } of LOSS_MARKERS) {
+      if (!re.test(line)) continue;
+      const cur = found.get(kind);
+      if (cur) cur.count++;
+      else found.set(kind, { kind, count: 1, sample: line.trim().slice(0, 300) });
+    }
+  }
+  return [...found.values()];
 }
 
 // ── printResults parsing ────────────────────────────────────────────────────

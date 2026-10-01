@@ -4,26 +4,29 @@
  * it is not.
  *
  * This is the primary, agent-facing compiler entry point. It validates the
- * sources, spawns the compiler-flavor Compiler app, and waits up to `max_wait_ms`
- * (default 45s) for completion: a small compile, and EVERY re-run (which reuses
- * prior units via the pinned output folder), finishes in that window and the
- * tool returns the finished library plus the full scan/link diagnostics in one
- * call. A long first compile of a large tree overruns the wait and returns a
- * running job_id, the run still finishes on its own and writes to the pinned
- * output, so it is collected by polling log10x_compile_status or by simply
- * calling this tool again later. `max_wait_ms: 0` returns the job_id
- * immediately (fire-and-forget).
+ * sources, resolves the compiler (image ref / local engine version, part of
+ * the output-folder key), spawns the compiler-flavor Compiler app, and waits
+ * up to `max_wait_ms` (default 45s) for completion: a small compile, and a
+ * re-run over unchanged local sources (the engine skips every file whose
+ * checksum already has a unit in the pinned output folder), finishes in that
+ * window and the tool returns the finished library plus the full scan/link
+ * diagnostics in one call. A long first compile overruns the wait and returns
+ * a running job_id; the run finishes on its own and writes to the pinned
+ * output, so it is collected by polling log10x_compile_status. Calling this
+ * tool again with the same arguments while the job runs joins that job rather
+ * than spawning a second engine into the same folder. `max_wait_ms: 0`
+ * returns the job_id immediately (fire-and-forget).
  *
- * Validation, the source set, credentials, output pinning, and the compiler-flavor
- * gate are shared with compile.ts (`prepareCompile`); the launch + wait is
- * shared with log10x_compile_link via compile-launch.ts.
+ * Validation, the source set, credentials, and output pinning are shared with
+ * compile.ts (`prepareCompile`); the launch + wait is shared with
+ * log10x_compile_link via compile-launch.ts.
  */
 
 import { z } from 'zod';
 import { type StructuredOutput } from '../lib/output-types.js';
-import { type CompileConfig } from '../lib/compile-runner.js';
+import { type CompileConfig, resolveCompilerIdentity } from '../lib/compile-runner.js';
 import { compileSchema, prepareCompile, describeSources, type CompileArgs } from './compile.js';
-import { launchCompileJob } from './compile-launch.js';
+import { launchCompileJob, preconditionEnvelope } from './compile-launch.js';
 
 const TOOL = 'log10x_compile';
 
@@ -37,7 +40,7 @@ export const compileToolSchema = {
     .max(300_000)
     .default(45_000)
     .describe(
-      'How long to wait inline (ms) for the compile to finish before handing back a job_id to poll. Default 45,000 (45s): small compiles and re-runs (which reuse prior units) finish inside this and return the library + diagnostics in ONE call. A long first compile of a large tree returns a running job_id you poll with log10x_compile_status, or just call this tool again later, since the output is pinned and a finished run is collected near-instantly. 0 = fire-and-forget (return the job_id immediately).',
+      'How long to wait inline (ms) for the compile to finish before handing back a job_id to poll. Default 45,000 (45s): small compiles, and re-runs over unchanged local sources (the engine skips files whose checksum already has a unit), finish inside this and return the library + diagnostics in ONE call. A long first compile returns a running job_id to poll with log10x_compile_status; calling this tool again with the same arguments joins the running job instead of starting a second one. Re-runs that pull remote sources are not instant: GitHub, images and Artifactory are re-checked remotely each run and Helm charts re-rendered. 0 = fire-and-forget (return the job_id immediately).',
     ),
 };
 
@@ -70,7 +73,16 @@ function sourceWindow(args: CompileArgs): string {
 }
 
 export async function executeCompile(args: CompileToolArgs): Promise<string | StructuredOutput> {
-  const prep = await prepareCompile(args);
+  // The compiler is resolved first because the output folder is keyed on it.
+  let identity;
+  try {
+    identity = await resolveCompilerIdentity(args.mode);
+  } catch (e) {
+    const env = preconditionEnvelope(e, TOOL);
+    if (env) return env;
+    throw e;
+  }
+  const prep = await prepareCompile(args, identity.key);
   if (isErrorEnvelope(prep)) {
     return prep;
   }
@@ -82,6 +94,7 @@ export async function executeCompile(args: CompileToolArgs): Promise<string | St
     sources: describeSources(args),
     runtimeName: cfg.output.runtimeName,
     mode: args.mode,
+    identity,
     maxWaitMs: args.max_wait_ms,
     tool: TOOL,
     scopeWindow: sourceWindow(args),

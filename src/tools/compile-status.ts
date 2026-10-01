@@ -16,6 +16,13 @@
  * buried in a multi-hundred-thousand-line log. Those diagnostics appear once
  * the compiler-10x image carries the engine `scanHealth` / `linkReport`
  * change; on an older image the tool degrades to unit counts + a log tail.
+ *
+ * A clean exit is not proof of a complete library: the engine stops a scan
+ * early on its own caps (whole-scan `scanOperationTimeout`, per-file
+ * `scanUnitTimeout`, ANTLR parse timeout, an abandoned subprocess) and still
+ * exits 0. The captured log is checked for those markers
+ * (`detectLossMarkers`) and such a run is reported as `incomplete`, with the
+ * markers in `data.payload.loss_markers`.
  */
 
 import { z } from 'zod';
@@ -35,6 +42,8 @@ import {
   readJobLog,
   tailLines,
   parseCompileResults,
+  detectLossMarkers,
+  type LossMarker,
   type CompileJobRecord,
   type CompileResultsDoc,
   type ScanHealth,
@@ -62,13 +71,13 @@ export const compileStatusSchema = {
     .max(400)
     .default(40)
     .describe(
-      'How many trailing engine-log lines to include in data.payload.log_tail (credential-redacted). 0 to omit. Raise it when diagnosing a failed run.',
+      'How many trailing engine-log lines to include in data.payload.log_tail (credential-redacted). 0 to omit. Raise it when diagnosing a failed or incomplete run.',
     ),
   view: z
     .literal('summary')
     .default('summary')
     .optional()
-    .describe('summary returns the typed envelope (data.payload.job_status, .diagnostics, .output, .log_tail).'),
+    .describe('summary returns the typed envelope (data.payload.job_status, .loss_markers, .diagnostics, .output, .log_tail).'),
 };
 
 interface CompileStatusArgs {
@@ -77,7 +86,12 @@ interface CompileStatusArgs {
   view?: 'summary';
 }
 
-type JobStatus = 'running' | 'completed' | 'failed' | 'timed_out';
+/**
+ * `incomplete`: the engine exited cleanly but its log carries a loss marker
+ * (a scan cap hit, a file dropped, a tree walk aborted, a subprocess's output
+ * abandoned), so the library is missing symbols the sources hold.
+ */
+type JobStatus = 'running' | 'completed' | 'incomplete' | 'failed' | 'timed_out';
 
 function humanByteSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -234,6 +248,7 @@ export async function executeCompileStatus(
   const tail = args.log_lines > 0 ? tailLines(logText, args.log_lines) : [];
   const results = parseCompileResults(logText);
   const diagnostics = buildDiagnostics(results);
+  const lossMarkers = detectLossMarkers(logText);
 
   const producedSymbols = scanned.unitCount > 0 || scanned.libraries.some((l) => l.bytes > 0);
   const elapsedMs = (record.ended_at ?? Date.now()) - record.started_at;
@@ -253,7 +268,10 @@ export async function executeCompileStatus(
     // any symbols were produced.
     const ok =
       record.mode === 'docker' ? exitCode === 0 : (results?.success ?? producedSymbols);
-    if (ok && producedSymbols) {
+    if (ok && lossMarkers.length > 0) {
+      jobStatus = 'incomplete';
+      chassisStatus = 'partial';
+    } else if (ok && producedSymbols) {
       jobStatus = 'completed';
       chassisStatus = 'success';
     } else if (ok && !producedSymbols) {
@@ -268,8 +286,17 @@ export async function executeCompileStatus(
     }
   }
 
-  const headline = buildHeadline(record, jobStatus, scanned, library, elapsedMs, diagnostics);
-  const human_summary = buildHumanSummary(record, jobStatus, scanned, library, elapsedMs, diagnostics, exitCode);
+  const headline = buildHeadline(record, jobStatus, scanned, library, elapsedMs, diagnostics, lossMarkers);
+  const human_summary = buildHumanSummary(
+    record,
+    jobStatus,
+    scanned,
+    library,
+    elapsedMs,
+    diagnostics,
+    exitCode,
+    lossMarkers,
+  );
 
   const actions: Action[] = [];
   if (jobStatus === 'running') {
@@ -283,6 +310,13 @@ export async function executeCompileStatus(
       tool: 'log10x_validate',
       args: { extra_args: [['symbolPaths', record.output_folder]] },
       reason: 'smoke-test the compiled library against a few sample event lines (supply input_lines)',
+    });
+  } else if (jobStatus === 'incomplete') {
+    actions.push({
+      tool: record.kind === 'link' ? 'log10x_compile_link' : 'log10x_compile',
+      args: { timeout_ms: Math.min(3_600_000, record.timeout_ms * 2) },
+      reason:
+        'the engine stopped early (see data.payload.loss_markers); re-run with the same sources and a larger timeout_ms, or narrow the sources. Files already scanned are reused by checksum',
     });
   }
 
@@ -304,9 +338,11 @@ export async function executeCompileStatus(
       job_status: jobStatus,
       mode: record.mode,
       image: record.image ?? null,
+      compiler: record.compiler ?? null,
       exit_code: exitCode,
       elapsed_ms: elapsedMs,
       timed_out: timedOut,
+      loss_markers: lossMarkers,
       sources: record.sources,
       output: {
         folder: record.output_folder,
@@ -329,6 +365,7 @@ function buildHeadline(
   library: { path: string; bytes: number } | undefined,
   elapsedMs: number,
   diagnostics: ReturnType<typeof buildDiagnostics>,
+  lossMarkers: LossMarker[],
 ): string {
   const failed = diagnostics.scan_health?.files_failed ?? 0;
   const failedClause = failed > 0 ? `, ${failed} file${failed === 1 ? '' : 's'} failed to scan` : '';
@@ -342,6 +379,8 @@ function buildHeadline(
         ? `${noun} job \`${record.job_id}\` done: ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} → ${lib}${failedClause}.`
         : `${noun} job \`${record.job_id}\` ran cleanly but produced no symbols from ${record.sources}.`;
     }
+    case 'incomplete':
+      return `${noun} job \`${record.job_id}\` exited cleanly but stopped early (${lossSummary(lossMarkers)}): ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} written${failedClause}. The library is missing symbols; see data.payload.loss_markers.`;
     case 'timed_out':
       return `${noun} job \`${record.job_id}\` timed out after ${humanDuration(elapsedMs)} (${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'} written). Raise timeout_ms or narrow the sources.`;
     case 'failed':
@@ -357,6 +396,7 @@ function buildHumanSummary(
   elapsedMs: number,
   diagnostics: ReturnType<typeof buildDiagnostics>,
   exitCode: number | null,
+  lossMarkers: LossMarker[],
 ): string {
   const noun = record.kind === 'link' ? 'Link' : 'Compile';
   if (jobStatus === 'running') {
@@ -364,7 +404,7 @@ function buildHumanSummary(
     const pace =
       record.kind === 'link'
         ? 'Linking is fast. Poll again shortly.'
-        : 'First compiles of a large tree take 10–30 min.';
+        : 'A first compile of a large tree can take tens of minutes.';
     return diagnostics.results_available
       ? `${base} ${scanFailureSentence(diagnostics)} Poll log10x_compile_status again for the final library and link report.`
       : `${base} The engine has not printed its results block yet. Poll again. ${pace}`;
@@ -375,7 +415,11 @@ function buildHumanSummary(
     parts.push(
       scanned.unitCount > 0
         ? `${noun} job ${record.job_id} completed via ${record.mode} in ${humanDuration(elapsedMs)}: ${scanned.unitCount} symbol unit${scanned.unitCount === 1 ? '' : 's'}${library ? `, linked to ${library.path} (${humanByteSize(library.bytes)})` : ', no library file'}.`
-        : `${noun} job ${record.job_id} ran to completion via ${record.mode} but found no symbols in ${record.sources}. Confirm the sources hold supported source/binary files (extracted .class, not .jar).`,
+        : `${noun} job ${record.job_id} ran to completion via ${record.mode} but found no symbols in ${record.sources}. Confirm the sources hold source, bytecode or archive files the scanners handle (see the source_path description of log10x_compile).`,
+    );
+  } else if (jobStatus === 'incomplete') {
+    parts.push(
+      `${noun} job ${record.job_id} exited cleanly via ${record.mode} after ${humanDuration(elapsedMs)} but the engine stopped early: ${lossSummary(lossMarkers)}. It wrote ${scanned.unitCount} unit${scanned.unitCount === 1 ? '' : 's'}${library ? ` and linked ${library.path} (${humanByteSize(library.bytes)})` : ''}, so the library is missing symbols the sources hold. Re-run with a larger timeout_ms or narrower sources; files already scanned are reused by checksum.`,
     );
   } else if (jobStatus === 'timed_out') {
     parts.push(
@@ -388,7 +432,7 @@ function buildHumanSummary(
   }
   if (scanned.emptyUnitCount > 0) {
     parts.push(
-      `${scanned.emptyUnitCount} unit${scanned.emptyUnitCount === 1 ? ' was' : 's were'} emitted empty: every symbol filtered out (the default symbol.types keeps class/enum/log/exec only).`,
+      `${scanned.emptyUnitCount} unit${scanned.emptyUnitCount === 1 ? ' is' : 's are'} zero bytes: the engine created the unit file and wrote nothing into it, because every symbol in the file was filtered out (the default symbolTypes keep package/class/enum/log/text/exec), the file was skipped as a duplicate of one already scanned, or its scan was dropped.`,
     );
   }
   if (diagnostics.results_available) {
@@ -396,6 +440,11 @@ function buildHumanSummary(
     parts.push(linkReportSentence(diagnostics));
   }
   return parts.filter(Boolean).join(' ');
+}
+
+/** Compact `kind xN` list of the loss markers for headlines. */
+function lossSummary(markers: LossMarker[]): string {
+  return markers.map((m) => `${m.kind.replace(/_/g, ' ')} x${m.count}`).join(', ');
 }
 
 /** One sentence on scan failures, by language, with a sample. */
