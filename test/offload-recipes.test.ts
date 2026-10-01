@@ -321,7 +321,7 @@ test('the Datadog section no longer warns any forwarder off Flex, with or withou
 test('fluentd: the recipe uses # comments, never <!-- -->, in both variants', () => {
   for (const keep of [true, false]) {
     const body = offloadRecipe('fluentd', { ...PARAMS, keepMarkerAtDestination: keep }).body;
-    assert.ok(!/<!--|-->/.test(body), `keep=${keep}: XML comment left in a fluentd config`);
+    assert.ok(!body.includes('<!--') && !body.includes('-->'), `keep=${keep}: XML comment left in a fluentd config`);
   }
 });
 
