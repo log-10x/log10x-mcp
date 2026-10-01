@@ -2071,8 +2071,9 @@ export async function executeCommitmentReport(
   });
 
   // 5b. Offload-bucket override via metric-surface stamp (§B.3).
-  // The receiver stamps `routeState="drop"` on every offloaded event;
-  // getOffloadStatusBatch reads that signal. Any pattern flagged as
+  // The receiver stamps `routeState="offload"` on every offloaded event;
+  // getOffloadStatusBatch reads that signal. (It read "drop" until
+  // 2026-10-01, which booked hard drops into this keep-everything bucket.) Any pattern flagged as
   // offloaded has its row's action_taken overridden to 'offload'
   // REGARDLESS of what the cap CSV said — the metric stamp is ground
   // truth. On metric backend timeout / env-load failure the bucket

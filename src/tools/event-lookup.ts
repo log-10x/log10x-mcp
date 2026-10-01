@@ -642,20 +642,20 @@ async function formatResults(
   // next call is retriever_query when the retriever is wired, otherwise
   // advise_retriever for the bucket recipe.
   if (offloadStatus && offloadStatus.is_offloaded) {
-    // HONESTY: the routeState="drop" marker is the engine's drop/offload cohort — it
-    // does NOT distinguish offload-to-S3 (recoverable) from hard-drop (gone).
-    // So we do not assert the bytes are archived/fetchable; we offer the fetch
-    // conditionally and flag that a zero result means it was hard-dropped.
+    // The offload cohort (routeState="offload") is what the forwarder recipe
+    // ships to the bucket. Fetching it back still needs the recipe applied
+    // and the bucket indexed, so the fetch is offered, and a zero result is
+    // read as "not wired or not indexed yet".
     const tail = offloadStatus.recommend_action === 'use_retriever_query'
-      ? `If your receiver offloads this pattern to S3 (not hard-drop), fetch it via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`. A zero result means it was hard-dropped, not offloaded.`
-      : `Check \`log10x_advise_retriever\` for the bucket recipe — the receiver is reducing this pattern but no retriever surface is configured.`;
+      ? `Fetch it via \`log10x_retriever_query({ pattern: '${pattern}', from: 'now-24h' })\`. A zero result means the offload bucket is not wired into the Retriever or not indexed yet.`
+      : `Check \`log10x_advise_retriever\` for the bucket recipe: the receiver is offloading this pattern but no retriever surface is configured.`;
     lines.push('');
     if (offloadStatus.kept_timed_out || offloadStatus.dropped_share_pct_24h === null || offloadStatus.kept_share_pct_24h === null) {
-      lines.push(`_Reduction status (24h): this pattern is in the receiver's acted-on cohort (offload | compact | tier_down | drop | sample; kept-side share query slow on a heavy cohort, share not computed). ${tail}_`);
+      lines.push(`_Offload status (24h): the receiver is offloading this pattern to the customer's bucket (share query slow on a heavy cohort, share not computed). ${tail}_`);
     } else {
       const dropped = fmtPct(offloadStatus.dropped_share_pct_24h);
       const kept = fmtPct(offloadStatus.kept_share_pct_24h);
-      lines.push(`_Reduction status (24h): ${dropped} of this pattern's volume is in the receiver's acted-on cohort (offload | compact | tier_down | drop | sample; ${kept} still flowing to the SIEM). ${tail}_`);
+      lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is offloaded to the customer's bucket (${kept} takes every other route). ${tail}_`);
     }
   }
 

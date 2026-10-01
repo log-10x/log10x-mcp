@@ -166,9 +166,9 @@ async function probeReporterTier(env: EnvConfig): Promise<'edge' | 'cloud' | nul
 
 /**
  * Probe Receiver tier — distinct from Reporter. Receiver stamps the
- * `routeState` label on at least some events (compact / sample / drop
- * happens in-path), so a non-zero `routeState="drop"` series is the
- * tell. This is best-effort; absence does not prove Receiver is
+ * `routeState` label with the action it took (offload / compact /
+ * tier_down / drop / sample), so a non-zero series in any acted-on state
+ * is the tell. This is best-effort; absence does not prove Receiver is
  * uninstalled (could be installed in pass-only mode).
  */
 async function probeReceiverInPath(env: EnvConfig, reporterTier: 'edge' | 'cloud'): Promise<{ detected: boolean; uncertain: boolean }> {

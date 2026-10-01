@@ -8,15 +8,19 @@
  *
  * The helper calls `queryInstant(env, promql)` which delegates to
  * `env.metricsBackend.queryInstant`. The tests stub the backend in-place
- * with a tiny fake that returns canned scalar responses keyed by which
- * cohort the query is asking for (kept = `routeState!="drop"`, dropped =
- * `routeState="drop"`).
+ * with a tiny fake that models THREE real cohorts, the way the engine
+ * stamps them: `offload` (shipped to the customer's bucket), `drop` (sent
+ * to a null sink by every forwarder recipe) and everything else. It
+ * answers whichever selector the helper sends, so a helper that asks for
+ * the wrong cohort gets the wrong bytes, as it would against a live TSDB.
+ * Until 2026-10-01 the helper asked for `routeState="drop"`: every case
+ * below with offload bytes fails against that version.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getOffloadStatus } from '../src/lib/offload-status.js';
+import { getOffloadStatus, getOffloadStatusBatch } from '../src/lib/offload-status.js';
 import { DEFAULT_LABELS } from '../src/lib/promql.js';
 import type { PrometheusResponse } from '../src/lib/api.js';
 import type { EnvConfig } from '../src/lib/environments.js';
@@ -36,10 +40,12 @@ function emptyResp(): PrometheusResponse {
 }
 
 interface StubOpts {
-  /** Bytes for the `routeState!="drop"` (kept) cohort. */
+  /** Bytes the pattern sent down every other route (pass, compact, tier_down, sample). */
   kept: number;
-  /** Bytes for the `routeState="drop"` (dropped) cohort. */
+  /** Bytes in the OFFLOAD cohort (`routeState="offload"`). */
   dropped: number;
+  /** Bytes in the hard-drop cohort (`routeState="drop"`), which no recipe ships anywhere. */
+  hardDropped?: number;
   /** When true, `queryInstant` never resolves (forces timeout in the helper). */
   hang?: boolean;
   /** When true, only the kept-cohort query hangs (dropped + timestamp resolve). */
@@ -55,22 +61,24 @@ function makeEnv(opts: StubOpts): EnvConfig {
       // Selective hang: only the kept-cohort scan stalls. Reproduces
       // the heavy-pattern tail-latency mode the demo hit on
       // AQwRuueOWbQ — dropped cohort comes back fast, kept does not.
-      if (opts.hangKept && promql.includes('routeState!="drop"')) {
+      if (opts.hangKept && /routeState!=/.test(promql)) {
         return await new Promise<PrometheusResponse>(() => {});
       }
-      // Discriminate by which `routeState` filter the query carries.
-      // `timestamp(max(...))` queries go through the dropped branch too.
-      if (promql.includes('routeState="drop"')) {
-        if (promql.startsWith('timestamp(')) {
-          // Last-seen timestamp piggyback — return a recent epoch seconds.
-          return opts.dropped > 0 ? scalarResp(Math.floor(Date.now() / 1000)) : emptyResp();
-        }
-        return opts.dropped > 0 ? scalarResp(opts.dropped) : emptyResp();
+      // Answer the selector the query carries, from the three cohorts.
+      // `timestamp(max(...))` queries carry the equality selector too.
+      const offload = opts.dropped;
+      const hard = opts.hardDropped ?? 0;
+      const rest = opts.kept;
+      const m = promql.match(/routeState(!?=)"([a-z_]+)"/);
+      if (!m) return emptyResp();
+      const [, op, state] = m;
+      const inState = state === 'offload' ? offload : state === 'drop' ? hard : 0;
+      const bytes = op === '=' ? inState : offload + hard + rest - inState;
+      if (promql.startsWith('timestamp(')) {
+        // Last-seen timestamp piggyback — return a recent epoch seconds.
+        return bytes > 0 ? scalarResp(Math.floor(Date.now() / 1000)) : emptyResp();
       }
-      if (promql.includes('routeState!="drop"')) {
-        return opts.kept > 0 ? scalarResp(opts.kept) : emptyResp();
-      }
-      return emptyResp();
+      return bytes > 0 ? scalarResp(bytes) : emptyResp();
     },
     async queryRange(): Promise<PrometheusResponse> {
       return emptyResp();
@@ -90,6 +98,15 @@ function makeEnv(opts: StubOpts): EnvConfig {
     envId: 'stub',
   };
 }
+
+test('getOffloadStatus: a hard-dropped pattern is NOT offloaded (the drop slice goes to a null sink)', async () => {
+  const env = makeEnv({ kept: 500, dropped: 0, hardDropped: 500 });
+  const s = await getOffloadStatus(env, { patternHash: 'h', metricsEnv: 'e' });
+  assert.equal(s.ok, true);
+  assert.equal(s.is_offloaded, false);
+  assert.equal(s.dropped_bytes_in_window, 0);
+  assert.equal(s.kept_bytes_in_window, 1000, 'hard-dropped bytes sit on the rest side');
+});
 
 test('getOffloadStatus: kept-only series → is_offloaded=false', async () => {
   const env = makeEnv({ kept: 1000, dropped: 0 });
@@ -188,4 +205,58 @@ test('getOffloadStatus: kept times out, dropped resolves → partial result with
   assert.ok(s.last_seen_dropped_ts !== null && s.last_seen_dropped_ts > 0);
   // Bounded by the per-query timeout, not the sum of them.
   assert.ok(elapsed < 500, `expected <500ms, got ${elapsed}ms`);
+});
+
+// The batch path is what commitment_report's offload override reads. A hash
+// it flags as offloaded has its bytes moved into the keep-everything offload
+// bucket, so a hard-dropped hash flagged here would be reported as kept.
+test('getOffloadStatusBatch: flags the offloaded hash and not the hard-dropped one', async () => {
+  const cohorts: Record<string, { offload: number; drop: number; rest: number }> = {
+    hOff: { offload: 300, drop: 0, rest: 700 },
+    hDrop: { offload: 0, drop: 500, rest: 500 },
+  };
+  const vec = (pairs: Array<[string, number]>): PrometheusResponse => ({
+    status: 'success',
+    data: {
+      resultType: 'vector',
+      result: pairs
+        .filter(([, v]) => v > 0)
+        .map(([h, v]) => ({ metric: { [DEFAULT_LABELS.hash]: h }, value: [Math.floor(Date.now() / 1000), String(v)] })),
+    },
+  });
+  const env: EnvConfig = {
+    nickname: 'offload-batch-test',
+    labels: DEFAULT_LABELS,
+    apiKey: 'stub',
+    envId: 'stub',
+    metricsBackend: {
+      kind: 'log10x' as const,
+      endpoint: 'stub://offload-batch',
+      async queryInstant(promql: string): Promise<PrometheusResponse> {
+        const m = promql.match(/routeState(!?=)"([a-z_]+)"/);
+        if (!m) return emptyResp();
+        const [, op, state] = m;
+        return vec(
+          Object.entries(cohorts).map(([h, c]) => {
+            const inState = state === 'offload' ? c.offload : state === 'drop' ? c.drop : 0;
+            return [h, op === '=' ? inState : c.offload + c.drop + c.rest - inState];
+          }),
+        );
+      },
+      async queryRange(): Promise<PrometheusResponse> {
+        return emptyResp();
+      },
+      async listLabels(): Promise<string[]> {
+        return [];
+      },
+      async listLabelValues(): Promise<string[]> {
+        return [];
+      },
+    },
+  };
+  const out = await getOffloadStatusBatch(env, { patternHashes: ['hOff', 'hDrop'], metricsEnv: 'e' });
+  assert.equal(out.hOff?.is_offloaded, true);
+  assert.equal(out.hOff?.dropped_bytes_in_window, 300);
+  assert.ok(out.hOff?.dropped_share_pct !== null && Math.abs((out.hOff?.dropped_share_pct ?? 0) - 30) < 0.001);
+  assert.equal(out.hDrop?.is_offloaded ?? false, false, 'a hard-dropped hash must never read as offloaded');
 });

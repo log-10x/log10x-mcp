@@ -204,9 +204,9 @@ interface RetrieverQuerySummary {
   /**
    * Per-`tenx_hash` offload status for hashes that appear on the returned
    * events. Populated best-effort via a single batched PromQL lookup
-   * (`getOffloadStatusBatch`) against the metric surface — the receiver
-   * stamps `routeState="drop"` on every event it routes to the
-   * customer-owned offload bucket, so a non-zero dropped share over the
+   * (`getOffloadStatusBatch`) against the metric surface: the receiver
+   * stamps `routeState="offload"` on every event it routes to the
+   * customer-owned offload bucket, so a non-zero offload share over the
    * lookup window means the pattern is currently being offloaded.
    *
    * Absent when no events were returned, the lookup timed out, or no hash
@@ -868,22 +868,22 @@ async function executeRetrieverQueryInner(
             const projected = offloadByHash[patternHashForNudge];
             const share = projected.dropped_share_pct;
             lines.push('');
-            // HONESTY: routeState="drop" is the engine's drop/offload cohort and does
-            // NOT distinguish offload-to-S3 (fetchable here) from hard-drop
-            // (gone). So the nudge is RESULT-AWARE: events found => the slice is
-            // really in the bucket; zero events => the honest read is hard-drop
-            // or an unwired bucket, not "query again".
+            // The offload cohort (routeState="offload") is the slice the
+            // forwarder recipe ships to the bucket. The nudge stays
+            // RESULT-AWARE: events found => the slice is really in the bucket;
+            // zero events => the recipe is not applied, the bucket is not wired
+            // into this Retriever, or it is not indexed yet, not "query again".
             const sharePhrase =
               share === null || projected.kept_timed_out
                 ? 'kept-side share query slow on a heavy cohort, share not computed'
-                : `~${share.toFixed(0)}% of recent volume acted on by the receiver (offload | compact | tier_down | drop | sample)`;
+                : `~${share.toFixed(0)}% of recent volume offloaded`;
             if (resp.events.length === 0) {
               lines.push(
-                `> **Reduction detected, no events found**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}), but this query returned no events. The likely reason: it was HARD-DROPPED (not archived), or the offload bucket is not wired into this retriever. Only patterns the receiver OFFLOADS to S3 are fetchable here — check \`log10x_advise_retriever\` for the bucket recipe.`,
+                `> **Offload detected, no events found**: the receiver is offloading this pattern (${sharePhrase}), but this query returned no events. The likely reason: the forwarder recipe is not applied, the offload bucket is not wired into this Retriever, or it is not indexed yet. Check \`log10x_advise_retriever\` for the bucket recipe.`,
               );
             } else {
               lines.push(
-                `> **Reduction detected**: this pattern is in the receiver's drop/offload cohort (${sharePhrase}); this query found events, so the offloaded slice is in your bucket. Widen the window with \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` for more, or check \`log10x_advise_retriever\`.`,
+                `> **Offload detected**: the receiver is offloading this pattern (${sharePhrase}); this query found events, so the offloaded slice is in your bucket. Widen the window with \`log10x_retriever_query{pattern: "${args.pattern}", from: "now-1h"}\` for more, or check \`log10x_advise_retriever\`.`,
               );
             }
           }

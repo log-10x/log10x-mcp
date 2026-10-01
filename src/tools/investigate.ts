@@ -331,9 +331,9 @@ export function buildHumanSummary(
 /**
  * Offload-status hint shape surfaced on the envelope. One entry per
  * pattern (by name) that the env-mode top-N or the acute-spike chain
- * reports as in the receiver's drop/offload cohort (routeState="drop"). Best-effort;
- * the field is absent on lookup failure. routeState="drop" does not distinguish
- * offload-to-S3 from hard-drop, so fetchability is conditional, not implied.
+ * reports in the receiver's offload cohort (routeState="offload"). Best-effort;
+ * the field is absent on lookup failure. Fetching back still needs the
+ * forwarder recipe applied and the bucket indexed, so it is offered, not implied.
  */
 export interface TopOffloadedPattern {
   pattern: string;
@@ -557,9 +557,9 @@ export async function executeInvestigate(
       .join(', ');
     const nudge =
       `\n\n> **Reduction-aware routing**: ${topOffloaded.length} of the patterns above ` +
-      `are in the receiver's drop/offload cohort (routeState="drop" marker). If a pattern is ` +
-      `offloaded to S3 (not hard-dropped), fetch its events via ` +
-      `\`log10x_retriever_query{pattern: "<name>"}\`; a zero result means it was hard-dropped, not archived. ` +
+      `are being offloaded by the receiver (routeState="offload"). Fetch their events via ` +
+      `\`log10x_retriever_query{pattern: "<name>"}\`; a zero result means the offload bucket is not wired ` +
+      `into the Retriever or not indexed yet (see \`log10x_advise_retriever\`). ` +
       `In cohort: ${names}.`;
     md = md + nudge;
   }
@@ -1314,7 +1314,7 @@ function buildInvestigateNextActions(
     out.push({
       tool: 'log10x_retriever_query',
       args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
-      reason: 'top mover is in the drop/offload cohort (routeState="drop"); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
+      reason: 'top mover is being offloaded (routeState="offload"); pull its events from the offload bucket. A zero result means the bucket is not wired into the Retriever or not indexed yet',
     });
   }
   return out;
@@ -1362,7 +1362,7 @@ function rewriteNextActionsWithOffload(
     {
       tool: 'log10x_retriever_query',
       args: { pattern: topOffloadedSample.pattern, from: 'now-24h' },
-      reason: 'top mover is in the drop/offload cohort (routeState="drop"); if offloaded to S3 (not hard-dropped), pull its events from the offload bucket — a zero result means it was hard-dropped',
+      reason: 'top mover is being offloaded (routeState="offload"); pull its events from the offload bucket. A zero result means the bucket is not wired into the Retriever or not indexed yet',
     },
   ];
   const fresh = renderNextActions(merged);

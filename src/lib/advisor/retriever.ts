@@ -688,7 +688,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
     );
   }
 
-  // Forwarder offload section: how to route the routeState="drop" slice to the
+  // Forwarder offload section: how to route the routeState="offload" slice to the
   // customer's own S3 (the bucket the Retriever reads) + SIEM down-tier
   // alternatives. Emitted only when the bucket + region are known.
   const region = snapshot.aws?.region;
