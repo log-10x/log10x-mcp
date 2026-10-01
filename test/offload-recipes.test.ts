@@ -259,6 +259,72 @@ test('non-Datadog destinations keep the broad strip', () => {
   }
 });
 
+// The same narrowing for every other generator (2026-10-01). Before it, only
+// fluent-bit kept the marker for Datadog, and the offload section printed
+// "cannot drive Flex as written" above vector, fluentd, otel-collector,
+// logstash and cribl. Each recipe now strips routeState on the S3 slice ONLY
+// when the destination routes on it, and keeps its broad strip otherwise.
+// Each keep-mode config was also run with the real forwarder binary (see the
+// PR): tier_down and pass arrive with routeState, offload without it.
+const STRIP_SITES: Record<string, { strip: RegExp; keepCount: number; stripCount: number }> = {
+  vector: { strip: /encoding\.except_fields\s*=\s*\["routeState"\]/g, keepCount: 1, stripCount: 3 },
+  fluentd: { strip: /remove_keys routeState/g, keepCount: 1, stripCount: 3 },
+  'otel-collector': { strip: /delete_key\(log\.attributes, "routeState"\)/g, keepCount: 1, stripCount: 2 },
+};
+for (const [fwd, site] of Object.entries(STRIP_SITES)) {
+  test(`${fwd}: for Datadog, routeState is stripped on the S3 slice only`, () => {
+    const keep = offloadRecipe(fwd as never, { ...PARAMS, keepMarkerAtDestination: true }).body;
+    const broad = offloadRecipe(fwd as never, PARAMS).body;
+    assert.equal((keep.match(site.strip) ?? []).length, site.keepCount, `${fwd} keep-mode strip count`);
+    assert.equal((broad.match(site.strip) ?? []).length, site.stripCount, `${fwd} default strip count`);
+  });
+}
+
+test('otel-collector: for Datadog, no Datadog-bound pipeline runs a strip processor', () => {
+  const keep = offloadRecipe('otel-collector', { ...PARAMS, keepMarkerAtDestination: true }).body;
+  assert.ok(!/transform\/strip/.test(keep), 'transform/strip must not be defined or wired in keep mode');
+  assert.match(keep, /logs\/offload:\s*\{[^}]*processors: \[transform\/offload\]/);
+});
+
+test('logstash: for Datadog, the routeState strip sits inside the offload branch', () => {
+  const keep = offloadRecipe('logstash', { ...PARAMS, keepMarkerAtDestination: true }).body;
+  assert.match(
+    keep,
+    /if \[@metadata\]\[tenx_route\] == "offload" \{\s*mutate \{ remove_field => \["routeState"\] \}\s*\}/,
+  );
+  // [event][original] holds a second copy of the raw line; it goes on every path.
+  assert.match(keep, /mutate \{ remove_field => \["\[event\]\[original\]"\] \}/);
+  assert.ok(!/remove_field => \["routeState", "\[event\]\[original\]"\]/.test(keep));
+});
+
+test('cribl: for Datadog, the strip pipeline attaches to the S3 destination only', () => {
+  const keep = offloadRecipe('cribl', { ...PARAMS, keepMarkerAtDestination: true }).body;
+  assert.match(keep, /Post-Processing Pipeline on tenx_offload_s3 ONLY/);
+  assert.ok(!/AND the SIEM destination/.test(keep));
+});
+
+test('the Datadog section no longer warns any forwarder off Flex, with or without a detected forwarder', () => {
+  for (const fwd of ['vector', 'fluentd', 'otel-collector', 'logstash', 'cribl', null] as const) {
+    const md = renderOffloadSection(PARAMS, fwd as never, 'datadog');
+    assert.ok(!/cannot drive Flex as written/.test(md), `${fwd ?? 'no forwarder'}: stale warning`);
+  }
+  // No forwarder detected: the verified leads (vector, fluentd) render in keep
+  // mode too, each with the keep note on both Datadog-bound paths.
+  const nofwd = renderOffloadSection(PARAMS, null, 'datadog');
+  assert.ok((nofwd.match(/routeState KEPT: the destination routes on it/g) ?? []).length >= 4, nofwd);
+});
+
+// Fluentd's config parser rejects XML comments ("expected '>'"), and the
+// recipe used them until 2026-10-01, so it did not load as printed. Run on
+// fluentd 1.19.1 (--dry-run, then live on five records), both variants route
+// and strip as specified once the comments are `#` lines.
+test('fluentd: the recipe uses # comments, never <!-- -->, in both variants', () => {
+  for (const keep of [true, false]) {
+    const body = offloadRecipe('fluentd', { ...PARAMS, keepMarkerAtDestination: keep }).body;
+    assert.ok(!/<!--|-->/.test(body), `keep=${keep}: XML comment left in a fluentd config`);
+  }
+});
+
 test('Datadog Flex recipe includes index_order companion + provider pin (first-match-wins)', () => {
   const r = datadogFlexRecipe();
   assert.match(r.body, /datadog_logs_index_order/);
