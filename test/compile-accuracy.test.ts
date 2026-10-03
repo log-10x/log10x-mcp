@@ -179,7 +179,7 @@ test('findRunningJobForOutput returns the live job for the folder and ignores fi
 test('the default compiler image is pinned by tag and index digest', () => {
   assert.equal(
     DEFAULT_IMAGE,
-    'log10x/compiler-10x:1.1.89@sha256:c020ff4dc1b089824fd6877c24a27acf3b5e39d607d56716dfed5cc1c48b725b',
+    'log10x/compiler-10x:1.1.125@sha256:ee875d49b9a25ef98b6b9edfe69a4b60888fd68fd370e8a0020f1b4777ecf12b',
   );
   assert.equal(resolveCompilerImage({}), DEFAULT_IMAGE);
   assert.equal(resolveCompilerImage({ LOG10X_COMPILER_IMAGE: 'log10x/compiler-10x:latest' }), 'log10x/compiler-10x:latest');
@@ -189,13 +189,13 @@ test('imageTagVersion reads a version tag, so an older pinned image is not given
   assert.equal(imageTagVersion('log10x/compiler-10x:1.1.39'), '1.1.39');
   assert.equal(
     imageTagVersion(
-      'log10x/compiler-10x:1.1.89@sha256:c020ff4dc1b089824fd6877c24a27acf3b5e39d607d56716dfed5cc1c48b725b',
+      'log10x/compiler-10x:1.1.125@sha256:ee875d49b9a25ef98b6b9edfe69a4b60888fd68fd370e8a0020f1b4777ecf12b',
     ),
-    '1.1.89',
+    '1.1.125',
   );
   assert.equal(imageTagVersion('log10x/compiler-10x:1.1.89-amd64'), '1.1.89');
   assert.equal(imageTagVersion('log10x/compiler-10x:latest'), null);
-  assert.equal(imageTagVersion('log10x/compiler-10x@sha256:c020ff4dc1b089824fd6877c24a27acf3b5e39d607d56716dfed5cc1c48b725b'), null);
+  assert.equal(imageTagVersion('log10x/compiler-10x@sha256:ee875d49b9a25ef98b6b9edfe69a4b60888fd68fd370e8a0020f1b4777ecf12b'), null);
   assert.equal(imageTagVersion('harbor.corp:8443/log10x/compiler-10x'), null);
   assert.equal(imageTagVersion('harbor.corp:8443/log10x/compiler-10x:1.1.40'), '1.1.40');
 });

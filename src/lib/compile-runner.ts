@@ -400,7 +400,7 @@ export class HelmRepoAddError extends Error {
  * `LOG10X_COMPILER_IMAGE=log10x/compiler-10x:latest` restores the moving tag.
  */
 export const DEFAULT_IMAGE =
-  'log10x/compiler-10x:1.1.89@sha256:c020ff4dc1b089824fd6877c24a27acf3b5e39d607d56716dfed5cc1c48b725b';
+  'log10x/compiler-10x:1.1.125@sha256:ee875d49b9a25ef98b6b9edfe69a4b60888fd68fd370e8a0020f1b4777ecf12b';
 
 /** First engine release where a CLI option given after `@apps/compiler` overrides the app's value. */
 export const CLI_OVERRIDE_MIN_ENGINE = '1.1.89';
