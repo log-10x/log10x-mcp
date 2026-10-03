@@ -217,9 +217,34 @@ export interface CompileConfig {
   };
   /** Hard cap on compile wall time in ms. */
   timeoutMs: number;
+  /**
+   * The engine's whole-scan cap (`scanOperationTimeout`, bundled default 10m)
+   * in ms, passed on the command line so a long compile is not cut short
+   * below `timeoutMs`. Omit to leave the engine default.
+   */
+  scanOperationTimeoutMs?: number;
 }
 
 export type CompileMode = 'docker' | 'local';
+
+/**
+ * Which compiler a run goes through, resolved BEFORE the output folder is
+ * chosen so the folder key can include it. `key` is the identity string that
+ * feeds `stableOutputKey`: the image ref in docker mode, the engine version
+ * read off the local binary's banner in local mode.
+ */
+export interface CompilerIdentity {
+  mode: CompileMode;
+  /** Resolved image ref (docker mode). */
+  image?: string;
+  /** Binary path (local mode). */
+  binary?: string;
+  /** Engine version from the banner (local mode; null when unreadable). */
+  version: string | null;
+  /** The local flavor probe, already gated (local mode). */
+  probe?: FlavorProbe;
+  key: string;
+}
 
 export interface CompileRunResult {
   mode: CompileMode;
@@ -238,7 +263,7 @@ export interface CompileRunResult {
     folder: string;
     /** Symbol units with actual content (zero-byte units are excluded). */
     unitCount: number;
-    /** Units the scanners emitted EMPTY, every symbol was filtered out. */
+    /** Zero-byte units: every symbol filtered out, a duplicate skipped, or a dropped scan. */
     emptyUnitCount: number;
     libraries: Array<{ path: string; bytes: number }>;
   };
@@ -359,24 +384,26 @@ export class HelmRepoAddError extends Error {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /**
- * The compiler image the docker path runs when nothing is set.
+ * The compiler image the docker path runs when nothing is set, pinned by tag
+ * AND index digest (amd64 + arm64) so every run goes through the same
+ * compiler. A mutable tag would let two runs of the same sources use two
+ * different engines with no record of which; the digest closes that. The
+ * image ref is also part of the output-folder key (`stableOutputKey`), so a
+ * compiler change never reuses units an older compiler wrote.
  *
- * PINNED ON PURPOSE. A symbol library built from a mutable tag is not
- * reproducible: the same sources compiled a week apart can go through two
- * different engines with no record of which, because nothing in the emitted
- * `.10x.json` units names the image that produced them. `latest` moves on
- * every engine release, so the drift is silent and routine rather than
- * exceptional.
+ * Bump with each engine release the MCP is validated against; read the new
+ * index digest with `docker manifest inspect log10x/compiler-10x:<version>`
+ * (or `docker buildx imagetools inspect`). `scanOperationTimeout` on the
+ * command line needs 1.1.89 or newer, the first release where a later CLI
+ * value overrides the app's own.
  *
- * BUMP THIS with each engine release the MCP is validated against. Verify the
- * tag resolves before changing it:
- *
- *   docker buildx imagetools inspect log10x/compiler-10x:<version>
- *
- * Callers who want the moving tag back can still set
- * `LOG10X_COMPILER_IMAGE=log10x/compiler-10x:latest`.
+ * `LOG10X_COMPILER_IMAGE=log10x/compiler-10x:latest` restores the moving tag.
  */
-const DEFAULT_IMAGE = 'log10x/compiler-10x:1.1.39';
+export const DEFAULT_IMAGE =
+  'log10x/compiler-10x:1.1.125@sha256:ee875d49b9a25ef98b6b9edfe69a4b60888fd68fd370e8a0020f1b4777ecf12b';
+
+/** First engine release where a CLI option given after `@apps/compiler` overrides the app's value. */
+export const CLI_OVERRIDE_MIN_ENGINE = '1.1.89';
 
 /**
  * Which image the docker compile path runs.
@@ -470,13 +497,36 @@ export interface CompileSpawnHandle {
 export async function spawnCompileDetached(
   cfg: CompileConfig,
   spawnOpts: { workspaceDir: string; logPath: string; containerName: string },
-  opts: { modeOverride?: 'auto' | 'docker' | 'local' } = {},
+  opts: { modeOverride?: 'auto' | 'docker' | 'local'; identity?: CompilerIdentity } = {},
 ): Promise<CompileSpawnHandle> {
-  const mode = await resolveMode(opts.modeOverride);
+  const mode = opts.identity?.mode ?? (await resolveMode(opts.modeOverride));
   await mkdir(cfg.output.folder, { recursive: true });
   return mode === 'docker'
     ? spawnDockerCompileDetached(cfg, spawnOpts)
-    : spawnLocalCompileDetached(cfg, spawnOpts);
+    : spawnLocalCompileDetached(cfg, spawnOpts, opts.identity);
+}
+
+/**
+ * Resolve the backend and the compiler behind it without spawning anything:
+ * the image ref in docker mode, the gated flavor probe + banner version in
+ * local mode. `auto` picks the backend here, once, and the spawn reuses the
+ * result. Throws the same precondition errors the spawn would.
+ */
+export async function resolveCompilerIdentity(
+  modeOverride?: 'auto' | 'docker' | 'local',
+): Promise<CompilerIdentity> {
+  const mode = await resolveMode(modeOverride);
+  if (mode === 'docker') {
+    const image = resolveCompilerImage();
+    return { mode, image, version: imageTagVersion(image), key: `docker:${image}` };
+  }
+  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  if (!(await isBinaryOnPath(binary))) {
+    throw new DevCliNotInstalledError();
+  }
+  const probe = await assertCompilerFlavor(binary);
+  const version = parseEngineVersion(probe.raw);
+  return { mode, binary, version, probe, key: `local:${version ?? 'unknown'}` };
 }
 
 async function spawnDockerCompileDetached(
@@ -530,15 +580,17 @@ async function spawnDockerCompileDetached(
 async function spawnLocalCompileDetached(
   cfg: CompileConfig,
   spawnOpts: { workspaceDir: string; logPath: string },
+  identity?: CompilerIdentity,
 ): Promise<CompileSpawnHandle> {
-  const binary = process.env.LOG10X_TENX_PATH || 'tenx';
+  const binary = identity?.binary ?? (process.env.LOG10X_TENX_PATH || 'tenx');
   if (!(await isBinaryOnPath(binary))) {
     throw new DevCliNotInstalledError();
   }
   // Compiler-flavor gate — see assertCompilerFlavor. A wrong flavor and an
   // unreadable one are both refusals here; neither is evidence of a compiler
-  // build.
-  await assertCompilerFlavor(binary);
+  // build. An identity resolved up front already passed it.
+  const probe = identity?.probe ?? (await assertCompilerFlavor(binary));
+  const version = identity?.version ?? parseEngineVersion(probe.raw);
 
   const overlayDir = join(spawnOpts.workspaceDir, 'overlays');
   await mkdir(overlayDir, { recursive: true });
@@ -555,7 +607,10 @@ async function spawnLocalCompileDetached(
     ...credentialEnv(cfg),
   };
 
-  const pid = await spawnToLog(binary, compileAppArgs(cfg), { env, logPath: spawnOpts.logPath });
+  const pid = await spawnToLog(binary, compileAppArgs(cfg, version), {
+    env,
+    logPath: spawnOpts.logPath,
+  });
   return { mode: 'local', pid, overlayDir };
 }
 
@@ -1000,7 +1055,10 @@ async function runLocalCompile(cfg: CompileConfig): Promise<CompileRunResult> {
     if (cfg.credentials?.artifactoryToken) env.ARTIFACTORY_TOKEN = cfg.credentials.artifactoryToken;
 
     const t0 = Date.now();
-    const r = await execCapture(binary, compileAppArgs(cfg), { env, timeoutMs: cfg.timeoutMs });
+    const r = await execCapture(binary, compileAppArgs(cfg, parseEngineVersion(probe.raw)), {
+      env,
+      timeoutMs: cfg.timeoutMs,
+    });
     const wallTimeMs = Date.now() - t0;
 
     const scanned = await scanSymbolOutputs(cfg.output.folder);
@@ -1366,6 +1424,41 @@ export function isCompilerFlavorOutput(output: string): boolean {
   return isCompilerFlavor(parseFlavor(output));
 }
 
+/**
+ * Extract the engine version from a `10x engine v1.1.89, flavor: '…'` banner.
+ * Returns the dotted version, or null if absent. Pure / testable.
+ */
+export function parseEngineVersion(output: string): string | null {
+  const m = output.match(/10x engine v(\d+(?:\.\d+)+)/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * The engine version a compiler image tag names (`log10x/compiler-10x:1.1.39`,
+ * also with an `@sha256:` digest after it), or null for `latest`, a bare digest
+ * or any non-version tag. Pure / testable.
+ */
+export function imageTagVersion(image: string): string | null {
+  const ref = image.split('@')[0];
+  const slash = ref.lastIndexOf('/');
+  const colon = ref.lastIndexOf(':');
+  if (colon <= slash) return null;
+  const m = ref.slice(colon + 1).match(/^v?(\d+(?:\.\d+)+)(?:-[A-Za-z0-9]+)?$/);
+  return m ? m[1] : null;
+}
+
+/** True when `version` (dotted numeric) is `min` or newer. Pure / testable. */
+export function engineVersionAtLeast(version: string, min: string): boolean {
+  const a = version.split('.').map(Number);
+  const b = min.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
 // ── Shared env builder ─────────────────────────────────────────────────────
 
 /**
@@ -1393,23 +1486,30 @@ export function compileEnvVars(p: {
 }
 
 /**
- * The engine argv for a run: the Compiler app config path, plus the
- * `mergeExistingUnits true` option when `cfg.mergeExistingUnits` is set. The
- * engine takes options as positional `name value` pairs after the config path
- * (PipelineCommandLine), and the `link` unit declares `mergeExistingUnits` as a
- * boolean option that `units/scan/settings.yaml` reads via `$?mergeExistingUnits`.
- * The literal `true` is passed verbatim (NOT a `$=TenXEnv.get(...)` expression,
- * which encodes as `~true` and is flaky); since no bundled config assigns the
- * option, a CLI value can't collide (no OverwrittenOptionException), unlike
- * inputPaths/outputSymbolFolder which the bundled config sets and which
- * therefore ride env/overlay instead. Shared by all three invocation sites
- * (docker argv, async local spawn, sync local exec).
+ * The engine argv for a run: the Compiler app config path, plus positional
+ * `name value` option pairs after it (PipelineCommandLine). Values are
+ * literals (NOT `$=TenXEnv.get(...)` expressions, which encode as `~true` and
+ * are flaky).
  *
- * Pure (no I/O) so it is unit-testable.
+ *   - `mergeExistingUnits true` for a link run; no bundled config assigns it.
+ *   - `scanOperationTimeout <ms>ms` when `cfg.scanOperationTimeoutMs` is set,
+ *     overriding the bundled `scan.operationTimeout: 10m` (DurationUtil
+ *     accepts `ms`). A value after the app wins from engine 1.1.89 on; an
+ *     older local engine rejects the repeat, so with a known older
+ *     `engineVersion` the option is left out and the engine's own 10m cap
+ *     stands.
+ *
+ * Shared by all three invocation sites (docker argv, async local spawn, sync
+ * local exec). Pure (no I/O) so it is unit-testable.
  */
-export function compileAppArgs(cfg: CompileConfig): string[] {
+export function compileAppArgs(cfg: CompileConfig, engineVersion?: string | null): string[] {
   const args = ['@apps/compiler'];
   if (cfg.mergeExistingUnits) args.push('mergeExistingUnits', 'true');
+  const ms = cfg.scanOperationTimeoutMs;
+  const engineTooOld = !!engineVersion && !engineVersionAtLeast(engineVersion, CLI_OVERRIDE_MIN_ENGINE);
+  if (ms !== undefined && ms > 0 && !engineTooOld) {
+    args.push('scanOperationTimeout', `${Math.floor(ms)}ms`);
+  }
   return args;
 }
 
@@ -1439,11 +1539,13 @@ export function credentialEnv(cfg: CompileConfig): Record<string, string> {
  * missing/empty dir (returns zeros), since a compile that produced nothing is
  * a valid `no_signal` outcome, not an error.
  *
- * Zero-byte units are counted separately (`emptyUnitCount`), NOT as units:
- * the scanners write an empty `.10x.json` when every symbol in a file was
- * filtered out (e.g. only method/package tokens, which the default
- * `symbol.types` drops), counting those as success is the "green but empty"
- * trap.
+ * Zero-byte units are counted separately (`emptyUnitCount`), NOT as units.
+ * The engine creates the unit file before it scans the source
+ * (SymbolScanFolderTreeTraverser.doScanPath), so a unit stays empty when
+ * nothing is written into it: every symbol in the file was filtered out
+ * (default `symbolTypes`), the file was skipped as a duplicate of one already
+ * scanned, or its scan was dropped. Counting those as success is the "green
+ * but empty" trap.
  */
 export async function scanSymbolOutputs(
   dir: string,

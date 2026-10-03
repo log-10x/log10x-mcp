@@ -7,6 +7,9 @@ import {
   stableOutputKey,
 } from '../src/tools/compile.js';
 
+/** A fixed compiler identity for the key tests that are not about the compiler. */
+const COMPILER = 'docker:log10x/compiler-10x:test';
+
 /** Minimal CompileArgs with the Zod-defaulted fields filled, for key tests. */
 function compileArgs(overrides: Record<string, unknown> = {}) {
   return {
@@ -102,16 +105,16 @@ test('classifyHelmChartRef distinguishes standalone refs, bare repo/chart, and i
 // folder and the engine's checksum-based unit reuse never fired. stableOutputKey
 // must be deterministic over the sources so re-runs reuse the same folder.
 test('stableOutputKey is identical across runs of the same source set', () => {
-  const a = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
-  const b = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
+  const a = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols', COMPILER);
+  const b = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols', COMPILER);
   assert.equal(a, b);
   assert.match(a, /^[a-f0-9]{16}$/);
 });
 
 test('stableOutputKey changes when any source changes', () => {
-  const base = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols');
-  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-lang'] }), 'symbols'));
-  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'other'));
+  const base = stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'symbols', COMPILER);
+  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-lang'] }), 'symbols', COMPILER));
+  assert.notEqual(base, stableOutputKey(compileArgs({ github_repos: ['apache/commons-cli'] }), 'other', COMPILER));
   assert.notEqual(
     base,
     stableOutputKey(
@@ -122,17 +125,19 @@ test('stableOutputKey changes when any source changes', () => {
         artifactory_folders: ['x'],
       }),
       'symbols',
+      COMPILER,
     ),
   );
 });
 
 test('stableOutputKey ignores credentials, mode, and timeout (they do not change symbols)', () => {
-  const base = stableOutputKey(compileArgs({ source_path: '/src/app' }), 'symbols');
+  const base = stableOutputKey(compileArgs({ source_path: '/src/app' }), 'symbols', COMPILER);
   assert.equal(
     base,
     stableOutputKey(
       compileArgs({ source_path: '/src/app', mode: 'docker', timeout_ms: 60_000, github_token: 'ghp_x' }),
       'symbols',
+      COMPILER,
     ),
   );
 });

@@ -30,9 +30,11 @@
  * full transitive dependency graph and floods the library with third-party
  * symbols.
  *
- * Backend: Docker-first. By default it runs the image log10x/compiler-10x
+ * Backend: Docker-first. By default it runs the pinned image log10x/compiler-10x
  * (which is compiler-flavor by construction); if the caller has a local
- * COMPILER-flavor `tenx` it can use that instead. Three flavors ship and two of
+ * COMPILER-flavor `tenx` it can use that instead. The resolved compiler (image
+ * ref, or local engine version) is part of the output-folder key, so units
+ * written by one compiler are never reused by another. Three flavors ship and two of
  * them are refused here: `runtime` (the native binary) and `runtime-jvm` (the
  * JVM-packaged runtime, the only runtime built for Windows) carry no `generate`
  * pipeline unit, cannot compile, and are refused with a clear remediation that
@@ -60,7 +62,7 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Absolute path to a local folder of source code / binaries to scan. The compiler recursively traverses it for supported languages (Java, Go, Python, JS/TS, Scala, C/C++, C#) and binaries. Note: .jar files are not scanned directly; provide extracted .class files. Optional when github_repos is given; at least one source (source_path and/or github_repos) is required.',
+      'Absolute path to a local folder of source code / binaries to scan, traversed recursively. Parsed with a grammar or AST: Java, Scala, Python, Go, C/C++, C#, JavaScript, TypeScript (.ts; .tsx goes through the text scanner), Rust, and JVM .class bytecode. Other languages in the pattern scanner\'s file list (Kotlin, Ruby, PHP, Lua, Groovy, Swift, bash) get quoted-string extraction only. Archives (.jar, .war, .ear, .zip, .gz, .tar and compressed tarballs) are expanded and their entries scanned; .json/.yaml/.xml/.properties/.csv/.txt and similar config/text files go through the text scanner; .so/.dylib (and .dll on Windows hosts) through `strings`. Optional when any other source is given; at least one source (source_path, github_repos, docker_images, helm_charts, or artifactory_instance + artifactory_repo) is required.',
     ),
   github_repos: z
     .array(z.string())
@@ -72,7 +74,7 @@ export const compileSchema = {
     .string()
     .optional()
     .describe(
-      'Branch to pull for ALL github_repos. Omit to pull each repo’s default branch.',
+      'Branch to pull for ALL github_repos. Omit to pull each repo\'s default branch.',
     ),
   github_folders: z
     .array(z.string())
@@ -180,7 +182,7 @@ export const compileSchema = {
     .enum(['auto', 'docker', 'local'])
     .default('auto')
     .describe(
-      'Execution backend. `auto` (default) prefers Docker (the compiler image, guaranteed compiler flavor) and falls back to a local compiler-flavor tenx. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:1.1.39, a pinned tag rather than :latest so the same sources compile through the same engine every time). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses it unless its version banner reports the compiler flavor (`compiler`, or `cloud` on an engine built before the flavor rename). Of the three shipped flavors only `compiler` can compile: `runtime` (native binary) and `runtime-jvm` (JVM-packaged runtime, the only runtime available on Windows) are both refused, since neither carries the `generate` pipeline unit. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
+      'Execution backend. `auto` (default) prefers Docker (the compiler image, guaranteed compiler flavor) and falls back to a local compiler-flavor tenx; the backend is chosen once, before the output folder is keyed. `docker` forces the image (LOG10X_COMPILER_IMAGE or LOG10X_TENX_IMAGE, default log10x/compiler-10x:1.1.125 pinned by digest, so every run goes through the same compiler). `local` forces the binary (LOG10X_TENX_PATH or `tenx` on PATH) and refuses it unless its version banner reports the compiler flavor (`compiler`, or `cloud` on an engine built before the flavor rename). Of the three shipped flavors only `compiler` can compile: `runtime` (native binary) and `runtime-jvm` (JVM-packaged runtime, the only runtime available on Windows) are both refused, since neither carries the `generate` pipeline unit. With a local install, local-folder compilation and GitHub pull (REST API + token) work out of the box; docker_images pull additionally needs a container engine (podman or docker) on the host. The docker `compiler-10x` image bundles all of those (podman included, daemonless), which is why Docker is the default.',
     ),
   timeout_ms: z
     .number()
@@ -189,7 +191,7 @@ export const compileSchema = {
     .max(3_600_000)
     .default(1_800_000)
     .describe(
-      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min). The first compile of a large codebase typically runs 10–30 min; subsequent runs are near-instant via checksum reuse.',
+      'Hard cap on compile wall time in milliseconds. Default 1,800,000 (30 min). The engine\'s own whole-scan cap (scanOperationTimeout, bundled default 10 min) is raised to 90% of this value on the command line, so the engine cap follows this value (needs compiler 1.1.89+; the pinned default is 1.1.125; an older local engine keeps its 10 min cap). A re-run over unchanged local sources skips every file whose checksum already has a unit and finishes in seconds. Pulled sources (GitHub, images, Artifactory) are re-checked remotely each run and downloaded again only when the remote changed; Helm charts are rendered again every run.',
     ),
 };
 
@@ -314,17 +316,18 @@ export function sanitizeName(name: string): string {
 /**
  * Stable per-source cache key. Re-running the SAME compile must land in the
  * SAME output folder, that is what lets the engine's checksum-based unit
- * reuse fire (the old `${name}-${Date.now()}-${pid}` temp dir was unique every
- * run, so reuse never triggered and every compile was a cold scan, defeating
- * the "subsequent runs are near-instant" contract). Hashes only the inputs
- * that determine the symbols: the sources and the runtime name. Credentials,
- * timeout, and mode are excluded, they don't change the produced library.
+ * reuse fire. Hashes the inputs that determine the symbols: the sources, the
+ * runtime name, and the compiler that writes them (`compilerKey`: the image
+ * ref in docker mode, the engine version in local mode), so a new compiler
+ * never reuses an older compiler's units for unchanged files. Credentials and
+ * timeout are excluded, they don't change the produced library.
  *
  * Pure (no I/O) so it is unit-testable.
  */
-export function stableOutputKey(args: CompileArgs, runtimeName: string): string {
+export function stableOutputKey(args: CompileArgs, runtimeName: string, compilerKey: string): string {
   const canonical = JSON.stringify({
     runtimeName,
+    compiler: compilerKey,
     source_path: args.source_path ? resolve(args.source_path) : null,
     github_repos: args.github_repos ?? null,
     github_branch: args.github_branch ?? null,
@@ -355,7 +358,10 @@ function defaultOutputDir(runtimeName: string, key: string): string {
  * `'inputs' in result`. Single-sources all the gating so log10x_compile (which
  * spawns the config asynchronously) shares exactly the same checks.
  */
-export async function prepareCompile(args: CompileArgs): Promise<CompileConfig | StructuredOutput> {
+export async function prepareCompile(
+  args: CompileArgs,
+  compilerKey: string,
+): Promise<CompileConfig | StructuredOutput> {
   // ── 1. Validate sources ──
   const hasGithub = (args.github_repos?.length ?? 0) > 0;
   const hasDockerImages = (args.docker_images?.length ?? 0) > 0;
@@ -569,7 +575,7 @@ export async function prepareCompile(args: CompileArgs): Promise<CompileConfig |
   // ── 2. Build the compile config ──
   const runtimeName = sanitizeName(args.library_name);
   const outputFolder = resolve(
-    args.output_path ?? defaultOutputDir(runtimeName, stableOutputKey(args, runtimeName)),
+    args.output_path ?? defaultOutputDir(runtimeName, stableOutputKey(args, runtimeName, compilerKey)),
   );
   const inputs: CompileConfig['inputs'] = [];
   if (args.source_path) inputs.push({ kind: 'local', path: resolve(args.source_path) });
@@ -627,7 +633,17 @@ export async function prepareCompile(args: CompileArgs): Promise<CompileConfig |
     license: process.env.TENX_LICENSE_KEY || process.env.LOG10X_LICENSE_KEY || undefined,
     credentials,
     timeoutMs: args.timeout_ms,
+    scanOperationTimeoutMs: scanOperationTimeoutFor(args.timeout_ms),
   };
 
   return cfg;
+}
+
+/**
+ * The engine's whole-scan cap derived from the caller's wall cap: 90% of it,
+ * so a scan that hits the cap still links what it scanned before
+ * `compile_status` reaps the run. Pure / testable.
+ */
+export function scanOperationTimeoutFor(timeoutMs: number): number {
+  return Math.max(10_000, Math.floor(timeoutMs * 0.9));
 }

@@ -91,7 +91,7 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 | `LOG10X_TENX_PATH` | Path to the local `tenx` binary (used when the resolved mode is `local`). Defaults to `tenx` on PATH. |
 | `LOG10X_RUNTIME_IMAGE` | Engine image for the run path in docker mode (default `log10x/pipeline-10x:latest`). Accepts the alias `native`, which selects the GraalVM-native `log10x/edge-10x`. |
 | `LOG10X_TENX_IMAGE` | Engine image shared by the run path and, as a fallback, `log10x_compile`. A runtime-flavor image here is refused on the compile path. |
-| `LOG10X_COMPILER_IMAGE` | Compiler image for `log10x_compile` / `log10x_compile_link` (default `log10x/compiler-10x:latest`, falls back to `LOG10X_TENX_IMAGE` when unset). Only the compiler flavor can build a symbol library. |
+| `LOG10X_COMPILER_IMAGE` | Compiler image for `log10x_compile` / `log10x_compile_link` (default `log10x/compiler-10x:1.1.125` pinned by digest, so every run goes through the same compiler; set it to `:latest` to track releases; falls back to `LOG10X_TENX_IMAGE` when unset). Only the compiler flavor can build a symbol library. |
 | `LOG10X_GH_REPO` / `LOG10X_GITOPS_REPO_PATH` | GitHub repo and local path for GitOps-aware config tools. |
 
 ## Connect your own data (optional)

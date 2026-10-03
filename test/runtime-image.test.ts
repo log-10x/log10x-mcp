@@ -19,7 +19,7 @@ import {
   isKnownRuntimeImage,
   resolveRuntimeImage,
 } from '../src/lib/runtime-image.js';
-import { resolveCompilerImage } from '../src/lib/compile-runner.js';
+import { resolveCompilerImage, DEFAULT_IMAGE } from '../src/lib/compile-runner.js';
 
 /** Run `fn`, returning whatever it threw (typed as unknown, not `void`). */
 function catchThrown(fn: () => unknown): unknown {
@@ -66,17 +66,15 @@ test('an empty/whitespace LOG10X_RUNTIME_IMAGE falls through rather than yieldin
 
 // ── compile path ───────────────────────────────────────────────────────────
 
-test('compile path defaults to the compiler image, at a PINNED tag', () => {
+test('compile path defaults to the compiler image, pinned by tag and digest', () => {
   const image = resolveCompilerImage({});
-  assert.equal(image, 'log10x/compiler-10x:1.1.39');
+  assert.equal(image, DEFAULT_IMAGE);
 
-  // The pin is the point, not the particular version. A symbol library built
-  // from a mutable tag is not reproducible: nothing in the emitted .10x.json
-  // units records which image produced them, so two compiles of the same
-  // sources can silently go through two different engines. Bumping the version
-  // above is expected; reverting to `:latest` is the regression this guards.
-  assert.doesNotMatch(image, /:latest$/, 'the default compiler image must not be a mutable tag');
-  assert.match(image, /^log10x\/compiler-10x:\d+\.\d+\.\d+$/);
+  // The pin is the point, not the particular version: the same compiler every
+  // run. Bumping the version is expected; a mutable tag is what this
+  // guards against.
+  assert.doesNotMatch(image, /:latest/, 'the default compiler image must not be a mutable tag');
+  assert.match(image, /^log10x\/compiler-10x:\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/);
 });
 
 test('compile path keeps the LOG10X_TENX_IMAGE fallback for non-runtime images', () => {
