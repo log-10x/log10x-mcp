@@ -24,9 +24,10 @@
  *   We query `all_events_summaryBytes_total` segmented by the engine's
  *   `routeState` label (TenXSummary emits it on the
  *   receive aggregator):
- *     - baseline_bytes      : sum over baseline (routeState!="drop" only)
- *     - post_passed_bytes   : sum over post (routeState!="drop" only)
- *     - post_dropped_bytes  : sum over post (routeState="drop")
+ *     - baseline_bytes      : sum over baseline (routeState=~"pass|", the kept set)
+ *     - post_passed_bytes   : sum over post (the kept set)
+ *     - post_dropped_bytes  : sum over post (routeState in the acted-on set:
+ *                             offload | compact | tier_down | drop | sample)
  *   `delivered_pct = 1 - (post_passed_bytes / scale(baseline_bytes,...))`
  *   and we attribute the gap to four buckets:
  *     - cap_fired   : bytes the engine dropped for patterns that
@@ -54,6 +55,9 @@ import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import {
   projectActionRange,
   resolveTierDownTier,
+  perEventTierPricing,
+  sumPerEventTierMoves,
+  type PerEventTierMove,
   getDestinationCostModel,
   getDefaultActionForDestination,
   getAllowedActionsForDestination,
@@ -391,8 +395,18 @@ export interface ForecastRow {
   avg_event_size_bytes: number;
   avg_event_size_bytes_display: string;
   dollars_saved_low: number;
+  /**
+   * On a Datadog Flex row (tier_down) the three dollars_saved legs are the
+   * Standard indexing line the move avoids, at list, and dollars_added_expected
+   * is the Flex storage line it adds. Neither is a net: Flex compute is
+   * unpriced and excluded.
+   */
   dollars_saved_expected: number;
   dollars_saved_high: number;
+  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  dollars_added_expected?: number;
+  /** Datadog Flex rows only: the move as stated lines. */
+  per_event_move?: PerEventTierMove;
   /**
    * True when this row's dollars rest on a model rather than on the
    * destination's own meter. Set on every ClickHouse row: there the bill is
@@ -490,11 +504,28 @@ export interface ForecastResult {
      * dollar/byte contribution came from which action.
      *
      * tier_down.bytes_saved is always 0 (byte volume is unchanged); savings
-     * come from the lower per-GB rate at the cheaper destination tier, which
-     * cuts both the ingest and storage rate. cost.ts computes the full
-     * standard-vs-tier rate delta.
+     * come from the cheaper tier's own price line: ingest on CloudWatch IA
+     * (where storage bills the same as Standard) and on Azure Basic/Auxiliary;
+     * on Datadog Flex, see datadog_flex.
      */
     action_mix?: ActionMix;
+    /**
+     * Datadog only, when any row moves to Flex: the Flex storage lines the
+     * plan adds, at list. dollars_*_monthly above then count the Standard
+     * indexing line avoided for those rows, gross. Flex compute is unpriced
+     * and in neither.
+     */
+    dollars_added_monthly?: number;
+    /** Datadog only: every Flex move, summed and stated as lines. Render its text. */
+    datadog_flex?: {
+      events_moved_monthly: number;
+      gb_moved_monthly: number;
+      events_basis: 'measured' | 'assumed';
+      standard_indexing_avoided_usd_monthly: number;
+      flex_storage_added_usd_monthly: number;
+      flex_compute: string;
+      text: string;
+    };
   };
   /**
    * Fraction of TOTAL observed monthly env bytes that this forecast covers.
@@ -605,7 +636,7 @@ export interface VerifyResult {
   per_action_breakdown?: ActionBytesBuckets;
   /**
    * Per-pattern attribution rows. One row per pattern_hash with
-   * non-zero routeState="drop" bytes in the post window. Action is
+   * non-zero acted-on bytes (any routeState but pass) in the post window. Action is
    * sourced from the cap-CSV via `buildPatternActionLookup`; rows
    * with no cap-CSV match are emitted with `action: 'drop'` and
    * `action_source: 'unattributed'` so the offload clamp + caveat
@@ -1251,9 +1282,12 @@ export async function runEstimateForecast(
     } else if (solverAction === 'tier_down') {
       // tier_down: estimate via the IA tier delta when available; fall back
       // to a conservative 50% ingest reduction for destinations with a known
-      // cheap tier (CloudWatch IA) and 0 elsewhere.
+      // cheap tier (CloudWatch IA) and 0 elsewhere. On Datadog the target is
+      // volume out of the Standard index, and Flex takes all of a row's.
       const solverTier = resolveTierDownTier(model, args.tier_down_plan);
-      if (solverTier) {
+      if (solverTier?.per_event) {
+        expectedReductionPerByte = 1;
+      } else if (solverTier) {
         const ingestDelta = model.ingest_per_gb - solverTier.ingest_rate_usd_per_gb;
         expectedReductionPerByte = model.ingest_per_gb > 0
           ? ingestDelta / model.ingest_per_gb
@@ -1365,6 +1399,9 @@ export async function runEstimateForecast(
   let totalLow = 0;
   let totalExpected = 0;
   let totalHigh = 0;
+  // Datadog Flex rows: their moves, and the Flex storage lines they add.
+  const flexMoves: PerEventTierMove[] = [];
+  let totalAdded = 0;
   const smallEventPatterns: string[] = [];
   let noOpCompactCount = 0;
 
@@ -1422,6 +1459,8 @@ export async function runEstimateForecast(
     const dollarsHigh =
       (passRange.high.total_dollars ?? 0) -
       (actionRange.high.total_dollars ?? 0);
+    // Datadog Flex: state the two priced lines apart, never their net.
+    const flexMove = actionRange.expected.per_event_move;
 
     if (
       row.action === 'compact' &&
@@ -1449,12 +1488,17 @@ export async function runEstimateForecast(
       bytes_saved_monthly_display: fmtBytes(Math.max(0, savedBytes)),
       avg_event_size_bytes: avgSize,
       avg_event_size_bytes_display: fmtBytes(avgSize),
-      dollars_saved_low: Math.max(0, dollarsLow),
-      dollars_saved_expected: Math.max(0, dollarsExpected),
-      dollars_saved_high: Math.max(0, dollarsHigh),
+      dollars_saved_low: flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsLow),
+      dollars_saved_expected: flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsExpected),
+      dollars_saved_high: flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsHigh),
+      ...(flexMove ? { dollars_added_expected: flexMove.tier_storage_added_usd, per_event_move: flexMove } : {}),
       ...(actionRange.expected.modeled ? { modeled: true } : {}),
       notes: actionRange.expected.notes,
     });
+    if (flexMove) {
+      flexMoves.push(flexMove);
+      totalAdded += flexMove.tier_storage_added_usd;
+    }
     totalIn += monthlyBytes;
     totalSavedBytes += Math.max(0, savedBytes);
     // Rows that never reach the cluster. Only these move compute; compact and
@@ -1471,10 +1515,12 @@ export async function runEstimateForecast(
       const keptShare = row.action === 'sample' ? 1 / Math.max(1, row.sample_n ?? 10) : 0;
       rowsRemovedEvents += obsEvents * (1 - keptShare);
     }
-    totalLow += Math.max(0, dollarsLow);
-    totalExpected += Math.max(0, dollarsExpected);
-    totalHigh += Math.max(0, dollarsHigh);
+    totalLow += flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsLow);
+    totalExpected += flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsExpected);
+    totalHigh += flexMove ? flexMove.standard_indexing_avoided_usd : Math.max(0, dollarsHigh);
   }
+  const flexPricing = perEventTierPricing(args.destination);
+  const flexTotal = flexPricing ? sumPerEventTierMoves(flexPricing, flexMoves) : undefined;
 
   // Coverage: fraction of TOTAL observed bytes (monthly-scaled) that the
   // forecast modeled. Patterns not in proposed_config and not picked by
@@ -1737,7 +1783,8 @@ export async function runEstimateForecast(
   if (
     args.target_percent !== undefined &&
     totalSavedBytes === 0 &&
-    rows.length > 0
+    rows.length > 0 &&
+    !flexTotal
   ) {
     caveats.push(
       `Requested ${args.target_percent}% volume reduction; achieved 0% on ${args.destination} because the only applicable action is tier_down (a storage-tier marker, not a byte reduction). To actually cut volume on this destination, pass default_action=drop or default_action=sample; or switch to a destination where compact is non-no-op.`
@@ -1774,6 +1821,20 @@ export async function runEstimateForecast(
       dollars_expected_monthly: totalExpected,
       dollars_high_monthly: totalHigh,
       annual_projection_expected: totalExpected * 12,
+      ...(flexTotal
+        ? {
+            dollars_added_monthly: totalAdded,
+            datadog_flex: {
+              events_moved_monthly: Math.round(flexTotal.events_moved),
+              gb_moved_monthly: Number(flexTotal.gb_moved.toFixed(1)),
+              events_basis: flexTotal.events_basis,
+              standard_indexing_avoided_usd_monthly: Math.round(flexTotal.standard_indexing_avoided_usd * 100) / 100,
+              flex_storage_added_usd_monthly: Math.round(flexTotal.tier_storage_added_usd * 100) / 100,
+              flex_compute: flexTotal.unpriced,
+              text: flexTotal.text,
+            },
+          }
+        : {}),
       modeled: forecastModel.compute != null,
       ...(estateComputeSaving ? { compute_saving: estateComputeSaving } : {}),
       ...(forecastModel.compute
@@ -2512,8 +2573,8 @@ export async function executeEstimateSavings(
 
       // Check whether the mix is uniformly tier_down (or has zero combined
       // bytes_saved_monthly across all patterns). tier_down does not reduce
-      // byte volume; savings come from the lower per-GB rate at the cheaper
-      // destination tier (both ingest and storage rate).
+      // byte volume; savings come from the cheaper tier's own rate (ingest
+      // only on CloudWatch IA).
       const allTierDown =
         result.per_pattern.length > 0 &&
         result.per_pattern.every((r) => r.action === 'tier_down');
@@ -2571,6 +2632,10 @@ export async function executeEstimateSavings(
             : pl.met
               ? `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo (today: ${fmtBudgetUsd(pl.billUsd)}/mo), ${keepNote}.`
               : `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo. ${pl.gap ? pl.gap.message : ''}`;
+          // Datadog Flex: the landing counts priced lines only; say which.
+          if (pl.perEventMove) {
+            headline += ` Counts priced lines only. ${pl.perEventMove.text}`;
+          }
         } else if (pl.target.kind === 'gb_budget') {
           const scopeVol = args.service
             ? `${args.service} ingest toward ${destination}`
@@ -2581,6 +2646,14 @@ export async function executeEstimateSavings(
             : pl.met
               ? `Budget: keep ${scopeVol} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${landsAtVol}/mo, ${keepNote}, and takes ${fmtDollar(pl.billUsd - (pl.landsAtUsd ?? pl.billUsd))}/mo off the bill with it.`
               : `Budget: keep ${scopeVol} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. This plan lands at ${landsAtVol}/mo. ${pl.gap ? pl.gap.message : ''}`;
+        } else if (pl.percentBasis === 'standard_index_volume') {
+          // Datadog: the percent is volume out of the Standard index. No share
+          // of the bill is stated for a Flex move (its compute is unpriced).
+          const scopeVol = args.service ? `${args.service} volume` : 'volume';
+          headline = (pl.met
+            ? `Target: move ${pl.targetPct}% of the ${scopeVol} out of the Datadog Standard index. This plan moves ${pl.achievedPct.toFixed(0)}%, ${keepNote}.`
+            : `Target: move ${pl.targetPct}% of the ${scopeVol} out of the Datadog Standard index. ${keepNote[0].toUpperCase()}${keepNote.slice(1)}, this plan moves ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`) +
+            (pl.perEventMove ? ` ${pl.perEventMove.text}` : '');
         } else {
           headline = pl.met
             ? `Target: cut ${pl.targetPct}% of the ${destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, ${keepNote}.`
@@ -2590,6 +2663,14 @@ export async function executeEstimateSavings(
         headline = leadDollar
           ? `If you enforce externally: ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings potential${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`
           : `If you enforce externally: ${savedVol}/mo (${bytePctReduced})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes). Enforcement choice is yours.`;
+      } else if (result.totals.datadog_flex && tierDownOnly) {
+        // Datadog Flex: the move's lines, and nothing that reads as a net or
+        // as a share of the bill.
+        headline = `Forecast (${destination})${serviceTag} on ${patternCountLabel}: ${result.totals.datadog_flex.text}`;
+      } else if (result.totals.datadog_flex) {
+        headline =
+          `Forecast (${destination})${serviceTag} on ${patternCountLabel}: ${savedVol}/mo (${bytePctReduced}) off the wire via byte-reducing actions. ` +
+          result.totals.datadog_flex.text;
       } else if (tierDownOnly) {
         const solverNote = args.target_percent !== undefined && args.default_action === 'compact'
           ? ` (solver requested compact; destination forced tier_down)`
@@ -2600,8 +2681,8 @@ export async function executeEstimateSavings(
         // append the dollar only at customer_supplied.
         const tierVol = fmtBytes(result.totals.bytes_in_monthly);
         headline = leadDollar
-          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`
-          : `Forecast (${destination}): ${tierVol}/mo moved to a cheaper destination tier${serviceTag} via tier_down (lower ingest + storage rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
+          ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings${serviceTag} via tier_down (cheaper destination tier, billed at that tier's own rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`
+          : `Forecast (${destination}): ${tierVol}/mo moved to a cheaper destination tier${serviceTag} via tier_down (billed at that tier's own rate; byte volume unchanged) on ${patternCountLabel}${solverNote}.`;
       } else if (actionMix.tier_down.pattern_count > 0 && actionMix.tier_down.dollars > 0) {
         // Mixed: some tier_down + other actions
         const bytesSavingDollars = result.totals.dollars_expected_monthly - actionMix.tier_down.dollars;
@@ -2910,6 +2991,14 @@ function buildForecastHumanSummary(
   // When action mix is uniformly tier_down (or bytes_saved is 0 and tier_down
   // dominates), use the tier-down framing so callers understand savings come
   // from the price differential, not byte reduction.
+  // Datadog Flex: state the move's lines; no net, no share of the bill.
+  if (result.totals.datadog_flex) {
+    const flexText = result.totals.datadog_flex.text;
+    const byteReducing = result.totals.bytes_saved_monthly > 0
+      ? ` ${savedVol}/mo (${bytePctReduced}) comes off the wire via byte-reducing actions.`
+      : '';
+    return `estimate_savings forecast on ${destination}${serviceClause}: ${flexText}${byteReducing} ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
+  }
   if (actionMix) {
     const zeroByteSaved = result.totals.bytes_saved_monthly === 0;
     const allTierDown =
@@ -2921,8 +3010,8 @@ function buildForecastHumanSummary(
       // cheaper tier, append the dollar only at customer_supplied.
       const tierVol = fmtBytes(result.totals.bytes_in_monthly);
       const tierLead = leadDollar
-        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, lower ingest + storage rate; byte volume unchanged)`
-        : `${tierVol}/mo moved to a cheaper destination tier via tier_down (lower ingest + storage rate; byte volume unchanged)`;
+        ? `${fmtDollar(result.totals.dollars_expected_monthly)}/mo savings via tier_down (cheaper destination tier, billed at that tier's own rate; byte volume unchanged)`
+        : `${tierVol}/mo moved to a cheaper destination tier via tier_down (billed at that tier's own rate; byte volume unchanged)`;
       return `estimate_savings forecast on ${destination}${serviceClause}: ${tierLead}. ${patternWord} covering ${envCoverage}.${result.caveats.length ? ` Caveats: ${result.caveats.length}.` : ''}`;
     }
     // Mixed actions: break down by byte-reducing vs tier_down.

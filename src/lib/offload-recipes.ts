@@ -113,6 +113,13 @@ export interface OffloadParams {
 
 const DEFAULT_PREFIX = 'app';
 
+/**
+ * The comment a recipe prints where it KEEPS `routeState` because the
+ * destination routes on it (keepMarkerAtDestination).
+ */
+const KEPT_MARKER_NOTE =
+  'routeState KEPT: the destination routes on it (a Datadog Flex index filters @routeState:tier_down)';
+
 /** Prerequisites shared by every forwarder recipe. */
 function basePrereqs(p: OffloadParams): string[] {
   return [
@@ -158,7 +165,11 @@ framing.method          = "newline_delimited"
 # destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Vector).
 [sinks.tenx_tier_down]
 inputs = ["tenx_action_route.tier_down"]
-encoding.except_fields = ["routeState"]   # strip the marker (tenx_hash kept)
+${p.keepMarkerAtDestination
+  ? `# ${KEPT_MARKER_NOTE}.
+# On Datadog this sink is your existing datadog_logs sink config: the Flex
+# index, ordered before the catch-all, picks the slice up at the destination.`
+  : `encoding.except_fields = ["routeState"]   # strip the marker (tenx_hash kept)`}
 # ... your CHEAP-TIER sink config (Flex index / IA log group / frozen tier) ...
 
 # drop slice -> SUPPRESSED. The "drop" route has no sink, so Vector discards
@@ -170,14 +181,20 @@ encoding.except_fields = ["routeState"]   # strip the marker (tenx_hash kept)
 # special handling is needed beyond routing it to the SIEM.
 [sinks.your_siem]
 inputs = ["tenx_action_route._unmatched"]
-encoding.except_fields = ["routeState"]   # strip the marker on the SIEM path too
+${p.keepMarkerAtDestination
+  ? `# ${KEPT_MARKER_NOTE}; pass events carry "pass", which no Flex filter matches.`
+  : `encoding.except_fields = ["routeState"]   # strip the marker on the SIEM path too`}
 # ... your existing SIEM sink config ...`,
     placementNote:
       'add the `route` transform downstream of the source reading 10x\'s return ' +
       'path. The `offload` route goes to S3, `tier_down` to your cheap-tier sink, ' +
       '`drop` is left unwired (suppressed), and pass/compact/sample fall through ' +
-      '`._unmatched` to your existing SIEM sink. The marker is stripped at each ' +
-      'sink via `encoding.except_fields`, so no extra transform is needed. ' +
+      '`._unmatched` to your existing SIEM sink. ' +
+      (p.keepMarkerAtDestination
+        ? 'The marker is stripped on the S3 sink only (`encoding.except_fields`); the ' +
+          'Datadog-bound sinks keep it, because the Flex index filter reads it. '
+        : 'The marker is stripped at each sink via `encoding.except_fields`, so no ' +
+          'extra transform is needed. ') +
       'Validate with `vector validate <config>`.',
     prerequisites: basePrereqs(p),
   };
@@ -186,17 +203,19 @@ encoding.except_fields = ["routeState"]   # strip the marker on the SIEM path to
 // ---------------------------------------------------------------------------
 // fluentd  (verified live: copy -> relabel -> grep + record_transformer.
 // CORE plugins only — no rewrite_tag_filter gem, no rewrite loop, explicit
-// label routing so nothing escapes to the root router.)
+// label routing so nothing escapes to the root router.) Comments are `#` lines:
+// Fluentd's parser rejects `<!-- -->` ("expected '>'"), which this recipe used
+// until 2026-10-01, so the recipe as printed did not load on fluentd 1.19.1.
 // ---------------------------------------------------------------------------
 function recipeFluentd(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   return {
     language: 'xml',
     body: `<label @OUTPUT>
-  <!-- 1) fan the 10x return stream to one label per action; each grep keeps
-       only its slice, so routing is explicit (core copy/relabel/grep only, no
-       extra tag-rewrite gem, no rewrite loop, nothing escapes to the root
-       router). -->
+  # 1) fan the 10x return stream to one label per action; each grep keeps
+  # only its slice, so routing is explicit (core copy/relabel/grep only, no
+  # extra tag-rewrite gem, no rewrite loop, nothing escapes to the root
+  # router).
   <match tenx.**>
     @type copy
     <store>
@@ -218,25 +237,28 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
   </match>
 </label>
 
-<!-- 2) offload slice -> customer-owned S3 as plain JSONL -->
+# 2) offload slice -> customer-owned S3 as plain JSONL
 <label @TENX_OFFLOAD>
   <filter **>
     @type grep
     <regexp>
       key routeState
-      pattern /^offload$/       <!-- keep only the offload slice -->
+      # keep only the offload slice
+      pattern /^offload$/
     </regexp>
   </filter>
   <filter **>
     @type record_transformer
-    remove_keys routeState      <!-- marker did its job; tenx_hash kept -->
+    # marker did its job; tenx_hash kept
+    remove_keys routeState
   </filter>
   <match **>
     @type s3
     s3_bucket ${p.bucket}
     s3_region ${p.region}
     path ${prefix}/
-    store_as txt                <!-- plain newline-delimited JSON, not gzip -->
+    # plain newline-delimited JSON, not gzip
+    store_as txt
     <format>
       @type json
     </format>
@@ -248,60 +270,71 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
   </match>
 </label>
 
-<!-- 3) tier_down slice -> your cheaper in-platform SIEM tier -->
+# 3) tier_down slice -> your cheaper in-platform SIEM tier
 <label @TENX_TIER_DOWN>
   <filter **>
     @type grep
     <regexp>
       key routeState
-      pattern /^tier_down$/      <!-- keep only the tier_down slice -->
+      # keep only the tier_down slice
+      pattern /^tier_down$/
     </regexp>
   </filter>
-  <filter **>
+${p.keepMarkerAtDestination
+  ? `  # ${KEPT_MARKER_NOTE}.
+  # On Datadog the <match> below is your existing datadog <match>; the Flex
+  # index picks the slice up at the destination.`
+  : `  <filter **>
     @type record_transformer
     remove_keys routeState
-  </filter>
+  </filter>`}
   <match **>
-    <!-- PLACEHOLDER: your CHEAP-TIER destination <match> (destination-specific):
-         e.g. a second cloudwatch_logs <match> pointed at an Infrequent-Access
-         log group, or a datadog <match> tagged to a Flex index. See
-         cloudwatchIaRecipe() / datadogFlexRecipe() / azureLogsTierRecipe() for the
-         destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Fluentd). -->
+    # PLACEHOLDER: your CHEAP-TIER destination <match> (destination-specific):
+    # e.g. a second cloudwatch_logs <match> pointed at an Infrequent-Access
+    # log group, or a datadog <match> tagged to a Flex index. See
+    # cloudwatchIaRecipe() / datadogFlexRecipe() / azureLogsTierRecipe() for the
+    # destination-side TF (Azure Basic/Auxiliary needs Fluent Bit or Logstash, not Fluentd).
   </match>
 </label>
 
-<!-- 4) drop slice -> SUPPRESSED. @type null discards it (the slice the engine
-     marked as pure noise never reaches a destination). -->
+# 4) drop slice -> SUPPRESSED. @type null discards it (the slice the engine
+# marked as pure noise never reaches a destination).
 <label @TENX_DROP>
   <filter **>
     @type grep
     <regexp>
       key routeState
-      pattern /^drop$/          <!-- keep only the drop slice... -->
+      # keep only the drop slice...
+      pattern /^drop$/
     </regexp>
   </filter>
   <match **>
-    @type null                  <!-- ...then discard it -->
+    # ...then discard it
+    @type null
   </match>
 </label>
 
-<!-- 5) pass / compact / sample -> your existing SIEM destination. compact
-     already carries the engine's encoded bytes on the wire, so no special
-     handling beyond routing it to the SIEM. -->
+# 5) pass / compact / sample -> your existing SIEM destination. compact
+# already carries the engine's encoded bytes on the wire, so no special
+# handling beyond routing it to the SIEM.
 <label @TENX_SIEM>
   <filter **>
     @type grep
     <regexp>
       key routeState
-      pattern /^(pass|compact|sample)$/   <!-- keep only the SIEM-bound slices -->
+      # keep only the SIEM-bound slices
+      pattern /^(pass|compact|sample)$/
     </regexp>
   </filter>
-  <filter **>
+${p.keepMarkerAtDestination
+  ? `  # ${KEPT_MARKER_NOTE};
+  # pass events carry "pass", which no Flex filter matches.`
+  : `  <filter **>
     @type record_transformer
     remove_keys routeState
-  </filter>
+  </filter>`}
   <match **>
-    <!-- ... your existing destination <match> ... -->
+    # ... your existing destination <match> ...
   </match>
 </label>`,
     placementNote:
@@ -310,8 +343,11 @@ function recipeFluentd(p: OffloadParams): OffloadRecipe {
       'each `grep` keeps only its action(s): `offload` -> S3, `tier_down` -> your ' +
       'cheap-tier <match>, `drop` -> `@type null` (suppressed), pass/compact/sample ' +
       '-> the SIEM. Routing is explicit (no rewrite_tag_filter, no rewrite loop, ' +
-      'nothing escapes to the root router). `record_transformer` strips the marker ' +
-      'on every kept path.',
+      'nothing escapes to the root router). ' +
+      (p.keepMarkerAtDestination
+        ? '`record_transformer` strips the marker on the S3 path only; the ' +
+          'Datadog-bound labels keep it, because the Flex index filter reads it.'
+        : '`record_transformer` strips the marker on every kept path.'),
     prerequisites: [
       ...basePrereqs(p),
       'Plugin: `fluent-plugin-s3` must be present for the S3 output (bundled in td-agent / fluent-package; on a vanilla OSS image run `fluent-gem install fluent-plugin-s3`). copy / relabel / grep / record_transformer / null are core, no extra gem.',
@@ -459,11 +495,14 @@ processors:
       - set(log.body, log.attributes)            # fold attrs into the body so tenx_hash
                                                   # survives marshaler:body (it is a LOG
                                                   # attribute; body-only would drop it)
-  transform/strip:
+${p.keepMarkerAtDestination
+  ? `  # No strip on the Datadog-bound pipelines: ${KEPT_MARKER_NOTE}.
+`
+  : `  transform/strip:
     error_mode: ignore
     log_statements:
       - delete_key(log.attributes, "routeState") # SIEM / tier_down path: drop the marker
-
+`}
 exporters:
   awss3:
     s3uploader:
@@ -484,15 +523,24 @@ service:
     logs/in:        { receivers: [otlp], exporters: [routing] }
     logs/offload:   { receivers: [routing], processors: [transform/offload], exporters: [awss3] }
     # tier_down -> swap exporters:[nop] for your cheap-tier exporter above.
-    logs/tier_down: { receivers: [routing], processors: [transform/strip], exporters: [nop] }
+${p.keepMarkerAtDestination
+  ? `    # On Datadog both pipelines below export to your datadog exporter.
+    logs/tier_down: { receivers: [routing], exporters: [nop] }
     logs/drop:      { receivers: [routing], exporters: [nop] }   # SUPPRESSED (no SIEM, no S3)
-    logs/siem:      { receivers: [routing], processors: [transform/strip], exporters: [<your_siem_exporter>] }`,
+    logs/siem:      { receivers: [routing], exporters: [<your_siem_exporter>] }`
+  : `    logs/tier_down: { receivers: [routing], processors: [transform/strip], exporters: [nop] }
+    logs/drop:      { receivers: [routing], exporters: [nop] }   # SUPPRESSED (no SIEM, no S3)
+    logs/siem:      { receivers: [routing], processors: [transform/strip], exporters: [<your_siem_exporter>] }`}`,
     placementNote:
       'the routing connector reads 10x\'s OTLP return path, where 10x\'s fields ' +
       'arrive as LOG attributes (body carries the message). `offload` strips the ' +
       'marker and folds attributes into the body so tenx_hash survives ' +
-      '`marshaler: body`; `tier_down` strips the marker and exports to your ' +
-      'cheap-tier exporter; `drop` routes to the `nop` exporter (suppressed); and ' +
+      '`marshaler: body`; ' +
+      (p.keepMarkerAtDestination
+        ? '`tier_down` keeps the marker (the Flex index filter reads it) and exports ' +
+          'to your datadog exporter; '
+        : '`tier_down` strips the marker and exports to your cheap-tier exporter; ') +
+      '`drop` routes to the `nop` exporter (suppressed); and ' +
       'pass/compact/sample fall through to the default SIEM pipeline.',
     prerequisites: [
       ...basePrereqs(p),
@@ -526,12 +574,22 @@ filter {
     # pass / compact / sample -> the SIEM.
     mutate { add_field => { "[@metadata][tenx_route]" => "siem" } }
   }
-  # marker did its job; drop it (tenx_hash kept). Also drop [event][original]:
+${p.keepMarkerAtDestination
+  ? `  # ${KEPT_MARKER_NOTE}, so the
+  # marker is stripped on the S3 slice only (tenx_hash kept). [event][original]
+  # goes everywhere: under ECS-compat v8 (Logstash 8.x default) the json codec
+  # stores the raw source line there, a second copy of the marker.
+  if [@metadata][tenx_route] == "offload" {
+    mutate { remove_field => ["routeState"] }
+  }
+  mutate { remove_field => ["[event][original]"] }
+}`
+  : `  # marker did its job; drop it (tenx_hash kept). Also drop [event][original]:
   # under ECS-compat v8 (Logstash 8.x default) the json codec stores the raw
   # source line there, which still contains "routeState" (verified leaking into
   # both sinks). Or set pipeline.ecs_compatibility: disabled on this pipeline.
   mutate { remove_field => ["routeState", "[event][original]"] }
-}
+}`}
 
 output {
   if [@metadata][tenx_route] == "offload" {
@@ -563,7 +621,10 @@ output {
       '`[@metadata]` flag: `offload` -> S3, `tier_down` -> your cheap-tier output, ' +
       '`drop` -> an empty (suppressed) branch, pass/compact/sample -> the SIEM. ' +
       '`@metadata` is never shipped, so the routing signal does not leak into S3 ' +
-      'or the SIEM, and `routeState` is removed before either.',
+      (p.keepMarkerAtDestination
+        ? 'or the SIEM. `routeState` is removed from the S3 slice only; the ' +
+          'Datadog-bound outputs keep it, because the Flex index filter reads it.'
+        : 'or the SIEM, and `routeState` is removed before either.'),
     prerequisites: [
       ...basePrereqs(p),
       'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with routeState), so the strip removes it too — or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
@@ -608,12 +669,17 @@ S3 destination "tenx_offload_s3":
   Format:          JSON (newline-delimited)
   Compression:     none
 
-Strip the marker (all kept destinations):
+${p.keepMarkerAtDestination
+  ? `Strip the marker (S3 only):
+  Pipeline "tenx_strip_routestate"  ->  one Eval function  ->  Remove fields: routeState
+  Attach it as the Post-Processing Pipeline on tenx_offload_s3 ONLY. Leave it off
+  the Datadog destinations: ${KEPT_MARKER_NOTE}. (tenx_hash kept.)`
+  : `Strip the marker (all kept destinations):
   Pipeline "tenx_strip_routestate"  ->  one Eval function  ->  Remove fields: routeState
   Attach it as the Post-Processing Pipeline on tenx_offload_s3, the cheap-tier
   destination, AND the SIEM destination. (Cribl S3/SIEM destinations have no
   native field-exclude, so the strip is a destination-attached pipeline, after
-  the route. tenx_hash kept.)`,
+  the route. tenx_hash kept.)`}`,
     placementNote:
       'order the per-action routes above the SIEM catch-all, each with Final=Yes so ' +
       'each slice is pulled out before the next route: `offload` -> S3, `tier_down` ' +
@@ -724,7 +790,7 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
  */
 export function forwarderWriteTerraform(): string {
   return `# Forwarder-write IAM for the offload loop. The forwarder PutObjects the
-# routeState=="drop" slice to the Retriever input bucket; the Retriever's own role only
+# routeState=="offload" slice to the Retriever input bucket; the Retriever's own role only
 # READS it, so this is a SEPARATE, additive grant.
 
 variable "bucket" {
@@ -2612,7 +2678,7 @@ export function renderOffloadSection(
   }
 
   lines.push(
-    'Route the slice 10x marks low-value (`routeState == "drop"`) to the customer\'s ' +
+    'Route the slice 10x marks for offload (`routeState == "offload"`) to the customer\'s ' +
       'own S3 before the SIEM bills it; the Retriever indexes that bucket and ' +
       'fetches it back by stamped identity. Nothing is deleted, it is relocated. ' +
       'This is lossless cost reduction, not deletion.',
@@ -2664,24 +2730,13 @@ export function renderOffloadSection(
     }
   } else if (forwarder) {
     // Datadog reads the marker at the DESTINATION: the Flex index selects the
-    // down-tiered slice with an index filter on `@routeState:tier_down`. The
-    // generic strip is `Match tenx.*`, which takes the marker off the SIEM path
-    // too, so the filter has nothing to match and nothing tiers, with HTTP 200
-    // and no error. Same failure Coralogix gets its own shipper to avoid.
-    // fluent-bit carries the narrowed strip; the other generators still strip
-    // on every path, so say so rather than emit a config that cannot work.
+    // down-tiered slice with an index filter on `@routeState:tier_down`, so a
+    // strip on the Datadog-bound path leaves the filter nothing to match and
+    // nothing tiers, with HTTP 200 and no error. Every generator narrows its
+    // strip to the S3 slice when keepMarkerAtDestination is set (fluent-bit
+    // first; vector, fluentd, otel-collector, logstash and cribl since
+    // 2026-10-01), so no forwarder needs a warning here any more.
     const keepMarker = destination === 'datadog';
-    if (keepMarker && forwarder !== 'fluent-bit') {
-      lines.push(
-        `**Datadog: the \`${forwarder}\` recipe below cannot drive Flex as written.** ` +
-          'It strips `routeState` on every output path, and the Flex index filter ' +
-          '(`@routeState:tier_down`) is the only thing that selects the down-tiered ' +
-          'slice, so the marker has to reach Datadog. Narrow the strip to the S3 ' +
-          'offload path before applying it, the way the fluent-bit recipe does, or ' +
-          'use fluent-bit here. Left as is, the apply succeeds and nothing ever tiers.',
-        ''
-      );
-    }
     lines.push(...renderRecipeBlock(forwarder, { ...params, keepMarkerAtDestination: keepMarker }), '');
     const others = otherOffloadForwarders(forwarder);
     lines.push(`Other supported forwarders: ${others.join(', ')}.`, '');
@@ -2692,7 +2747,7 @@ export function renderOffloadSection(
       ''
     );
     for (const f of VERIFIED_OFFLOAD_FORWARDERS) {
-      lines.push(...renderRecipeBlock(f, params), '');
+      lines.push(...renderRecipeBlock(f, { ...params, keepMarkerAtDestination: destination === 'datadog' }), '');
     }
     lines.push(
       `Also supported (smoke-test first): ${OFFLOAD_FORWARDERS.filter(

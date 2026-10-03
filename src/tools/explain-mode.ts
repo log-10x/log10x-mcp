@@ -33,6 +33,8 @@ import {
   describeCompactFigure,
   describeCompactReadback,
   tierDownRateDelta,
+  perEventTierPricing,
+  projectPerEventTierMove,
   type DestinationCostModel,
 } from '../lib/cost.js';
 import { resolveRate } from '../lib/rate-resolution.js';
@@ -71,7 +73,7 @@ export const explainModeSchema = {
       'Which enforcement mode to explain. Keep-everything levers come first, then the lossy opt-ins. ' +
       "`compact` = keeps everything: engine minifies events; all events still reach the stack, and the destination's expander rebuilds them (how exactly, and which searches see the full text, is per destination). " +
       '`offload` = keeps everything: engine diverts matched events to a customer-owned S3 bucket; readable via log10x_retriever_query. ' +
-      '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
+      '`tier_down` = keeps everything: engine stamps the routeState marker; a routing rule moves those events to a cheaper tier in the same destination (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       '`sample` = lossy opt-in: engine passes 1-in-N events through to the stack; the rest are discarded. ' +
       '`drop` = lossy opt-in: engine hard-drops matched patterns at the Receiver before delivery. ' +
       '`observe_only` = engine observes and fingerprints but does not act; use to baseline volume before committing.'
@@ -212,17 +214,18 @@ const MODE_METADATA: Record<ExplainMode, ModeMetadata> = {
   },
   tier_down: {
     what_it_does:
-      'Events reach the stack at a cheaper storage tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
+      'Events reach the stack at a cheaper tier (Datadog Flex / CloudWatch IA / Azure Monitor Basic or Auxiliary Logs). ' +
       'Engine stamps matched events with the routeState marker. ' +
-      'Your analyzer routes stamped events to a cheaper storage tier. ' +
-      'Events remain searchable at the lower tier; only ingest/storage cost drops.',
+      'Your analyzer routes stamped events to the cheaper tier. ' +
+      'Events remain searchable at the lower tier; only the line that tier discounts drops ' +
+      '(ingest on CloudWatch IA, where storage bills the same as Standard).',
     what_you_need:
       'The 10x Receiver in-path AND a compatible analyzer (Datadog, CloudWatch, or Azure Monitor). ' +
       'Tier-routing must be configured on the analyzer side once.',
     who_enforces: 'engine',
     apply_tool: 'log10x_configure_engine',
     apply_args: (service) => ({ service, default_action: 'tier_down' }),
-    what_survives: 'Events reach the stack at a cheaper storage tier. Indexed fields preserved.',
+    what_survives: 'Events reach the stack at a cheaper tier. Indexed fields preserved.',
   },
   offload: {
     what_it_does:
@@ -349,7 +352,12 @@ function renderVerbatim(args: {
     }
     if (mode === 'tier_down' && model) savingsFrac.tier_down = tierDownRateDelta(model);
     const frac = savingsFrac[mode];
-    if (frac > 0) {
+    // Datadog Flex has no per-GB fraction: it is priced per event at list and
+    // stated as lines, with its compute add-on unpriced and excluded.
+    const flexPricing = mode === 'tier_down' && model ? perEventTierPricing(model) : undefined;
+    if (flexPricing) {
+      savingsLine = `  ${projectPerEventTierMove(flexPricing, bytesPerMonth).text}`;
+    } else if (frac > 0) {
       const gb = (bytesPerMonth / (1e9));
       const savingsUsd = costPerMonth * frac;
       const affectedGb = gb * frac;

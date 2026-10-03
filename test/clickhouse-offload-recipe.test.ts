@@ -259,26 +259,26 @@ const BASELINE: Record<string, string> = {
   coralogixMonitoringRecipe: '8a6da4b70815abe3',
   coralogixTcoApiContract: '835216577057de80',
   'offloadRecipe.vector': '0d706eb3869c241e',
-  'offloadRecipe.fluentd': '78d0249acf9f1cc5',
+  'offloadRecipe.fluentd': 'cbb056d173054948',
   'offloadRecipe.fluent-bit': 'a26a53c5fddcf4c3',
   'offloadRecipe.otel-collector': 'd12563720dda1c89',
   'offloadRecipe.logstash': 'c724edcc895a7f6e',
   'offloadRecipe.cribl': '617a7ef8a96e455a',
-  'renderOffloadSection.none': '34643c598e3c9292',
-  'renderOffloadSection.nofwd.none': '809d68fc2190077b',
-  'renderOffloadSection.datadog': '7a222ba94682e21e',
-  'renderOffloadSection.nofwd.datadog': '976f23db88d79fe2',
-  'renderOffloadSection.cloudwatch': '122fa49f70c56b75',
-  'renderOffloadSection.nofwd.cloudwatch': 'dfc0da69622ca820',
-  'renderOffloadSection.azure-monitor': 'a53491e6c52d1be4',
-  'renderOffloadSection.nofwd.azure-monitor': '1660741eeb677ae5',
-  'renderOffloadSection.coralogix': '8f2628944a16400e',
-  'renderOffloadSection.nofwd.coralogix': 'e1f5e644ce59341e',
-  'renderOffloadSection.elasticsearch': '4fddcc7ab38308ce',
-  'renderOffloadSection.nofwd.elasticsearch': '0d500c602ef7788f',
-  'renderOffloadSection.splunk': 'e0454f3735c37064',
-  'renderOffloadSection.nofwd.splunk': 'd9b502894d9e2057',
-  forwarderWriteTerraform: '33fbf1f20045b799',
+  'renderOffloadSection.none': 'e1d550d16bdd6b35',
+  'renderOffloadSection.nofwd.none': 'd2344072b88bece8',
+  'renderOffloadSection.datadog': '0c270fe196cc42e2',
+  'renderOffloadSection.nofwd.datadog': '5a198e1669ea1fb3',
+  'renderOffloadSection.cloudwatch': '4487ba37b8eb4397',
+  'renderOffloadSection.nofwd.cloudwatch': '96efa1ccf2126e6c',
+  'renderOffloadSection.azure-monitor': '2b32bc73d614c50f',
+  'renderOffloadSection.nofwd.azure-monitor': '4ff36154036b2f70',
+  'renderOffloadSection.coralogix': 'e7a956fd41a2d1c1',
+  'renderOffloadSection.nofwd.coralogix': '98fd381e0f90e4eb',
+  'renderOffloadSection.elasticsearch': 'bc42653ca08ccae0',
+  'renderOffloadSection.nofwd.elasticsearch': 'a265164f9d2a847b',
+  'renderOffloadSection.splunk': '3e789fc723ba99d3',
+  'renderOffloadSection.nofwd.splunk': '7c125fd593b5c9b8',
+  forwarderWriteTerraform: '91968b63922ff7b0',
 };
 
 // REBASELINED 2026-09-17, deliberately. Nine entries moved, and every one of
@@ -297,6 +297,24 @@ const BASELINE: Record<string, string> = {
 //
 // The four renderOffloadSection entries that did NOT move (azure-monitor,
 // coralogix, elasticsearch, splunk) are the check that this stayed scoped.
+//
+// REBASELINED 2026-09-30, deliberately. The fourteen renderOffloadSection
+// entries and forwarderWriteTerraform moved, and nothing else did. The S3
+// section's opening sentence said it routes "the slice 10x marks low-value
+// (`routeState == "drop"`)" to S3, while every recipe it then prints sends
+// `drop` to a null sink and `offload` to S3. It now names the `offload`
+// slice, as does the Terraform comment. Every recipe body is unchanged.
+//
+// REBASELINED 2026-10-01, deliberately. Only the two Datadog sections moved.
+// Every forwarder now keeps routeState on the Datadog-bound paths (the Flex
+// index filter reads it) and strips it on the S3 slice only, so the section
+// no longer prints "cannot drive Flex as written", and the no-forwarder
+// Datadog section renders its leads in that mode.
+// Same date, also deliberate: the fluentd recipe's comments are now `#` lines.
+// It used XML comments, which fluentd's parser rejects ("expected '>'"), so
+// the recipe did not load as printed (found running it on fluentd 1.19.1). That
+// moves offloadRecipe.fluentd and every no-forwarder section, which renders
+// fluentd as a lead. Every other default-mode recipe is byte-identical.
 test('every pre-existing recipe is byte-identical to the parent commit', () => {
   const P = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
   const h = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);

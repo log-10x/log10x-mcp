@@ -1724,7 +1724,7 @@ function renderInputBucketQuestion(snapshot: DiscoverySnapshot): string {
   const lines = [
     '# Retriever wizard — Step 4a: S3 input bucket',
     '',
-    'The Retriever reads source logs from an S3 bucket. This is the same bucket where your forwarder offloads the `routeState="drop"` slice.',
+    'The Retriever reads source logs from an S3 bucket. This is the same bucket where your forwarder offloads the `routeState="offload"` slice.',
   ];
   if (suggestions.length > 0) {
     lines.push('', 'Possible buckets detected in the account:', ...suggestions);
