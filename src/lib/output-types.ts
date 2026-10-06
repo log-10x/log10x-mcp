@@ -35,7 +35,7 @@ export const SCHEMA_VERSION = '1.0' as const;
  * Kept simple: an ISO date string. Agents do not parse it; they just
  * compare for equality across calls.
  */
-export const SCHEMA_EPOCH = '2026-05-25' as const;
+export const SCHEMA_EPOCH = '2026-10-06' as const;
 
 /**
  * Uniform view enum across all default-loaded tools. Per-tool

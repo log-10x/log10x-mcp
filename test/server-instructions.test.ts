@@ -125,3 +125,12 @@ test('instructions carry the budget-target grammar (denomination discipline)', a
   // idempotence: under budget renders the headroom line and no cards.
   assert.match(SERVER_INSTRUCTIONS, /headroom/);
 });
+
+test('instructions explain the one-time rename after an engine naming change', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  assert.match(SERVER_INSTRUCTIONS, /engine upgrade that changes the naming rules\s+renames the patterns it affects, once/);
+  assert.match(SERVER_INSTRUCTIONS, /Logger and class names stay in names/);
+  assert.match(SERVER_INSTRUCTIONS, /log10x_whats_new and log10x_pattern_diff as new/);
+  assert.match(SERVER_INSTRUCTIONS, /keyed on an old name or hash no longer match them/);
+  assert.match(SERVER_INSTRUCTIONS, /re-derive the per-pattern rules from the new names/);
+});
