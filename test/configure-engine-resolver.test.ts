@@ -87,7 +87,7 @@ test('splunk: measured E21 band (0.375) is below threshold -> compact, and the r
   const { decision } = resolve('splunk');
   assert.equal(decision.action, 'compact');
   assert.equal(decision.ratio_source, 'static_band');
-  assert.match(decision.reason, /62% compaction, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/);
+  assert.match(decision.reason, /59% compaction, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/);
 });
 
 test('splunk: measured-poor compressibility (0.9) -> offload', () => {

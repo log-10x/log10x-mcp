@@ -45,6 +45,9 @@ import {
 
 export type AdvisorApp = 'reporter' | 'receiver';
 
+/** Receiver forwarders whose overlay renders the Splunk compact-mode outputs. */
+export const SPLUNK_COMPACT_FORWARDERS: ForwarderKind[] = ['fluentbit', 'fluentd'];
+
 /**
  * Deployment shape — orthogonal to forwarder kind.
  *   inline     = replace the user's forwarder deployment with a
@@ -242,6 +245,14 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   if (effectiveOptimize && compaction.kind === 'unsupported') {
     blockers.push(
       `optimize=true cannot be used with destination=${destination}. ${compaction.displayName} has no 10x expander, so compacted events would land there unreadable and stay that way, and compaction saves nothing on a destination billed this way. Drop \`optimize\`, or price tier_down/offload instead with \`log10x_estimate_savings\`.`
+    );
+  }
+  // Splunk compact mode needs the forwarder to send each template to its own
+  // index and the compact message as the event, with the record's metadata as
+  // indexed fields. The overlays render that for these forwarders only.
+  if (effectiveOptimize && destination === 'splunk' && !SPLUNK_COMPACT_FORWARDERS.includes(forwarder)) {
+    blockers.push(
+      `optimize=true with destination=splunk is configured for ${SPLUNK_COMPACT_FORWARDERS.join(' and ')} receivers, not ${forwarder}. Use one of those forwarders, or drop \`optimize\` and price tier_down/offload with \`log10x_estimate_savings\`.`
     );
   }
   // logstash receiver path is supported via the upstream elastic/logstash
@@ -830,6 +841,7 @@ function buildInstallSteps(opts: {
     ? spec.renderExtraFiles({
         releaseName,
         namespace,
+        destination,
         optimize,
         airgapped,
         licenseSecretName,

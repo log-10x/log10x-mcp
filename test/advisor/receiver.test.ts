@@ -751,3 +751,89 @@ test('a plan with neither a JWT nor builtinLicense still blocks', async () => {
   });
   assert.ok(plan.blockers.some((b) => /builtinLicense: true/.test(b)), plan.blockers.join(' | '));
 });
+
+test('receiver/fluentbit to Splunk in compact mode routes templates and events separately, with metadata as fields', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    licenseJwt: 'test',
+    destination: 'splunk',
+    splunkHecToken: 'tok',
+    optimize: true,
+  });
+  assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
+  const content = findValuesContents(plan);
+  assert.ok(content.includes('Match             tenx.tenx-template'), 'templates output matches the returning template tag');
+  assert.ok(content.includes('event_index       tenx_dml'), 'templates go to the tenx_dml index');
+  assert.ok(content.includes('Match_Regex       ^tenx\\.(?!tenx-template).*'), 'events output matches only returning events');
+  assert.ok(content.includes('event_key         $log'), 'the compact message is the Splunk event');
+  assert.ok(content.includes('event_field       k8s_pod_name $k8s_pod_name'), 'metadata travels as indexed fields');
+  assert.ok(/Name\s+nest[\s\S]*Nested_under\s+kubernetes/.test(content), 'the kubernetes map is lifted for the fields');
+  for (const arg of ['"varMaxRecurIndexes"', '"timestampZone"', '"UTC"', '"timestampMaxPerObject"']) {
+    assert.ok(content.includes(arg), `sidecar args carry the Splunk app option ${arg}`);
+  }
+  assert.ok(!/Match\s+tenx\.\*\s*\n/.test(content), 'no catch-all tenx.* output in compact mode');
+  assert.ok(/Merge_Log Off/.test(content) && !/Keep_Log Off/.test(content), 'JSON log lines stay in log for compaction');
+});
+
+test('receiver/fluentbit to Splunk without compact keeps one output and no app options', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    licenseJwt: 'test',
+    destination: 'splunk',
+    splunkHecToken: 'tok',
+    optimize: false,
+  });
+  const content = findValuesContents(plan);
+  assert.ok(/Match tenx\.\*/.test(content), 'records go to Splunk as they arrived');
+  assert.ok(!content.includes('tenx-template'), 'no template output without compact');
+  assert.ok(!content.includes('varMaxRecurIndexes'), 'no Splunk app options without compact');
+  assert.ok(!/Name\s+nest/.test(content), 'no lift filter without compact');
+  assert.ok(/Merge_Log On/.test(content), 'the overlay keeps its default merge without compact');
+});
+
+test('optimize=true with destination=splunk is blocked on forwarders without the Splunk compact outputs', async () => {
+  for (const forwarder of ['logstash', 'otel-collector'] as ForwarderKind[]) {
+    const plan = await buildReporterPlan({
+      snapshot: baseSnapshot(),
+      app: 'receiver',
+      forwarder,
+      licenseJwt: 'test',
+      destination: 'splunk',
+      splunkHecToken: 'tok',
+      optimize: true,
+    });
+    assert.ok(
+      plan.blockers.some((b) => b.includes('destination=splunk') && b.includes(forwarder)),
+      `${forwarder}: expected the Splunk compact blocker, got: ${plan.blockers.join(' | ')}`
+    );
+  }
+});
+
+test('receiver/fluentd to Splunk in compact mode routes templates and events separately, with metadata as fields', async () => {
+  const plan = await buildReporterPlan({
+    snapshot: baseSnapshot(),
+    app: 'receiver',
+    forwarder: 'fluentd',
+    licenseJwt: 'test',
+    destination: 'splunk',
+    splunkHecToken: 'tok',
+    optimize: true,
+  });
+  assert.equal(plan.blockers.length, 0, `no blockers expected, got: ${plan.blockers.join(' | ')}`);
+  const values = findValuesContents(plan);
+  assert.ok(values.includes('<match tenx-template>'), 'templates match their own tag');
+  assert.ok(values.includes('index tenx_dml'), 'templates go to the tenx_dml index');
+  assert.ok(values.includes('message_key log'), 'the compact message is the Splunk event');
+  assert.ok(values.includes('k8s_pod_name ${record.dig("kubernetes", "pod_name")}'), 'metadata lifted for the fields');
+  assert.ok(/<fields>[\s\S]*k8s_pod_name[\s\S]*<\/fields>/.test(values), 'metadata travels as indexed fields');
+  assert.ok(values.includes('pattern /\\A\\z/'), 'empty messages are dropped before the events output');
+  const patch = plan.install.flatMap((s) => s.files ?? (s.file ? [s.file] : [])).find((f) => f.path.endsWith('sidecar-patch.yaml'));
+  assert.ok(patch, 'the kustomize sidecar patch is emitted');
+  for (const arg of ['"varMaxRecurIndexes"', '"timestampZone"', '"timestampMaxPerObject"']) {
+    assert.ok(patch!.contents.includes(arg), `sidecar patch carries the Splunk app option ${arg}`);
+  }
+});

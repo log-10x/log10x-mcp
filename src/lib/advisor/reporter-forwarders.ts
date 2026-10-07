@@ -218,6 +218,7 @@ export interface ForwarderSpec {
   renderExtraFiles?: (opts: {
     releaseName: string;
     namespace: string;
+    destination?: OutputDestination;
     optimize?: boolean;
     airgapped?: boolean;
     licenseSecretName: string;
@@ -578,6 +579,11 @@ function renderLog10xSidecar(opts: {
   forwarderKind: 'fluentbit' | 'fluentd' | 'otel-collector' | 'vector' | 'logstash';
   /** When true, append `receiverOptimize true` to the engine args. */
   optimize?: boolean;
+  /**
+   * When true, append the three options the 10x Splunk app needs to expand every
+   * event exactly: no back-references, timestamps read in UTC, one timestamp slot.
+   */
+  splunkAppOptions?: boolean;
   /** When true, append `TENX_AIRGAPPED=true` to the sidecar env. */
   airgapped?: boolean;
   /** Name of the Kubernetes Secret holding the license JWT. */
@@ -599,6 +605,12 @@ function renderLog10xSidecar(opts: {
   if (opts.optimize) {
     argLines.push(`      - "receiverOptimize"`);
     argLines.push(`      - "true"`);
+  }
+  if (opts.optimize && opts.splunkAppOptions) {
+    for (const [k, v] of SPLUNK_APP_OPTIONS) {
+      argLines.push(`      - "${k}"`);
+      argLines.push(`      - "${v}"`);
+    }
   }
   const envLines: string[] = opts.builtinLicense
     ? []
@@ -688,12 +700,19 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
         backendCredentials,
         forwarderKind: 'fluentbit',
         optimize,
+        splunkAppOptions: destination === 'splunk',
         airgapped,
         licenseSecretName: licenseSecretName ?? 'log10x-license',
         licenseSecretKey: licenseSecretKey ?? 'license-jwt',
         builtinLicense,
       });
-      const destOutput = renderFluentBitDestinationOutput(destination, outputHost, splunkHecToken);
+      const destOutput = renderFluentBitDestinationOutput(destination, outputHost, splunkHecToken, optimize);
+      const destFilters = renderFluentBitDestinationFilters(destination, optimize);
+      // Splunk compact mode compacts the `log` value, so a JSON log line stays
+      // in `log` instead of being merged into the record and removed.
+      const mergeLog = destination === 'splunk' && optimize
+        ? '        Merge_Log Off'
+        : '        Merge_Log On\n        Keep_Log Off';
       return `# Receiver overlay for Fluent Bit (upstream fluent/fluent-bit chart).
 # Layer on top of your existing values:
 #   helm upgrade --install <release> fluent/fluent-bit \\
@@ -745,11 +764,10 @@ config:
     [FILTER]
         Name kubernetes
         Match kube.*
-        Merge_Log On
-        Keep_Log Off
+${mergeLog}
         K8S-Logging.Parser On
         K8S-Logging.Exclude On
-
+${destFilters}
   outputs: |
     # Hand off to the Log10x sidecar.
     [OUTPUT]
@@ -832,8 +850,8 @@ ${destOutput}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken, installMode }) => {
-      const destOutput = renderFluentdDestinationOutput(destination, outputHost, splunkHecToken);
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, installMode }) => {
+      const destOutput = renderFluentdDestinationOutput(destination, outputHost, splunkHecToken, optimize);
       // Shared fileConfigs body — used by both modes. Routes through
       // the log10x sidecar via @INGEST → :24224 → :24225 → @OUTPUT.
       const fileConfigsBlock = `fileConfigs:
@@ -900,7 +918,8 @@ ${destOutput}
   04_outputs.conf: |-
     # @OUTPUT is the terminal label — replace with your real
     # destinations (out_elasticsearch, out_splunk_hec, out_kafka2,
-    # out_s3, ...). Keep this label filter-free.
+    # out_s3, ...). Enrichment belongs in @INGEST, which runs once
+    # per event.
     <label @OUTPUT>
 ${indent(destOutput, 6)}
     </label>
@@ -976,7 +995,7 @@ podSecurityPolicy:
 # on :24225 and writes them to your destinations.
 ${fileConfigsBlock}`;
     },
-    renderExtraFiles: ({ releaseName, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
+    renderExtraFiles: ({ releaseName, destination, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
       const deploymentName = `${releaseName}-fluentd`;
       // engine args for the sidecar — same convention as
       // renderLog10xSidecar but inline because the patch YAML lives
@@ -989,6 +1008,12 @@ ${fileConfigsBlock}`;
       if (optimize) {
         argLines.push(`                    - "receiverOptimize"`);
         argLines.push(`                    - "true"`);
+      }
+      if (optimize && destination === 'splunk') {
+        for (const [k, v] of SPLUNK_APP_OPTIONS) {
+          argLines.push(`                    - "${k}"`);
+          argLines.push(`                    - "${v}"`);
+        }
       }
       const envLines: string[] = builtinLicense
         ? []
@@ -1909,6 +1934,46 @@ const FORWARDER_EXCLUDE_REGEX = [
 ];
 
 /**
+ * Kubernetes metadata the Splunk compact output sends as HEC indexed fields,
+ * named after the keys the `nest` lift in renderFluentBitDestinationFilters
+ * produces from the kubernetes filter's `kubernetes` map.
+ */
+const SPLUNK_APP_OPTIONS: Array<[string, string]> = [
+  ['varMaxRecurIndexes', '0'],
+  ['timestampZone', 'UTC'],
+  ['timestampMaxPerObject', '1'],
+];
+
+const SPLUNK_K8S_FIELDS = [
+  'stream',
+  'k8s_namespace_name',
+  'k8s_pod_name',
+  'k8s_pod_id',
+  'k8s_container_name',
+  'k8s_container_image',
+  'k8s_docker_id',
+  'k8s_host',
+];
+
+/**
+ * Filters a destination needs on returning `tenx.*` records. Splunk in compact
+ * mode lifts the `kubernetes` map to top-level `k8s_*` keys so its output can
+ * name them as indexed fields. Returns lines indented for the `filters:` block,
+ * or an empty string.
+ */
+function renderFluentBitDestinationFilters(destination: OutputDestination, optimize?: boolean): string {
+  if (destination !== 'splunk' || !optimize) return '';
+  return `
+    [FILTER]
+        Name          nest
+        Match_Regex   ^tenx\\.(?!tenx-template).*
+        Operation     lift
+        Nested_under  kubernetes
+        Add_prefix    k8s_
+`;
+}
+
+/**
  * Renders the destination `[OUTPUT]` block for the Fluent Bit receiver
  * overlay. This is the second [OUTPUT] in the chain — Match tenx.* —
  * consuming the post-sidecar tagged events emitted back into Fluent Bit
@@ -1922,7 +1987,8 @@ const FORWARDER_EXCLUDE_REGEX = [
 function renderFluentBitDestinationOutput(
   destination: OutputDestination,
   outputHost?: string,
-  splunkHecToken?: string
+  splunkHecToken?: string,
+  optimize?: boolean
 ): string {
   if (destination === 'mock') {
     return `    # Destination for processed tenx.* events. Replace with your real
@@ -1939,6 +2005,35 @@ function renderFluentBitDestinationOutput(
         Match tenx.*
         Host ${outputHost ?? 'elasticsearch-master'}
         Logstash_Format On`;
+  }
+  if (destination === 'splunk' && optimize) {
+    const host = outputHost ?? 'splunk-hec.example.com';
+    const token = splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN';
+    const fields = SPLUNK_K8S_FIELDS.map((f) => `        event_field       ${f} $${f}`).join('\n');
+    return `    # Templates, one record per new template, for the 10x Splunk app's KV Store.
+    # The HEC token must allow index tenx_dml.
+    [OUTPUT]
+        Name              splunk
+        Match             tenx.tenx-template
+        Host              ${host}
+        Port              8088
+        TLS               On
+        Splunk_Token      ${token}
+        event_index       tenx_dml
+        event_sourcetype  tenx_dml_raw_json
+
+    # Compact events: the message as the Splunk event, the Kubernetes metadata
+    # as indexed fields.
+    [OUTPUT]
+        Name              splunk
+        Match_Regex       ^tenx\\.(?!tenx-template).*
+        Host              ${host}
+        Port              8088
+        TLS               On
+        Splunk_Token      ${token}
+        event_sourcetype  tenx_encoded
+        event_key         $log
+${fields}`;
   }
   if (destination === 'splunk') {
     return `    [OUTPUT]
@@ -2035,6 +2130,7 @@ function renderFluentdDestinationOutput(
   destination: OutputDestination,
   outputHost?: string,
   splunkHecToken?: string,
+  optimize?: boolean,
 ): string {
   if (destination === 'mock') {
     return `<match **>
@@ -2048,6 +2144,59 @@ function renderFluentdDestinationOutput(
   host "${outputHost ?? 'elasticsearch-master'}"
   port 9200
   logstash_format true
+</match>`;
+  }
+  if (destination === 'splunk' && optimize) {
+    const host = outputHost ?? 'splunk-hec.example.com';
+    const token = splunkHecToken ?? 'REPLACE_WITH_HEC_TOKEN';
+    const lifted = SPLUNK_K8S_FIELDS.filter((f) => f.startsWith('k8s_'))
+      .map((f) => `    ${f} \${record.dig("kubernetes", "${f.slice(4)}")}`)
+      .join('\n');
+    const fields = SPLUNK_K8S_FIELDS.map((f) => `    ${f}`).join('\n');
+    return `# Templates, one record per new template, for the 10x Splunk app's KV Store.
+# The HEC token must allow index tenx_dml.
+<match tenx-template>
+  @type splunk_hec
+  hec_host ${host}
+  hec_port 8088
+  hec_token ${token}
+  index tenx_dml
+  sourcetype tenx_dml_raw_json
+</match>
+
+# HEC rejects a whole batch that contains an empty event.
+<filter **>
+  @type grep
+  <exclude>
+    key log
+    pattern /\\A\\z/
+  </exclude>
+</filter>
+
+# Lift the Kubernetes metadata to top-level keys the output can name.
+<filter **>
+  @type record_transformer
+  enable_ruby true
+  <record>
+${lifted}
+  </record>
+</filter>
+
+# Compact events: the message as the Splunk event, the Kubernetes metadata
+# as indexed fields.
+<match **>
+  @type splunk_hec
+  hec_host ${host}
+  hec_port 8088
+  hec_token ${token}
+  sourcetype tenx_encoded
+  <fields>
+${fields}
+  </fields>
+  <format>
+    @type single_value
+    message_key log
+  </format>
 </match>`;
   }
   if (destination === 'splunk') {

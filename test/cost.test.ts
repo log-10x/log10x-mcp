@@ -8,7 +8,7 @@
  * annualization.
  *
  * Acceptance gates from the spec:
- *   - compact on splunk: the E21 licence-meter figure, 62.46% off → ~$2.29 for 1GB.
+ *   - compact on splunk: the licence-meter figure, 58.97% off → ~$2.50 for 1GB.
  *   - compact on datadog: bytes_out === bytes_in + 'not supported' note.
  *   - small-event degradation: avg 50B against a 0.26 band → ~0.63.
  *   - degradation clamped to ≤ 1.0.
@@ -155,7 +155,7 @@ test('getDestinationCostModel switches to unpruned ES band when esPruned=false',
 test('getDestinationCostModel ignores esPruned for non-ES destinations', () => {
   const m = getDestinationCostModel('splunk', { esPruned: false });
   assert.equal(m.compact_mode, 'envelope');
-  assert.equal(m.compact_ratio_low, 197_426 / 642_494);
+  assert.equal(m.compact_ratio_low, 4_316 / 51_253);
 });
 
 // ---------------------------------------------------------------------------
@@ -209,17 +209,17 @@ test('projectAction sample defaults to 1:10 when sample_n omitted', () => {
   assert.ok(Math.abs(p.bytes_out - GB / 10) < 1e-6);
 });
 
-test('projectAction compact on splunk lands on the measured 62.46% ($2.29 on 1GB)', () => {
-  // E21: 80,653,626 of 214,841,731 licence-metered bytes remain = 0.3754;
-  // 1GB * 6 * 0.3754 = 2.2525 ingest; + 0.3754 * 0.10 storage = ~2.29.
+test('projectAction compact on splunk lands on the measured 58.97% ($2.50 on 1GB)', () => {
+  // 1,427,624 of 3,479,139 licence-metered bytes remain = 0.4103;
+  // 1GB * 6 * 0.4103 = 2.4620 ingest; + 0.4103 * 0.10 storage = ~2.50.
   const p = projectAction({
     action: 'compact',
     bytes_in: GB,
     destination: 'splunk',
   });
-  assert.ok(Math.abs(p.bytes_out - GB * 0.3754) < GB * 0.0001, `bytes_out=${p.bytes_out}`);
-  assert.ok(Math.abs(p.ingest_dollars! - 2.2525) < 0.001, `ingest_dollars=${p.ingest_dollars}`);
-  assert.ok(Math.abs(p.total_dollars! - 2.29) < 0.01, `total_dollars=${p.total_dollars}`);
+  assert.ok(Math.abs(p.bytes_out - GB * 0.4103) < GB * 0.0001, `bytes_out=${p.bytes_out}`);
+  assert.ok(Math.abs(p.ingest_dollars! - 2.4620) < 0.001, `ingest_dollars=${p.ingest_dollars}`);
+  assert.ok(Math.abs(p.total_dollars! - 2.50) < 0.01, `total_dollars=${p.total_dollars}`);
 });
 
 test('projectAction compact on datadog is a no-op with caveat note', () => {
@@ -497,29 +497,29 @@ test('(f) projectActionRange ingest_per_gb_override flips only ingest axis', () 
 });
 
 test('projectActionRange surfaces percent_reduction triplet for plain compact', () => {
-  // Splunk, E21 licence meter: the whole run is expected, the per-container
-  // spread is the band. Expected is the measured total, not the midpoint.
+  // Splunk licence meter: the whole run is expected, the per-container spread
+  // is the band. Expected is the measured total, not the midpoint.
   const range = projectActionRange({
     destination: 'splunk',
     bytes_in: 1e9,
     action: 'compact',
   });
-  assert.ok(Math.abs(range.percent_reduction_expected - 62.46) < 0.01, `${range.percent_reduction_expected}`);
+  assert.ok(Math.abs(range.percent_reduction_expected - 58.97) < 0.01, `${range.percent_reduction_expected}`);
   // Low-savings axis: the worst container, ad.
-  assert.ok(Math.abs(range.percent_reduction_low - 57.86) < 0.01, `${range.percent_reduction_low}`);
-  // High-savings axis: the best container, opensearch.
-  assert.ok(Math.abs(range.percent_reduction_high - 69.27) < 0.01, `${range.percent_reduction_high}`);
+  assert.ok(Math.abs(range.percent_reduction_low - 51.52) < 0.01, `${range.percent_reduction_low}`);
+  // High-savings axis: the best container, frontend.
+  assert.ok(Math.abs(range.percent_reduction_high - 91.58) < 0.01, `${range.percent_reduction_high}`);
 });
 
 test('the Splunk and Elasticsearch compact figures name their measurements', () => {
   const splunk = getDestinationCostModel('splunk');
-  assert.ok(Math.abs(expectedCompactRatio(splunk) - 80_653_626 / 214_841_731) < 1e-12);
+  assert.ok(Math.abs(expectedCompactRatio(splunk) - 1_427_624 / 3_479_139) < 1e-12);
   assert.equal(
     describeCompactFigure(splunk),
-    "62% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate",
+    "59% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate",
   );
-  assert.match(splunk.compact_ratio_basis!.full, /214,841,731 licence-metered bytes/);
-  assert.match(splunk.compact_ratio_basis!.full, /62\.46% less/);
+  assert.match(splunk.compact_ratio_basis!.full, /1,427,624 metered bytes/);
+  assert.match(splunk.compact_ratio_basis!.full, /58\.97% less/);
   assert.match(splunk.compact_ratio_basis!.full, /not a forecast for this estate/);
   const p = projectAction({ action: 'compact', bytes_in: GB, destination: 'splunk' });
   assert.ok(p.notes!.some((n) => /licence meter on one OpenTelemetry capture/.test(n)), p.notes!.join('|'));
@@ -570,7 +570,7 @@ test('compact_ratio_override on splunk uses the measured ratio across the whole 
   assert.ok(Math.abs(r.expected.bytes_out - 0.5 * GB) < 1, `bytes_out=${r.expected.bytes_out}`);
   assert.equal(r.low.bytes_out, r.expected.bytes_out);
   assert.equal(r.high.bytes_out, r.expected.bytes_out);
-  // ~50% reduction, not the 62.46% the static band would have given.
+  // ~50% reduction, not the 58.97% the static band would have given.
   assert.ok(Math.abs(r.percent_reduction_expected - 50) < 1, `pct=${r.percent_reduction_expected}`);
   assert.ok(r.expected.notes!.some((n) => /measured/.test(n)), r.expected.notes?.join('|'));
 });

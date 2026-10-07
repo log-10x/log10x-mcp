@@ -14,11 +14,16 @@
  * Compact-ratio numbers, and where each comes from. The model's
  * `compact_ratio_basis` carries the same statement into every output that
  * quotes the figure:
- *   - Splunk: measured once, in Splunk's own licence meter (E21,
- *     log-10x/benchmarks#18, splunk-license/results/results.md). One
- *     OpenTelemetry demo capture, 214,841,731 licence-metered bytes without
- *     compact and 80,653,626 with it: 62.46% less. Per container 57.86% (ad)
- *     to 69.27% (opensearch). Modeled as 0.3073..0.4214, expected 0.3754.
+ *   - Splunk: measured once, in Splunk's own licence meter, on 20,000
+ *     Kubernetes records of the OpenTelemetry demo capture sent through a
+ *     Fluent Bit Receiver: the compact message as the event, the Kubernetes
+ *     metadata as HEC indexed fields, template records included, 1,427,624
+ *     metered bytes. Against the same records sent message-as-event with the
+ *     metadata as fields (the OpenTelemetry Collector's Splunk default),
+ *     3,479,139 bytes: 58.97% less. Per container 51.52% (ad) to 91.58%
+ *     (frontend), template records not split per container. Against the whole
+ *     JSON record as the event, 21,527,812 bytes: 93.37% less. Modeled as
+ *     0.0842..0.4848, expected 0.4103.
  *   - Elasticsearch unpruned: measured once on disk (ES_ON_DISK_RATIO): one
  *     OpenTelemetry demo capture, 28.6 MB raw against 13.8 MB compact plus
  *     templates, 51.7% less, ES 8.17.0, nothing pruned from _source. Returned
@@ -565,24 +570,28 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
     compact_requires: 'the 10x Splunk app installed (it auto-expands compacted events at search time)',
-    // Measured once, in Splunk's own licence meter (E21, log-10x/benchmarks#18,
-    // splunk-license/results/results.md): one OpenTelemetry demo capture
-    // indexed with and without compact, Splunk 10.4.3, Universal Forwarder.
-    // The expected figure is the whole run, template dictionary and the app's
-    // re-index of it included. The band is the per-container spread; the
-    // dictionary is not split per container, so each slice reads slightly
-    // better than it would deployed. This replaced 0.08..0.15, a band with no
-    // run behind it that the meter contradicts.
-    compact_ratio_low: 197_426 / 642_494, // 69.27% less, opensearch
-    compact_ratio_expected: 80_653_626 / 214_841_731, // 62.46% less, whole run
-    compact_ratio_high: 2_864_638 / 6_798_676, // 57.86% less, ad
+    // Measured once, in Splunk's own licence meter (Splunk 10.4.3): 20,000
+    // Kubernetes records of the OpenTelemetry demo capture through a Fluent Bit
+    // Receiver, the compact message as the event and the Kubernetes metadata as
+    // HEC indexed fields, template records included. Every figure compares
+    // against the same records sent message-as-event with the metadata as
+    // fields, the shape the OpenTelemetry Collector sends to Splunk by default.
+    // The expected figure is the whole run; the band is the per-container
+    // spread, where template records are not split per container, so each
+    // slice reads slightly better than it would deployed.
+    compact_ratio_low: 4_316 / 51_253, // 91.58% less, frontend
+    compact_ratio_expected: 1_427_624 / 3_479_139, // 58.97% less, whole run
+    compact_ratio_high: 37_011 / 76_340, // 51.52% less, ad
     compact_ratio_basis: {
       short: "measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate",
       full:
-        "measured once in Splunk's own licence meter: one OpenTelemetry demo capture, 214,841,731 " +
-        'licence-metered bytes without compact and 80,653,626 with it, 62.46% less (Splunk 10.4.3, ' +
-        'log-10x/benchmarks#18); 57.86% to 69.27% per container. One capture, not a forecast for this ' +
-        'estate: log10x_measure_compaction reads the ratio off the stream itself',
+        "measured once in Splunk's own licence meter (Splunk 10.4.3) on 20,000 Kubernetes records of " +
+        'the OpenTelemetry demo capture, the compact message sent as the event and the Kubernetes ' +
+        'metadata as indexed fields: 1,427,624 metered bytes, template records included, against ' +
+        '3,479,139 for the same records sent message-as-event with the metadata as fields (58.97% less; ' +
+        '51.52% to 91.58% per container) and 21,527,812 for the whole JSON record as the event (93.37% ' +
+        'less). One capture, not a forecast for this estate: log10x_measure_compaction reads the ratio ' +
+        'off the stream itself',
     },
     // splunk-app default/props.conf: TRUNCATE = 262144 on tenx_encoded (#33).
     // A longer compact event is cut by Splunk with no marker and rebuilds
@@ -1300,7 +1309,7 @@ export function expectedCompactRatio(model: DestinationCostModel): number {
 }
 
 /**
- * The compact figure as a reader sees it, basis attached: "62% smaller,
+ * The compact figure as a reader sees it, basis attached: "59% smaller,
  * measured once in ..." or "60-70% smaller, modeled, ...". Every tool that
  * quotes a compact figure renders it through here, so none can quote a number
  * without saying where it comes from. Null on a no-op destination.
@@ -1899,7 +1908,7 @@ function projectActionWithRatio(
  *
  * Examples:
  *   projectAction({ action:'compact', bytes_in:1e9, destination:'splunk' })
- *     → total_dollars ≈ 0.3754 * ($6 + $0.10) ≈ $2.29, the measured 62.46% off.
+ *     → total_dollars ≈ 0.4103 * ($6 + $0.10) ≈ $2.50, the measured 58.97% off.
  *   projectAction({ action:'compact', bytes_in:1e9, destination:'datadog' })
  *     → bytes_out === bytes_in, notes includes
  *       'compact not supported on datadog'.
