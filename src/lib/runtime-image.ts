@@ -77,7 +77,7 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * pass-through fix (config #74) ships in this image, checked with a Fluent
  * Bit sidecar: 0 fullText fallbacks, 2,000 of 2,000 lines.
  */
-export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.133';
+export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.136';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

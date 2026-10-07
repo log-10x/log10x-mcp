@@ -134,3 +134,9 @@ test('instructions explain the one-time rename after an engine naming change', a
   assert.match(SERVER_INSTRUCTIONS, /keyed on an old name or hash no longer match them/);
   assert.match(SERVER_INSTRUCTIONS, /re-derive the per-pattern rules from the new names/);
 });
+
+test('instructions state what compact keeps of a zoned timestamp', async () => {
+  const { SERVER_INSTRUCTIONS } = await import('../src/lib/server-instructions.js');
+  assert.match(SERVER_INSTRUCTIONS, /Timestamps keep their instant/);
+  assert.match(SERVER_INSTRUCTIONS, /any other offset or zone name \(-0700, PDT, GMT\) can come back written in another zone/);
+});
