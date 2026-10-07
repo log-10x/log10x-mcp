@@ -53,8 +53,8 @@
   *              action never reaches the engine.
   *   - debug / synthetic → `drop` by default, a lossy proposal: it applies
   *              when the operator merges the rendered PR (delivery `gitops`)
-  *              or approves the tool call that writes the ConfigMap (delivery
-  *              `kubectl_configmap`); `action_defaults` keeps them lossless.
+  *              or runs the separate `auto_apply=true` call that writes the
+  *              ConfigMap (delivery `kubectl_configmap`); `action_defaults` keeps them lossless.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
@@ -219,6 +219,15 @@ const DESTINATION_ENUM = [
   'sumo',
 ] as const;
 
+/**
+ * Whether a call executes its delivery. An explicit `auto_apply` wins; unset,
+ * the gitops delivery opens its PR (the operator merges it) and the ConfigMap
+ * delivery, which goes live at once, renders and stops.
+ */
+export function resolveAutoApply(args: { auto_apply?: boolean; delivery?: string }): boolean {
+  return args.auto_apply ?? (args.delivery !== 'kubectl_configmap');
+}
+
 // ─── schema ───────────────────────────────────────────────────────────
 export const configureEngineSchema = {
   mode: z
@@ -231,7 +240,7 @@ export const configureEngineSchema = {
     .enum(['gitops', 'kubectl_configmap', 'stdout_only'])
     .default('gitops')
     .describe(
-      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` writes caps.csv + actions.csv + config-generation.csv + action-intent.json directly to a k8s ConfigMap on the active cluster (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
+      'How the rendered policy is delivered. `gitops` (default) opens a PR against the customer gitops repo (requires `gitops_repo`). `kubectl_configmap` renders caps.csv + actions.csv + config-generation.csv + action-intent.json for a k8s ConfigMap on the active cluster and writes them on a call with `auto_apply=true` (no GitHub needed; the engine\'s ConfigMap pull driver reads from the ConfigMap named via $K8S_CONFIGMAP, default `log10x-action-intent`). `stdout_only` returns the proposed config in the response without writing anywhere.'
     ),
   kubectl_namespace: z
     .string()
@@ -328,15 +337,15 @@ export const configureEngineSchema = {
       debug: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
+        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
       synthetic: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
+        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
     })
     .default({})
     .describe(
-      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, proposed for the operator to approve: it applies when the rendered PR is merged (delivery `gitops`, the default) or when the operator approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`). When a pinned `sample` is projected, N=10 (keep 1 in 10).'
+      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, proposed for the operator to approve: it applies when the rendered PR is merged (delivery `gitops`, the default) or when the operator runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`). When a pinned `sample` is projected, N=10 (keep 1 in 10).'
     ),
   respect_default_action: z
     .boolean()
@@ -394,7 +403,10 @@ export const configureEngineSchema = {
   // ── auto-apply (industry-standard MCP write tool surface) ──
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
   // MCPs converged on auto-execute as the default for write-capable servers.
-  // This server follows that convention with two opt-outs:
+  // This server follows that convention for the gitops delivery, where the
+  // write is a PR the operator merges. The ConfigMap delivery puts a policy
+  // live at once, so there the default is off: the tool renders the policy
+  // and stops, and one explicit `auto_apply: true` call writes it. Opt-outs:
   //   (1) `auto_apply: false` per-call (e.g. for evaluation customers, dry-run
   //       audits, or running outside an approval-capable MCP client).
   //   (2) `read_only: true` per-call (or the server's --read-only flag, which
@@ -403,9 +415,9 @@ export const configureEngineSchema = {
   // (Claude Desktop, Cursor), and `destructiveHint: true` on the registration.
   auto_apply: z
     .boolean()
-    .default(true)
+    .optional()
     .describe(
-      'When `true` (default), the tool executes the delivery after rendering: with delivery `gitops` it shells out to `gh` to open the PR, and the policy applies only when that PR is merged; with delivery `kubectl_configmap` it writes the ConfigMap, which the engine loads at once. When `false`, returns the gh script verbatim for the agent/user to run. Industry-standard MCPs (GitHub, Linear, Atlassian) auto-execute write tools by default; the safety boundary is the MCP client approval UX plus the gh CLI token. Forced `false` whenever `read_only=true`.'
+      'Whether the tool executes the delivery after rendering. Unset, it follows the delivery: with `gitops` it shells out to `gh` to open the PR, and the policy applies only when that PR is merged; with `kubectl_configmap` it renders the policy and stops, and a second call with `auto_apply=true` writes the ConfigMap, which the engine loads at once. `true` executes either delivery; `false` returns the rendered policy and the gh script for the agent/user to run. Industry-standard MCPs (GitHub, Linear, Atlassian) auto-execute write tools by default; the safety boundary is the MCP client approval UX plus the gh CLI token. Forced `false` whenever `read_only=true`.'
     ),
   read_only: z
     .boolean()
@@ -1636,7 +1648,7 @@ export async function executeConfigureEngine(
   let applied: ConfigureEngineData['applied'];
   let commitmentId: string | undefined;
   const shouldApply =
-    (args.auto_apply ?? true) &&
+    resolveAutoApply(args) &&
     !(args.read_only ?? false) &&
     feasible &&
     !targetMetByCurrent;
@@ -1704,6 +1716,21 @@ export async function executeConfigureEngine(
       why: 'Independent forecast confirmation of the proposed policy.',
     },
   ];
+
+  if (
+    args.delivery === 'kubectl_configmap' &&
+    !applied &&
+    !resolveAutoApply(args) &&
+    !(args.read_only ?? false) &&
+    feasible &&
+    !targetMetByCurrent
+  ) {
+    nextActions.push({
+      tool: 'log10x_configure_engine',
+      args: { ...args, auto_apply: true },
+      why: 'Writes the rendered policy to the ConfigMap; the engine loads it at once. Run it once the operator approves the policy above.',
+    });
+  }
 
   if (!feasible) {
     nextActions.push({
@@ -2224,7 +2251,7 @@ async function tryConsumePocSnapshot(
   let applied: ConfigureEngineData['applied'];
   let commitmentId: string | undefined;
   const shouldApply =
-    (args.auto_apply ?? true) &&
+    resolveAutoApply(args) &&
     !(args.read_only ?? false) &&
     feasibility?.feasible === true;
   if (shouldApply && args.delivery === 'kubectl_configmap') {
