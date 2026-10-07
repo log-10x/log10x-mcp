@@ -87,7 +87,9 @@ export function parsePrometheusValue(result: { value?: [number, string] }): numb
  *  - uncompressed-ingest: Splunk (bytes-into-indexer at uncompressed size)
  *  - compressed-ingest:   Datadog, CloudWatch, GCP Logging, Sumo, Azure
  *                         (bytes accepted by the API; vendor compresses
- *                         post-receipt)
+ *                         post-receipt). Datadog's GB meter is only its
+ *                         ingest line; most of its bill is per-million-event
+ *                         indexing (see ingest_label).
  *  - indexed-uncompressed: Elasticsearch (the _source / index footprint)
  *  - stored-month:        ClickHouse, S3-backed offload (per GB-month)
  */
@@ -552,7 +554,8 @@ const ES_ON_DISK_BASIS =
  *  - Azure Logs: $0.12/GB-month (interactive).
  *  - GCP Logging: $0.01/GB-month (after 30d free).
  *  - Sumo: $0.02/GB-month (continuous tier).
- *  - Datadog: $0 storage (commodity included; pure ingest billing).
+ *  - Datadog: $0 storage line: retention is priced inside per-million-event
+ *    indexing, and ingest_per_gb is the blend of that and the GB ingest meter.
  */
 export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
   splunk: {
