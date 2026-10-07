@@ -20,7 +20,7 @@ This server is open source under MIT. A Log10x product license (API key) unlocks
 | "This message type is noise, cut it." | Sample, drop, compact, tier down, or offload a chosen message type, with examples and trend so the action is clear. `log10x_pattern_mitigate`, `log10x_pattern_examples`, `log10x_pattern_trend` |
 | "We are 100% Lambda, no cluster. Install there." | The install plan comes back for the serverless estate: the engine as a Lambda extension paired with the function's OTel collector, a CDK construct, and an AWS-native recurring tick over an S3 config plane. `log10x_advise_install`, `log10x_setup_recurring` |
 | "Get me the actual events I offloaded." | Fetch the exact events back on demand from your own S3. `log10x_retriever_query`, `log10x_offload_add`, `log10x_retriever_register` |
-| "Recognize more of my message types." | Build a custom symbol library from your own logs so the engine finds more savings. `log10x_compile`, `log10x_compile_link`, `log10x_compile_status` |
+| "Recognize more of my message types." | Build a custom symbol library from your own code, container images and Helm charts so the engine finds more savings. `log10x_compile`, `log10x_compile_link`, `log10x_compile_status` |
 
 ## Install
 

@@ -51,8 +51,9 @@
   *              rules render (lib/poc-report-renderer.ts). See the note on
   *              cap semantics in renderCsvDiff for why the per-pattern
   *              action never reaches the engine.
-  *   - debug / synthetic → `drop` by default. These two ARE lossy defaults;
-  *              a caller who needs them lossless sets `action_defaults`.
+  *   - debug / synthetic → `drop` by default. Lossy, and proposed: the plan
+  *              takes effect when the operator merges the PR (default
+  *              delivery). A caller who needs them kept sets `action_defaults`.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
@@ -334,7 +335,7 @@ export const configureEngineSchema = {
     })
     .default({})
     .describe(
-      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`. When a pinned `sample` is projected, N=10 (keep 1 in 10).'
+      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, a lossy proposal that takes effect only when the operator merges the PR (or applies it with `delivery: kubectl_configmap`). When a pinned `sample` is projected, N=10 (keep 1 in 10).'
     ),
   respect_default_action: z
     .boolean()
