@@ -51,9 +51,10 @@
   *              rules render (lib/poc-report-renderer.ts). See the note on
   *              cap semantics in renderCsvDiff for why the per-pattern
   *              action never reaches the engine.
-  *   - debug / synthetic → `drop` by default, a lossy proposal: nothing
-  *              applies until the operator merges the rendered PR (or
-  *              applies the ConfigMap), and `action_defaults` keeps them lossless.
+  *   - debug / synthetic → `drop` by default, a lossy proposal: it applies
+  *              when the operator merges the rendered PR (delivery `gitops`)
+  *              or approves the tool call that writes the ConfigMap (delivery
+  *              `kubectl_configmap`); `action_defaults` keeps them lossless.
  *
  * Cross-validation: exactly one of target_percent / budget_usd is required;
  * else the tool returns a structured not-configured envelope.
@@ -327,15 +328,15 @@ export const configureEngineSchema = {
       debug: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal the operator approves by merging the rendered policy; set a lossless lever to keep these lines.'),
+        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
       synthetic: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal the operator approves by merging the rendered policy; set a lossless lever to keep these lines.'),
+        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
     })
     .default({})
     .describe(
-      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, proposed for the operator to approve: nothing applies until the rendered PR is merged (delivery `gitops`, the default) or the ConfigMap is applied. When a pinned `sample` is projected, N=10 (keep 1 in 10).'
+      'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, proposed for the operator to approve: it applies when the rendered PR is merged (delivery `gitops`, the default) or when the operator approves the tool call that writes the ConfigMap (delivery `kubectl_configmap`). When a pinned `sample` is projected, N=10 (keep 1 in 10).'
     ),
   respect_default_action: z
     .boolean()
@@ -404,7 +405,7 @@ export const configureEngineSchema = {
     .boolean()
     .default(true)
     .describe(
-      'When `true` (default), the tool shells out to `gh` to create the PR after rendering. When `false`, returns the gh script verbatim for the agent/user to run. Industry-standard MCPs (GitHub, Linear, Atlassian) auto-execute write tools by default; the safety boundary is the MCP client approval UX plus the gh CLI token. Forced `false` whenever `read_only=true`.'
+      'When `true` (default), the tool executes the delivery after rendering: with delivery `gitops` it shells out to `gh` to open the PR, and the policy applies only when that PR is merged; with delivery `kubectl_configmap` it writes the ConfigMap, which the engine loads at once. When `false`, returns the gh script verbatim for the agent/user to run. Industry-standard MCPs (GitHub, Linear, Atlassian) auto-execute write tools by default; the safety boundary is the MCP client approval UX plus the gh CLI token. Forced `false` whenever `read_only=true`.'
     ),
   read_only: z
     .boolean()
