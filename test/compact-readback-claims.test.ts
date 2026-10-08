@@ -6,7 +6,7 @@
  * app sets on tenx_encoded (262,144 bytes on splunk-app main, #33); a longer
  * event is cut with no marker and rebuilds shorter. The search page loads no
  * app JavaScript, so a search-bar query reaches the full text only through
- * the app's tenxsearch command. On Elasticsearch the l1es plugin rewrites
+ * the app's tx command. On Elasticsearch the l1es plugin rewrites
  * match, match_phrase and multi_match; other query types see the encoded
  * form. Every rendered sentence about compact read-back comes from
  * describeCompactReadback() in lib/cost.ts, and the scan below fails if an
@@ -23,7 +23,7 @@ test('describeCompactReadback states each destination in its own terms', () => {
   const splunk = describeCompactReadback('splunk');
   assert.match(splunk, /exactly up to 256 KB/);
   assert.match(splunk, /a longer one comes back cut/);
-  assert.match(splunk, /tenxsearch/);
+  assert.match(splunk, /app's tx command/);
 
   const es = describeCompactReadback('elasticsearch');
   assert.match(es, /match, match_phrase and multi_match/);

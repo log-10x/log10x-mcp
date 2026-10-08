@@ -596,11 +596,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // splunk-app default/props.conf: TRUNCATE = 262144 on tenx_encoded (#33).
     // A longer compact event is cut by Splunk with no marker and rebuilds
     // shorter. The search page loads no app JavaScript, so a search-bar query
-    // reaches the full text only wrapped in the app's tenxsearch command;
+    // reaches the full text only through the app's tx command;
     // classic dashboards go through its hook, alerts through Compile Alert.
     compact_readback:
       'on Splunk each event expands exactly up to 256 KB with the current 10x app (a longer one comes back cut), ' +
-      "and a search-bar query needs the app's tenxsearch command to see the full text",
+      "and a search-bar query needs the app's tx command to see the full text",
     small_event_floor_bytes: 100,
   },
   datadog: {
