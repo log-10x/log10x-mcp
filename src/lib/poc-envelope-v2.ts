@@ -743,7 +743,7 @@ export function buildPocEnvelopeV2(
  *   drop      → 1.00 (full removal)
  *   offload   → 1.00 (destination sees nothing; S3 cost out of scope)
  *   compact   → 1 - the destination's expected compact ratio (cost.ts):
- *               0.6246 on Splunk, measured in its licence meter (E21);
+ *               0.5897 on Splunk, measured in its licence meter;
  *               0.5175 on Elasticsearch, measured on disk; 0 where compact
  *               is a no-op
  *   tier_down → the destination's list-price delta to its cheaper tier

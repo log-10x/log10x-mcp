@@ -357,7 +357,7 @@ test('a splunk envelope marks nothing modeled', () => {
   assert.ok(!/MODELED/.test(envelope.output.commitment_artifact!.markdown));
 });
 
-test('destination text: splunk compact quotes the E21 figure with its source; datadog flex carries no percentage', () => {
+test('destination text: splunk compact quotes the licence-meter figure with its source; datadog flex carries no percentage', () => {
   const pins = { payments: 'compact' as const, auth: 'compact' as const };
   const splunk = buildPocEnvelopeV2(makeRenderInput('splunk'), makePatterns(), [], [], 10, {
     targetPercentReduction: 50,
@@ -367,14 +367,14 @@ test('destination text: splunk compact quotes the E21 figure with its source; da
   assert.ok(compactRow, 'a compact row exists');
   assert.match(
     compactRow.actions.consequence.destination_description,
-    /62% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/,
+    /59% smaller, measured once in Splunk's licence meter on one OpenTelemetry capture, not on this estate/,
   );
   // Read-back in Splunk's own terms, not "queryable as-is".
   assert.match(compactRow.actions.consequence.destination_description, /exactly up to 256 KB/);
-  assert.match(compactRow.actions.consequence.destination_description, /tenxsearch/);
-  // Priced on the same measured figure: 1 - 80,653,626 / 214,841,731.
+  assert.match(compactRow.actions.consequence.destination_description, /app's tx command/);
+  // Priced on the same measured figure: 1 - 1,427,624 / 3,479,139.
   const compactSlot = splunk.output.feasibility!.achievable_by_action.find((a) => a.action === 'compact')!;
-  const expectedAchievable = (compactSlot.monthly_cost_usd * (1 - 80_653_626 / 214_841_731) * 100) /
+  const expectedAchievable = (compactSlot.monthly_cost_usd * (1 - 1_427_624 / 3_479_139) * 100) /
     splunk.output.feasibility!.achievable_by_action.reduce((s, a) => s + a.monthly_cost_usd, 0);
   assert.ok(
     Math.abs(splunk.output.feasibility!.max_achievable_percent - expectedAchievable) < 0.01,

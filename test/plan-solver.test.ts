@@ -230,8 +230,8 @@ test('rateBasis names the destination, the list-price basis, and the lever rate'
   assert.ok(/Infrequent Access/i.test(cw.rateBasis), cw.rateBasis);
   const sp = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
   assert.ok(sp.rateBasis.includes('splunk list price'), sp.rateBasis);
-  // The Splunk figure is the E21 licence-meter measurement, and it says so.
-  assert.ok(sp.rateBasis.includes("compact 62% smaller, measured once in Splunk's licence meter"), sp.rateBasis);
+  // The Splunk figure is a licence-meter measurement, and it says so.
+  assert.ok(sp.rateBasis.includes("compact 59% smaller, measured once in Splunk's licence meter"), sp.rateBasis);
   assert.ok(sp.rateBasis.includes('not on this estate'), sp.rateBasis);
 });
 
