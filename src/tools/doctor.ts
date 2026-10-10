@@ -665,7 +665,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
       checks.push({
         name: 'reporter_tier',
         status: 'pass',
-        message: 'Edge Reporter detected — full-fidelity metrics with dropped-event coverage.',
+        message: 'Reporter detected (DaemonSet beside the forwarder): full-fidelity metrics with dropped-event coverage.',
       });
     } else {
       const cloudRes = await iQueryInstant(
@@ -678,7 +678,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         checks.push({
           name: 'reporter_tier',
           status: 'pass',
-          message: 'Cloud Reporter detected — sampled metrics, ±1-5min inflection granularity.',
+          message: 'SIEM-sampled metrics detected (a scheduled job reading a sample through an analyzer input): ±1-5min inflection granularity.',
         });
       } else {
         checks.push({
@@ -686,7 +686,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           status: 'warn',
           message:
             'No Reporter tier detected, so investigate / whats_changing / pattern_trend tools will be unavailable in this env.',
-          fix: 'Deploy Cloud Reporter (k8s CronJob) or Edge Reporter (forwarder pipeline) per https://doc.log10x.com/apps/reporter/.',
+          fix: 'Deploy the Reporter as a DaemonSet beside the forwarder (https://doc.log10x.com/apps/reporter/), or run a scheduled job that samples the SIEM through an analyzer input (https://doc.log10x.com/run/input/analyzer/).',
         });
       }
     }
@@ -694,6 +694,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
 
   // Metric freshness — catches the "Reporter deployed but stopped emitting 6h ago" case.
   if (detectedTier) {
+    const source = detectedTier === 'edge' ? 'The Reporter' : 'The SIEM-sampling job';
     try {
       // Query the age in seconds of the most recent non-stale datapoint.
       // time() - timestamp(last emission) = seconds since last scrape.
@@ -714,20 +715,20 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           checks.push({
             name: 'metric_freshness',
             status: 'pass',
-            message: `${detectedTier} reporter emitted within the last ${Math.round(ageSec)}s — metrics are fresh.`,
+            message: `${source} emitted within the last ${Math.round(ageSec)}s; metrics are fresh.`,
           });
         } else if (ageSec <= 3600) {
           checks.push({
             name: 'metric_freshness',
             status: 'warn',
-            message: `${detectedTier} reporter's most recent datapoint is ${Math.round(ageSec / 60)} minutes old. Tools will still answer but the data is stale.`,
-            fix: 'Check the Reporter pod / CronJob is healthy. For Cloud Reporter, inspect the most recent CronJob run. For Edge Reporter, check the forwarder pipeline sidecar is emitting.',
+            message: `${source}'s most recent datapoint is ${Math.round(ageSec / 60)} minutes old. Tools will still answer but the data is stale.`,
+            fix: 'Check that the Reporter DaemonSet pods are running and emitting. For a scheduled SIEM-sampling job, inspect its most recent CronJob run.',
           });
         } else {
           checks.push({
             name: 'metric_freshness',
             status: 'fail',
-            message: `${detectedTier} reporter's most recent datapoint is ${Math.round(ageSec / 3600)} hours old. The Reporter has stopped emitting. Investigate / whats_changing / pattern_trend will return stale data or empty results.`,
+            message: `${source}'s most recent datapoint is ${Math.round(ageSec / 3600)} hours old. ${source} has stopped emitting. Investigate / whats_changing / pattern_trend will return stale data or empty results.`,
             fix: 'The Reporter has stopped emitting metrics. Check the Reporter pod / CronJob status, recent logs, and restart if needed. This is the most common silent failure mode.',
           });
         }

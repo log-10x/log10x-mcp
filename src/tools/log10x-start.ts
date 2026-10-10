@@ -549,12 +549,12 @@ export async function executeLog10xStart(
 
     // Midway mode: omit capability fields entirely rather than lying with
     // all-false values. Downstream tools that read capability_summary would
-    // incorrectly block actions for a real Edge Reporter + CloudWatch env.
+    // incorrectly block actions for a real Reporter + CloudWatch env.
     // Callers that need fresh capability state should pass session_state=fresh.
     // Partial envelope: only emit fields that are honest in midway mode.
     // Capability state is intentionally omitted — re-probing is skipped
     // here, and fabricating all-false values would break downstream tools
-    // that read capability_summary for real Edge Reporter + CloudWatch envs.
+    // that read capability_summary for real Reporter + CloudWatch envs.
     const envelope = {
       must_render_verbatim: shortVerbatim,
       must_ask_user: {
