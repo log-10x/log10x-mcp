@@ -1,7 +1,7 @@
 /**
  * Edge/cloud environment resolution.
  *
- * Prefers edge reporter metrics when available, falls back to cloud.
+ * Prefers the Reporter's edge-tier metrics when available, falls back to cloud.
  */
 
 import type { EnvConfig } from './environments.js';

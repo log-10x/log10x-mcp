@@ -102,10 +102,10 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   lines.push('### Fidelity annotations');
   lines.push('');
   if (input.reporterTier === 'cloud') {
-    lines.push('- **Count estimation error**: ±N% (sampled by Cloud Reporter CronJob)');
+    lines.push('- **Count estimation error**: ±N% (sampled from the SIEM by a scheduled job)');
     lines.push('- **Inflection timing granularity**: bounded by the sampling window (typically 1–5 min)');
     lines.push('- **Rare-variant coverage warning**: rare variable values may be under-sampled');
-    lines.push('- **Forwarder-dropped events visible**: false (Cloud Reporter inherits the SIEM coverage gap)');
+    lines.push('- **Forwarder-dropped events visible**: false (a sample read from the SIEM inherits its coverage gap)');
   } else if (input.reporterTier === 'edge') {
     lines.push('- **Count estimation error**: 0% (exact counts via forwarder pipeline sidecar)');
     lines.push('- **Inflection timing granularity**: ~5 seconds');
