@@ -56,6 +56,13 @@ import {
 import { verifyConfigGeneration } from '../lib/config-generation.js';
 import { findNewestConfigMapTarget } from './commitment-report.js';
 
+/**
+ * Labels the cross-pillar checks need on the per-pattern metrics. Pod and host
+ * are not on the list: the shipped metric outputs carry neither, so the series
+ * count does not grow with nodes or restarts.
+ */
+export const CROSS_PILLAR_REQUIRED_LABELS: string[] = ['tenx_user_service', 'k8s_namespace', 'k8s_container'];
+
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
 export interface DoctorCheck {
@@ -953,7 +960,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // the labels needed for structural validation are actually present on
   // Log10x pattern metrics. Never fails — always degrades gracefully.
   if (backendResolution.backend) {
-    const required = ['tenx_user_service', 'k8s_namespace', 'k8s_pod', 'k8s_container'];
+    const required = CROSS_PILLAR_REQUIRED_LABELS;
     // Bounded fan-out over the 4 label probes (was a serial await loop). Each
     // is a count()>0 existence probe — numeric value discarded → cheap budget.
     // The fn returns '' when the label is confirmed present, and the label
@@ -977,7 +984,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         name: 'cross_pillar_enrichment_floor',
         status: 'pass',
         message:
-          'All v1.4 enrichment labels present (tenx_user_service, k8s_namespace, k8s_pod, k8s_container). Structural validation will work for service, namespace, pod, and container-level anchors. Node-level correlation is deferred to v1.4.1.',
+          'All enrichment labels present (tenx_user_service, k8s_namespace, k8s_container). Structural validation will work for service, namespace, and container-level anchors. Node-level correlation is deferred to v1.4.1.',
       });
     } else {
       checks.push({
