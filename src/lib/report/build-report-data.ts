@@ -14,6 +14,7 @@
  */
 
 import type { RenderInput, _EnrichedPattern } from '../poc-report-renderer.js';
+import type { Plan } from '../plan-solver.js';
 import type { IncidentCluster } from '../detectors/incident-cluster.js';
 import {
   isProtectedSeverity,
@@ -24,6 +25,7 @@ import { fmtBytes, fmtCount } from '../format.js';
 import { buildFace } from './face-extraction.js';
 import {
   lookupCommandCell,
+  ACTIONS_FILE_NAME,
   type CmdCtx,
   type InstallMethod,
 } from './command-matrix.js';
@@ -53,6 +55,40 @@ const MIN_STATEMENT_SHARE = 0.005;
 const CAP_RESET_WINDOW_SECONDS = 240;
 
 export const CAPS_FILE_NAME = 'log10x-caps.csv';
+export { ACTIONS_FILE_NAME } from './command-matrix.js';
+
+/**
+ * The engine's two files from a plan's container rows. `caps.csv` gives each
+ * container the bytes a pattern may spend per regulator window before its
+ * excess takes the action; `actions.csv` gives the action. Both in the
+ * engine's own grammar, `<container>,<bytes>::<reason>` and
+ * `<container>,<action>::<reason>`, the empty middle field being the expiry
+ * slot. A tier_down cap is the largest kept pattern's bytes, so the planned
+ * patterns and no other exceed it; offload and drop act on the whole
+ * container, so their cap is the 1-byte minimum (0 would switch the
+ * regulator off for that container). `spanSeconds` is the span the plan's
+ * byte figures cover.
+ */
+export function engineFilesFromContainerCaps(
+  caps: Plan['containerCaps'],
+  spanSeconds: number,
+  reason: string,
+): { capsCsv: string; actionsCsv: string; capRows: string[] } {
+  const r = reason.replace(/[,:]/g, ';');
+  const capRows: string[] = [];
+  const actionRows: string[] = [];
+  for (const [container, v] of Object.entries(caps).sort(([a], [b]) => a.localeCompare(b))) {
+    const perWindow = Math.round((v.capBytesMonthly * CAP_RESET_WINDOW_SECONDS) / Math.max(1, spanSeconds));
+    const cap = v.action === 'offload' || v.action === 'drop' ? 1 : Math.max(1, perWindow);
+    capRows.push(`${container},${cap}::${r}`);
+    actionRows.push(`${container},${v.action}::${r}`);
+  }
+  return {
+    capsCsv: ['container,cap', ...capRows].join('\n') + '\n',
+    actionsCsv: ['container,action', ...actionRows].join('\n') + '\n',
+    capRows,
+  };
+}
 
 export interface BuildReportOptions {
   siem: string | null;
@@ -65,6 +101,10 @@ export interface BuildReportOptions {
   annotations?: Record<string, string>;
   generatedAtIso: string;
   mcpVersion: string;
+  /** The ladder plan the tool solved; its container rows become the engine files. */
+  plan?: Plan;
+  /** The span the plan's byte figures cover, in seconds. */
+  planSpanSeconds?: number;
 }
 
 export class ReportRefusal extends Error {}
@@ -75,6 +115,10 @@ export interface BuiltReport {
    * the plan has no volume action. Written beside the report so the
    * apply commands reference a real file. */
   capsCsv: string | null;
+  /** The sibling actions.csv, the engine's per-container action file. */
+  actionsCsv: string | null;
+  /** Planned patterns with no container, which no cap row can key. */
+  unattributedPlanned: number;
 }
 
 export function buildReportData(
@@ -134,6 +178,7 @@ export function buildReportData(
     namespace: opts.namespace,
     workload: opts.workload,
     capsFileName: CAPS_FILE_NAME,
+    actionsFileName: ACTIONS_FILE_NAME,
   };
   const noCellNote = `no verified commands for this stack (${opts.siem ?? 'siem not set'} / ${opts.forwarder ?? 'forwarder not set'} / ${opts.install}) in this version; run log10x_advise_install`;
 
@@ -141,26 +186,48 @@ export function buildReportData(
   const windowSeconds = Math.max(1, Math.round(input.windowHours * 3600));
 
   let capsCsv: string | null = null;
+  let actionsCsv: string | null = null;
+  let unattributedPlanned = 0;
   if (reducible.length > 0) {
     const impact = reducible.reduce((s, p) => s + p.bytes, 0);
     const faces = reducible.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
     const services = countByService(reducible);
     const label = serviceLabel(services);
-    // Container-keyed rows, the grammar configure_engine truly emits:
-    // `<container>,<capBytes>:<action>:<reason>`. Cap is scaled to the
-    // engine's reset window from this window's measured bytes.
-    const byContainer = new Map<string, number>();
-    for (const p of reducible) {
-      const key = p.service ?? '<container>';
-      byContainer.set(key, (byContainer.get(key) ?? 0) + p.bytes);
+    // The engine's files, one row per container. From the solved plan when
+    // there is one; otherwise from this window's reducible patterns, with a
+    // tier_down cap at the largest pattern the container keeps.
+    let containerCaps: Plan['containerCaps'];
+    let spanSeconds: number;
+    if (opts.plan && opts.planSpanSeconds) {
+      containerCaps = opts.plan.containerCaps;
+      spanSeconds = opts.planSpanSeconds;
+      unattributedPlanned = opts.plan.planned.filter(
+        (r) => r.action !== 'pass' && (!r.dominantService || r.dominantService === '(unattributed)'),
+      ).length;
+    } else {
+      containerCaps = {};
+      spanSeconds = windowSeconds;
+      const reducibleSet = new Set(reducible);
+      const hosts = new Set(reducible.map((p) => p.service).filter((s): s is string => !!s));
+      unattributedPlanned = reducible.filter((p) => !p.service).length;
+      for (const c of hosts) {
+        let cap = 0;
+        let keptMaxPattern: string | undefined;
+        for (const p of enriched.patterns) {
+          if (p.service !== c || reducibleSet.has(p)) continue;
+          if (p.bytes > cap) { cap = p.bytes; keptMaxPattern = p.symbolMessage ?? p.template.split("\n")[0]; }
+        }
+        containerCaps[c] = { action: 'tier_down', capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) };
+      }
     }
-    const rows = Array.from(byContainer.entries())
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([container, bytes]) => {
-        const cap = Math.max(1, Math.round(bytes * (CAP_RESET_WINDOW_SECONDS / windowSeconds)));
-        return `${container},${cap}:tier_down:MCP poc_from_local soft`;
-      });
-    capsCsv = ['container,cap', ...rows].join('\n') + '\n';
+    const files = engineFilesFromContainerCaps(
+      containerCaps,
+      spanSeconds,
+      `MCP poc_from_local${opts.plan ? ` plan ${opts.plan.targetPct} pct` : ''}`,
+    );
+    const rows = files.capRows;
+    capsCsv = files.capsCsv;
+    actionsCsv = files.actionsCsv;
     actions.push({
       kind: 'tier_down',
       title: `Route ${label} statements to the retrievable tier`,
@@ -175,13 +242,17 @@ export function buildReportData(
         : {}),
       change: {
         commentLines: [
-          `${CAPS_FILE_NAME} — engine route rows, keyed by container.`,
-          `Generated from this window; caps are scaled to the engine's ${CAP_RESET_WINDOW_SECONDS}s reset window.`,
+          `${CAPS_FILE_NAME} — bytes a pattern may spend per ${CAP_RESET_WINDOW_SECONDS}s regulator window, keyed by container; ` +
+            `${ACTIONS_FILE_NAME} — the action a container's excess takes.`,
+          `A tier_down cap is the largest pattern the container keeps, so the statements above exceed it and no other does.`,
         ],
         rows,
         engineGapNote:
-          `the engine acts per container today; per-statement disposition is pending engine work, ` +
-          `so these rows route the containers hosting the statements above`,
+          `the engine acts per container: every pattern over the cap in a routed container takes the action, ` +
+          `at the share the severity floors leave` +
+          (unattributedPlanned > 0
+            ? `; ${unattributedPlanned} planned statement${unattributedPlanned === 1 ? '' : 's'} carried no container and ${unattributedPlanned === 1 ? 'is' : 'are'} not in these rows`
+            : ''),
       },
       apply: cell
         ? { commands: cell.applyCaps(cmdCtx) }
@@ -297,7 +368,7 @@ export function buildReportData(
     verify,
     kept: { protectedEvents, sentences: keptSentences },
   };
-  return { data, capsCsv };
+  return { data, capsCsv, actionsCsv, unattributedPlanned };
 }
 
 function attachAnnotations(

@@ -3028,7 +3028,9 @@ function computeCapBytesPerWindow(action: Action, monthlyBytes: number): number 
       // behaviour as shipped; how much compact saves is cost.ts's figure.
       return Math.max(1, perWindow * 0.15);
     case 'tier_down':
-      // No on-wire change; cap = full throughput.
+      // The pattern's own rate per window. The container's cap is not this
+      // value: renderCsvDiff sets it to the largest pattern the container
+      // keeps, so the planned patterns exceed it and the kept ones do not.
       return Math.max(1, perWindow);
     case 'offload':
     case 'drop':
@@ -3115,12 +3117,20 @@ export function renderCsvDiff(
   // it hands a pass-heavy service a near-full cap and an offload-heavy one
   // ~0. Build the per-container sums once.
   const capSumByContainer = new Map<string, number>();
+  // tier_down is the exception: the engine caps each pattern, so a cap at the
+  // sum of the container's rates is never exceeded and moves nothing. The cap
+  // that moves the planned patterns and no other is the largest pattern the
+  // container keeps (its `pass` rows), so that is the tier_down cap.
+  const keptMaxByContainer = new Map<string, number>();
   for (const r of rows) {
     if (!r.container) continue;
     capSumByContainer.set(
       r.container,
       (capSumByContainer.get(r.container) ?? 0) + r.cap_bytes_per_window
     );
+    if (r.action === 'pass') {
+      keptMaxByContainer.set(r.container, Math.max(keptMaxByContainer.get(r.container) ?? 0, r.cap_bytes_per_window));
+    }
   }
   const reason = `MCP configure_engine (${reduction})`;
   for (const c of containers) {
@@ -3131,7 +3141,9 @@ export function renderCsvDiff(
     const cap =
       action === 'offload' || action === 'drop'
         ? 1
-        : Math.max(1, Math.round(capSumByContainer.get(c) ?? 0));
+        : action === 'tier_down'
+          ? Math.max(1, Math.round(keptMaxByContainer.get(c) ?? 0))
+          : Math.max(1, Math.round(capSumByContainer.get(c) ?? 0));
     // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
     // never break the `<bytes>::<reason>` parse. The empty second field is
     // the engine's "no expiry" slot.
