@@ -90,26 +90,39 @@ function build(severityCoverage = 1, opts: Partial<BuildReportOptions> = {}) {
   return buildReportData(input, { patterns: enriched.patterns, clusters: enriched.clusters }, { ...OPTS, ...opts });
 }
 
-test('volume action: reducible statements only, container-keyed change rows in the configure_engine grammar', () => {
-  const { data, capsCsv } = build();
+test('volume action: reducible statements only, container-keyed change rows in the engine grammar', () => {
+  const { data, capsCsv, actionsCsv } = build();
   const tier = data.actions.find((a) => a.kind === 'tier_down');
   assert.ok(tier, 'expected a tier_down action');
   // impact counts INFO/DEBUG bytes only — never the ERROR family
   assert.ok(tier!.impactBytes! <= 3_900_005);
   assert.ok(tier!.impactBytes! >= 3_000_000);
-  // rows are `<container>,<cap>:<action>:<reason>` — the grammar the
-  // engine truly consumes; no per-pattern `pat:` rows, no head_only
+  // rows are `<container>,<bytes>::<reason>`: the grammar the engine reads,
+  // the empty middle field being the expiry slot; the action is never in
+  // this file. No per-pattern `pat:` rows, no head_only, no placeholder key.
   for (const row of tier!.change!.rows) {
-    assert.match(row, /^[^,]+,\d+:tier_down:MCP poc_from_local soft$/);
+    assert.match(row, /^[^,<>]+,\d+::MCP poc_from_local$/);
     assert.ok(!row.includes('head_only'));
     assert.ok(!row.startsWith('pat:'));
   }
   assert.ok(tier!.change!.engineGapNote!.includes('per container'));
-  // caps.csv mirrors the change rows
+  // caps.csv mirrors the change rows; actions.csv names the same containers
   assert.ok(capsCsv!.startsWith('container,cap\n'));
   for (const row of tier!.change!.rows) assert.ok(capsCsv!.includes(row));
-  // verified commands resolved from the matrix cell
-  assert.ok(tier!.apply!.commands.join('\n').includes('kubectl -n demo'));
+  assert.ok(actionsCsv!.startsWith('container,action\n'));
+  for (const row of tier!.change!.rows) {
+    const container = row.split(',')[0];
+    assert.ok(actionsCsv!.includes(`${container},tier_down::`), `${container} missing from actions.csv`);
+  }
+  // the cap is the largest pattern the container keeps: the reducible
+  // statements exceed it, the kept ones do not
+  assert.ok(tier!.change!.commentLines.join(' ').includes('largest pattern the container keeps'));
+  // verified commands resolved from the matrix cell: both files into the
+  // ConfigMap the engine reads
+  const cmds = tier!.apply!.commands.join('\n');
+  assert.ok(cmds.includes('kubectl -n demo'));
+  assert.ok(cmds.includes('log10x-action-intent'));
+  assert.ok(cmds.includes('--from-file=caps.csv=') && cmds.includes('--from-file=actions.csv='));
 });
 
 test('dominant ERROR cluster becomes an operational action, never a volume action', () => {

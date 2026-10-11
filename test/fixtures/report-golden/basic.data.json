@@ -88,25 +88,25 @@
       ],
       "change": {
         "commentLines": [
-          "log10x-caps.csv — engine route rows, keyed by container.",
-          "Generated from this window; caps are scaled to the engine's 240s reset window."
+          "log10x-caps.csv — bytes a pattern may spend per 240s regulator window, keyed by container; log10x-actions.csv — the action a container's excess takes.",
+          "A tier_down cap is the largest pattern the container keeps, so the statements above exceed it and no other does."
         ],
         "rows": [
-          "cartservice,60000:tier_down:MCP poc_from_local soft",
-          "otelcol,200000:tier_down:MCP poc_from_local soft"
+          "cartservice,333::MCP poc_from_local",
+          "otelcol,533333::MCP poc_from_local"
         ],
-        "engineGapNote": "the engine acts per container today; per-statement disposition is pending engine work, so these rows route the containers hosting the statements above"
+        "engineGapNote": "the engine acts per container: every pattern over the cap in a routed container takes the action, at the share the severity floors leave"
       },
       "apply": {
         "commands": [
-          "kubectl -n demo create configmap log10x-caps --from-file=log10x-caps.csv \\",
-          "  --dry-run=client -o yaml | kubectl apply -f -",
+          "kubectl -n demo create configmap log10x-action-intent --from-file=caps.csv=log10x-caps.csv \\",
+          "  --from-file=actions.csv=log10x-actions.csv --dry-run=client -o yaml | kubectl apply -f -",
           "kubectl -n demo rollout restart daemonset tenx-fluentd"
         ]
       },
       "undo": {
         "commands": [
-          "kubectl -n demo delete configmap log10x-caps",
+          "kubectl -n demo delete configmap log10x-action-intent",
           "kubectl -n demo rollout restart daemonset tenx-fluentd"
         ]
       },

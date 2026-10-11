@@ -111,15 +111,23 @@ test('a Datadog percent plan counts volume out of the Standard index and states 
   assert.equal(pl.percentBasis, 'standard_index_volume');
   assert.equal(pl.keepEverythingLever, 'tier_down');
   assert.ok(pl.met);
-  // 600 GB of 1,100 GB moves on the heaviest type alone.
-  assert.equal(Math.round(pl.achievedPct), 55);
+  // The engine moves each planned pattern's excess over its container's cap,
+  // the largest pattern the container keeps: `payment failed` (ERROR, 100 GB).
+  // The INFO floor keeps a tenth of the excess. `heartbeat` alone moves
+  // 450 GB of 1,100, short of 50%, so `request served` is planned too:
+  // 270 GB more, 720 GB of 1,100.
+  assert.equal(Math.round(pl.achievedPct), 65);
+  assert.deepEqual(pl.containerCaps, {
+    api: { action: 'tier_down', capBytesMonthly: 100 * GB, keptMaxPattern: 'payment failed' },
+  });
   assert.equal(pl.landsAtUsd, undefined, 'a before/after pair would be a share of the bill');
   assert.ok(pl.perEventMove);
-  assert.equal(pl.perEventMove!.standard_indexing_avoided_usd, 1020); // 600M events x $1.70/M
+  assert.equal(pl.perEventMove!.standard_indexing_avoided_usd, 1224); // 720M events x $1.70/M
   const row = pl.planned[0];
   assert.equal(row.action, 'tier_down');
-  assert.equal(row.savedUsd, 1020);
-  assert.equal(row.addedUsd, 30);
+  assert.equal(row.movedBytesMonthly, 450 * GB);
+  assert.equal(row.savedUsd, 765); // 450M events x $1.70/M
+  assert.equal(row.addedUsd, 22.5); // 450M events x $0.05/M, held 30 days
   assert.match(pl.rateBasis, /per million events/);
   assert.ok(!/Flex Logs ingest \$[\d.]+\/GB/.test(pl.rateBasis), pl.rateBasis);
 });

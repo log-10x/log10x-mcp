@@ -1583,15 +1583,20 @@ function buildCapCsv(
   windowDurationSeconds: number,
 ): string {
   const level1: CostAction = getDefaultActionForDestination(siem, 1);
-  const services = new Map<string, { bytes: number; isException: boolean }>();
+  const services = new Map<string, { bytes: number; keptMax: number; isException: boolean }>();
   for (const p of patterns) {
     const svc = (p.service ?? '').toLowerCase();
     if (!svc) continue;
+    // The cap that moves the service's planned patterns and no other is the
+    // largest pattern it keeps: a pattern over it takes the action, one under
+    // it passes.
+    const kept = p.actions.recommended_action === 'pass' ? p.metrics.bytes_in_window : 0;
     const existing = services.get(svc);
     if (existing) {
       existing.bytes += p.metrics.bytes_in_window;
+      existing.keptMax = Math.max(existing.keptMax, kept);
     } else {
-      services.set(svc, { bytes: p.metrics.bytes_in_window, isException: exceptionSet.has(svc) });
+      services.set(svc, { bytes: p.metrics.bytes_in_window, keptMax: kept, isException: exceptionSet.has(svc) });
     }
   }
 
@@ -1605,8 +1610,12 @@ function buildCapCsv(
     const reason = agg.isException
       ? 'service_pinned_by_exception_list'
       : `MCP poc_envelope (destination_level_1=${level1})`;
-    const monthlyBytes = agg.bytes * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
-    const cap = Math.max(1, Math.round(capBytesPerWindow(action, monthlyBytes, 10)));
+    const hours = Math.max(0.001, windowDurationSeconds / 3600);
+    const monthlyBytes = agg.bytes * (24 * 30) / hours;
+    const cap =
+      action === 'tier_down'
+        ? Math.max(1, Math.round(scaleObservedToReceiverWindow(agg.keptMax * (24 * 30) / hours, '30d')))
+        : Math.max(1, Math.round(capBytesPerWindow(action, monthlyBytes, 10)));
     lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}`);
   }
   return lines.join('\n') + '\n';

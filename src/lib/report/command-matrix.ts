@@ -57,6 +57,8 @@ export interface CmdCtx {
   workload?: string;
   /** Local caps file name written next to the report. */
   capsFileName: string;
+  /** Local actions file name written next to the report. */
+  actionsFileName?: string;
 }
 
 export interface CommandCell {
@@ -71,12 +73,18 @@ export interface CommandCell {
 export const FILL_ME_NS = '<namespace>';
 export const FILL_ME_WORKLOAD = '<forwarder-workload>';
 
+// The ConfigMap the engine's Kubernetes pull driver reads, under the keys the
+// regulator loads: caps.csv and actions.csv side by side. A cap file with no
+// actions file beside it stops the Receiver from launching.
+export const POLICY_CONFIGMAP = 'log10x-action-intent';
+export const ACTIONS_FILE_NAME = 'log10x-actions.csv';
+
 function k8sApplyCaps(ctx: CmdCtx): string[] {
   const ns = ctx.namespace ?? FILL_ME_NS;
   const wl = ctx.workload ?? FILL_ME_WORKLOAD;
   return [
-    `kubectl -n ${ns} create configmap log10x-caps --from-file=${ctx.capsFileName} \\`,
-    `  --dry-run=client -o yaml | kubectl apply -f -`,
+    `kubectl -n ${ns} create configmap ${POLICY_CONFIGMAP} --from-file=caps.csv=${ctx.capsFileName} \\`,
+    `  --from-file=actions.csv=${ctx.actionsFileName ?? ACTIONS_FILE_NAME} --dry-run=client -o yaml | kubectl apply -f -`,
     `kubectl -n ${ns} rollout restart daemonset ${wl}`,
   ];
 }
@@ -85,7 +93,7 @@ function k8sUndoCaps(ctx: CmdCtx): string[] {
   const ns = ctx.namespace ?? FILL_ME_NS;
   const wl = ctx.workload ?? FILL_ME_WORKLOAD;
   return [
-    `kubectl -n ${ns} delete configmap log10x-caps`,
+    `kubectl -n ${ns} delete configmap ${POLICY_CONFIGMAP}`,
     `kubectl -n ${ns} rollout restart daemonset ${wl}`,
   ];
 }

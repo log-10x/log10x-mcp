@@ -46,6 +46,21 @@ import {
 import { type SiemId } from './siem/pricing.js';
 import { isProtectedSeverity } from './severity-policy.js';
 
+/**
+ * The regulator's shipped configuration (config/pipelines/run/receive/rate/config.yaml):
+ * a pattern under this share of its container's bytes in a window is not capped, and
+ * the severity floors keep this share of each level's over-cap events.
+ */
+export const ENGINE_MIN_SHARE = 0.05;
+export const ENGINE_SEVERITY_FLOORS: Record<string, number> = {
+  TRACE: 0.1, DEBUG: 0.1, INFO: 0.1, WARN: 0.3, WARNING: 0.3, ERROR: 0.5, CRITICAL: 0.5, FATAL: 0.5,
+};
+export const ENGINE_MIN_RETENTION = 0.1;
+export function engineSeverityFloor(severity?: string | null): number {
+  const key = (severity ?? '').toUpperCase();
+  return ENGINE_SEVERITY_FLOORS[key] ?? ENGINE_MIN_RETENTION;
+}
+
 /** True ladder order: keep-everything (in-SIEM before out) then lossy. */
 const LADDER: Action[] = ['compact', 'tier_down', 'offload', 'sample', 'drop'];
 
@@ -159,6 +174,12 @@ export interface PlannedRow {
   severity: string;
   billUsd: number;
   action: Action | 'pass';
+  /**
+   * tier_down rows: the bytes the engine moves, the pattern's excess over its
+   * container's cap less the share the severity floors keep. A month's bytes
+   * in the plan's own scale.
+   */
+  movedBytesMonthly?: number;
   savedUsd: number;
   /** The template skeleton ($-slots), passed through from the source. */
   skeleton?: string;
@@ -254,6 +275,14 @@ export interface Plan {
   landsAtUsd?: number;
   /** gb_budget targets: monthly bytes toward the destination after the plan. */
   landsAtBytesMonthly?: number;
+  /**
+   * The engine's files, one row per container that hosts a planned pattern:
+   * the action its excess takes and, for tier_down, the cap that moves the
+   * planned patterns and no other, the largest kept pattern's bytes. In the
+   * plan's own byte scale and span; the writer converts to bytes per
+   * regulator window.
+   */
+  containerCaps: Record<string, { action: Action; capBytesMonthly: number; keptMaxPattern?: string }>;
   planned: PlannedRow[];
   kept: PlannedRow[];
   /** Present when the keep-everything ceiling is below the target. Names the
@@ -371,6 +400,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       byHash.set(p.hash, { ...p, services: { ...p.services } });
       continue;
     }
+    const prevBytes = prev.bytes;
     prev.bytes += p.bytes;
     for (const [svc, b] of Object.entries(p.services)) {
       prev.services[svc] = (prev.services[svc] ?? 0) + b;
@@ -379,7 +409,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       prev.severity = p.severity;
     }
     if (prev.avgEventBytes !== undefined && p.avgEventBytes !== undefined) {
-      prev.avgEventBytes = (prev.avgEventBytes + p.avgEventBytes) / 2;
+      // Weighted by events, so a few large records do not inflate the size of many small ones.
+      const events = prevBytes / prev.avgEventBytes + p.bytes / p.avgEventBytes;
+      prev.avgEventBytes = events > 0 ? prev.bytes / events : prev.avgEventBytes;
     }
   }
   const patterns = [...byHash.values()];
@@ -472,6 +504,47 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     return saveUsd(action, bytes, opts.destination, avg) * dollarScale;
   };
 
+  // How the engine enforces tier_down: a cap on each pattern's bytes per
+  // container per window, the excess over it taking the container's action.
+  // The cap that moves the planned patterns and no other is the largest kept
+  // pattern's bytes in that container, so what a plan moves is each planned
+  // pattern's excess over that cap, less the share the severity floors keep,
+  // and nothing for a pattern under the regulator's share guard. Recomputed
+  // as the selection grows, since every pattern added lowers its container's
+  // cap.
+  const containerOf = (p: SolverPattern): string => serviceMix(p.services).dominant;
+  const byContainer = new Map<string, (typeof rows)[number][]>();
+  for (const r of rows) {
+    const c = containerOf(r.p);
+    const list = byContainer.get(c) ?? [];
+    list.push(r);
+    byContainer.set(c, list);
+  }
+  const tierDownMoves = (
+    chosenHashes: Set<string>,
+  ): { moved: Map<string, number>; caps: Map<string, { capBytesMonthly: number; keptMaxPattern?: string }> } => {
+    const moved = new Map<string, number>();
+    const caps = new Map<string, { capBytesMonthly: number; keptMaxPattern?: string }>();
+    for (const [c, members] of byContainer) {
+      const total = members.reduce((s, r) => s + r.scopedBytes, 0);
+      let cap = 0;
+      let keptMaxPattern: string | undefined;
+      for (const r of members) {
+        if (chosenHashes.has(r.p.hash)) continue;
+        if (r.scopedBytes > cap) { cap = r.scopedBytes; keptMaxPattern = r.p.name; }
+      }
+      caps.set(c, { capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) });
+      for (const r of members) {
+        if (!chosenHashes.has(r.p.hash)) continue;
+        const share = total > 0 ? r.scopedBytes / total : 0;
+        const excess = share < ENGINE_MIN_SHARE ? 0 : Math.max(0, r.scopedBytes - cap);
+        moved.set(r.p.hash, excess * (1 - engineSeverityFloor(r.p.severity)));
+      }
+    }
+    return { moved, caps };
+  };
+  const tierDownMoved = new Map<string, number>();
+
   const allowed = new Set(getAvailableActions(opts.destination, { selfManaged: opts.selfManaged }));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
   // The in-SIEM keep-everything lever (compact/tier_down), separate from offload
@@ -489,9 +562,12 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   // in-SIEM lever caps it.
   const deepest: Action | null = canOffload ? 'offload' : inSiem;
   const nonError = rows.filter((r) => !isPinned(r.p));
+  const ceilingMoved = deepest === 'tier_down' ? tierDownMoves(new Set(nonError.map((r) => r.p.hash))).moved : undefined;
+  const ceilingBytesOf = (r: (typeof rows)[number]): number =>
+    ceilingMoved ? (ceilingMoved.get(r.p.hash) ?? 0) : r.scopedBytes;
   const ceilingAmount = deepest
     ? nonError.reduce(
-        (s, r) => s + gain(deepest, r.scopedBytes, r.p.avgEventBytes),
+        (s, r) => s + gain(deepest, ceilingBytesOf(r), r.p.avgEventBytes),
         0,
       )
     : 0;
@@ -499,7 +575,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     denom === 'usd' && perEvent
       ? bytesIn > 0 && deepest
         ? (nonError.reduce(
-            (s, r) => s + (deepest === 'tier_down' ? r.scopedBytes : saveBytes(deepest, r.scopedBytes, opts.destination, r.p.avgEventBytes)),
+            (s, r) => s + (deepest === 'tier_down' ? ceilingBytesOf(r) : saveBytes(deepest, r.scopedBytes, opts.destination, r.p.avgEventBytes)),
             0,
           ) * 100) / bytesIn
         : 0
@@ -516,7 +592,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     // bytes, so recompute the dollar figure for the card. A per-event tier
     // row states its two priced lines separately: savedUsd is the Standard
     // indexing line avoided and addedUsd the Flex storage line added.
-    const move = action === 'tier_down' ? flexMoveOf(r.scopedBytes, r.p.avgEventBytes) : undefined;
+    const movedBytes = action === 'tier_down' ? (tierDownMoved.get(r.p.hash) ?? 0) : undefined;
+    const move = action === 'tier_down' ? flexMoveOf(movedBytes ?? 0, r.p.avgEventBytes) : undefined;
     const savedUsd =
       action === 'pass' ? 0
       : move ? move.standard_indexing_avoided_usd
@@ -533,6 +610,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       billUsd: billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes) * dollarScale,
       ...(r.p.skeleton ? { skeleton: r.p.skeleton } : {}),
       action,
+      ...(movedBytes !== undefined ? { movedBytesMonthly: movedBytes } : {}),
       savedUsd,
       ...(move ? { addedUsd: move.tier_storage_added_usd, perEventMove: move } : {}),
       ...(denom === 'bytes' && action !== 'pass' ? { savedBytes: gained } : {}),
@@ -545,8 +623,32 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const chosen = new Map<string, { action: Action; saved: number }>();
   let savedAmount = 0;
 
+
   // Rung 1-2: the in-SIEM lever, biggest patterns first, until the target.
-  if (inSiem) {
+  if (inSiem === 'tier_down') {
+    for (const r of rankedNonError) {
+      if (savedAmount >= targetAmount) break;
+      chosen.set(r.p.hash, { action: 'tier_down', saved: 0 });
+      const { moved } = tierDownMoves(new Set(chosen.keys()));
+      savedAmount = 0;
+      for (const [h, bytes] of moved) {
+        const src = rows.find((x) => x.p.hash === h)!;
+        const saved = gain('tier_down', bytes, src.p.avgEventBytes);
+        chosen.set(h, { action: 'tier_down', saved });
+        tierDownMoved.set(h, bytes);
+        savedAmount += saved;
+      }
+    }
+    // A pattern whose excess moves nothing, under its container's cap or the
+    // share guard, is not planned. Taking it out leaves the other caps as
+    // they are, since its bytes were already at or under them.
+    for (const [h, c] of [...chosen.entries()]) {
+      if (c.action === 'tier_down' && (tierDownMoved.get(h) ?? 0) <= 0) {
+        chosen.delete(h);
+        tierDownMoved.delete(h);
+      }
+    }
+  } else if (inSiem) {
     for (const r of rankedNonError) {
       if (savedAmount >= targetAmount) break;
       const saved = gain(inSiem, r.scopedBytes, r.p.avgEventBytes);
@@ -593,6 +695,29 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     }
   }
 
+  // One row per container that hosts a planned pattern, with the strongest
+  // action among its patterns (the order the action-intent writer uses) and,
+  // for tier_down, the cap that moves the planned patterns and no other.
+  const ACTION_RANK: Record<string, number> = { drop: 5, offload: 4, tier_down: 3, compact: 2, sample: 1, pass: 0 };
+  const containerCaps: Plan['containerCaps'] = {};
+  const tierDownCaps = tierDownMoves(new Set([...chosen.entries()].filter(([, c]) => c.action === 'tier_down').map(([h]) => h))).caps;
+  for (const r of rows) {
+    const c = chosen.get(r.p.hash);
+    if (!c) continue;
+    const container = containerOf(r.p);
+    // A pattern with no container has no engine key; unattributedPlanned counts it.
+    if (container === '(unattributed)') continue;
+    const current = containerCaps[container];
+    if (!current || ACTION_RANK[c.action] > ACTION_RANK[current.action]) {
+      const cap = tierDownCaps.get(container);
+      containerCaps[container] = {
+        action: c.action,
+        capBytesMonthly: c.action === 'tier_down' ? (cap?.capBytesMonthly ?? 0) : 0,
+        ...(c.action === 'tier_down' && cap?.keptMaxPattern ? { keptMaxPattern: cap.keptMaxPattern } : {}),
+      };
+    }
+  }
+
   const planned: PlannedRow[] = [];
   const kept: PlannedRow[] = [];
   for (const r of ranked) {
@@ -610,7 +735,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       if (!src) return s;
       const a = lever(pr);
       if (a === 'pass') return s;
-      return s + (a === 'tier_down' ? src.scopedBytes : saveBytes(a, src.scopedBytes, opts.destination, src.p.avgEventBytes));
+      return s + (a === 'tier_down' ? (tierDownMoved.get(pr.hash) ?? 0) : saveBytes(a, src.scopedBytes, opts.destination, src.p.avgEventBytes));
     }, 0);
   const achievedPct =
     denom === 'usd' && perEvent
@@ -773,6 +898,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     prerequisites,
     ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
     bytesInMonthly: bytesIn,
+    containerCaps,
     ...(denom === 'index_volume' ? {} : { landsAtUsd }),
     ...(landsAtBytesMonthly !== undefined ? { landsAtBytesMonthly } : {}),
     planned,
