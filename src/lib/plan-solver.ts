@@ -702,6 +702,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     const c = chosen.get(r.p.hash);
     if (!c) continue;
     const container = containerOf(r.p);
+    // A pattern with no container has no engine key; unattributedPlanned counts it.
+    if (container === '(unattributed)') continue;
     const current = containerCaps[container];
     if (!current || ACTION_RANK[c.action] > ACTION_RANK[current.action]) {
       const cap = tierDownCaps.get(container);

@@ -234,6 +234,9 @@ export function templateEnds(template: string): { prefix: string; suffix: string
       if (i < n && template[i] === '(') {
         const close = template.indexOf(')', i);
         if (close >= 0 && close <= i + 40 && !template.slice(i, close).includes('"')) i = close + 1;
+      } else {
+        // `$N` repeats the value N slots back; the digits are part of the slot.
+        while (i < n && template[i] >= '0' && template[i] <= '9') i += 1;
       }
       continue;
     }

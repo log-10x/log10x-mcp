@@ -18,6 +18,8 @@ test('templateEnds undoes the engine escaping and swallows timestamp slots', () 
   assert.deepEqual(templateEnds('ghcr.io//demo:$.$ pulled'), { prefix: 'ghcr.io/demo:', suffix: ' pulled', lines: 1 });
   assert.deepEqual(templateEnds('price /$ $'), { prefix: 'price $ ', suffix: '', lines: 1 });
   assert.deepEqual(templateEnds('no slots at all'), { prefix: 'no slots at all', suffix: 'no slots at all', lines: 1 });
+  assert.deepEqual(templateEnds('[KAFKA_PORT_$_TCP, tcp:////$.$.$.$:$5]'), { prefix: '[KAFKA_PORT_', suffix: ']', lines: 1 });
+  assert.deepEqual(templateEnds('[KAFKA_PORT_$_TCP_PORT, $1]'), { prefix: '[KAFKA_PORT_', suffix: ']', lines: 1 });
   assert.equal(templateEnds('Caused by: $\n\tat $').lines, 2);
 });
 
