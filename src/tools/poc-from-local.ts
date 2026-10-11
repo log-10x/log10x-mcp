@@ -40,7 +40,7 @@ import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
-import { buildReportData, ReportRefusal, CAPS_FILE_NAME } from '../lib/report/build-report-data.js';
+import { buildReportData, ReportRefusal, CAPS_FILE_NAME, ACTIONS_FILE_NAME } from '../lib/report/build-report-data.js';
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
@@ -437,6 +437,20 @@ interface PocFromLocalInner {
   };
   /** Absolute path of the caps CSV the report's apply commands reference. */
   report_caps_path?: string;
+  /** Absolute path of the sibling actions CSV. */
+  report_actions_path?: string;
+  /**
+   * The two files the engine reads, verbatim, with the span the plan's byte
+   * figures cover: a cap row is bytes per `reset_window_seconds`, scaled from
+   * that span.
+   */
+  engine_policy?: {
+    caps_csv: string;
+    actions_csv: string;
+    span_seconds: number;
+    reset_window_seconds: number;
+    unattributed_planned: number;
+  };
   /** Honest note when report generation was skipped or degraded. */
   report_note?: string;
   /** `-` for source: file (no namespace concept). */
@@ -494,12 +508,18 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
    * lanes feed raw lines, which is what those sources actually carry. */
   let extractionInput: unknown[];
   let rawIngestBytes: number | undefined;
+  /** On-disk bytes per sampled record, so patterns carry the size a platform bills. */
+  let lineRawBytes: number[] | undefined;
+  /** File bytes over sampled bytes: a strided sample's rates scaled to the whole file. */
+  let sampleScale = 1;
   if (source === 'file') {
     if (args.path) {
       const fileSample = await sampleFromFile(args.path);
       sample = fileSample;
       extractionInput = fileSample.records;
       rawIngestBytes = fileSample.normalized ? fileSample.rawBytes : undefined;
+      lineRawBytes = fileSample.lineRawBytes;
+      sampleScale = fileSample.sampledRawBytes > 0 ? fileSample.rawBytes / fileSample.sampledRawBytes : 1;
     } else if (args.paths && args.paths.length > 0) {
       // per_pod_limit / max_pods double as per-file / max-file caps — same
       // budget, different source grain.
@@ -555,7 +575,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
-  const extraction = await extractPatterns(extractionInput);
+  const extraction = await extractPatterns(extractionInput, lineRawBytes ? { lineRawBytes } : {});
 
   // Project the sampled-window bytes to a daily figure.
   const windowHours = parseWindowHours(opts.window!);
@@ -689,6 +709,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   let commitment_artifact: LocalCommitmentArtifact | undefined;
   /** The shared ladder plan; attached to the envelope as `plan`. */
   let plan: Plan | undefined;
+  /** The span the plan's byte figures cover, for the engine's per-window caps. */
+  let planSpanSeconds: number | undefined;
   const budgetCount =
     (args.budget_usd_monthly !== undefined ? 1 : 0) +
     (args.budget_gb_monthly !== undefined ? 1 : 0);
@@ -737,22 +759,29 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     }
     if (sampleWindowHours <= 0) sampleWindowHours = 1;
     const monthScale = budgetCount > 0 ? (24 * 30) / sampleWindowHours : 1;
+    planSpanSeconds = Math.round((budgetCount > 0 ? 24 * 30 : sampleWindowHours) * 3600);
     const target: PlanTarget =
       args.budget_usd_monthly !== undefined
         ? { kind: 'usd_budget', value: args.budget_usd_monthly }
         : args.budget_gb_monthly !== undefined
           ? { kind: 'gb_budget', value: args.budget_gb_monthly }
           : { kind: 'percent', value: args.target_percent_reduction! };
+    // Bytes as the forwarder sends them, on-disk record size scaled from the
+    // sample to the whole file, so the plan's caps are in the units the engine
+    // measures.
     plan = solvePlan(
-      patterns.map((p) => ({
-        hash: p.tenxHash ?? p.hash,
-        name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
-        ...(p.template ? { skeleton: p.template.split('\n')[0] } : {}),
-        services: { [p.service ?? '(unattributed)']: p.bytes * monthScale },
-        severity: p.severity ?? '',
-        bytes: p.bytes * monthScale,
-        ...(p.count > 0 ? { avgEventBytes: p.bytes / p.count } : {}),
-      })),
+      patterns.map((p) => {
+        const bytes = (p.rawBytes ?? p.bytes) * sampleScale * monthScale;
+        return {
+          hash: p.tenxHash ?? p.hash,
+          name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
+          ...(p.template ? { skeleton: p.template.split('\n')[0] } : {}),
+          services: { [p.service ?? '(unattributed)']: bytes },
+          severity: p.severity ?? '',
+          bytes,
+          ...(p.count > 0 ? { avgEventBytes: (p.rawBytes ?? p.bytes) / p.count } : {}),
+        };
+      }),
       {
         // Same assumption rule as the report header: absent siem -> cloudwatch.
         destination: (args.siem ?? 'cloudwatch') as SiemId,
@@ -902,6 +931,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   let report_path: string | undefined;
   let plan_path: string | undefined;
   let report_caps_path: string | undefined;
+  let report_actions_path: string | undefined;
+  let engine_policy: PocFromLocalInner['engine_policy'];
   let report_note: string | undefined;
   try {
     const siem: SiemId = args.siem ?? 'cloudwatch';
@@ -957,6 +988,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         annotations: args.report_annotations,
         generatedAtIso: finishedAtIso,
         mcpVersion: MCP_VERSION,
+        ...(plan && planSpanSeconds ? { plan, planSpanSeconds } : {}),
       },
     );
     const html = renderReportHtml(built.data);
@@ -966,15 +998,26 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       plan_path = nodePath.resolve(process.cwd(), PLAN_FILE_NAME);
       await fs.writeFile(plan_path, lines.join('\n') + '\n', 'utf8');
     }
-    if (built.capsCsv !== null) {
+    if (built.capsCsv !== null && built.actionsCsv !== null) {
       report_caps_path = nodePath.resolve(process.cwd(), CAPS_FILE_NAME);
       await fs.writeFile(report_caps_path, built.capsCsv, 'utf8');
+      report_actions_path = nodePath.resolve(process.cwd(), ACTIONS_FILE_NAME);
+      await fs.writeFile(report_actions_path, built.actionsCsv, 'utf8');
+      engine_policy = {
+        caps_csv: built.capsCsv,
+        actions_csv: built.actionsCsv,
+        span_seconds: planSpanSeconds ?? Math.round(windowHoursForReport * 3600),
+        reset_window_seconds: 240,
+        unattributed_planned: built.unattributedPlanned,
+      };
     }
   } catch (e) {
     if (e instanceof ReportRefusal) throw e;
     report_path = undefined;
     plan_path = undefined;
     report_caps_path = undefined;
+    report_actions_path = undefined;
+    engine_policy = undefined;
     report_note = `report.html generation failed: ${e instanceof Error ? e.message : String(e)}`;
   }
 
@@ -984,6 +1027,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     report_path,
     plan_path,
     report_caps_path,
+    report_actions_path,
+    engine_policy,
     report_note,
     namespace: namespaceOut,
     window: opts.window!,

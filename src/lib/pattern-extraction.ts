@@ -56,9 +56,9 @@ export interface ExtractedPattern {
   template: string;
   /**
    * Dominant service label, from the envelope of the events bound to this
-   * pattern. Only populated when `positionalBindingExact` held: when the
-   * engine's record count does not reconcile against the submitted lines,
-   * this is left unset rather than guessed.
+   * pattern. A record is bound to its input line by position, re-synchronised
+   * on the template's literal ends where the engine dropped a line; a record
+   * whose ends match no line nearby stays unbound and carries no service.
    */
   service?: string;
   /** Dominant severity (uppercase standard form). */
@@ -67,6 +67,12 @@ export interface ExtractedPattern {
   count: number;
   /** Total bytes across all matching events. */
   bytes: number;
+  /**
+   * Bytes of the records as they arrived, before any unwrapping, summed over
+   * the bound events: the size a forwarder sends and a platform bills. Only
+   * present when the caller supplied `lineRawBytes`.
+   */
+  rawBytes?: number;
   /**
    * Total bytes that would ship over the wire if these events were
    * encoded by the engine. Sum of the raw `encoded.log` line bytes
@@ -130,14 +136,18 @@ export interface ExtractedPatterns {
    */
   severityCoverage: number;
   /**
-   * Whether encoded records reconciled against input lines, so that
-   * envelope-derived fields (service, first-seen) could be bound to patterns.
-   * False means they were deliberately left unset rather than guessed.
+   * Whether the engine's records reconciled against the input lines by count
+   * alone. When false, binding re-synchronised on template ends; the two
+   * counts below say how many records were bound and how many were not.
    */
   positionalBindingExact: boolean;
   /** Input lines submitted, and the line count the engine's records account for. */
   inputLinesSubmitted: number;
   inputLinesAccountedFor: number;
+  /** Records bound to an input line, records whose binding re-synchronised, and records left unbound. */
+  recordsBound?: number;
+  recordsResynced?: number;
+  recordsUnbound?: number;
 }
 
 export interface ExtractPatternsOptions {
@@ -189,6 +199,107 @@ export interface ExtractPatternsOptions {
    * Default: undefined.
    */
   bucketHashHint?: string;
+  /**
+   * The on-disk byte size of each event, aligned with `events`, for callers
+   * that unwrapped a record before handing it over. Summed per pattern into
+   * `rawBytes`.
+   */
+  lineRawBytes?: number[];
+}
+
+/**
+ * The literal text at a template's two ends, with the engine's escaping
+ * undone: `$` marks a variable slot, `$(...)` a timestamp slot, and `/`
+ * escapes the next character. `prefix` is the text before the first slot
+ * and `suffix` the text after the last one; a template with no slot has the
+ * whole text as both.
+ */
+export function templateEnds(template: string): { prefix: string; suffix: string; lines: number } {
+  let prefix = '';
+  let suffix = '';
+  let slots = 0;
+  let i = 0;
+  const n = template.length;
+  while (i < n) {
+    const c = template[i];
+    if (c === '/' && i + 1 < n) {
+      if (slots === 0) prefix += template[i + 1]; else suffix += template[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === '$') {
+      slots += 1;
+      suffix = '';
+      i += 1;
+      if (i < n && template[i] === '(') {
+        const close = template.indexOf(')', i);
+        if (close >= 0 && close <= i + 40 && !template.slice(i, close).includes('"')) i = close + 1;
+      }
+      continue;
+    }
+    if (slots === 0) prefix += c; else suffix += c;
+    i += 1;
+  }
+  if (slots === 0) suffix = prefix;
+  return { prefix, suffix, lines: template.split('\n').length };
+}
+
+/**
+ * Bind each encoded record to the input line it starts on. Records come back
+ * in input order, each spanning the lines its template folds, so a cursor
+ * walk binds them by position. Where the engine dropped a line the walk
+ * re-synchronises on the template's literal ends: the text before the first
+ * slot starts the record's first line and the text after the last slot ends
+ * its last line. A record whose ends match nothing within `lookahead` lines
+ * stays unbound and the cursor moves on by the record's span.
+ */
+export function bindRecordsToLines(
+  records: Array<{ templateHash: string }>,
+  templates: Map<string, { template: string }>,
+  lines: string[],
+  lookahead = 64,
+): { head: Array<number | undefined>; bound: number; resyncs: number; unbound: number } {
+  const ends = new Map<string, { prefix: string; suffix: string; lines: number }>();
+  const head: Array<number | undefined> = new Array(records.length);
+  let cursor = 0;
+  let bound = 0;
+  let resyncs = 0;
+  let unbound = 0;
+  const matches = (e: { prefix: string; suffix: string; lines: number }, at: number): boolean => {
+    if (at + e.lines > lines.length) return false;
+    const first = e.prefix.split('\n')[0];
+    const last = e.suffix.slice(e.suffix.lastIndexOf('\n') + 1);
+    return lines[at].startsWith(first) && lines[at + e.lines - 1].endsWith(last);
+  };
+  for (let i = 0; i < records.length; i++) {
+    const tpl = templates.get(records[i].templateHash);
+    let e = tpl ? ends.get(records[i].templateHash) : undefined;
+    if (!e && tpl) {
+      e = templateEnds(tpl.template);
+      ends.set(records[i].templateHash, e);
+    }
+    const span = e?.lines ?? 1;
+    let found: number | undefined;
+    if (!e) {
+      found = cursor < lines.length ? cursor : undefined;
+    } else {
+      const stop = Math.min(lines.length, cursor + lookahead + 1);
+      for (let j = cursor; j < stop; j++) {
+        if (matches(e, j)) { found = j; break; }
+      }
+    }
+    if (found === undefined) {
+      unbound += 1;
+      head[i] = undefined;
+      cursor += span;
+    } else {
+      if (found !== cursor) resyncs += 1;
+      bound += 1;
+      head[i] = found;
+      cursor = found + span;
+    }
+  }
+  return { head, bound, resyncs, unbound };
 }
 
 /**
@@ -208,16 +319,17 @@ export async function extractPatterns(
   // aggregation into per-pattern service/severity.
   const coerceOpts = { preserveEnvelope: opts.preserveEnvelope };
   const pairs = events
-    .map((e) => {
+    .map((e, idx) => {
       const line = coerceToLine(e, coerceOpts);
       const enrichment = typeof e === 'object' && e !== null
         ? extractEnrichmentFromEnvelope(e as Record<string, unknown>)
         : {};
-      return { line, enrichment };
+      return { line, enrichment, rawBytes: opts.lineRawBytes?.[idx] };
     })
     .filter((p) => p.line && p.line.trim().length > 0);
   const lines = pairs.map((p) => p.line);
   const enrichments = pairs.map((p) => p.enrichment);
+  const rawLineBytes = pairs.map((p) => p.rawBytes);
 
   if (lines.length === 0) {
     return {
@@ -231,6 +343,9 @@ export async function extractPatterns(
       positionalBindingExact: true,
       inputLinesSubmitted: 0,
       inputLinesAccountedFor: 0,
+      recordsBound: 0,
+      recordsResynced: 0,
+      recordsUnbound: 0,
     };
   }
 
@@ -279,6 +394,7 @@ export async function extractPatterns(
   const byHash = new Map<string, {
     count: number;
     bytes: number;
+    rawBytes: number;
     encodedBytes: number;
     sampleEvent: string;
     variables: Map<string, Set<string>>;
@@ -317,6 +433,9 @@ export async function extractPatterns(
     expectedLines += t ? 1 + (t.template.split('\n').length - 1) : 1;
   }
   const positionalBindingExact = expectedLines === lines.length;
+  // Where the totals disagree, the walk re-synchronises on each template's
+  // literal ends instead of dropping attribution for every record.
+  const binding = bindRecordsToLines(mergedEncoded, mergedTemplates, lines);
 
   let cursor = 0;
   for (let i = 0; i < mergedEncoded.length; i++) {
@@ -324,6 +443,7 @@ export async function extractPatterns(
     const rec = byHash.get(ev.templateHash) || {
       count: 0,
       bytes: 0,
+      rawBytes: 0,
       encodedBytes: 0,
       sampleEvent: '',
       variables: new Map<string, Set<string>>(),
@@ -341,12 +461,17 @@ export async function extractPatterns(
     // folded continuation lines into it, otherwise one line.
     const tplForSpan = mergedTemplates.get(ev.templateHash);
     const span = tplForSpan ? 1 + (tplForSpan.template.split('\n').length - 1) : 1;
+    // The line this record starts on: the bound line where the walk matched
+    // the template's ends, the running position otherwise.
+    const head = binding.head[i];
+    cursor = head ?? cursor;
     // Raw bytes are the sum over every input line this record covers, so a
     // grouped stack trace is charged its real size instead of its head line.
     for (let k = 0; k < span; k++) {
       const raw = cursor + k < lines.length ? lines[cursor + k] : undefined;
       if (!raw) continue;
       rec.bytes += Buffer.byteLength(raw, 'utf8');
+      rec.rawBytes += rawLineBytes[cursor + k] ?? Buffer.byteLength(raw, 'utf8');
       if (!rec.sampleEvent) rec.sampleEvent = raw;
       rec.lineIndices.push(cursor + k);
     }
@@ -361,7 +486,7 @@ export async function extractPatterns(
     // identity-keyed source (the aggregated join on tenx_hash) and survives,
     // but service and first-seen have only this one, and a wrong service
     // breakdown is worse than an absent one.
-    const enr = positionalBindingExact && cursor < enrichments.length ? enrichments[cursor] : undefined;
+    const enr = head !== undefined && head < enrichments.length ? enrichments[head] : undefined;
     cursor += span;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
     if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
@@ -447,6 +572,7 @@ export async function extractPatterns(
       service,
       count: rec.count,
       bytes: rec.bytes,
+      ...(opts.lineRawBytes ? { rawBytes: rec.rawBytes } : {}),
       encodedBytes: rec.encodedBytes,
       sampleEvent: rec.sampleEvent,
       variables,
@@ -474,6 +600,9 @@ export async function extractPatterns(
     positionalBindingExact,
     inputLinesSubmitted: lines.length,
     inputLinesAccountedFor: expectedLines,
+    recordsBound: binding.bound,
+    recordsResynced: binding.resyncs,
+    recordsUnbound: binding.unbound,
   };
 }
 

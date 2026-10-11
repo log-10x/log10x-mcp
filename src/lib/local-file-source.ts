@@ -51,6 +51,10 @@ export interface FileSourceResult extends LocalSourceResult {
   records: unknown[];
   /** On-disk bytes (wrapped size) — the billable figure. */
   rawBytes: number;
+  /** On-disk bytes of the sampled lines, newlines included; equals `rawBytes` when the file was read whole. */
+  sampledRawBytes: number;
+  /** On-disk bytes of each sampled line, aligned with `records`, newline included. */
+  lineRawBytes: number[];
   /** True when the wrapped-JSON normalization path was taken. */
   normalized: boolean;
 }
@@ -123,6 +127,8 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
         `split it and analyse each phase.`,
     );
   }
+  const lineRawBytes = lines.map((l) => Buffer.byteLength(l, 'utf8') + 1);
+  const sampledRawBytes = sampledLargeFile ? lineRawBytes.reduce((s, b) => s + b, 0) : stat.size;
   if (lines.length === 0) {
     notes.push(`file ${path} contains no non-empty lines.`);
     return {
@@ -130,6 +136,8 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
       records: [],
       totalBytes: 0,
       rawBytes: stat.size,
+      sampledRawBytes,
+      lineRawBytes,
       normalized: false,
       composition: [],
       failedSources: [],
@@ -151,6 +159,8 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
       records: lines,
       totalBytes,
       rawBytes: stat.size,
+      sampledRawBytes,
+      lineRawBytes,
       normalized: false,
       composition: [{ source: path, bytes: totalBytes, lines: lines.length, pct: 100 }],
       failedSources: [],
@@ -211,6 +221,8 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
     records,
     totalBytes,
     rawBytes: stat.size,
+    sampledRawBytes,
+    lineRawBytes,
     normalized: true,
     composition,
     failedSources: [],
