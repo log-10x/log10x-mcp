@@ -56,6 +56,13 @@ import {
 import { verifyConfigGeneration } from '../lib/config-generation.js';
 import { findNewestConfigMapTarget } from './commitment-report.js';
 
+/**
+ * Labels the cross-pillar checks need on the per-pattern metrics. Pod and host
+ * are not on the list: the shipped metric outputs carry neither, so the series
+ * count does not grow with nodes or restarts.
+ */
+export const CROSS_PILLAR_REQUIRED_LABELS: string[] = ['tenx_user_service', 'k8s_namespace', 'k8s_container'];
+
 export type CheckStatus = 'pass' | 'warn' | 'fail';
 
 export interface DoctorCheck {
@@ -953,7 +960,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   // the labels needed for structural validation are actually present on
   // Log10x pattern metrics. Never fails — always degrades gracefully.
   if (backendResolution.backend) {
-    const required = ['tenx_user_service', 'k8s_namespace', 'k8s_pod', 'k8s_container'];
+    const required = CROSS_PILLAR_REQUIRED_LABELS;
     // Bounded fan-out over the 4 label probes (was a serial await loop). Each
     // is a count()>0 existence probe — numeric value discarded → cheap budget.
     // The fn returns '' when the label is confirmed present, and the label
@@ -977,7 +984,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
         name: 'cross_pillar_enrichment_floor',
         status: 'pass',
         message:
-          'All v1.4 enrichment labels present (tenx_user_service, k8s_namespace, k8s_pod, k8s_container). Structural validation will work for service, namespace, pod, and container-level anchors. Node-level correlation is deferred to v1.4.1.',
+          'All enrichment labels present (tenx_user_service, k8s_namespace, k8s_container). Structural validation will work for service, namespace, and container-level anchors. Node-level correlation is deferred to v1.4.1.',
       });
     } else {
       checks.push({
@@ -1154,6 +1161,62 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
   return checks;
 }
 
+/** Container keys of a policy CSV: data rows only, the seed row excluded. */
+function policyCsvKeys(csv: string | null | undefined): string[] {
+  if (!csv) return [];
+  const rows = csv.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  return rows
+    .slice(1)
+    .map((l) => l.split(',')[0].trim())
+    .filter((k) => k && k !== 'tenx-seed');
+}
+
+/**
+ * The policy ConfigMap's caps.csv against its actions.csv. A capped container
+ * with no action row never takes its planned action: up to engine 1.1.139 its
+ * over-cap slice is dropped (and a missing actions.csv fails the launch);
+ * from 1.1.140 it passes, so the cap does nothing.
+ */
+export function policyActionsChecks(
+  capsCsv: string,
+  actionsCsv: string | null,
+  cmNs: string,
+  cmName: string,
+): DoctorCheck[] {
+  const capped = policyCsvKeys(capsCsv);
+  if (capped.length === 0) return [];
+  const actioned = new Set(policyCsvKeys(actionsCsv));
+  const hasActionsFile = !!actionsCsv && actionsCsv.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#')).length >= 2;
+  if (!hasActionsFile) {
+    return [{
+      name: 'policy_actions_file',
+      status: 'fail',
+      message:
+        `Policy ConfigMap ${cmNs}/${cmName} carries caps.csv but no usable actions.csv, so no capped container takes its planned action. ` +
+        `On engine 1.1.139 and earlier the receiver fails at launch on its next restart and, until then, drops each container's over-cap events; from 1.1.140 it starts and passes them, so the caps do nothing.`,
+      fix:
+        'Re-run log10x_configure_engine (delivery="kubectl_configmap"): it writes caps.csv and actions.csv together and merges over existing rows.',
+    }];
+  }
+  const missing = capped.filter((c) => !actioned.has(c));
+  if (missing.length > 0) {
+    return [{
+      name: 'policy_actions_file',
+      status: 'warn',
+      message:
+        `Policy ConfigMap ${cmNs}/${cmName} caps ${missing.length} container${missing.length === 1 ? '' : 's'} with no row in actions.csv: ${missing.join(', ')}. ` +
+        `On engine 1.1.139 and earlier their over-cap events are dropped; from 1.1.140 they pass, so those caps do nothing.`,
+      fix:
+        `Re-run log10x_configure_engine for ${missing.length === 1 ? 'that container' : 'those containers'}, or add a \`<container>,<action>::<reason>\` row for each to actions.csv.`,
+    }];
+  }
+  return [{
+    name: 'policy_actions_file',
+    status: 'pass',
+    message: `Policy ConfigMap ${cmNs}/${cmName}: every capped container has a row in actions.csv.`,
+  }];
+}
+
 /**
  * config_live — verify the running engine is executing the cap policy the MCP
  * WROTE, not just that a ConfigMap/PR was written (the config-generation closed
@@ -1194,33 +1257,13 @@ async function addConfigLiveCheck(
   };
   const readCapsCsv = (): Promise<string | null> => readCmKey('caps.csv');
 
-  // Engine boot contract: when the cap variant is armed (CAP_LOOKUP_FILE
-  // set), rateReceiverCapInput hard-loads BOTH lookup files at pipeline
-  // init. A ConfigMap that carries caps.csv without a non-empty actions.csv
-  // (the shape older MCP versions wrote — they deleted the actions.csv key)
-  // crash-loops the receiver on its next restart, and until then every
-  // over-cap event hard-drops instead of taking the configured action.
+  // The engine reads a capped container's over-cap action only from
+  // actions.csv. MCP 1.13 to 1.29.9 wrote caps.csv alone and deleted the
+  // actions.csv key; a hand-edited file can miss a container.
   const capsForPairCheck = await readCapsCsv();
   if (capsForPairCheck) {
     const actions = await readCmKey('actions.csv');
-    const actionsHasRows =
-      !!actions && actions.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#')).length >= 2;
-    if (!actionsHasRows) {
-      checks.push({
-        name: 'policy_actions_file',
-        status: 'fail',
-        message:
-          `Policy ConfigMap ${cmNs}/${cmName} carries caps.csv but no usable actions.csv — the engine reads the per-service over-cap action ONLY from actions.csv, so every over-cap event hard-drops, and the next receiver restart fails at launch (the cap variant hard-loads both files).`,
-        fix:
-          'Re-run log10x_configure_engine (delivery="kubectl_configmap") — current versions write caps.csv + actions.csv together and merge over existing rows.',
-      });
-    } else {
-      checks.push({
-        name: 'policy_actions_file',
-        status: 'pass',
-        message: `Policy ConfigMap ${cmNs}/${cmName} carries caps.csv and actions.csv together.`,
-      });
-    }
+    checks.push(...policyActionsChecks(capsForPairCheck, actions, cmNs, cmName));
   }
 
   const envSel = detectedTier ? `${LABELS.env}="${detectedTier}"` : `${LABELS.env}=~"edge|cloud"`;

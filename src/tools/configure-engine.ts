@@ -1615,9 +1615,10 @@ export async function executeConfigureEngine(
   // Engine delivery is TWO container-keyed files: caps.csv (byte caps,
   // rateReceiverCapLookupFile) and actions.csv (per-service disposition of
   // the over-cap slice, rateReceiverActionLookupFile). The engine reads the
-  // action ONLY from actions.csv — a caps.csv shipped without it turns every
-  // non-drop policy into hard drops, and fails the receiver launch outright
-  // when the cap variant is active. data/action-intent.json rides along as
+  // action ONLY from actions.csv. A capped container with no row there takes
+  // the engine's default: its over-cap slice is dropped on engines up to
+  // 1.1.139 (where a caps.csv without the file also fails the launch) and
+  // passes from 1.1.140, so the cap does nothing. data/action-intent.json rides along as
   // MCP-side per-pattern state for commitment_report / estimate_savings.
   // On the gitops channel, merge over the repo's existing actions.csv so
   // services configured in earlier runs keep their rows (the kubectl channel
@@ -3091,8 +3092,8 @@ export function renderCsvDiff(
   // action lives in the sibling actions.csv (see renderActionsCsv) — the
   // engine's `rateReceiverActionLookupFile` — and NEVER in this file. A
   // value shaped `<bytes>:<action>:<reason>` parses as bytes + a garbage
-  // epoch: the engine ignores the action and every over-cap event falls to
-  // the default `drop`.
+  // epoch: the engine ignores the action and the container takes the default
+  // for a missing actions row (drop up to engine 1.1.139, pass from 1.1.140).
   //
   // KEY BINDING: The engine's rate module reads caps.csv keyed by the
   // value of `rateReceiverContainerField` (defaults to `k8s_container`).
@@ -3180,15 +3181,14 @@ function renderPreambleFromParsed(p: PreambleData): string[] {
  *
  * ENGINE GRAMMAR (rate-object-cap.js):
  *   <container>,<action>[:<untilEpochSec>][:<reason>]
- * A service with no row (or no file) defaults to `drop` for its over-cap
- * slice, so this file must ship WITH every caps.csv delivery: caps without
- * actions silently turns compact/offload/tier_down/sample/pass policies
- * into hard drops.
+ * A service with no row takes the engine's default for its over-cap slice:
+ * drop up to engine 1.1.139, pass from 1.1.140. Either way the planned
+ * action never happens, so this file ships WITH every caps.csv delivery.
  *
- * BOOT CONTRACT: when the cap variant is active the engine hard-resolves
- * this file at pipeline init (`rateReceiverCapInput` loads both tables) —
- * a missing OR EMPTY actions.csv fails the receiver launch. Always emit
- * the header plus at least one row, and never deliver caps.csv without it.
+ * BOOT CONTRACT: up to engine 1.1.139 a missing actions.csv fails the
+ * receiver launch when the cap variant is active; from 1.1.140 a missing
+ * file loads as an empty table. Always emit the header plus at least one
+ * row, and never deliver caps.csv without it.
  *
  * Merge semantics mirror the caps merge: rows for other services in the
  * existing file survive; the configured containers' rows are replaced.
@@ -3290,9 +3290,8 @@ export function renderPrCommand(
   const genCsv = renderGenerationCsv(computeGeneration(newCsv));
   const genPath = lookupPath.replace(/[^/]*$/, 'config-generation.csv');
   // Sibling files: actions.csv is the ENGINE's per-service action source
-  // (rateReceiverActionLookupFile) — caps.csv without it turns every
-  // non-drop policy into hard drops and fails the receiver launch when the
-  // cap variant is active. data/action-intent.json is MCP-side per-pattern
+  // (rateReceiverActionLookupFile); caps.csv without it leaves every capped
+  // container on the engine default (drop up to 1.1.139, pass from 1.1.140). data/action-intent.json is MCP-side per-pattern
   // state that commitment_report / estimate_savings read back.
   const actionsPath = lookupPath.replace(/[^/]*$/, 'actions.csv');
   const intentPath = 'data/action-intent.json';
@@ -3370,8 +3369,8 @@ export function renderPrCommand(
   out.push('');
   if (siblings?.actionsCsv) {
     out.push('# Commit actions.csv (sibling of caps.csv) — the engine reads the');
-    out.push('# per-service action for the over-cap slice from THIS file; without');
-    out.push('# it every over-cap event is hard-dropped.');
+    out.push('# per-service action for the over-cap slice from THIS file; a capped');
+    out.push('# container with no row here never takes its planned action.');
     out.push('ACTIONS_CUR_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
     out.push('ACTIONS_CONTENT_B64=$(base64 < "$ACTIONSFILE" | tr -d "\\n")');
     out.push('ACTIONS_PUT_ARGS=( -X PUT "/repos/$REPO/contents/$ACTIONS_PATH"');
@@ -3687,9 +3686,10 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  *   - `actions.csv` — engine per-SERVICE action routing,
  *     `<container>,<action>[:<epoch>][:<reason>]` (rateReceiverActionLookupFile).
  *     The receiver stamps `route(<action>)` on that service's regulator-excess
- *     slice; a service with no row defaults to `drop`, and when the cap
- *     variant is active a missing/empty file FAILS the receiver launch —
- *     caps.csv must never ship without it.
+ *     slice; a service with no row takes the engine default (drop up to
+ *     1.1.139, pass from 1.1.140), and up to 1.1.139 a missing file FAILS
+ *     the receiver launch when the cap variant is active — caps.csv must
+ *     never ship without it.
  *   - `config-generation.csv` — policy-generation stamp for the closed loop.
  *   - `action-intent.json` — per-pattern intent; the ENGINE ignores it, but
  *     commitment_report / estimate_savings read it back for attribution
