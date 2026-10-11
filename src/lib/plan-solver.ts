@@ -400,6 +400,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       byHash.set(p.hash, { ...p, services: { ...p.services } });
       continue;
     }
+    const prevBytes = prev.bytes;
     prev.bytes += p.bytes;
     for (const [svc, b] of Object.entries(p.services)) {
       prev.services[svc] = (prev.services[svc] ?? 0) + b;
@@ -408,7 +409,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       prev.severity = p.severity;
     }
     if (prev.avgEventBytes !== undefined && p.avgEventBytes !== undefined) {
-      prev.avgEventBytes = (prev.avgEventBytes + p.avgEventBytes) / 2;
+      // Weighted by events, so a few large records do not inflate the size of many small ones.
+      const events = prevBytes / prev.avgEventBytes + p.bytes / p.avgEventBytes;
+      prev.avgEventBytes = events > 0 ? prev.bytes / events : prev.avgEventBytes;
     }
   }
   const patterns = [...byHash.values()];

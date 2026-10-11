@@ -96,6 +96,22 @@ test('three targets plan three different sets, and the caps follow the kept patt
   assert.equal(traces50.perEventMove!.events_moved, ((46 - 4) * GB * 0.9) / 1200);
 });
 
+test('two templates under one hash merge their event size weighted by events', () => {
+  // 45 GB of 1,200-byte records and 1 GB of 120,000-byte ones: 37.5 M events and 8,333,
+  // so the merged record is 46 GB / 37.51 M = 1,226 bytes, not the 60,600 of a plain mean.
+  const patterns: SolverPattern[] = [
+    { hash: 't', name: 'Traces', services: { collector: 45 * GB }, severity: 'INFO', bytes: 45 * GB, avgEventBytes: 1200 },
+    { hash: 't', name: 'Traces', services: { collector: 1 * GB }, severity: 'INFO', bytes: 1 * GB, avgEventBytes: 120_000 },
+    ...estate().slice(1),
+  ];
+  const plan = solvePlan(patterns, { destination: 'datadog', retrieverInstalled: false, targetPct: 50 });
+  const traces = plan.planned.find((r) => r.name === 'Traces')!;
+  const events = (45 * GB) / 1200 + (1 * GB) / 120_000;
+  const avg = (46 * GB) / events;
+  assert.ok(Math.abs(traces.perEventMove!.events_moved - traces.movedBytesMonthly! / avg) < 1);
+  assert.ok(traces.perEventMove!.events_moved > 20_000_000);
+});
+
 test('the engine files carry the cap per window in the engine grammar, one row per container', () => {
   const p = solvePlan(estate(), { destination: 'datadog', retrieverInstalled: false, targetPct: 70 });
   const files = engineFilesFromContainerCaps(p.containerCaps, 36_000, 'plan datadog 70 pct: x,y');
