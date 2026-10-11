@@ -657,7 +657,7 @@ export interface VerifyResult {
      * How the action was attributed:
      *  - 'pat_row'      — from a `pat:<hash>` row in the cap-CSV
      *  - 'container'    — from the container-default row
-     *  - 'unattributed' — no row matched; action defaulted to 'drop'
+     *  - 'unattributed' — no row matched; the action is unknown and shown as 'drop'
      */
     action_source: 'pat_row' | 'container' | 'unattributed';
   }>;
