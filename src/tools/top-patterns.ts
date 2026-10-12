@@ -67,9 +67,9 @@ export const topPatternsSchema = {
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return. Default 10.'),
   offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
   analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
-  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the profile list rate (`rate_source=list_price`) or omits dollars entirely (`rate_source=unset`).'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the destination default rate (`rate_source=list_price`; a list price only where the vendor sells logs per GB) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('Ignored: the summary envelope carries no verbatim sample line. Accepted so existing callers still validate.'),
-  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s list rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s default rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),

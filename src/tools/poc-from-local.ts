@@ -38,7 +38,7 @@ import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
-import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, defaultRateNote, type SiemId } from '../lib/siem/pricing.js';
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
 import { buildReportData, ReportRefusal, CAPS_FILE_NAME, ACTIONS_FILE_NAME } from '../lib/report/build-report-data.js';
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
@@ -265,24 +265,22 @@ interface LocalCommitmentArtifact {
   next_step: { tool: 'log10x_advise_install' | 'log10x_configure_engine'; reason: string };
 }
 
-interface PriceRow {
+export interface PriceRow {
   vendor: string;
   perGb: number;
   note: string;
 }
 
-// No-env POC matrix (kubectl scan, no resolved env/destination) so it cannot
-// resolveRate, but its list figures MUST come from the single canonical source
-// (DEFAULT_ANALYZER_COST_PER_GB, synced from vendors.json) instead of duplicated
-// literals that drift. Splunk was hardcoded $5.0 here, contradicting canonical
-// $6. OpenSearch has no SiemId in pricing.ts; it keeps a local baseline figure.
-const INDUSTRY_PRICING: PriceRow[] = [
-  { vendor: 'Datadog', perGb: DEFAULT_ANALYZER_COST_PER_GB.datadog, note: '30-day indexed, list price' },
-  { vendor: 'Splunk', perGb: DEFAULT_ANALYZER_COST_PER_GB.splunk, note: 'self-hosted ingest license, list price' },
+// The no-env matrix cannot resolveRate, so its figures come from the canonical
+// defaults (DEFAULT_ANALYZER_COST_PER_GB), and each note says what the figure
+// is: a list price only where the vendor sells logs per GB.
+export const INDUSTRY_PRICING: PriceRow[] = [
+  { vendor: 'Datadog', perGb: DEFAULT_ANALYZER_COST_PER_GB.datadog, note: `default rate, ${defaultRateNote('datadog')}` },
+  { vendor: 'Splunk', perGb: DEFAULT_ANALYZER_COST_PER_GB.splunk, note: 'default rate, not a Splunk list price' },
   { vendor: 'CloudWatch Logs', perGb: DEFAULT_ANALYZER_COST_PER_GB.cloudwatch, note: 'ingestion + first-month storage' },
   { vendor: 'Azure Monitor', perGb: DEFAULT_ANALYZER_COST_PER_GB['azure-monitor'], note: 'Analytics tier ingest, list price' },
-  { vendor: 'Sumo Logic', perGb: DEFAULT_ANALYZER_COST_PER_GB.sumo, note: 'Continuous ingest tier, list price' },
-  { vendor: 'Elastic Cloud', perGb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, note: 'Hot tier + searchable' },
+  { vendor: 'Sumo Logic', perGb: DEFAULT_ANALYZER_COST_PER_GB.sumo, note: 'default rate, not a Sumo Logic list price' },
+  { vendor: 'Elasticsearch', perGb: DEFAULT_ANALYZER_COST_PER_GB.elasticsearch, note: `default rate, ${defaultRateNote('elasticsearch')}` },
   { vendor: 'Coralogix', perGb: DEFAULT_ANALYZER_COST_PER_GB.coralogix, note: 'Frequent Search (High) priority, list price' },
   { vendor: 'Elastic Cloud Serverless', perGb: DEFAULT_ANALYZER_COST_PER_GB['elastic-serverless'], note: 'Logs Essentials ingest floor; retention billed separately' },
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
@@ -363,7 +361,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
           ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
           : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
-    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list price across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
+    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list prices and default rates across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
     : inner.source === 'file'
       ? 'POC from files: no log lines pulled. Check the paths / glob patterns.'
       : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
@@ -399,7 +397,7 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At industry list price the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
   if (inner.report_path) {
     return `${base} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
   }
@@ -627,9 +625,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('');
 
   // Section: industry-pricing matrix.
-  lines.push('## Projected savings at industry list pricing');
+  lines.push('## Projected savings at default rates');
   lines.push('');
-  lines.push('_Rate source: list price (vendors.json). Pass `effective_ingest_per_gb` on `log10x_estimate_savings` or `log10x_savings` once your real $/GB is known to convert these projections into a customer-specific quote._');
+  lines.push('_Rates: the vendor\'s list price where it sells logs per GB, and a per-GB default, marked "default rate", where it bills in other units or publishes no per-GB price. Pass `effective_ingest_per_gb` on `log10x_estimate_savings` or `log10x_savings` once your real $/GB is known to convert these projections into a customer-specific quote._');
   lines.push('');
   lines.push(
     `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns — candidates for compacting, tiering down or offloading, each of which keeps every line.`
@@ -646,7 +644,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     lines.push('');
   }
   lines.push(
-    '_These are list-price figures, not predictions of your specific bill — use them to size the order of magnitude, not to negotiate with procurement._'
+    '_These are list prices and default rates, not predictions of your specific bill: use them to size the order of magnitude, not to negotiate with procurement._'
   );
   lines.push('');
   lines.push('| Log analyzer | Rate | Annual cost | Annual savings |');

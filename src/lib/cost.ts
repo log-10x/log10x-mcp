@@ -44,7 +44,7 @@
  */
 
 import type { SiemId } from './siem/pricing.js';
-import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, describeDefaultRate } from './siem/pricing.js';
 
 // GB = 10^9 bytes (decimal). This is the unit CloudWatch / Datadog /
 // Splunk / Azure Monitor / GCP Logging / Sumo all bill in, so dollar
@@ -406,8 +406,9 @@ export interface DisclosedDollarValue {
  *
  *  - source='customer_supplied' → disclosure=null (caller owns the rate).
  *  - source='unset'             → disclosure='(no $/GB rate configured)'.
- *  - source='list_price'        → disclosure carries the SIEM label + list
- *                                 rate + "may differ" caveat.
+ *  - source='list_price'        → disclosure names the rate and what it is
+ *                                 (a list price, or a per-GB default) + the
+ *                                 "may differ" caveat.
  */
 export function buildDisclosedDollarValue(
   value: number,
@@ -421,12 +422,10 @@ export function buildDisclosedDollarValue(
   if (source === 'unset') {
     return { value, source, disclosure: '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)' };
   }
-  const siem = siemLabel ?? 'SIEM';
-  const rate = listRatePerGb != null ? `$${listRatePerGb.toFixed(2)}/GB` : 'list price';
   return {
     value,
     source,
-    disclosure: `(at ${siem} list price ${rate} — your actual bill may differ depending on discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
+    disclosure: `(at ${describeDefaultRate(siemLabel, listRatePerGb)}. Your actual bill may differ with discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
   };
 }
 

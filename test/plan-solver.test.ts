@@ -223,13 +223,13 @@ test('plan arithmetic closes: totalSavedUsd = billUsd - landsAtUsd = sum of rows
   assert.ok(Math.abs(pl.billUsd - pl.totalSavedUsd - (pl.landsAtUsd ?? NaN)) < 1e-9);
 });
 
-test('rateBasis names the destination, the list-price basis, and the lever rate', () => {
+test('rateBasis names the destination, what its rate is, and the lever rate', () => {
   const cw = solvePlan(estate(), { destination: 'cloudwatch', retrieverInstalled: true, targetPct: 50 });
   assert.ok(cw.rateBasis.includes('cloudwatch list price'), cw.rateBasis);
   assert.ok(cw.rateBasis.includes('ingest $'), cw.rateBasis);
   assert.ok(/Infrequent Access/i.test(cw.rateBasis), cw.rateBasis);
   const sp = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
-  assert.ok(sp.rateBasis.includes('splunk list price'), sp.rateBasis);
+  assert.ok(sp.rateBasis.includes('splunk default rate'), sp.rateBasis);
   // The Splunk figure is a licence-meter measurement, and it says so.
   assert.ok(sp.rateBasis.includes("compact 59% smaller, measured once in Splunk's licence meter"), sp.rateBasis);
   assert.ok(sp.rateBasis.includes('not on this estate'), sp.rateBasis);

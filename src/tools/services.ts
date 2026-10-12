@@ -74,7 +74,7 @@ export const servicesSchema = {
     .max(50)
     .optional()
     .describe('Customer-flagged services that must stay in the SIEM with full retention (audit / regulatory / executive). Per row, marks current_mode="pass" and points next_action at pattern_mitigate instead of the configure_engine bulk path.'),
-  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the per-service $/mo columns at this destination\'s list rates instead of the connected pipeline\'s (env-configured rates never cross destinations). Volumes/patterns are unaffected; the envelope stamps siem_actual vs siem_lens.'),
+  siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the per-service $/mo columns at this destination\'s default rates instead of the connected pipeline\'s (env-configured rates never cross destinations). Volumes/patterns are unaffected; the envelope stamps siem_actual vs siem_lens.'),
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),

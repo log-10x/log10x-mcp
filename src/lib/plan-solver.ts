@@ -43,7 +43,7 @@ import {
   type Action,
   type PerEventTierMove,
 } from './cost.js';
-import { type SiemId } from './siem/pricing.js';
+import { type SiemId, defaultRateLabel } from './siem/pricing.js';
 import { isProtectedSeverity } from './severity-policy.js';
 
 /**
@@ -846,7 +846,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       `${opts.destination} at your rate: ${rate(opts.customerRatePerGb!)}/GB all-in (customer supplied)` +
       (structureParts.length > 0 ? `; lever ratios from list structure: ${structureParts.join(', ')}` : '');
   } else {
-    const basisParts = [`${opts.destination} list price: ${ingestLabel} ${rate(model.ingest_per_gb)}/GB`];
+    const basisParts = [`${opts.destination} ${defaultRateLabel(opts.destination)}: ${ingestLabel} ${rate(model.ingest_per_gb)}/GB`];
     if (model.storage_per_gb_month > 0) {
       basisParts.push(`storage ${rate(model.storage_per_gb_month)}/GB-mo`);
     }
