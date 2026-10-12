@@ -701,28 +701,39 @@ function renderLog10xSidecar(opts: {
   envLines.push(...engineEnvLines('      ', opts.engineEnv));
   // No licence: no mount and no volume. The container then has nothing to
   // wait on, and the engine logs that it runs the built-in evaluation licence.
-  const mountBlock = opts.builtinLicense
+  // /tmp is the one path the engine writes (the GitOps mirror GH_DEST and the
+  // pull cache); the root filesystem is read-only.
+  const mountBlock = `
+    volumeMounts:
+      - name: tenx-tmp
+        mountPath: /tmp` + (opts.builtinLicense
     ? ''
     : `
-    volumeMounts:
       - name: tenx-license
         mountPath: /etc/tenx/license
-        readOnly: true`;
-  const volumeBlock = opts.builtinLicense
-    ? ''
-    : `
+        readOnly: true`);
+  const volumeBlock = `
 
 extraVolumes:
+  - name: tenx-tmp
+    emptyDir: {}` + (opts.builtinLicense
+    ? ''
+    : `
   - name: tenx-license
     secret:
       secretName: ${opts.licenseSecretName}
       items:
         - key: ${opts.licenseSecretKey}
-          path: license.jwt`;
+          path: license.jwt`);
   return `extraContainers:
   - name: log10x
     image: ${EDGE_MANIFEST_IMAGE}
     imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
     args:
 ${argLines.join('\n')}
     env:
@@ -1091,23 +1102,27 @@ ${fileConfigsBlock}`;
       envLines.push(...engineEnvLines('                    ', engineEnv));
       // No licence: the patch adds the container only, with no licence
       // mount and no pod volume (see renderLog10xSidecar).
-      const patchMounts = builtinLicense
+      const patchMounts = `
+          volumeMounts:
+            - name: tenx-tmp
+              mountPath: /tmp` + (builtinLicense
         ? ''
         : `
-          volumeMounts:
             - name: tenx-license
               mountPath: /etc/tenx/license
-              readOnly: true`;
-      const patchVolumes = builtinLicense
+              readOnly: true`);
+      const patchVolumes = `
+      volumes:
+        - name: tenx-tmp
+          emptyDir: {}` + (builtinLicense
         ? ''
         : `
-      volumes:
         - name: tenx-license
           secret:
             secretName: ${licenseSecretName}
             items:
               - key: ${licenseSecretKey}
-                path: license.jwt`;
+                path: license.jwt`);
       return [
         {
           path: 'tenx-kustomize/kustomization.yaml',
@@ -1137,6 +1152,11 @@ spec:
         - name: log10x
           image: ${EDGE_MANIFEST_IMAGE}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
           args:
 ${argLines.join('\n')}
           env:
@@ -1461,14 +1481,16 @@ ${envLines.join('\n')}${licenseVolumes}
       envLines.push(...engineEnvLines('      ', engineEnv));
       const destOutput = renderLogstashDestinationOutput(destination, outputHost);
       // No licence: no mount and no secretMounts entry (see renderLog10xSidecar).
-      const licenseMount = builtinLicense
+      const licenseMount = `
+    volumeMounts:
+      - name: tenx-tmp
+        mountPath: /tmp` + (builtinLicense
         ? ''
         : `
-    volumeMounts:
       - name: tenx-license
         mountPath: /etc/tenx/license/license.jwt
         subPath: license.jwt
-        readOnly: true`;
+        readOnly: true`);
       const licenseSecretMounts = builtinLicense
         ? ''
         : `
@@ -1491,13 +1513,23 @@ extraContainers: |
   - name: log10x
     image: ${EDGE_MANIFEST_IMAGE}
     imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
     args:
 ${argLines.join('\n')}
     env:
 ${envLines.join('\n')}${licenseMount}
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-      limits:   { cpu: 500m, memory: 512Mi }${licenseSecretMounts}
+      limits:   { cpu: 500m, memory: 512Mi }
+
+# The chart takes extraVolumes as a string, like extraContainers.
+extraVolumes: |
+  - name: tenx-tmp
+    emptyDir: {}${licenseSecretMounts}
 
 # Two-pipeline driver: ingest runs your filters and hands off to the
 # sidecar; destinations consumes returning events filter-free, so
