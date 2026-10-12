@@ -1,0 +1,38 @@
+# Log10x MCP — decode pass for the round-trip check.
+#
+# Reads one file holding the template records followed by the compact
+# records of an encode pass (templates.json then the plain `encode()`
+# lines), expands every compact record and writes the original text, one
+# record per line, to LOG10X_MCP_OUTPUT_DIR/decoded.log. The caller
+# compares that file with the text it fed the encode pass. Override this
+# file via LOG10X_MCP_DECODE_CONFIG_PATH.
+
+tenx: run
+runtimeName: $=TenXEnv.get("LOG10X_MCP_RUNTIME_NAME", "mcp-decode")
+
+include:
+
+  # Shared bootstrap (symbols, template loading, transform, etc.)
+  - apps/shared
+
+  # Input module
+  - run/modules/input/file
+
+  # Output module
+  - run/modules/output/event/file
+
+# ========================== Input options ==========================
+
+inputFile:
+  - name: mcpDecodeInput
+    path: $=TenXEnv.get("LOG10X_MCP_INPUT_PATH")
+    printProgress: false
+
+# ========================= Output options =========================
+
+outputFile:
+
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/decoded.log"
+    filter: isEncoded
+    fields:
+      - text

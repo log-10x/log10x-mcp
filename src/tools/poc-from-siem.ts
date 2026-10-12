@@ -216,6 +216,21 @@ export const pocFromSiemSubmitSchema = {
     .describe(
       'Bytes of forwarder metadata per record. The Receiver counts each record as the forwarder sends it, metadata included, and events read back from a SIEM\'s API seldom carry that record, so the caps add this to every event. Default 760, the median of a Fluent Bit kubernetes record on an EKS capture.'
     ),
+  splunk_pricing: z
+    .enum(['ingest', 'workload'])
+    .optional()
+    .describe(
+      'Splunk only: `ingest` (bytes per day) prices compact; `workload` (vCPU) meters compute, where compaction ' +
+        'is not a saving and compact leaves the lever set. Set from what the user said; absent means ingest.'
+    ),
+  enterprise_security: z
+    .boolean()
+    .optional()
+    .describe(
+      'Splunk only: whether Enterprise Security or any CIM data model reads this estate. True or absent keeps ' +
+        'the add-on sourcetypes (Windows, Palo Alto, Zeek, CrowdStrike, Okta and the like) raw: their add-ons ' +
+        'extract from the raw event before anything can expand a compact one. Pass false only when the user states it.'
+    ),
   pin_services: z
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
@@ -327,6 +342,10 @@ interface Snapshot {
    * lifecycle as targetPercentReduction.
    */
   exceptionServices?: string[];
+  /** Splunk only, carried from submit: how the licence meters. */
+  splunkPricing?: 'ingest' | 'workload';
+  /** Splunk only, carried from submit: whether Enterprise Security reads the estate. */
+  enterpriseSecurity?: boolean;
   /**
    * Per-service action overrides (pin_services). Carried from submit
    * through to the v2 envelope builder.
@@ -402,6 +421,10 @@ export interface PocSubmitArgs {
   target_percent_reduction?: number;
   /** Services pinned to action=pass on the envelope outputs. */
   exception_services?: string[];
+  /** Splunk only: how the licence meters. `workload` takes compact out of the lever set. */
+  splunk_pricing?: 'ingest' | 'workload';
+  /** Splunk only: whether Enterprise Security reads the estate. True or absent keeps add-on sourcetypes raw. */
+  enterprise_security?: boolean;
   /** Service-level action overrides (map of service → action). */
   pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
   /** Per-pattern action overrides (map of pattern_hash → action). */
@@ -501,6 +524,8 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     startedAtMs: Date.now(),
     targetPercentReduction: args.target_percent_reduction,
     exceptionServices: args.exception_services,
+    splunkPricing: args.splunk_pricing,
+    enterpriseSecurity: args.enterprise_security,
     pinServices: args.pin_services,
     pinPatterns: args.pin_patterns,
     pull: {
@@ -679,6 +704,8 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         {
           targetPercentReduction: s.targetPercentReduction,
           exceptionServices: s.exceptionServices,
+          splunkPricing: s.splunkPricing,
+          enterpriseSecurity: s.enterpriseSecurity,
           pinServices: s.pinServices,
           pinPatterns: s.pinPatterns,
         },
@@ -1217,6 +1244,8 @@ export async function runPipeline(
         {
           targetPercentReduction: args.target_percent_reduction,
           exceptionServices: args.exception_services,
+          splunkPricing: args.splunk_pricing,
+          enterpriseSecurity: args.enterprise_security,
           pinServices: args.pin_services,
           pinPatterns: args.pin_patterns,
         },

@@ -23,7 +23,7 @@ test('describeCompactReadback states each destination in its own terms', () => {
   const splunk = describeCompactReadback('splunk');
   assert.match(splunk, /exactly up to 256 KB/);
   assert.match(splunk, /a longer one comes back cut/);
-  assert.match(splunk, /app's tx command/);
+  assert.match(splunk, /tenx-search macro or its tx command/);
 
   const es = describeCompactReadback('elasticsearch');
   assert.match(es, /match, match_phrase and multi_match/);

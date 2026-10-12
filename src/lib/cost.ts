@@ -614,7 +614,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.1,
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
-    compact_requires: 'the 10x Splunk app installed (it auto-expands compacted events at search time)',
+    compact_requires: 'the 10x Splunk app installed (its tenx-search macro, tx command and dashboard hook expand compact events at search time)',
     // Measured once, in Splunk's own licence meter (Splunk 10.4.3): 20,000
     // Kubernetes records of the OpenTelemetry demo capture through a Fluent Bit
     // Receiver, the compact message as the event and the Kubernetes metadata as
@@ -641,11 +641,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // splunk-app default/props.conf: TRUNCATE = 262144 on tenx_encoded (#33).
     // A longer compact event is cut by Splunk with no marker and rebuilds
     // shorter. The search page loads no app JavaScript, so a search-bar query
-    // reaches the full text only through the app's tx command;
+    // reaches the full text through the app's tenx-search macro or its tx command;
     // classic dashboards go through its hook, alerts through Compile Alert.
     compact_readback:
       'on Splunk each event expands exactly up to 256 KB with the current 10x app (a longer one comes back cut), ' +
-      "and a search-bar query needs the app's tx command to see the full text",
+      "and a search-bar query needs the app's tenx-search macro or its tx command to see the full text",
     small_event_floor_bytes: 100,
   },
   datadog: {
@@ -1128,10 +1128,16 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  */
 export function getAvailableActions(
   destination: SiemId,
-  opts?: { selfManaged?: boolean },
+  opts?: { selfManaged?: boolean; splunkPricing?: 'ingest' | 'workload' },
 ): Action[] {
-  const base = getAllowedActionsForDestination(destination);
+  const allowed = getAllowedActionsForDestination(destination);
   const d = String(destination);
+  // Splunk workload (vCPU) pricing meters compute, not bytes: compaction is
+  // not a saving there (see SPLUNK_WORKLOAD_COMPACT_NOTE in siem/splunk-keep-raw.ts).
+  const base =
+    opts?.splunkPricing === 'workload' && d.startsWith('splunk')
+      ? allowed.filter((a) => a !== 'compact')
+      : allowed;
   const pluginFamily = d.startsWith('elasticsearch') || d.startsWith('opensearch');
   if (
     opts?.selfManaged === true &&

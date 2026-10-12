@@ -224,6 +224,24 @@ export const estimateSavingsSchema = {
         + 'unknown deployment prices only the levers that hold either way. Irrelevant on destinations '
         + 'whose levers do not depend on it (Datadog, CloudWatch, Azure, Coralogix).'
     ),
+  splunk_pricing: z
+    .enum(['ingest', 'workload'])
+    .optional()
+    .describe(
+      'Splunk only: how the licence meters. `ingest` (bytes per day, the common case) prices compact; '
+        + '`workload` (vCPU) meters compute, where compaction saves storage and not the bill and searches '
+        + 'that expand events cost about three times the CPU, so compact leaves the lever set. Set from what '
+        + 'the user said; absent means ingest.'
+    ),
+  enterprise_security: z
+    .boolean()
+    .optional()
+    .describe(
+      'Splunk only: whether Enterprise Security or any CIM data model reads this estate. True or absent '
+        + 'keeps the add-on sourcetypes (Windows, Palo Alto, Zeek, CrowdStrike, Okta and the like) raw, '
+        + 'since the add-ons extract from the raw event before anything can expand a compact one. Pass '
+        + 'false only when the user states it.'
+    ),
   exception_services: z
     .array(z.string())
     .optional()
@@ -936,6 +954,8 @@ export interface RunForecastArgs {
   retriever_installed?: boolean;
   allow_lossy?: boolean;
   deployment?: 'self_managed' | 'managed';
+  splunk_pricing?: 'ingest' | 'workload';
+  enterprise_security?: boolean;
   exception_services?: string[];
   unprotect_patterns?: string[];
   check_dependencies?: boolean;
@@ -1355,6 +1375,8 @@ export async function runEstimateForecast(
       ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
       ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
       ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
+      ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
+      ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
     });
     // Blast radius, two tiers (persona reviews' top blocker): batch-match the
     // vendor's object inventory against EVERY planned type. Literal hits are
@@ -1383,6 +1405,8 @@ export async function runEstimateForecast(
           ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
           ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
           ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
+      ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
+      ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
         }, planDeps);
         ladderPlan = res.plan;
         planDeps = { ...planDeps, excluded: res.excluded, rule_dependencies: res.rule_dependencies };

@@ -25,6 +25,7 @@
  */
 
 import { z } from 'zod';
+import { splunkKeepRaw } from '../lib/siem/splunk-keep-raw.js';
 import type { EnvConfig } from '../lib/environments.js';
 import { resolveSiemSelection, formatAmbiguousError, formatNoneError } from '../lib/siem/resolve.js';
 import { getConnector } from '../lib/siem/index.js';
@@ -524,6 +525,10 @@ export async function executeMeasureCompaction(
 
   const lowConfidenceCount = patterns.filter((p) => p.confidence === 'low').length;
   const warnings: string[] = [];
+  // A Splunk source that stays raw by Splunk's own rules: the ratio is still
+  // measured and reported, and the reason it must not be acted on rides with it.
+  const keepRaw = sel.id === 'splunk' ? splunkKeepRaw(args.service) : undefined;
+  if (keepRaw) warnings.push(`Keep this source raw. ${keepRaw.text}`);
   if (lowConfidenceCount > 0) {
     warnings.push(
       `${lowConfidenceCount} pattern(s) have low confidence (< 10 events). Pull a larger sample_size to improve accuracy.`

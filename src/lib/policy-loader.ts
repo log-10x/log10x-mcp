@@ -40,7 +40,12 @@
 
 // ─── public types ─────────────────────────────────────────────────────────────
 
-export type SeverityAction = 'keep' | 'auto' | 'drop' | 'sample' | 'compact';
+/**
+ * Per-severity rules the tick applies. Compaction is not one of them: it is a
+ * per-source switch (the sidecar's `optimize` flag), set at install from a
+ * measured ratio, not a per-pattern row the tick writes.
+ */
+export type SeverityAction = 'keep' | 'auto' | 'drop' | 'sample';
 
 export interface SeverityRules {
   ERROR?: SeverityAction;
@@ -379,7 +384,7 @@ export function parsePolicyYaml(text: string): Policy {
   const rawSev = red?.['severity_rules'] as Record<string, unknown> | undefined;
   const severity_rules: SeverityRules = { ...POLICY_DEFAULTS.severity_rules };
   const VALID_SEVERITY_ACTIONS: ReadonlySet<string> = new Set([
-    'keep', 'auto', 'drop', 'sample', 'compact',
+    'keep', 'auto', 'drop', 'sample',
   ]);
   if (rawSev && typeof rawSev === 'object') {
     for (const [sev, action] of Object.entries(rawSev)) {

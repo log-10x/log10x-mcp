@@ -461,7 +461,7 @@ function renderVerbatim(args: {
   const tierLine = {
     dev: 'Dev CLI: local binary only. No pipeline infrastructure detected.',
     reporter: 'Reporter: cost attribution metrics flowing; in-path actions not yet wired.',
-    receiver: 'Receiver: in-path; compact / sample / drop are deployable as cap-CSV plans.',
+    receiver: 'Receiver: in-path; compaction per source (the sidecar\'s optimize flag), sample / drop per pattern as cap-CSV plans.',
     retriever: 'Retriever: full stack. Overflow bucket is wired between forwarder and SIEM; fetch-back available on demand.',
   }[args.tier];
 

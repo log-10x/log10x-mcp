@@ -47,6 +47,7 @@ import {
 } from './cost.js';
 import { type SiemId, defaultRateLabel } from './siem/pricing.js';
 import { isProtectedSeverity } from './severity-policy.js';
+import { isSplunkDestination, splunkKeepRaw, type SplunkPricing } from './siem/splunk-keep-raw.js';
 
 /**
  * The regulator's shipped configuration (config/pipelines/run/receive/rate/config.yaml):
@@ -172,6 +173,17 @@ export interface SolveOpts {
    */
   selfManaged?: boolean;
   /**
+   * Splunk only. `workload`: the licence meters vCPU, not bytes, and compact
+   * leaves the lever set. Absent means ingest pricing, Splunk's common case.
+   */
+  splunkPricing?: SplunkPricing;
+  /**
+   * Splunk only. Whether Enterprise Security (or any CIM data model) reads
+   * this estate. True or absent keeps the add-on sourcetypes raw; false,
+   * stated by the user, frees them. Never inferred.
+   */
+  enterpriseSecurity?: boolean;
+  /**
    * Specific pattern hashes the user EXPLICITLY unpinned from the severity
    * floor — a warn-level retry storm they chose to act on. Bypasses ONLY the
    * severity protection for the listed hashes; pinnedHashes and
@@ -287,6 +299,12 @@ export interface Plan {
   /** Total scoped bytes/mo behind the bill — the reconciliation multiplicand:
    *  bytesInMonthly times the rate should foot against the invoice line. */
   bytesInMonthly: number;
+  /**
+   * Splunk only: sources pinned at pass by the destination's own rules (an
+   * Enterprise Security add-on reads them, or Splunk meters them at the
+   * Cisco rate), with the sentence that says why. Render each one.
+   */
+  keptRaw?: { service: string; reason: 'cisco_rate' | 'enterprise_security_add_on'; text: string }[];
   /** usd_budget / percent targets: the bill after the plan, in $/mo. Absent
    *  on a percent plan over a per-event tier (Datadog Flex): a before and
    *  after pair there IS a bill percentage, and none can be stated. On a
@@ -337,7 +355,7 @@ export interface Plan {
 export function keepEverythingLever(
   destination: SiemId,
   retrieverInstalled: boolean,
-  opts?: { selfManaged?: boolean },
+  opts?: { selfManaged?: boolean; splunkPricing?: SplunkPricing },
 ): Action | null {
   const allowed = new Set(getAvailableActions(destination, opts));
   // in-SIEM rungs, in ladder order, gated by whether compact is real here
@@ -460,7 +478,24 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     opts.scope && opts.scope !== 'all' ? new Set(opts.scope) : null;
   const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled, {
     selfManaged: opts.selfManaged,
+    splunkPricing: opts.splunkPricing,
   });
+  // Splunk sources that stay raw whatever the target: the add-on sourcetypes
+  // Enterprise Security reads, and the Cisco sourcetypes metered at their own
+  // rate. Pinned like the exception services, with the reason kept for the render.
+  const keptRaw: NonNullable<Plan['keptRaw']> = [];
+  const keptRawServices = new Set<string>();
+  if (isSplunkDestination(opts.destination)) {
+    for (const p of rawPatterns) {
+      const { dominant } = serviceMix(p.services);
+      if (keptRawServices.has(dominant.toLowerCase())) continue;
+      const verdict = splunkKeepRaw(dominant, { enterpriseSecurity: opts.enterpriseSecurity });
+      if (verdict) {
+        keptRawServices.add(dominant.toLowerCase());
+        keptRaw.push({ service: dominant, reason: verdict.reason, text: verdict.text });
+      }
+    }
+  }
 
   // Scope: keep patterns touching a scoped service; weight by scoped bytes.
   const exceptions = new Set(
@@ -472,9 +507,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     // Explicit pins win over everything, including an unpin of the same hash.
     if (pinnedHashes.has(p.hash)) return true;
     if (isProtectedSeverity(p.severity) && !unprotect.has(p.hash)) return true;
-    if (exceptions.size === 0) return false;
+    if (exceptions.size === 0 && keptRawServices.size === 0) return false;
     const { dominant } = serviceMix(p.services);
-    return exceptions.has(dominant.toLowerCase());
+    return exceptions.has(dominant.toLowerCase()) || keptRawServices.has(dominant.toLowerCase());
   };
 
   const rows = patterns
@@ -995,6 +1030,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     prerequisites,
     ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
     bytesInMonthly: bytesIn,
+    ...(keptRaw.length > 0 ? { keptRaw } : {}),
     containerCaps,
     ...(denom === 'index_volume' ? {} : { landsAtUsd }),
     ...(landsAtBytesMonthly !== undefined ? { landsAtBytesMonthly } : {}),

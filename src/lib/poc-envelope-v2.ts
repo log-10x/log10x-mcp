@@ -22,7 +22,8 @@ import type { SiemId } from './siem/pricing.js';
 import { receiverBytesStatement } from './receiver-bytes.js';
 import { placeServiceCap } from './service-cap.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
+import { isSplunkDestination, splunkKeepRaw, type SplunkPricing } from './siem/splunk-keep-raw.js';
+import { getAvailableActions, getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
 import { csvReason, serviceLimitSentence, serviceLimitsFromPatterns } from './report/user-units.js';
@@ -433,6 +434,13 @@ export function buildPocEnvelopeV2(
      * bytes are subtracted from the achievable pool.
      */
     exceptionServices?: string[];
+    /** Splunk only: `workload` takes compact out of the lever set. */
+    splunkPricing?: SplunkPricing;
+    /**
+     * Splunk only: whether Enterprise Security reads the estate. True or
+     * absent pins the add-on sourcetypes at pass; false frees them.
+     */
+    enterpriseSecurity?: boolean;
     /**
      * Service-level action overrides. Applied AFTER destination default
      * and AFTER exception_services. Map of service name → action.
@@ -542,15 +550,30 @@ export function buildPocEnvelopeV2(
   const exceptionSet = new Set<string>(
     (opts?.exceptionServices ?? []).map((s) => s.toLowerCase()),
   );
+  // Splunk sources that stay raw by the destination's own rules: the add-on
+  // sourcetypes Enterprise Security reads, and the Cisco sourcetypes metered
+  // at their own rate. Pinned like the exception services, with their reason.
+  const keptRaw = new Map<string, { reason: string; text: string }>();
+  if (isSplunkDestination(siem)) {
+    for (const p of patternOutputs) {
+      const svc = (p.service ?? '').toLowerCase();
+      if (!svc || keptRaw.has(svc) || exceptionSet.has(svc)) continue;
+      const verdict = splunkKeepRaw(p.service, { enterpriseSecurity: opts?.enterpriseSecurity });
+      if (verdict) keptRaw.set(svc, verdict);
+    }
+    for (const svc of keptRaw.keys()) exceptionSet.add(svc);
+  }
+  const exceptionServicesAll = [...(opts?.exceptionServices ?? []), ...keptRaw.keys()];
   if (exceptionSet.size > 0) {
     for (const p of patternOutputs) {
       const svc = (p.service ?? '').toLowerCase();
       if (!svc || !exceptionSet.has(svc)) continue;
       const passDesc = describeDestination(siem, 'pass');
       const passMonthly = p.metrics.bytes_in_window * (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
+      const kept = keptRaw.get(svc);
       p.actions = {
         recommended_action: 'pass',
-        reason: 'service_pinned_by_exception_list',
+        reason: kept ? `sourcetype_kept_raw:${kept.reason}` : 'service_pinned_by_exception_list',
         expected_savings_usd_per_month: 0,
         sample_n: null,
         // pass keeps the full per-window throughput unchanged — the cap
@@ -659,9 +682,10 @@ export function buildPocEnvelopeV2(
       monthlyCostUsd,
       windowDurationSeconds,
       exceptionSet,
-      opts.exceptionServices ?? [],
+      exceptionServicesAll,
       pinServicesLower,
       pinPatterns,
+      opts.splunkPricing,
     );
     commitmentArtifact = buildCommitmentArtifact(
       feasibility,
@@ -795,12 +819,13 @@ function computeFeasibility(
   exceptionServices: string[],
   pinServicesLower: Map<string, CostAction>,
   pinPatterns: Record<string, CostAction>,
+  splunkPricing?: SplunkPricing,
 ): FeasibilityVerdict {
   // Convert per-pattern window cost → monthly cost using the same
   // factor the rest of the envelope uses.
   const monthlyFactor = (24 * 30) / Math.max(0.001, windowDurationSeconds / 3600);
 
-  const allowed = getAllowedActionsForDestination(siem);
+  const allowed = getAvailableActions(siem, { splunkPricing });
   const level1 = allowed[0] ?? 'offload';
   const level2 = allowed[1] ?? level1;
   const perEvent = perEventTierPricing(siem) != null;

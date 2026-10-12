@@ -200,18 +200,18 @@ test('decision: INFO moderate volume → sample', async () => {
   assert.equal(d.action, 'sample', `expected sample for 100 MB INFO; got ${d.action}`);
 });
 
-test('decision: explicit severity_rules compact → compact', async () => {
-  // In auto mode the threshold gate (50 MB) sits at the sample cutoff, so the
-  // bytes-magnitude tiers only ever yield drop/sample/pass. The 'compact'
-  // action is reached via an explicit per-severity rule, which is what this
-  // test exercises against the current source.
+test('decision: a compact severity rule is not a tick action', async () => {
+  // Compaction is a per-source switch (the sidecar's optimize flag), not a
+  // per-pattern row. A policy that still carries `compact` as a severity rule
+  // is read as `auto`: the tick plans drop and sample only, and the
+  // projection carries no compaction assumption.
   const policy = makePolicy({
     target_percent: 95,
     severity_rules: {
       ERROR: 'keep',
       CRITICAL: 'keep',
       WARN: 'auto',
-      INFO: 'compact',
+      INFO: 'compact' as unknown as 'auto',
       DEBUG: 'auto',
       TRACE: 'auto',
     },
@@ -227,13 +227,10 @@ test('decision: explicit severity_rules compact → compact', async () => {
 
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-compact');
   assert.ok(d);
-  assert.equal(d.action, 'compact', `expected compact for INFO:compact rule; got ${d.action}`);
-  // The tick has no destination and so no measurement: the 75% it applies to
-  // compacted bytes is stated as an assumption wherever the percentage renders.
-  assert.equal(result.projected_savings_basis, 'assumes 75% compaction, unmeasured for this estate');
-  if (result.status === 'dry_run') {
-    assert.match(result.message, /projected savings [\d.]+% \(assumes 75% compaction, unmeasured for this estate\)/);
-  }
+  assert.notEqual(d.action, 'compact', 'compact is never a tick decision');
+  assert.equal(d.action, 'sample', `60 MB INFO under auto samples; got ${d.action}`);
+  assert.equal(result.projected_savings_basis, undefined);
+  assert.ok(result.applied_changes.every((c) => c.action !== 'compact'));
 });
 
 test('decision: INFO below threshold → pass', async () => {

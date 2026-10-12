@@ -20,6 +20,7 @@
 
 import { z } from 'zod';
 import { queryInstant } from '../lib/api.js';
+import { isSplunkDestination, SPLUNK_WORKLOAD_COMPACT_NOTE } from '../lib/siem/splunk-keep-raw.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
@@ -64,6 +65,13 @@ export const costOptionsSchema = {
     .optional()
     .describe(
       'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings: overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
+    ),
+  splunk_pricing: z
+    .enum(['ingest', 'workload'])
+    .optional()
+    .describe(
+      'Splunk only: `ingest` (bytes per day) prices compact; `workload` (vCPU) meters compute, where compaction ' +
+        'is not a saving, so the compact mode is gated with that reason. Set from what the user said; absent means ingest.'
     ),
   siem_lens: z
     .enum(SIEM_LENS_ENUM)
@@ -264,7 +272,7 @@ function buildCapabilities(args: {
 function buildModes(
   caps: CapabilitySummary & { _tier?: CustomerTier },
   siemDetected: string | null,
-  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string; monthly_volume_gb?: number; siem_lens?: string }
+  args: { target_percent?: number; service?: string; pattern_hash?: string; destination?: string; monthly_volume_gb?: number; siem_lens?: string; splunk_pricing?: 'ingest' | 'workload' }
 ): CostOptionItem[] {
   const { target_percent, service, pattern_hash, monthly_volume_gb, siem_lens } = args;
   const tier: CustomerTier = caps._tier ?? 'dev';
@@ -354,13 +362,17 @@ function buildModes(
   // by the detected cloudwatch — e.g. compact comes back "no-op on cloudwatch"
   // while routes_to correctly carries splunk. The applicability verdict and the routing
   // target must describe the SAME destination.
+  const splunkWorkload =
+    args.splunk_pricing === 'workload' && isSplunkDestination(effectiveDestination);
   const compactApplicable =
-    caps.compact_installable && siemSupportsCompact(effectiveDestination);
+    caps.compact_installable && siemSupportsCompact(effectiveDestination) && !splunkWorkload;
   const compactGatedReason = !caps.compact_installable
     ? 'Requires Receiver tier (in-path forwarder sidecar). Install via log10x_advise_install.'
-    : !siemSupportsCompact(effectiveDestination)
-      ? `compact is a no-op on ${effectiveDestination}${compactNoOpReason(effectiveDestination) ? `: ${compactNoOpReason(effectiveDestination)}` : ': it does not reduce what that destination bills on'}. Use ${leadLeverFor(effectiveDestination)} instead.`
-      : undefined;
+    : splunkWorkload
+      ? SPLUNK_WORKLOAD_COMPACT_NOTE
+      : !siemSupportsCompact(effectiveDestination)
+        ? `compact is a no-op on ${effectiveDestination}${compactNoOpReason(effectiveDestination) ? `: ${compactNoOpReason(effectiveDestination)}` : ': it does not reduce what that destination bills on'}. Use ${leadLeverFor(effectiveDestination)} instead.`
+        : undefined;
 
   const tierDownApplicable =
     caps.tier_down_available &&
@@ -530,6 +542,7 @@ export async function executeCostOptions(args: {
   pattern_hash?: string;
   destination?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo' | 'coralogix' | 'elastic-serverless';
   siem_lens?: 'splunk' | 'datadog' | 'elasticsearch' | 'clickhouse' | 'cloudwatch' | 'azure-monitor' | 'gcp-logging' | 'sumo' | 'coralogix' | 'elastic-serverless';
+  splunk_pricing?: 'ingest' | 'workload';
   monthly_volume_gb?: number;
 }): Promise<StructuredOutput> {
   const telemetry = newChassisTelemetry();

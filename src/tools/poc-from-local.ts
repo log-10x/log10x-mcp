@@ -47,6 +47,7 @@ import {
 import { receiverBytesStatement } from '../lib/receiver-bytes.js';
 import { renderNativeControlSection, controlPatterns } from '../lib/datadog-native-control.js';
 import { extractPatterns, pipelineSplitAttribute } from '../lib/pattern-extraction.js';
+import type { RoundTripResult } from '../lib/dev-cli.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -256,6 +257,20 @@ export const pocFromLocalSchema = {
         'Their bytes are subtracted from the achievable reduction pool used for the feasibility verdict. ' +
         'Matched case-insensitively against the pod / source name.'
     ),
+  splunk_pricing: z
+    .enum(['ingest', 'workload'])
+    .optional()
+    .describe(
+      'Splunk only: `ingest` (bytes per day) prices compact; `workload` (vCPU) meters compute, where compaction ' +
+        'is not a saving and compact leaves the lever set. Set from what the user said; absent means ingest.'
+    ),
+  enterprise_security: z
+    .boolean()
+    .optional()
+    .describe(
+      'Splunk only: whether Enterprise Security or any CIM data model reads this estate. True or absent keeps ' +
+        'the add-on sourcetypes raw. Pass false only when the user states it.'
+    ),
   pin_services: z
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
@@ -298,6 +313,8 @@ export interface PocFromLocalArgs {
   budget_usd_monthly?: number;
   budget_gb_monthly?: number;
   exception_services?: string[];
+  splunk_pricing?: 'ingest' | 'workload';
+  enterprise_security?: boolean;
   pin_services?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
   pin_patterns?: Record<string, 'pass'|'sample'|'compact'|'tier_down'|'offload'|'drop'>;
 }
@@ -471,10 +488,11 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
   const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const withRoundTrip = inner.round_trip ? `${base} ${describeRoundTrip(inner.round_trip)}` : base;
   if (inner.report_path) {
-    return `${base} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
+    return `${withRoundTrip} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
   }
-  return base;
+  return withRoundTrip;
 }
 
 interface PocFromLocalInner {
@@ -568,6 +586,11 @@ interface PocFromLocalInner {
    *  dollar-denominated, with the keep-everything ceiling and the honest gap. */
   plan?: Plan;
   commitment_artifact?: LocalCommitmentArtifact;
+  /**
+   * The decode pass over this sample: every compact record expanded by the
+   * engine and compared with the text it was given.
+   */
+  round_trip?: RoundTripResult;
 }
 
 async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFromLocalInner> {
@@ -686,6 +709,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     // A file read before Datadog's intake has no parsed attributes; the Kafka
     // pipeline's logger.name is read from the event's text instead.
     ...(args.siem === 'datadog' ? { pipelineSplitAttribute } : {}),
+    // The savings figure is only worth quoting beside the proof that the
+    // compact form gives the text back.
+    verifyRoundTrip: true,
   });
 
   // Hours the sampled bytes stand for: a file's span shrinks by the share of
@@ -715,6 +741,13 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       : `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} pod${sample.composition.length === 1 ? '' : 's'} in namespace \`${opts.namespace}\` over the last ${opts.window}._`
   );
   lines.push('');
+
+  if (extraction.roundTrip) {
+    lines.push('## Round trip');
+    lines.push('');
+    lines.push(describeRoundTrip(extraction.roundTrip));
+    lines.push('');
+  }
 
   // Section: sample composition (Opus-recommended trust pre-emption).
   lines.push('## Sample composition');
@@ -901,6 +934,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
           ...exceptions,
           ...[...pinServicesLower.entries()].filter(([, a]) => a === 'pass').map(([k]) => k),
         ],
+        ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
+        ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
       },
     );
     const maxAchievable = plan.keepEverythingCeilingPct;
@@ -1249,7 +1284,27 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     feasibility,
     ...(plan ? { plan } : {}),
     commitment_artifact,
+    ...(extraction.roundTrip ? { round_trip: extraction.roundTrip } : {}),
   };
+}
+
+/**
+ * One sentence on the decode pass, for the report and the summary. States
+ * the count it checked; a pass that did not run says so rather than
+ * implying a proof.
+ */
+export function describeRoundTrip(rt: RoundTripResult): string {
+  if (rt.status === 'identical') {
+    return `Round trip: the ${rt.records.toLocaleString()} compact records of this sample were decoded by the engine and compared with the ${rt.inputLines.toLocaleString()} lines it was given, byte for byte: identical.`;
+  }
+  if (rt.status === 'differs') {
+    const first = rt.firstDifference
+      ? ` First difference at line ${rt.firstDifference.line}: input \`${rt.firstDifference.input.slice(0, 120)}\`, decoded \`${rt.firstDifference.decoded.slice(0, 120)}\`.`
+      : '';
+    const note = rt.note ? ` ${rt.note[0].toUpperCase()}${rt.note.slice(1)}.` : '';
+    return `Round trip: ${rt.differingLines.toLocaleString()} of ${rt.inputLines.toLocaleString()} lines differ after the engine decoded the ${rt.records.toLocaleString()} compact records of this sample (${rt.decodedLines.toLocaleString()} lines came back).${first}${note} Do not quote this sample's saving as lossless until that is understood.`;
+  }
+  return `Round trip: not run${rt.note ? ` (${rt.note})` : ''}. The saving above is a byte count, not a proof that the text comes back; run the POC again with the engine reachable to get one.`;
 }
 
 function parseWindowHours(window: string): number {
