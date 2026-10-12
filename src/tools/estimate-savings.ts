@@ -240,7 +240,9 @@ export const estimateSavingsSchema = {
       'Splunk only: whether Enterprise Security or any CIM data model reads this estate. True or absent '
         + 'keeps the add-on sourcetypes (Windows, Palo Alto, Zeek, CrowdStrike, Okta and the like) raw, '
         + 'since the add-ons extract from the raw event before anything can expand a compact one. Pass '
-        + 'false only when the user states it.'
+        + 'false only when the user states it. The rule matches on the pattern\'s service name, which is '
+        + 'the Splunk sourcetype on a Splunk pull (poc_from_siem, measure_compaction); on metrics-backed '
+        + 'or local samples the services are containers or files, and no sourcetype rule fires.'
     ),
   exception_services: z
     .array(z.string())

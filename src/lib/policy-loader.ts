@@ -391,6 +391,16 @@ export function parsePolicyYaml(text: string): Policy {
       if (typeof action === 'string' && VALID_SEVERITY_ACTIONS.has(action)) {
         (severity_rules as Record<string, SeverityAction>)[sev.toUpperCase()] =
           action as SeverityAction;
+      } else if (action === 'compact') {
+        // A rule written for the per-pattern compact row the tick no longer
+        // writes. The intent was lossless, so the severity is kept, never
+        // sampled or dropped under `auto`; compaction is the sidecar's
+        // optimize flag.
+        (severity_rules as Record<string, SeverityAction>)[sev.toUpperCase()] = 'keep';
+        process.stderr.write(
+          `[tenx-recur] severity_rules.${sev}: "compact" is not a tick action; the severity is kept. ` +
+            'Compaction is the sidecar\'s optimize flag, set at install.\n'
+        );
       }
     }
   }

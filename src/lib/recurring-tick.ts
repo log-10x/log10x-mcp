@@ -317,6 +317,11 @@ function decideAction(
       reason: `severity ${severity} rule → ${sevRule}`,
     };
   }
+  if (sevRule !== 'auto') {
+    // A rule the tick does not know (a stale `compact`) never makes the
+    // severity lossy: it is kept, as a `keep` rule would be.
+    return { action: 'pass', reason: `severity ${severity} rule "${String(sevRule)}" is not a tick action; kept` };
+  }
 
   // auto mode: threshold-based
   const threshold = DEFAULT_THRESHOLD_BYTES;

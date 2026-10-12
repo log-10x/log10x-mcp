@@ -1323,9 +1323,9 @@ export interface RoundTripResult {
 /**
  * The plain `~hash,val,...` form of an encoded line. The engine's MCP apps
  * append `,pattern=,<message_pattern>,patternHash=,<tenx_hash>` for the
- * parser; the decode pass reads the record without them. Commas inside
- * values are escaped `\,`, so an unescaped `,pattern=,` can only be the
- * anchor.
+ * parser; the decode pass reads the record without them. The anchor is the
+ * first `,pattern=,` not preceded by a backslash, the same rule the parser
+ * applies.
  */
 export function stripEncodedAnchors(encodedLog: string): string {
   return encodedLog

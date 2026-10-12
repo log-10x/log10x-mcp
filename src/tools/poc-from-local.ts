@@ -269,7 +269,9 @@ export const pocFromLocalSchema = {
     .optional()
     .describe(
       'Splunk only: whether Enterprise Security or any CIM data model reads this estate. True or absent keeps ' +
-        'the add-on sourcetypes raw. Pass false only when the user states it.'
+        'the add-on sourcetypes raw. Pass false only when the user states it. On a kubectl or file sample the ' +
+        'services are containers or files, not sourcetypes, so the rule fires only where a service is named ' +
+        'after its Splunk sourcetype.'
     ),
   pin_services: z
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))

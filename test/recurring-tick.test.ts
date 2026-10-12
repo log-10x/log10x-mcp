@@ -228,9 +228,26 @@ test('decision: a compact severity rule is not a tick action', async () => {
   const d = result.applied_changes.find((d) => d.pattern_hash === 'hash-info-compact');
   assert.ok(d);
   assert.notEqual(d.action, 'compact', 'compact is never a tick decision');
-  assert.equal(d.action, 'sample', `60 MB INFO under auto samples; got ${d.action}`);
+  // A lossless instruction never turns lossy: the stale rule keeps the severity.
+  assert.equal(d.action, 'pass', `a stale compact rule keeps the severity; got ${d.action}`);
+  assert.match(d.reason, /not a tick action; kept/);
   assert.equal(result.projected_savings_basis, undefined);
   assert.ok(result.applied_changes.every((c) => c.action !== 'compact'));
+});
+
+test('policy loader: a compact severity rule is read as keep', () => {
+  const p = parsePolicyYaml([
+    'version: "1.0"',
+    'reduction:',
+    '  target_percent: 40',
+    '  severity_rules:',
+    '    INFO: compact',
+    '    DEBUG: sample',
+    'config_plane:',
+    '  repo: https://github.com/acme/log10x-config',
+  ].join('\n'));
+  assert.equal(p.severity_rules.INFO, 'keep');
+  assert.equal(p.severity_rules.DEBUG, 'sample');
 });
 
 test('decision: INFO below threshold → pass', async () => {
