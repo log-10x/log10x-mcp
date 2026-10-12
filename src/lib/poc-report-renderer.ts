@@ -8,7 +8,7 @@
 
 import type { ExtractedPattern, ExtractedPatterns } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
-import { SIEM_DISPLAY_NAMES } from './siem/pricing.js';
+import { SIEM_DISPLAY_NAMES, defaultRateLabel, describeDefaultRate } from './siem/pricing.js';
 import {
   getDefaultActionForDestination,
   getAllowedActionsForDestination,
@@ -189,7 +189,8 @@ function discloseCost(input: RenderInput, amount: number): DisclosedDollarValue 
  * — but the full ~150-char tail repeated in every cell made the tables
  * unreadable. This keeps the invariant with a terse `(list price)` marker and
  * defers the full caveat to `disclosureFootnote()`, rendered ONCE per view.
- *   - list_price        → `$8.6K (list price)`
+ *   - list_price        → `$8.6K (list price)`, or `(default rate)` where the
+ *                         destination's per-GB figure is not a vendor list price
  *   - customer_supplied → `$8.6K` (no caveat — invariant: real rate, no tail)
  *   - unset             → `—`
  */
@@ -197,7 +198,7 @@ function fmtCostDisclosed(input: RenderInput, amount: number): string {
   const d = discloseCost(input, amount);
   if (d == null || d.source === 'unset') return '-';
   const head = fmtDollar(d.value);
-  return d.source === 'customer_supplied' ? head : `${head} (list price)`;
+  return d.source === 'customer_supplied' ? head : `${head} (${defaultRateLabel(input.siem)})`;
 }
 
 /**
@@ -210,9 +211,8 @@ function disclosureFootnote(input: RenderInput): string | null {
   const source: DollarSource = input.rateSource ?? 'list_price';
   const modeled = modeledDollarFootnote(input);
   if (source !== 'list_price') return modeled;
-  const siemLabel = input.siemLabel ?? SIEM_DISPLAY_NAMES[input.siem] ?? 'the SIEM';
   const listNote =
-    `_Figures marked "(list price)" use ${siemLabel} list price $${input.analyzerCostPerGb}/GB; ` +
+    `_Figures marked "(${defaultRateLabel(input.siem)})" use ${describeDefaultRate(input.siem, input.analyzerCostPerGb)}; ` +
     'your actual bill may differ with discounts, commits, or contract tier. Set `analyzerCost` ' +
     'in your env config or pass `effective_ingest_per_gb` for your real rate._';
   return modeled ? `${listNote}\n\n${modeled}` : listNote;

@@ -91,7 +91,7 @@ export const explainModeSchema = {
     .describe(
       'Customer-supplied $/GB rate used for the dollar overlay. When set, ' +
       "source_disclosure.rate_source='customer_supplied'. When absent, the shared rate resolver falls back to " +
-      'envs.json analyzerCost → LOG10X_ANALYZER_COST → destination list price → unset (no dollar overlay).'
+      'envs.json analyzerCost → LOG10X_ANALYZER_COST → the destination default rate (a list price where the vendor sells logs per GB) → unset (no dollar overlay).'
     ),
 };
 

@@ -34,6 +34,7 @@ import { loadEnvironments, type Environments, type EnvConfig } from '../lib/envi
 import { toolUnavailableReason, peekBootMode } from '../lib/tool-availability.js';
 import { shouldRegisterTool } from '../lib/mode-detect.js';
 import { LABELS, ACTED_STATES_RE } from '../lib/promql.js';
+import { describeDefaultRate } from '../lib/siem/pricing.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 
 export type Tier = 'dev' | 'reporter' | 'receiver' | 'retriever';
@@ -487,7 +488,7 @@ function renderVerbatim(args: {
   // destination is the parenthetical. Two separate lines (detected: X, then
   // lens: Y) read as the product ignoring the user's selection.
   const siemLine = args.lens?.lensed && args.lens.display
-    ? `Stack: ${args.lens.display} (selected) · pipeline destination: \`${args.siemDetected ?? 'unknown'}\`. Volumes are real; pricing follows ${args.lens.display} list rates.`
+    ? `Stack: ${args.lens.display} (selected) · pipeline destination: \`${args.siemDetected ?? 'unknown'}\`. Volumes are real; pricing follows ${describeDefaultRate(args.lens.effective)}.`
     : args.siemDetected
       ? `SIEM credentials detected: \`${args.siemDetected}\`.`
       : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';

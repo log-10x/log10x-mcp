@@ -93,6 +93,7 @@ import {
 import { PRIMITIVE_ERROR_TYPES, type PrimitiveErrorType } from './primitive-errors.js';
 import { filterActionsByActiveMode } from './actions-filter.js';
 import type { Mode } from './mode-detect.js';
+import { defaultRateLabel, describeDefaultRate } from './siem/pricing.js';
 
 // ── Version / epoch ────────────────────────────────────────────────────────────
 
@@ -757,9 +758,13 @@ export function buildChassisEnvelope(input: ChassisEnvelopeInput): ChassisEnvelo
   // automatically, for every tool that sets rate_source='list_price'. A tool's
   // own explicit headline_callout still wins (it can say something more
   // specific).
+  const vendor = input.source_disclosure.siem_vendor;
   const listPriceCallout =
     input.source_disclosure.rate_source === 'list_price'
-      ? 'Dollar figures use the SIEM vendor list rate, not your contracted rate. Pass `effective_ingest_per_gb` (or set `analyzerCost` in your env) to ground them in your real price. Volume (GB / %) is exact regardless.'
+      ? (vendor && defaultRateLabel(vendor) === 'default rate'
+          ? `Dollar figures use ${describeDefaultRate(vendor)}, not your contracted rate.`
+          : 'Dollar figures use the SIEM vendor list rate, not your contracted rate.') +
+        ' Pass `effective_ingest_per_gb` (or set `analyzerCost` in your env) to ground them in your real price. Volume (GB / %) is exact regardless.'
       : undefined;
 
   const summary: Summary = {

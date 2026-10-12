@@ -24,14 +24,14 @@ test('groundedDollar: shows the dollar only for a real rate (customer_supplied /
 
 // ─── chassis list-price callout ──────────────────────────────────────
 
-function envelope(rate_source: 'customer_supplied' | 'list_price' | 'none') {
+function envelope(rate_source: 'customer_supplied' | 'list_price' | 'none', siem_vendor = 'cloudwatch') {
   return buildChassisEnvelope({
     tool: 'log10x_top_patterns',
     view: 'summary',
     headline: '168 GB/mo, 30% above floor.',
     status: 'success',
     decisions: { threshold_used: null, threshold_basis: 'default' },
-    source_disclosure: { bytes_source: 'tsdb', rate_source, siem_vendor: 'splunk' },
+    source_disclosure: { bytes_source: 'tsdb', rate_source, siem_vendor },
     scope: { window: '1h', window_basis: 'explicit' },
     payload: {},
     human_summary: 'volume-led summary',
@@ -44,6 +44,15 @@ test('chassis: a list_price rate_source attaches a list-rate calibration callout
   const json = JSON.stringify(envelope('list_price'));
   assert.ok(/list rate/i.test(json), 'expected a list-rate callout in the envelope');
   assert.ok(/effective_ingest_per_gb/.test(json), 'expected the set-your-rate hint');
+});
+
+test('chassis: on a destination whose per-GB figure is a default, the callout says default rate', () => {
+  for (const vendor of ['splunk', 'datadog']) {
+    const json = JSON.stringify(envelope('list_price', vendor));
+    assert.match(json, /default rate/, vendor);
+    assert.ok(!/vendor list rate/.test(json), `${vendor}: called a list rate`);
+    assert.match(json, /effective_ingest_per_gb/);
+  }
 });
 
 test('chassis: a customer_supplied rate_source attaches NO list-rate callout', () => {

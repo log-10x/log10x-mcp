@@ -20,7 +20,7 @@
  */
 
 import type { SiemId } from './pricing.js';
-import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES } from './pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, describeDefaultRate } from './pricing.js';
 import { parseAnalyzerEnv } from '../environments.js';
 
 /** The destinations a lens may target = the destinations we can price. */
@@ -105,7 +105,7 @@ export function resolveSiemLens(
       basis: 'requested',
       display: SIEM_DISPLAY_NAMES[req],
       disclosure:
-        `Lens: priced and gated for ${SIEM_DISPLAY_NAMES[req]} at list rates; ` +
+        `Lens: priced and gated for ${SIEM_DISPLAY_NAMES[req]} at ${describeDefaultRate(req)}; ` +
         `the connected pipeline's destination is ${actual ? SIEM_DISPLAY_NAMES[actual] : 'unknown'}. ` +
         `Volumes are real measurements; only the rate card and action applicability follow the lens.`,
     };

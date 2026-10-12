@@ -86,6 +86,78 @@ export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
   coralogix: 'Coralogix',
 };
 
+/**
+ * What each per-GB default is. `list`: the vendor sells logs per GB and this is
+ * its price. `default`: a stand-in, because the vendor bills in other units
+ * (Datadog indexes per million events) or publishes no per-GB price. A default
+ * is never labelled a list price where it is printed.
+ */
+export type DefaultRateBasis = 'list' | 'default';
+
+export const DEFAULT_RATE_BASIS: Record<SiemId, DefaultRateBasis> = {
+  cloudwatch: 'list',
+  'gcp-logging': 'list',
+  'azure-monitor': 'list',
+  coralogix: 'list',
+  'elastic-serverless': 'list',
+  datadog: 'default',
+  splunk: 'default',
+  elasticsearch: 'default',
+  sumo: 'default',
+  clickhouse: 'default',
+};
+
+/** The vendor's own units, where the per-GB default stands in for them. */
+const DEFAULT_RATE_NOTES: Partial<Record<SiemId, string>> = {
+  datadog:
+    'a blend of Datadog\'s two meters, which datadoghq.com/pricing/list gives as $0.10 per GB ingested and $2.50 per million events indexed at 30-day retention, billed annually',
+  elasticsearch: 'an estimate of self-managed infrastructure per GB',
+  clickhouse: 'a storage stand-in; the ClickHouse bill is compute',
+};
+
+/** A SiemId from an id or a display name; undefined when neither matches. */
+export function siemIdOf(x: string | null | undefined): SiemId | undefined {
+  if (!x) return undefined;
+  const k = x.trim();
+  if (k in DEFAULT_ANALYZER_COST_PER_GB) return k as SiemId;
+  const lower = k.toLowerCase();
+  if (lower in DEFAULT_ANALYZER_COST_PER_GB) return lower as SiemId;
+  const byName = (Object.entries(SIEM_DISPLAY_NAMES) as [SiemId, string][]).find(
+    ([, name]) => name.toLowerCase() === lower,
+  );
+  return byName?.[0];
+}
+
+/** "list price" or "default rate": the label for this destination's per-GB default. */
+export function defaultRateLabel(x: string | null | undefined): 'list price' | 'default rate' {
+  const id = siemIdOf(x);
+  return id && DEFAULT_RATE_BASIS[id] === 'list' ? 'list price' : 'default rate';
+}
+
+/** The vendor's own units behind a default rate, when known. */
+export function defaultRateNote(x: string | null | undefined): string | undefined {
+  const id = siemIdOf(x);
+  return id ? DEFAULT_RATE_NOTES[id] : undefined;
+}
+
+/**
+ * The per-GB default in words, with its basis: "Amazon CloudWatch Logs list
+ * price $0.50/GB", or "the Datadog default rate $2.50/GB, a per-GB default,
+ * not a Datadog list price (a blend of Datadog's two meters: ...)".
+ */
+export function describeDefaultRate(x: string | null | undefined, ratePerGb?: number | null): string {
+  const id = siemIdOf(x);
+  const rate = ratePerGb ?? (id ? DEFAULT_ANALYZER_COST_PER_GB[id] : undefined);
+  const shown =
+    rate != null && Number.isFinite(rate) ? ` $${Number.isInteger(rate) ? rate : rate.toFixed(2)}/GB` : '';
+  if (!id) return `the default rate${shown} for ${x?.trim() || 'this destination'}, a per-GB default, not a vendor list price`;
+  const name = SIEM_DISPLAY_NAMES[id];
+  if (DEFAULT_RATE_BASIS[id] === 'list') return `${name} list price${shown}`;
+  const note = defaultRateNote(id);
+  const article = /^[aeiou]/i.test(name) ? 'an' : 'a';
+  return `the ${name} default rate${shown}, a per-GB default, not ${article} ${name} list price` + (note ? ` (${note})` : '');
+}
+
 export function getAnalyzerCostForSiem(id: SiemId, override?: number): number {
   if (override !== undefined && Number.isFinite(override) && override > 0) return override;
   return DEFAULT_ANALYZER_COST_PER_GB[id];

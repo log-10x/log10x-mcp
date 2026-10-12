@@ -59,7 +59,7 @@ test('instructions carry the plan-row rendering grammar (stacked list, never a t
   assert.match(SERVER_INSTRUCTIONS, /keep-everything ceiling <keepEverythingCeilingPct>%/);
   assert.match(SERVER_INSTRUCTIONS, /arithmetic on the page MUST close/);
   assert.match(SERVER_INSTRUCTIONS, /Rates: <rateBasis>/);
-  assert.match(SERVER_INSTRUCTIONS, /List-price dollars, not a quote/);
+  assert.match(SERVER_INSTRUCTIONS, /List-price or default-rate dollars, as rateBasis names them, not a quote/);
   // provenance upgrade: customer-supplied rates get the reconciliation Check
   // line — the one multiplication the reader verifies against their invoice.
   assert.match(SERVER_INSTRUCTIONS, /plan\.rateSource/);

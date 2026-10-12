@@ -68,6 +68,7 @@ import {
   type ComputeSavingProjection,
 } from '../lib/cost.js';
 import type { SiemId } from '../lib/siem/pricing.js';
+import { defaultRateLabel, describeDefaultRate } from '../lib/siem/pricing.js';
 import { resolveRate } from '../lib/rate-resolution.js';
 import { resolveSiemLens, lensDisclosure, SIEM_LENS_ENUM } from '../lib/siem/lens.js';
 import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
@@ -345,7 +346,7 @@ export const estimateSavingsSchema = {
     .positive()
     .optional()
     .describe(
-      "forecast and verify mode: override the destination list-price rate with the customer's contracted $/GB. When supplied, dollar projections use this rate and surface rate_source='customer_supplied'."
+      "forecast and verify mode: override the destination default rate with the customer's contracted $/GB. When supplied, dollar projections use this rate and surface rate_source='customer_supplied'."
     ),
   current_compute_units: z
     .number()
@@ -1756,7 +1757,7 @@ export async function runEstimateForecast(
   }
   if (forecast_rate_source === 'list_price') {
     caveats.push(
-      `Dollar projections use ${args.destination} list price. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
+      `Dollar projections use ${describeDefaultRate(args.destination)}. Pass effective_ingest_per_gb to use your contracted rate and align with top_patterns output.`
     );
   }
   // When EVERY row got tier_down and the
@@ -2559,7 +2560,7 @@ export async function executeEstimateSavings(
         : `${result.per_pattern.length} pattern${result.per_pattern.length !== 1 ? 's' : ''}`;
       const rateTag = result.rate_source === 'customer_supplied'
         ? 'contracted rate'
-        : `${destination} list price, your bill may differ`;
+        : `${destination} ${defaultRateLabel(destination)}, your bill may differ`;
 
       // ── Action-mix disclosure ──
       // Compute per-action bucket totals from the full (pre-slice) per_pattern
@@ -2964,7 +2965,7 @@ function buildForecastHumanSummary(
   const serviceClause = result.service ? ` on service ${result.service}` : '';
   const rateTag = result.rate_source === 'customer_supplied'
     ? 'contracted rate'
-    : `${destination} list price`;
+    : `${destination} ${defaultRateLabel(destination)}`;
   // C-policy: lead the summary with the saved DOLLAR only when the rate is the
   // customer's contracted rate. At list_price the dollar is the SIEM rack
   // rate, so lead with VOLUME (GB saved / % reduction, always exact); the

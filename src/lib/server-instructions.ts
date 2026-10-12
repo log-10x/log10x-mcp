@@ -6,7 +6,7 @@
  * know what to ask" — and a contract wants a test.
  */
 
-import { DEFAULT_ANALYZER_COST_PER_GB, type SiemId } from './siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, defaultRateLabel, defaultRateNote, type SiemId } from './siem/pricing.js';
 
 // Rate card surfaced in the agent instructions. Generated from the single
 // canonical source (DEFAULT_ANALYZER_COST_PER_GB, synced from vendors.json) so
@@ -26,7 +26,7 @@ const RATE_CARD_LINE = (
     // sub-dollar/fractional rates so the card reads like the prior hand-written
     // version ($2.50, $0.50) while integers stay clean ($6, $1).
     const shown = Number.isInteger(r) ? `$${r}` : `$${r.toFixed(2)}`;
-    return `${label} ${shown}/GB`;
+    return `${label} ${shown}/GB (${defaultRateLabel(id)})`;
   })
   .join(', ');
 
@@ -215,8 +215,9 @@ NUMBERS DISCIPLINE — hard rules, no exceptions:
   reads "(paste-ready)". In that case do NOT report "zero dependencies found" or "safe to drop"
   — wait for the user to run the script and paste back its results.
 
-Analyzer cost is auto-detected from the user's profile. Typical rates if unspecified:
-${RATE_CARD_LINE}.
+Analyzer cost is auto-detected from the user's profile. Defaults if unspecified:
+${RATE_CARD_LINE}. A "default rate" is a per-GB stand-in; never call it a list price. Datadog's
+$${DEFAULT_ANALYZER_COST_PER_GB.datadog.toFixed(2)}/GB default is ${defaultRateNote('datadog')}.
 
 TOOL OUTPUT — AUDIENCE-SEPARATED MARKDOWN
 
@@ -379,7 +380,7 @@ counts priced lines only, and the money line says so. The same form holds for co
 Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim. Two
 provenances, keyed on plan.rateSource:
   list_price:         *Rates: <rateBasis>. Measured over <scope.window from the envelope>.
-                      List-price dollars, not a quote.*
+                      List-price or default-rate dollars, as rateBasis names them, not a quote.*
   customer_supplied:  *Rates: <rateBasis>. Measured over <scope.window from the envelope>.*
                       **Check:** <bytesInMonthly, as GB or TB> measured this window × your
                       $<customerRatePerGb>/GB = <billUsd verbatim>/mo. Compare with the invoice

@@ -124,17 +124,19 @@ test('buildDisclosedDollarValue disclosure-by-source contract', () => {
   const l = buildDisclosedDollarValue(1800, 'list_price', 'Splunk', 5.0);
   assert.equal(l.source, 'list_price');
   assert.ok(l.disclosure, 'list_price must carry a disclosure');
-  assert.match(l.disclosure!, /Splunk list price \$5\.00\/GB/);
-  assert.match(l.disclosure!, /your actual bill may differ/);
+  assert.match(l.disclosure!, /the Splunk default rate \$5\/GB, a per-GB default, not a Splunk list price/);
+  assert.match(l.disclosure!, /your actual bill may differ/i);
+  const cw = buildDisclosedDollarValue(1800, 'list_price', 'Amazon CloudWatch Logs', 0.5);
+  assert.match(cw.disclosure!, /Amazon CloudWatch Logs list price \$0\.50\/GB/);
 
   const u = buildDisclosedDollarValue(0, 'unset', null, null);
   assert.equal(u.source, 'unset');
   assert.equal(u.disclosure, '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)');
 });
 
-test('buildDisclosedDollarValue falls back to "SIEM" + "list price" when label/rate are null', () => {
+test('buildDisclosedDollarValue names an unknown destination\'s rate as a default when label/rate are null', () => {
   const l = buildDisclosedDollarValue(1000, 'list_price', null, null);
-  assert.match(l.disclosure!, /at SIEM list price/);
+  assert.match(l.disclosure!, /at the default rate for this destination, a per-GB default, not a vendor list price/);
   assert.match(l.disclosure!, /may differ/);
 });
 

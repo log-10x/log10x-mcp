@@ -38,7 +38,7 @@ export const eventLookupSchema = {
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values for incident-window lookups. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB (deprecated alias of `effective_ingest_per_gb`)'),
-  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingest cost in $/GB. When set, dollar fields populate with rate_source=customer_supplied; when absent and no list rate is detected, dollar fields collapse to null and rate_source=unset.'),
+  effective_ingest_per_gb: z.number().optional().describe('Customer-supplied SIEM ingest cost in $/GB. When set, dollar fields populate with rate_source=customer_supplied; when absent and no default rate is detected, dollar fields collapse to null and rate_source=unset.'),
   siemScope: z.string().optional().describe('SIEM scope for the live sample line on a tenxHash reverse lookup: a CloudWatch log group (`/aws/ecs/my-svc`), ES index, or Splunk index. When omitted, the detected SIEM connector uses its own default scope. Only consulted when `tenxHash` was passed (the cross-pillar correlation case).'),
   environment: z.string().optional().describe('Environment nickname'),
 };

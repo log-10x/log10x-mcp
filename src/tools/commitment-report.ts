@@ -55,7 +55,7 @@ import {
   type DisclosedDollarValue,
 } from '../lib/cost.js';
 import { fmtDisclosedDollar } from '../lib/format.js';
-import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, type SiemId } from '../lib/siem/pricing.js';
+import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, defaultRateLabel, type SiemId } from '../lib/siem/pricing.js';
 import { loadEnvironments, resolveEnv } from '../lib/environments.js';
 import {
   resolveClusterConfig,
@@ -2511,6 +2511,7 @@ export async function executeCommitmentReport(
     promisedPct: commitment.promised_pct,
     days: period.days,
     rateSource: envelope.rate_source,
+    destination: commitment.destination,
     deliveredDollars: envelope.delivered_dollars,
     weekCount: envelope.weekly_series.length,
     caveats: envelope.caveats,
@@ -2577,6 +2578,7 @@ function buildCommitmentReportHumanSummary(args: {
   promisedPct: number;
   days: number;
   rateSource: 'list_price' | 'customer_supplied' | 'unset';
+  destination?: string;
   deliveredDollars: number | null;
   weekCount: number;
   caveats: string[];
@@ -2595,7 +2597,7 @@ function buildCommitmentReportHumanSummary(args: {
   const fmtRealized = (v: number) => (Math.abs(v) < 1 ? `$${v.toFixed(2)}` : `$${Math.round(v)}`);
   const dollars =
     args.rateSource !== 'unset' && args.deliveredDollars != null
-      ? ` Realized savings: ${fmtRealized(args.deliveredDollars)} (${args.rateSource === 'customer_supplied' ? 'customer-supplied rate' : 'list price'}).`
+      ? ` Realized savings: ${fmtRealized(args.deliveredDollars)} (${args.rateSource === 'customer_supplied' ? 'customer-supplied rate' : defaultRateLabel(args.destination)}).`
       : '';
   const caveats = args.caveats.length > 0 ? ` Caveats: ${args.caveats.length}.` : '';
   return `${lead}${dollars}${caveats}`;
