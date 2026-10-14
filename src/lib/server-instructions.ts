@@ -291,7 +291,7 @@ did it work, what happens to the number, how, what is protected.
     version constraint. Never omit the line when the array is non-empty, and never soften a version
     or licence constraint: a lever whose prerequisite the reader cannot meet is not a saving, and
     finding that out after they agreed is how a cost tool loses a customer.
-  **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, up to three lines
+  **Touches:** when the envelope carries \`plan_dependencies\` with checked=true, up to four items
     from its fields, in this order:
     1. Scan-depth honesty: "scanned <scan_depth>" — and when \`literal\` is empty, say "no literal
        references found in what was scanned", NEVER "none referenced" or "safe": monitors usually
@@ -305,6 +305,9 @@ did it work, what happens to the number, how, what is protected.
     3. When \`slice\` is non-empty: "<total slice objects> monitors and dashboards mention
        <the services>: <platform_truth verbatim>." — this is DISCLOSURE, not exclusion; slice
        overlap is deliberately broad and must never silently shrink the plan.
+    4. When \`plan_dependencies.rule_dependencies.lines\` is non-empty (Datadog): those lines
+       verbatim, each rule's block beside that service. They name the log monitors a move blinds
+       and the log-based metrics that keep or stop counting the moved lines.
     When checked=false, render no Touches line; if the user asks what the plan breaks, relay
     plan_dependencies.note verbatim (it names the missing credentials or the unsupported
     destination).

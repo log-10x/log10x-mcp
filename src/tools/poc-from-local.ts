@@ -43,6 +43,7 @@ import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, defaultRateNote, type
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
 import { buildReportData, ReportRefusal, CAPS_FILE_NAME, ACTIONS_FILE_NAME } from '../lib/report/build-report-data.js';
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
+import { checkRuleDependencies, dependencyRulesFromPlan } from '../lib/plan-dependencies.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
 import { isFenced, fencedOffer, fencedVerification } from '../lib/fenced.js';
@@ -150,6 +151,12 @@ export const pocFromLocalSchema = {
     .optional()
     .default(20)
     .describe('Cap on number of pods sampled. Default 20.'),
+  check_dependencies: z
+    .boolean()
+    .optional()
+    .describe(
+      'Datadog only, default true: before the plan moves statements off Standard, read the account\'s log monitors and log-based metrics (read-only GETs, needs DD_API_KEY + DD_APP_KEY in the session) and print beside each service line the ones whose query reads its moved lines. Set false to skip the read.'
+    ),
   retriever_installed: z
     .boolean()
     .optional()
@@ -235,6 +242,8 @@ export interface PocFromLocalArgs {
   max_pods?: number;
   ai_prettify?: boolean;
   retriever_installed?: boolean;
+  /** Datadog only, default true: list the log monitors and log-based metrics that read each rule's moved lines. */
+  check_dependencies?: boolean;
   allow_lossy?: boolean;
   target_percent_reduction?: number;
   budget_usd_monthly?: number;
@@ -1001,6 +1010,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       windowEndMs,
     };
     const enrichment = _enrichForEnvelope(renderInput);
+    // Datadog: before a rule moves statements off Standard, the log monitors and
+    // log-based metrics that read them. Read-only, credential-gated, never throws.
+    const ruleDependencies =
+      siem === 'datadog' && plan && args.check_dependencies !== false
+        ? await checkRuleDependencies('datadog', dependencyRulesFromPlan(plan))
+        : undefined;
     const built = buildReportData(
       renderInput,
       { patterns: enrichment.patterns, clusters: enrichment.clusters },
@@ -1015,6 +1030,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         generatedAtIso: finishedAtIso,
         mcpVersion: MCP_VERSION,
         ...(plan && planSpanSeconds ? { plan, planSpanSeconds } : {}),
+        ...(ruleDependencies ? { ruleDependencies } : {}),
         enforcingInstances: resolveEnforcingInstances(
           [...new Set([...Object.keys(plan?.containerCaps ?? {}), ...Object.keys(sample.containerNodes ?? {})])],
           { fromPods: sample.containerNodes },

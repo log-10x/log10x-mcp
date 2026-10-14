@@ -34,6 +34,12 @@ import {
   DEP_CHECK_VENDORS,
   type VendorInventory,
 } from './siem/deps/index.js';
+import {
+  matchRuleDependencies,
+  ruleDependenciesNotChecked,
+  type DependencyRule,
+  type RuleDependencySummary,
+} from './siem/deps/datadog-log-queries.js';
 
 export interface PlanRowDependencies {
   hash: string;
@@ -74,6 +80,8 @@ export interface PlanDependencySummary {
   total_refs: number;
   /** One human-readable line: what ran, or why nothing did. Render-safe. */
   note: string;
+  /** Datadog: the log monitors and log-based metrics each moving rule touches. */
+  rule_dependencies?: RuleDependencySummary;
 }
 
 /** Map a plan destination onto the dep-check vendor that can scan it. */
@@ -175,6 +183,81 @@ export function sliceScan(inv: VendorInventory, services: string[]): SliceDepend
   return out;
 }
 
+/** One rule per (service, action) for the rows a plan moves off Standard. */
+export function dependencyRulesFromPlan(plan: Plan): DependencyRule[] {
+  const byKey = new Map<string, DependencyRule>();
+  for (const r of plan.planned) {
+    if (r.action !== 'tier_down' && r.action !== 'offload') continue;
+    const key = `${r.dominantService}\u0000${r.action}`;
+    let rule = byKey.get(key);
+    if (!rule) {
+      rule = { service: r.dominantService, action: r.action, statements: [] };
+      byKey.set(key, rule);
+    }
+    rule.statements.push({ name: r.name, text: r.skeleton || r.name, severity: r.severity });
+  }
+  return [...byKey.values()];
+}
+
+const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Match rules against an already-fetched inventory. */
+export function ruleDependenciesFromInventory(rules: DependencyRule[], inv: VendorInventory): RuleDependencySummary {
+  const lq = inv.logQueries;
+  if (!lq) return ruleDependenciesNotChecked(`${inv.vendor} has no log monitor or log-based metric reader`);
+  if (!lq.monitorsRead && !lq.metricsRead) {
+    return ruleDependenciesNotChecked(lq.notes.join('; ') || 'log monitors and log-based metrics could not be read');
+  }
+  const summary = matchRuleDependencies(rules, lq.objects, { notes: lq.notes });
+  for (const n of lq.notes) summary.lines.push(`${capitalize(n)}; the lines above do not cover them.`);
+  return summary;
+}
+
+const inventoryBySummary = new WeakMap<PlanDependencySummary, VendorInventory>();
+
+async function fetchWithDeadline(vendor: SiemId, timeoutMs: number): Promise<VendorInventory> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      inventoryFetcher(vendor),
+      new Promise<VendorInventory>((_res, rej) => {
+        timer = setTimeout(() => rej(new Error('inventory fetch timeout')), timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * The per-rule monitor and log-based-metric check on its own, for callers
+ * that hold rules rather than a plan (configure_engine). Read-only,
+ * credential-gated, deadline-capped; never throws.
+ */
+export async function checkRuleDependencies(
+  destination: SiemId,
+  rules: DependencyRule[],
+  opts: CheckPlanDepsOptions = {},
+): Promise<RuleDependencySummary> {
+  if (rules.length === 0) return ruleDependenciesNotChecked('no rule moves a statement off Standard');
+  if (depVendorForDestination(destination) !== 'datadog') {
+    return ruleDependenciesNotChecked(`the check reads Datadog log monitors and log-based metrics, not ${destination}`);
+  }
+  const creds = depCredsPresent('datadog');
+  if (!creds.present) {
+    return ruleDependenciesNotChecked(`no Datadog credentials in this session (need ${creds.missing})`);
+  }
+  let inv: VendorInventory;
+  try {
+    inv = await fetchWithDeadline('datadog', opts.timeoutMs ?? 20_000);
+  } catch (e) {
+    return ruleDependenciesNotChecked(`the Datadog read failed (${e instanceof Error ? e.message : String(e)})`);
+  }
+  if (inv.error) return ruleDependenciesNotChecked(inv.error);
+  return ruleDependenciesFromInventory(rules, inv);
+}
+
 export interface CheckPlanDepsOptions {
   /** Overall wall-clock budget for the inventory fetch. Default 20000ms. */
   timeoutMs?: number;
@@ -209,13 +292,7 @@ export async function checkPlanDependencies(
 
   let inv: VendorInventory;
   try {
-    inv = await Promise.race([
-      inventoryFetcher(vendor),
-      new Promise<VendorInventory>((_res, rej) => {
-        const t = setTimeout(() => rej(new Error('inventory fetch timeout')), timeoutMs);
-        t.unref?.();
-      }),
-    ]);
+    inv = await fetchWithDeadline(vendor, timeoutMs);
   } catch (e) {
     return none(`not checked: inventory fetch failed (${e instanceof Error ? e.message : String(e)})`);
   }
@@ -253,7 +330,8 @@ export async function checkPlanDependencies(
     noteParts.push(`${slice.reduce((s, x) => s + x.objects, 0)} objects mention the planned services`);
   }
 
-  return {
+  const rules = vendor === 'datadog' ? dependencyRulesFromPlan(plan) : [];
+  const summary: PlanDependencySummary = {
     checked: true,
     vendor,
     scan_depth: inv.scanDepth,
@@ -264,7 +342,10 @@ export async function checkPlanDependencies(
     platform_truth: platformTruth(plan),
     total_refs: totalRefs,
     note: noteParts.join('; '),
+    ...(rules.length > 0 ? { rule_dependencies: ruleDependenciesFromInventory(rules, inv) } : {}),
   };
+  inventoryBySummary.set(summary, inv);
+  return summary;
 }
 
 /**
@@ -277,13 +358,20 @@ export function applyReferencedExclusion(
   patterns: SolverPattern[],
   solveOpts: SolveOpts,
   summary: PlanDependencySummary,
-): { plan: Plan; excluded: PlanRowDependencies[] } {
+): { plan: Plan; excluded: PlanRowDependencies[]; rule_dependencies?: RuleDependencySummary } {
   const excludedHashes = summary.literal.map((h) => h.hash);
   const plan = solvePlan(patterns, {
     ...solveOpts,
     pinnedHashes: [...(solveOpts.pinnedHashes ?? []), ...excludedHashes],
   });
-  return { plan, excluded: summary.literal };
+  // The re-solved plan moves different rows; re-match them on the same inventory.
+  const inv = inventoryBySummary.get(summary);
+  const rules = inv && summary.vendor === 'datadog' ? dependencyRulesFromPlan(plan) : [];
+  return {
+    plan,
+    excluded: summary.literal,
+    ...(inv && rules.length > 0 ? { rule_dependencies: ruleDependenciesFromInventory(rules, inv) } : {}),
+  };
 }
 
 export type { PlannedRow };

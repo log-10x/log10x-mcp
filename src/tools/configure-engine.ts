@@ -128,6 +128,8 @@ import {
 } from '../lib/window-scaling.js';
 import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.js';
 import { requireWriteAccess } from '../lib/read-only-guard.js';
+import { checkRuleDependencies } from '../lib/plan-dependencies.js';
+import { dependencyLinesForService, type DependencyRule, type RuleDependencySummary } from '../lib/siem/deps/datadog-log-queries.js';
 import { putCommitment, type CommitmentRecord } from './commitment-report.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -528,6 +530,12 @@ export const configureEngineSchema = {
     .describe(
       'Per-service measured compaction from `log10x_measure_compaction`, keyed by k8s_container. Grounds the per-service advisory in the real codec BEFORE optimize mode is deployed (the live optimize-mode metric only exists after deployment). Precedence for each service compressibility signal: live production metric (when optimize mode is running) wins, else this on-demand sample, else the static destination band. Run `log10x_measure_compaction` per service first, then pass `{ "<k8s_container>": { compaction_ratio_x: N } }`.'
     ),
+  check_dependencies: z
+    .boolean()
+    .optional()
+    .describe(
+      'Datadog only, default true: before a rule moves statements off Standard, read the account\'s log monitors and log-based metrics (read-only GETs, needs DD_API_KEY + DD_APP_KEY in the session) and list the ones whose query matches each rule\'s service or statement text, as `rule_dependencies` and as lines in human_summary. Set false to skip the read.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
@@ -774,6 +782,8 @@ interface ConfigureEngineData {
      */
     respect_default_action: boolean;
   };
+  /** Datadog: log monitors and log-based metrics each rule's moved statements feed. */
+  rule_dependencies?: RuleDependencySummary;
   /**
    * One-paragraph plain-prose distillation of the structured data.
    * Agents quote this directly; dollars omitted unless feasible derivation ran.
@@ -1468,6 +1478,13 @@ export async function executeConfigureEngine(
     }
   }
 
+  const dependencyRules =
+    destination === 'datadog' && args.check_dependencies !== false
+      ? dependencyRulesFromEngineRows(rows, perPattern, args.service)
+      : [];
+  const ruleDependencies =
+    dependencyRules.length > 0 ? await checkRuleDependencies(destination, dependencyRules) : undefined;
+
   // Emit the destination-compat fallback warning IF and only IF rows
   // actually survived carrying the fallback action. When zero rows
   // survived (every standard-tier row was demoted to pass by the
@@ -1970,6 +1987,7 @@ export async function executeConfigureEngine(
         }
       : undefined,
     next_actions: nextActions,
+    ...(ruleDependencies ? { rule_dependencies: ruleDependencies } : {}),
     human_summary: buildConfigureEngineHumanSummary({
       feasible,
       targetPercent,
@@ -1981,7 +1999,7 @@ export async function executeConfigureEngine(
       applied,
       refreshMode: !!refreshState,
       flexStatement: flexPlanMove?.text,
-      userUnitLines: [...sentenceByContainer.values(), fleetSentence(destination)],
+      userUnitLines: userUnitLinesWithDependencies(sentenceByContainer, fleetSentence(destination), ruleDependencies),
     }),
   };
 
@@ -2258,6 +2276,7 @@ function buildSummaryPayload(params: {
     commitment_id: data.commitment_id,
     action_default_resolution: data.action_default_resolution,
     refresh: data.refresh,
+    ...(data.rule_dependencies ? { rule_dependencies: data.rule_dependencies } : {}),
     next_actions: slimNextActions,
     human_summary: data.human_summary,
     details_available: {
@@ -3628,6 +3647,62 @@ function reconstructAfterCsv(diff: string, currentCsv: string | undefined): stri
     );
   }
   return renderCsv(merged, preamble);
+}
+
+// ─── monitor and log-based-metric check ───────────────────────────────
+/**
+ * One rule per (container, action) for the rows that leave Standard. The
+ * service the caller named is an alias: a monitor on `service:<it>` reads
+ * these containers' lines.
+ */
+export function dependencyRulesFromEngineRows(
+  rows: PerPatternRow[],
+  perPattern: Array<{ pattern_hash: string; container: string; severity: string }>,
+  service: string,
+): DependencyRule[] {
+  const severity = new Map(perPattern.map((p) => [`${p.pattern_hash}\u0000${p.container}`, p.severity]));
+  const byKey = new Map<string, DependencyRule>();
+  for (const r of rows) {
+    if (r.action !== 'tier_down' && r.action !== 'offload') continue;
+    const container = r.container ?? service;
+    const key = `${container}\u0000${r.action}`;
+    let rule = byKey.get(key);
+    if (!rule) {
+      rule = {
+        service: container,
+        ...(service && service !== container ? { aliases: [service] } : {}),
+        action: r.action,
+        statements: [],
+      };
+      byKey.set(key, rule);
+    }
+    rule.statements.push({ name: r.pattern, severity: severity.get(`${r.pattern_hash}\u0000${container}`) });
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * The plan in user units with the check beside each rule: a service's
+ * sentence, then the log monitors and log-based metrics that read its moved
+ * lines; the fleet line; then the objects not tied to one service, and the
+ * reason when the check did not run.
+ */
+export function userUnitLinesWithDependencies(
+  sentenceByContainer: ReadonlyMap<string, string>,
+  fleetLine: string,
+  deps: RuleDependencySummary | undefined,
+): string[] {
+  const out: string[] = [];
+  for (const [container, sentence] of sentenceByContainer) {
+    out.push(sentence);
+    if (deps?.checked) out.push(...dependencyLinesForService(deps, container));
+  }
+  out.push(fleetLine);
+  if (deps) {
+    const perRule = deps.rules.reduce((n, r) => n + r.lines.length, 0);
+    out.push(...deps.lines.slice(perRule));
+  }
+  return out;
 }
 
 // ─── human_summary builder ────────────────────────────────────────────

@@ -46,6 +46,7 @@ import {
   serviceLimitsFromPatterns,
   type FleetLimit,
 } from './user-units.js';
+import { dependencyLinesForService, type RuleDependencySummary } from '../siem/deps/datadog-log-queries.js';
 
 /** A cluster must carry at least this share of window bytes to drive
  * the verdict + an operational action. */
@@ -125,6 +126,8 @@ export interface BuildReportOptions {
   enforcingInstances?: EnforcingInstances;
   /** The fleet-wide default for services with no row, when the plan writes one. */
   fleetDefault?: FleetLimit;
+  /** Datadog: the log monitors and log-based metrics that read each rule's moved lines, printed beside the rule. */
+  ruleDependencies?: RuleDependencySummary;
 }
 
 export class ReportRefusal extends Error {}
@@ -257,6 +260,13 @@ export function buildReportData(
     );
     const serviceLines = units.limits.map((l) => serviceLimitSentence(l, opts.siem));
     const reasonByContainer = Object.fromEntries(units.limits.map((l, i) => [l.service, serviceLines[i]]));
+    // Each service's sentence, then the monitors and metrics that read its moved lines.
+    const deps = opts.ruleDependencies;
+    const serviceBlocks = units.limits.flatMap((l, i) => [
+      serviceLines[i],
+      ...(deps?.checked ? dependencyLinesForService(deps, l.service) : []),
+    ]);
+    const unscopedLines = deps ? deps.lines.slice(deps.rules.reduce((n, r) => n + r.lines.length, 0)) : [];
     const flexLine = flexAddedSentence(opts.siem, units.movedBytesMonthly, units.movedEventsMonthly);
     const files = engineFilesFromContainerCaps(
       containerCaps,
@@ -282,8 +292,9 @@ export function buildReportData(
         : {}),
       change: {
         commentLines: [
-          ...serviceLines,
+          ...serviceBlocks,
           fleetSentence(opts.siem, opts.fleetDefault),
+          ...unscopedLines,
           ...(flexLine ? [flexLine] : []),
           `A limit is the largest statement the container keeps, so the statements above exceed it and no other does.`,
           `${CAPS_FILE_NAME}: each container's limit in the engine's units, bytes per node, with its sentence as the reason; ` +
