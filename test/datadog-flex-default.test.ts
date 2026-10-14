@@ -7,8 +7,8 @@
  * to Flex before offload. The plan reports the events and GB moved out of the
  * Standard index, the Standard indexing line avoided at Datadog list, and the
  * Flex line added at the tier the moved volume lands in: Flex Starter, storage
- * and compute at one rate for at least 3 months, below 2 billion events a
- * month and 10 billion stored; above that, Flex storage on a scalable compute
+ * and compute at one rate for at least 3 months, the size Datadog recommends
+ * below 10 billion events stored; above that, Flex storage on a scalable compute
  * tier, with compute unpriced and excluded. It prints no percentage of the
  * Datadog bill and no 0.6/0.4 blend (claims charter: never a Datadog Flex
  * percentage, bare or qualified).
@@ -60,8 +60,9 @@ test('a 1,000 GB/mo Flex move is priced per event at Datadog list, as lines', ()
   assert.equal(move.events_moved, 1e9);
   assert.equal(move.events_basis, 'measured');
   assert.equal(move.standard_indexing_avoided_usd, 1700); // $1.70 per million, 15-day retention
-  // One billion events a month, held 3 months, is 3 billion stored: inside
-  // Flex Starter, so the line is $0.60 per million stored per month for 3 months.
+  // One billion events a month, held 3 months, is 3 billion stored, within the
+  // 10 billion Datadog recommends Starter below, so the line is $0.60 per
+  // million stored per month for 3 months.
   assert.equal(move.pricing_tier, 'starter');
   assert.equal(move.tier_storage_added_usd, 1800);
   assert.equal(move.tier_retention_months, 3);
@@ -74,13 +75,14 @@ test('a 1,000 GB/mo Flex move is priced per event at Datadog list, as lines', ()
 });
 
 test('above Starter, a Flex move is priced at scalable storage with compute unpriced', () => {
-  // Three billion events a month leaves Starter: storage at $0.05 per million
+  // Four billion events a month, held 3 months, is 12 billion stored, above the
+  // 10 billion Datadog recommends Starter below: storage at $0.05 per million
   // stored per month, held 30 days, and the compute line named, not counted.
-  const move = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 3000 * GB, { avgEventBytes: 1000 });
+  const move = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 4000 * GB, { avgEventBytes: 1000 });
   assert.equal(move.pricing_tier, 'scalable');
-  assert.equal(move.tier_storage_added_usd, 150);
+  assert.equal(move.tier_storage_added_usd, 200);
   assert.equal(move.tier_retention_months, 1);
-  assert.match(move.text, /Flex storage added: \$150\/mo at \$0\.05 per million events stored per month, held 30 days, on a scalable compute tier/);
+  assert.match(move.text, /Flex storage added: \$200\/mo at \$0\.05 per million events stored per month, held 30 days, on a scalable compute tier/);
   assert.match(move.text, /Flex compute is unpriced .* excluded from both figures/);
 });
 

@@ -107,7 +107,8 @@ export function serviceLimitSentence(l: ServiceLimit, siem: string | null): stri
   const k = l.movedStatements;
   if (k === 0) return `${head} Today no statement is above it.`;
   const money = l.movedUsdMonthly !== undefined ? `, about ${fmtAboutUsd(l.movedUsdMonthly)} a month` : '';
-  return `${head} Today that is these ${k} statement${k === 1 ? '' : 's'}${money}.`;
+  const these = k === 1 ? 'this one statement' : `these ${k} statements`;
+  return `${head} Today that is ${these}${money}.`;
 }
 
 /** The fleet line: services with no row of their own, and the lines that always pass. */

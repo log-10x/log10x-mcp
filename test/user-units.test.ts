@@ -35,7 +35,7 @@ test('a service line reads in lines a day and dollars a month, by destination', 
   );
   assert.equal(
     serviceLimitSentence({ ...l, action: 'offload', limitLinesPerDay: null, movedStatements: 1 }, 'datadog'),
-    'checkout: every statement goes to the offload bucket. Today that is these 1 statement, about $41 a month.',
+    'checkout: every statement goes to the offload bucket. Today that is this one statement, about $41 a month.',
   );
   assert.equal(
     serviceLimitSentence({ ...l, movedUsdMonthly: undefined }, 'datadog'),
@@ -108,10 +108,11 @@ test('the Flex add-on line names the tier the plan volume lands in', () => {
     flexAddedSentence('datadog', 10e9, 10e6),
     'The dollar figures are the Standard indexing line at list. Flex Starter adds about $18 a month for all of them, compute included, held 3 months.',
   );
-  // 3 billion events a month is above Starter: scalable storage, compute on request.
+  // 4 billion events a month, held 3 months, is above the 10 billion stored
+  // Datadog recommends Starter below: scalable storage, compute on request.
   assert.equal(
-    flexAddedSentence('datadog', 3000e9, 3e9),
-    'The dollar figures are the Standard indexing line at list. Flex storage adds about $150 a month for all of them, compute priced by Datadog on request, held 30 days.',
+    flexAddedSentence('datadog', 4000e9, 4e9),
+    'The dollar figures are the Standard indexing line at list. Flex storage adds about $200 a month for all of them, compute priced by Datadog on request, held 30 days.',
   );
   assert.equal(flexAddedSentence('cloudwatch', 10e9, 10e6), undefined);
 });
@@ -182,12 +183,12 @@ test('configure_engine: a tier_down limit is the largest pass row in lines a day
   const limits = serviceLimitsFromRows(['api'], rows, actions, 'tier_down', 'datadog');
   assert.deepEqual(limits, [{ service: 'api', action: 'tier_down', limitLinesPerDay: 10_000, movedStatements: 1, movedUsdMonthly: 17 }]);
   const sentence = serviceLimitSentence(limits[0], 'datadog');
-  assert.equal(sentence, 'api: any statement above 10,000 lines a day goes to Flex. Today that is these 1 statement, about $17 a month.');
+  assert.equal(sentence, 'api: any statement above 10,000 lines a day goes to Flex. Today that is this one statement, about $17 a month.');
   const reasons = new Map([['api', csvReason(sentence)]]);
   const diff = renderCsvDiff(['api'], undefined, rows, 'tier_down', actions, 'hard', undefined, undefined, reasons);
-  assert.match(diff, /^\+api,9000::api any statement above 10000 lines a day goes to Flex\. Today that is these 1 statement about \$17 a month\.$/m);
+  assert.match(diff, /^\+api,9000::api any statement above 10000 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
   const actionsCsv = renderActionsCsv(['api'], actions, 'tier_down', undefined, 'hard', reasons);
-  assert.match(actionsCsv, /^api,tier_down::api any statement above 10000 lines a day goes to Flex\. Today that is these 1 statement about \$17 a month\.$/m);
+  assert.match(actionsCsv, /^api,tier_down::api any statement above 10000 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
 
   // compact: the container's cap is a sum, stated at its average line size.
   // 150 bytes per window, 100-byte lines: 150 x 360 / 100 = 540 lines a day.
