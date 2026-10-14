@@ -24,6 +24,7 @@ import { fmtBytes, fmtCount, fmtDisclosedDollar, fmtDollar, fmtGb, fmtPct } from
 import { buildDfContext, buildDisplayName, type DfContext } from './pattern-df.js';
 import { renderNextActions, type NextAction } from './next-actions.js';
 import { agentOnly } from './agent-only.js';
+import { renderNativeControlSection } from './datadog-native-control.js';
 import { enrichForPoc, type PocEnrichment } from './poc-enrichers.js';
 import type { IncidentCluster } from './detectors/incident-cluster.js';
 import type { RedundancyPair } from './poc-enrichers.js';
@@ -1511,6 +1512,35 @@ export function renderPocReport(input: RenderInput): RenderResult {
     `10x keeps every line, so this plan has no drop candidates. If you specifically want to hard-drop a pattern (lossy, not recommended), native ${siemName} and Fluent Bit exclusion configs are available via the \`configs\` view (\`log10x_poc_from_siem_status\` with \`view: "configs"\`).`,
   );
   lines.push('');
+
+  if (input.siem === 'datadog') {
+    lines.push(sec('Native Index Filters Against the Plan'));
+    lines.push('');
+    lines.push(
+      ...renderNativeControlSection({
+        patterns: patterns.map((p) => ({
+          identity: p.identity,
+          template: p.template,
+          sampleEvent: p.sampleEvent,
+          tenxHash: p.tenxHash,
+          service: p.service,
+          severity: p.severity,
+          count: p.count,
+          bytes: p.bytes,
+          cells: p.cells,
+          action: p.recommendedAction,
+        })),
+        totalBytes: input.extraction.totalBytes,
+        totalDailyGb: input.totalDailyGb,
+        windowHours: input.windowHours,
+        window: input.window,
+        volumeLabel:
+          input.volumeSource === 'auto_detected' ? input.volumeDetectSource || 'Datadog usage API' : 'user-supplied',
+        volumeRangeMultiplier: input.volumeRangeMultiplier,
+        dollarsWithheld: (input.rateSource ?? 'list_price') === 'unset',
+      }),
+    );
+  }
 
   // Section 6: Compact-byte ratio (measured, only where the engine
   // emitted encoded lines and only for SIEMs that ingest forwarder-

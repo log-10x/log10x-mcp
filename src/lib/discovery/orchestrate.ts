@@ -263,9 +263,11 @@ function deriveRecommendations(
   if (receiverDetail && receiverInPath === false) {
     receiverInPathReason =
       `Receiver pod is deployed but events flowing to the log analyzer` +
-      ` do not carry tenx_hash. Possible causes: forwarder bypassing` +
-      ` the Receiver (check fluentd/vector/logstash output config), or` +
-      ` the Receiver is unhealthy. Inspect: kubectl logs ${receiverDetail.pod} -c log10x.`;
+      ` do not carry tenx_hash. Possible causes: the Receiver runs without` +
+      ` \`symbolMessageHashField tenx_hash\` (the option that stamps the pattern` +
+      ` hash on each event), the forwarder bypassing the Receiver (check` +
+      ` fluentd/vector/logstash output config), or the Receiver is unhealthy.` +
+      ` Inspect: kubectl logs ${receiverDetail.pod} -c log10x.`;
   }
 
   return {

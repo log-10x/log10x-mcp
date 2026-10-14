@@ -2213,3 +2213,19 @@ export function annualizeDollars(windowDollars: number, windowDays: number): num
   if (!windowDays || windowDays <= 0) return 0;
   return (windowDollars * 365) / windowDays;
 }
+
+/**
+ * Datadog's ingestion meter at list. Every line that reaches the intake pays
+ * it, whichever index, Flex or exclusion filter it meets next; only a line
+ * that never reaches the intake (offloaded to S3, or dropped at the edge)
+ * avoids it.
+ */
+export const DATADOG_INGEST_LIST_PRICING = {
+  usd_per_gb: 0.1,
+  source: 'Datadog list prices, datadoghq.com/pricing/list ("Logs - Ingestion, per ingested logs (1GB), per month"), read 2026-10-13',
+} as const;
+
+/** The ingestion line on `bytes`, at list, in dollars. */
+export function datadogIngestionUsd(bytes: number): number {
+  return (bytes / GB) * DATADOG_INGEST_LIST_PRICING.usd_per_gb;
+}
