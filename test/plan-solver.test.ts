@@ -92,12 +92,19 @@ test('tier_down is priced on its destinations (regression: Datadog was $0, Serve
   // The exact bug surface: tier_down must produce a real dollar cut where it is
   // the destination lever. Datadog (Flex) had no tier and returned $0; Elastic
   // Serverless had no tier at all.
-  for (const destination of ['datadog', 'cloudwatch', 'elastic-serverless'] as const) {
+  for (const destination of ['cloudwatch', 'elastic-serverless'] as const) {
     const bill = projectAction({ action: 'pass', bytes_in: 1e9, destination }).total_dollars ?? 0;
     const after = projectAction({ action: 'tier_down', bytes_in: 1e9, destination }).total_dollars ?? bill;
     assert.ok(bill > 0, `${destination} should have a bill`);
     assert.ok(after < bill, `${destination} tier_down must cut the bill (was ${bill} -> ${after})`);
   }
+  // Datadog Flex is priced as two lines, the Standard indexing avoided and the
+  // Flex line added at its tier; at Flex Starter the added line can exceed the
+  // 15-day indexing avoided, so the test is that both lines are priced.
+  const dd1 = projectAction({ action: 'tier_down', bytes_in: 1e9, destination: 'datadog' });
+  assert.ok(dd1.per_event_move, 'datadog tier_down is priced as a Flex move');
+  assert.ok(dd1.per_event_move!.standard_indexing_avoided_usd > 0);
+  assert.ok(dd1.per_event_move!.tier_storage_added_usd > 0);
   // Datadog cut 50% now reaches the target on tier_down alone.
   const dd = solvePlan(
     [{ hash: 'x', name: 'noisy', services: { app: 50_000_000_000 }, severity: 'INFO', bytes: 50_000_000_000 }],

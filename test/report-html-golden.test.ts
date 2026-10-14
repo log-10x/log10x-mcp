@@ -30,11 +30,14 @@ test('rule: no ellipsis truncation anywhere in the output', () => {
   assert.ok(!html.includes('&hellip;'));
 });
 
-test('rule: no dollar amounts — the report leads with volume', () => {
+test('rule: dollar amounts only in THE CHANGE, where the plan is stated in lines a day and dollars a month', () => {
   const html = renderReportHtml(loadFixture());
   // masked-value chips render `$` alone inside <i class="v">; a dollar
-  // AMOUNT would be $ followed by a digit.
-  assert.ok(!/\$\d/.test(html));
+  // AMOUNT would be $ followed by a digit. Outside the change block the
+  // report leads with volume.
+  const outside = html.replace(/<pre class="cmd">[\s\S]*?<\/pre>/g, '');
+  assert.ok(!/\$\d/.test(outside));
+  assert.ok(/<pre class="cmd">[\s\S]*about \$\d/.test(html), 'the change block states dollars a month');
 });
 
 test('rule: statement identifiers appear in evidence metadata, never in headings', () => {

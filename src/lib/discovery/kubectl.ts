@@ -14,6 +14,7 @@
 import { run, runJson, type ShellResult } from './shell.js';
 import { classifyForwarderImage, classifyLog10xApp, isLog10xImage } from './forwarder-detect.js';
 import { detectBackendAgents } from './backend-detect.js';
+import { nodesPerContainerFromPods } from '../enforcing-instances.js';
 import type {
   DetectedForwarder,
   DetectedLog10xApp,
@@ -162,7 +163,25 @@ export async function probeKubectl(
     }
   }
 
-  // Step 8: detect metrics-backend agents (Datadog, Prometheus, etc.)
+  // Step 8: nodes per container in the probed namespaces, so caps can be
+  // divided by the DaemonSet Receivers that enforce them. Two columns only.
+  const podRows: Array<{ nodeName?: string; containers?: string[] }> = [];
+  for (const n of probedNs) {
+    const pods = await run(
+      'kubectl',
+      ['get', 'pods', '-n', n, '--no-headers', '-o', 'custom-columns=NODE:.spec.nodeName,CONTAINERS:.spec.containers[*].name'],
+      { timeoutMs: 8_000 }
+    );
+    record(pods);
+    for (const line of pods.stdout.split('\n')) {
+      const [node, names] = line.trim().split(/\s+/);
+      if (!node || node === '<none>' || !names) continue;
+      podRows.push({ nodeName: node, containers: names.split(',').filter(Boolean) });
+    }
+  }
+  const containerNodes = nodesPerContainerFromPods(podRows);
+
+  // Step 9: detect metrics-backend agents (Datadog, Prometheus, etc.)
   // No additional shell calls — runs off the helm releases + workload
   // labels we already pulled.
   const backendAgents = detectBackendAgents({
@@ -192,6 +211,7 @@ export async function probeKubectl(
       ingressClasses,
       serviceAccountIrsa,
       backendAgents,
+      containerNodes,
     },
     log,
   };

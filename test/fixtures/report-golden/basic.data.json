@@ -88,14 +88,18 @@
       ],
       "change": {
         "commentLines": [
-          "log10x-caps.csv — bytes a pattern may spend per 240s regulator window, keyed by container; log10x-actions.csv — the action a container's excess takes.",
-          "A tier_down cap is the largest pattern the container keeps, so the statements above exceed it and no other does."
+          "cartservice: any statement above 1,200 lines a day goes to Infrequent Access. Today that is this one statement, about $0.34 a month.",
+          "otelcol: any statement above 72,000 lines a day goes to Infrequent Access. Today that is this one statement, about $1.1 a month.",
+          "Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.",
+          "A limit is the largest statement the container keeps, so the statements above exceed it and no other does.",
+          "log10x-caps.csv: each container's limit in the engine's units, bytes per node, with its sentence as the reason; log10x-actions.csv: where a container's excess goes.",
+          "Limits are per node: cartservice: node count unknown, written for one Receiver; otelcol: node count unknown, written for one Receiver."
         ],
         "rows": [
-          "cartservice,333::MCP poc_from_local",
-          "otelcol,533333::MCP poc_from_local"
+          "cartservice,333::cartservice any statement above 1200 lines a day goes to Infrequent Access. Today that is this one statement about $0.34 a month.",
+          "otelcol,533333::otelcol any statement above 72000 lines a day goes to Infrequent Access. Today that is this one statement about $1.1 a month."
         ],
-        "engineGapNote": "the engine acts per container: every pattern over the cap in a routed container takes the action, at the share the severity floors leave"
+        "engineGapNote": "the engine applies each limit per container: every statement above it in a listed container takes the route, less the share its severity keeps"
       },
       "apply": {
         "commands": [

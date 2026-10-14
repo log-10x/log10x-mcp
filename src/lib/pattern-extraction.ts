@@ -980,6 +980,11 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
   return out;
 }
 
+/** The event time an envelope carries, read from the same fields the enrichment reads. */
+export function envelopeTimestampMs(obj: Record<string, unknown>): number | undefined {
+  return extractEnrichmentFromEnvelope(obj).timestampMs;
+}
+
 /** Return the majority value in a counting map, or undefined if empty. */
 function majority<K>(counts: Map<K, number>): K | undefined {
   if (counts.size === 0) return undefined;

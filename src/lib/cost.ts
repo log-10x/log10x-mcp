@@ -144,59 +144,90 @@ export interface TierDownTargetTier {
 /**
  * List prices for a cheaper tier billed per event. Datadog only today: its
  * log bill is a $0.10/GB ingest meter plus Standard indexing per million
- * events, and Flex Logs replaces the indexing line with Flex storage per
- * million events stored per month plus a compute add-on Datadog does not list.
+ * events, and Flex Logs replaces the indexing line with a Flex line priced by
+ * the tier the stored volume lands in: Starter, storage and compute at one
+ * rate, the size Datadog recommends below 10 billion events stored; above
+ * that, storage per million events
+ * stored per month plus a compute tier Datadog does not list.
  *
- * So a Flex move is stated as three lines and nothing else: the Standard
- * indexing line avoided, the Flex storage line added, and the compute line,
- * unpriced and excluded. No per-GB Flex rate, no fraction of the bill, no net
- * (claims charter: never a Datadog Flex percentage, bare or qualified).
+ * So a Flex move is stated as lines and nothing else: the Standard indexing
+ * line avoided, the Flex line added at its tier, and on a scalable tier the
+ * compute line, unpriced and excluded. No per-GB Flex rate, no fraction of the
+ * bill, no net (claims charter: never a Datadog Flex percentage, bare or
+ * qualified).
  */
 export interface PerEventTierPricing {
   /** The line the move takes off the bill, $ per million events. */
   standard_index_usd_per_million_events: number;
   /** The Standard retention that indexing price is quoted at, in days. */
   standard_index_retention_days: number;
-  /** The line the move adds, $ per million events stored per month. */
+  /** Storage on the scalable tiers, $ per million events stored per month. Compute is priced apart. */
   tier_storage_usd_per_million_events_month: number;
-  /** Months a moved event is held in the tier when the caller states none. ASSUMED. */
+  /** Shortest hold on the scalable tiers, in months, when the caller states none. */
   tier_retention_months: number;
+  /** The bundled entry tier, the size Datadog recommends below a stored volume. */
+  starter: PerEventStarterTier;
   /** Bytes per event when the caller has no event count. ASSUMED. */
   assumed_event_bytes: number;
-  /** The line no list price covers. Rendered with every figure. */
+  /** The line no list price covers on a scalable tier. Rendered with every scalable figure. */
   unpriced_line: string;
   /** Where every figure above comes from, with the date it was read. */
   source: string;
 }
 
+/** A per-event tier's bundled entry level: storage and compute at one rate, recommended below a stored volume. */
+export interface PerEventStarterTier {
+  name: string;
+  /** Storage and compute together, $ per million events stored per month. */
+  usd_per_million_events_month: number;
+  /** Shortest retention sold, in months. */
+  min_retention_months: number;
+  /** Events stored below which Datadog recommends this tier. */
+  recommended_below_events_stored: number;
+}
+
 /** One per-event tier move, as the plan states it. */
 export interface PerEventTierMove {
   tier: string;
+  /** The pricing tier the move's stored volume lands in. */
+  pricing_tier: 'starter' | 'scalable';
   events_moved: number;
   gb_moved: number;
   /** 'measured' when the caller supplied an event size, 'assumed' when not. */
   events_basis: 'measured' | 'assumed';
   /** The Standard indexing line the move avoids, at list, $/month. */
   standard_indexing_avoided_usd: number;
-  /** The tier storage line the move adds, at list, $/month. */
+  /**
+   * The Flex line the move adds at its tier, at list, $/month: Starter storage
+   * and compute together, or scalable storage alone.
+   */
   tier_storage_added_usd: number;
+  /** Months each moved event is held: the stated retention, never under the tier's minimum. */
   tier_retention_months: number;
-  /** The unpriced line, verbatim. Never a number. */
-  unpriced: string;
+  /** The retention the caller stated, when it stated one. */
+  stated_retention_months?: number;
+  /** How compute is billed at this tier, in words. Never a number. */
+  compute: string;
+  /** Scalable tiers only: the unpriced line, verbatim. Never a number. */
+  unpriced?: string;
   /** The move in words. Render verbatim. */
   text: string;
 }
 
 /**
- * Datadog Log Management list prices, from datadoghq.com/pricing
- * (product=log-management), read 2026-09-30: "$1.70 Per million log events,
- * per month" for Standard Indexing at 15-day retention, billed annually
- * ($2.55 on demand); Flex Storage "Starting At $0.05 Per million events
- * stored, per month"; Flex Compute sizes listed as "Contact Us". The same
- * figures were read on 2026-09-08. Flex on scalable compute keeps logs 30 to
- * 450 days (docs.datadoghq.com/logs/log_configuration/flex_logs/, read
- * 2026-09-30); the model holds a moved event for the shortest of those, 30
- * days, unless the caller states a retention.
+ * Datadog Log Management list prices, read 2026-10-13 from the price list
+ * (datadoghq.com/pricing/list/) and the Flex docs
+ * (docs.datadoghq.com/logs/log_configuration/flex_logs/). Standard Indexing at
+ * 15-day retention: "$1.70 Per 1M indexed logs (15-day retention), per month",
+ * billed annually ($2.55 on demand). Flex Logs Starter: "$0.60 Per 1 M events
+ * stored (6, 12 or 15 months retention), per month"; the Flex Logs docs, read
+ * 2026-10-14: "Flex Logs Starter is billed at a bundled storage+compute rate",
+ * "Datadog recommends the Starter compute size for organizations with less
+ * than 10B logs stored", retention 3, 6, 12 or 15 months. No Datadog page
+ * states a monthly limit for Starter. Flex Logs Storage on
+ * the scalable tiers (XS to L): "$0.05 Per 1 M events stored, per month", held
+ * "30-450 days", with "Scalable (XS, XS+, S, M, L) compute tiers ... billed at
+ * a flat rate" quoted on request.
  *
  * assumed_event_bytes is the event size PRICING.md's $2.50/GB derivation
  * rests on ("1 million events ≈ 1 GB"). It is used only where the caller has
@@ -207,10 +238,17 @@ export const DATADOG_FLEX_LIST_PRICING: PerEventTierPricing = {
   standard_index_retention_days: 15,
   tier_storage_usd_per_million_events_month: 0.05,
   tier_retention_months: 1,
+  starter: {
+    name: 'Flex Starter',
+    usd_per_million_events_month: 0.6,
+    // Flex docs sell Starter for 3, 6, 12 or 15 months, the price list 6, 12 or 15; 3 is the minimum, as the benchmark prices it.
+    min_retention_months: 3,
+    recommended_below_events_stored: 10e9,
+  },
   assumed_event_bytes: 1000,
   unpriced_line:
     'Flex compute is unpriced (Datadog quotes compute sizes on request) and is excluded from both figures',
-  source: 'Datadog list prices, datadoghq.com/pricing, read 2026-09-30',
+  source: 'Datadog list prices and Flex Logs docs, read 2026-10-13',
 };
 
 /**
@@ -617,8 +655,8 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // Datadog Flex Logs: the default tier_down route, because the moved
     // events stay searchable in Datadog (Log Explorer, "Include Flex Logs").
     // Flex is billed per event, so the move is priced from per_event and
-    // stated as the Standard indexing line avoided, the Flex storage line
-    // added, and Flex compute unpriced and excluded (projectPerEventTierMove).
+    // stated as the Standard indexing line avoided and the Flex line added at
+    // the tier the volume lands in (projectPerEventTierMove).
     // This tier used to carry $1.00/GB, which was $2.50 x 0.40: a modeled
     // 0.6 fraction of the bill, i.e. the Flex percentage the claims charter
     // bars. The per-GB rates below now equal the Standard ones, so any
@@ -1514,58 +1552,155 @@ function fmtRetention(months: number): string {
 }
 
 /**
- * Price one per-event tier move (Datadog Flex) at list: the events moved out
- * of the Standard index, the Standard indexing line that avoids, and the tier
- * storage line it adds. The compute line is unpriced and is named, never
- * counted. There is deliberately no net and no percentage here: with compute
- * unpriced, neither can be stated, and a reader who knows Flex pricing could
- * take either apart.
- *
- * Events come from the caller's measured event size when it supplies one, and
- * from the pricing's ASSUMED event size otherwise; the text says which.
+ * The pricing tier a per-event move lands in, and the months each event is
+ * held there. The tier follows the events stored: monthly events times the
+ * months held, against the entry tier's limits. A stated retention is used
+ * when it is at least the tier's minimum.
  */
-export function projectPerEventTierMove(
+export function perEventPricingTier(
   pricing: PerEventTierPricing,
-  bytes: number,
-  opts: { avgEventBytes?: number; retentionMonths?: number; tierName?: string } = {},
-): PerEventTierMove {
-  const measured = opts.avgEventBytes != null && opts.avgEventBytes > 0;
-  const eventBytes = measured ? opts.avgEventBytes! : pricing.assumed_event_bytes;
-  const events = bytes > 0 ? bytes / eventBytes : 0;
-  const months =
-    opts.retentionMonths != null && opts.retentionMonths > 0
-      ? opts.retentionMonths
-      : pricing.tier_retention_months;
-  const avoided = (events / 1e6) * pricing.standard_index_usd_per_million_events;
-  const added = (events / 1e6) * pricing.tier_storage_usd_per_million_events_month * months;
-  const tier = opts.tierName ?? 'Datadog Flex Logs';
-  const gb = bytes / GB;
+  eventsMonthly: number,
+  statedRetentionMonths?: number,
+): { pricing_tier: 'starter' | 'scalable'; months: number } {
+  const stated = statedRetentionMonths != null && statedRetentionMonths > 0 ? statedRetentionMonths : undefined;
+  const s = pricing.starter;
+  const starterMonths = Math.max(s.min_retention_months, stated ?? 0);
+  if (eventsMonthly * starterMonths < s.recommended_below_events_stored) {
+    return { pricing_tier: 'starter', months: starterMonths };
+  }
+  return { pricing_tier: 'scalable', months: Math.max(pricing.tier_retention_months, stated ?? 0) };
+}
+
+/** The Flex line of a pricing basis: the tier a plan landed in, or both tiers when none is known. */
+export function describePerEventTierRate(
+  pricing: PerEventTierPricing,
+  pricingTier?: 'starter' | 'scalable',
+): string {
+  const s = pricing.starter;
+  const starter =
+    `${s.name} added ${fmtListRate(s.usd_per_million_events_month)} per million events stored per month, compute included, ` +
+    `held at least ${fmtRetention(s.min_retention_months)}, the size Datadog recommends below ` +
+    `${fmtEventCount(s.recommended_below_events_stored)} events stored`;
+  const scalable =
+    `Flex storage added ${fmtListRate(pricing.tier_storage_usd_per_million_events_month)} per million events stored per month ` +
+    `on a scalable compute tier, Flex compute unpriced and excluded`;
+  if (pricingTier === 'starter') return starter;
+  if (pricingTier === 'scalable') return scalable;
+  return `${starter}; above that, ${scalable}`;
+}
+
+/** What a move is, before it is priced. */
+interface PerEventMoveFacts {
+  events: number;
+  bytes: number;
+  /** 'mixed' is a sum where some parts had no event count. */
+  basis: 'measured' | 'assumed' | 'mixed';
+  statedMonths?: number;
+  tierName: string;
+  /** Monthly events whose stored volume decides the tier. */
+  tierEvents: number;
+}
+
+function statePerEventTierMove(pricing: PerEventTierPricing, f: PerEventMoveFacts): PerEventTierMove {
+  const { pricing_tier, months } = perEventPricingTier(pricing, f.tierEvents, f.statedMonths);
+  const s = pricing.starter;
+  const starter = pricing_tier === 'starter';
+  const rate = starter ? s.usd_per_million_events_month : pricing.tier_storage_usd_per_million_events_month;
+  const avoided = (f.events / 1e6) * pricing.standard_index_usd_per_million_events;
+  const added = (f.events / 1e6) * rate * months;
+  const gb = f.bytes / GB;
+  const stored = `${fmtEventCount(s.recommended_below_events_stored)} events stored`;
+  const addedLine = starter
+    ? `${s.name} added: ${fmtListUsd(added)}/mo at ${fmtListRate(rate)} per million events stored per month, compute included, ` +
+      `held ${fmtRetention(months)} (the size Datadog recommends below ${stored}).`
+    : `Flex storage added: ${fmtListUsd(added)}/mo at ${fmtListRate(rate)} per million events stored per month, ` +
+      `held ${fmtRetention(months)}, on a scalable compute tier (above the ${stored} Datadog recommends ${s.name} below). ` +
+      `${pricing.unpriced_line}.`;
+  const partOf =
+    Math.abs(f.tierEvents - f.events) > 0.5
+      ? ` Priced at the tier of the ${fmtEventCount(f.tierEvents)} events a month moved in all.`
+      : '';
+  const assumed =
+    f.basis === 'assumed'
+      ? ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event, since this path has no event count.`
+      : f.basis === 'mixed'
+        ? ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event where the path had no event count.`
+        : '';
   const text =
-    `Moves ${fmtEventCount(events)} events (${Number(gb.toFixed(1))} GB) a month out of the Standard index into ${tier}. ` +
+    `Moves ${fmtEventCount(f.events)} events (${Number(gb.toFixed(1))} GB) a month out of the Standard index into ${f.tierName}. ` +
     `Standard indexing avoided: ${fmtListUsd(avoided)}/mo at ${fmtListRate(pricing.standard_index_usd_per_million_events)} per million events ` +
     `(${pricing.standard_index_retention_days}-day retention). ` +
-    `Flex storage added: ${fmtListUsd(added)}/mo at ${fmtListRate(pricing.tier_storage_usd_per_million_events_month)} per million events stored per month, ` +
-    `held ${fmtRetention(months)}. ` +
-    `${pricing.unpriced_line}. ${pricing.source}.` +
-    (measured
-      ? ''
-      : ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event, since this path has no event count.`);
+    addedLine +
+    partOf +
+    ` ${pricing.source}.` +
+    assumed;
   return {
-    tier,
-    events_moved: events,
+    tier: f.tierName,
+    pricing_tier,
+    events_moved: f.events,
     gb_moved: gb,
-    events_basis: measured ? 'measured' : 'assumed',
+    events_basis: f.basis === 'measured' ? 'measured' : 'assumed',
     standard_indexing_avoided_usd: avoided,
     tier_storage_added_usd: added,
     tier_retention_months: months,
-    unpriced: pricing.unpriced_line,
+    ...(f.statedMonths != null ? { stated_retention_months: f.statedMonths } : {}),
+    compute: starter ? `${s.name} compute is included in its rate` : pricing.unpriced_line,
+    ...(starter ? {} : { unpriced: pricing.unpriced_line }),
     text,
   };
 }
 
 /**
- * Sum per-event moves into one, for a plan-level statement. The text is
- * rebuilt from the summed figures, so it reads the same as a single move.
+ * Price one per-event tier move (Datadog Flex) at list: the events moved out
+ * of the Standard index, the Standard indexing line that avoids, and the Flex
+ * line it adds at the tier its stored volume lands in. On a scalable tier the
+ * compute line is unpriced and is named, never counted. There is deliberately
+ * no net and no percentage here: a reader who knows Flex pricing could take
+ * either apart.
+ *
+ * Events come from the caller's measured event size when it supplies one, and
+ * from the pricing's ASSUMED event size otherwise; the text says which.
+ * tierEventsMonthly prices a move that is one part of a larger one at the
+ * larger one's tier.
+ */
+export function projectPerEventTierMove(
+  pricing: PerEventTierPricing,
+  bytes: number,
+  opts: { avgEventBytes?: number; retentionMonths?: number; tierName?: string; tierEventsMonthly?: number } = {},
+): PerEventTierMove {
+  const measured = opts.avgEventBytes != null && opts.avgEventBytes > 0;
+  const eventBytes = measured ? opts.avgEventBytes! : pricing.assumed_event_bytes;
+  const events = bytes > 0 ? bytes / eventBytes : 0;
+  return statePerEventTierMove(pricing, {
+    events,
+    bytes,
+    basis: measured ? 'measured' : 'assumed',
+    statedMonths: opts.retentionMonths != null && opts.retentionMonths > 0 ? opts.retentionMonths : undefined,
+    tierName: opts.tierName ?? 'Datadog Flex Logs',
+    tierEvents: opts.tierEventsMonthly ?? events,
+  });
+}
+
+/** One part of a larger move, re-priced at the tier the larger move's monthly events land in. */
+export function retierPerEventTierMove(
+  pricing: PerEventTierPricing,
+  move: PerEventTierMove,
+  tierEventsMonthly: number,
+): PerEventTierMove {
+  return statePerEventTierMove(pricing, {
+    events: move.events_moved,
+    bytes: move.gb_moved * GB,
+    basis: move.events_basis,
+    statedMonths: move.stated_retention_months,
+    tierName: move.tier,
+    tierEvents: tierEventsMonthly,
+  });
+}
+
+/**
+ * Sum per-event moves into one, for a plan-level statement, priced at the tier
+ * the summed volume lands in. The text is rebuilt from the summed figures, so
+ * it reads the same as a single move.
  */
 export function sumPerEventTierMoves(
   pricing: PerEventTierPricing,
@@ -1573,24 +1708,23 @@ export function sumPerEventTierMoves(
 ): PerEventTierMove | undefined {
   if (moves.length === 0) return undefined;
   const events = moves.reduce((s, m) => s + m.events_moved, 0);
-  const bytes = moves.reduce((s, m) => s + m.gb_moved, 0) * GB;
-  const allMeasured = moves.every((m) => m.events_basis === 'measured');
-  const months = moves[0].tier_retention_months;
-  // Re-derive through the one function so the wording cannot drift. The
-  // average event size reproduces the summed event count exactly.
-  const merged = projectPerEventTierMove(pricing, bytes, {
-    avgEventBytes: events > 0 ? bytes / events : undefined,
-    retentionMonths: months,
+  return statePerEventTierMove(pricing, {
+    events,
+    bytes: moves.reduce((s, m) => s + m.gb_moved, 0) * GB,
+    basis: moves.every((m) => m.events_basis === 'measured') ? 'measured' : 'mixed',
+    statedMonths: moves[0].stated_retention_months,
     tierName: moves[0].tier,
+    tierEvents: events,
   });
-  if (allMeasured) return merged;
-  return {
-    ...merged,
-    events_basis: 'assumed',
-    text:
-      merged.text +
-      ` Event count ASSUMED at ${pricing.assumed_event_bytes.toLocaleString('en-US')} bytes per event where the path had no event count.`,
-  };
+}
+
+/** Every move re-priced at the tier their sum lands in, so the parts add up to the whole. */
+export function retierPerEventTierMoves(
+  pricing: PerEventTierPricing,
+  moves: PerEventTierMove[],
+): PerEventTierMove[] {
+  const events = moves.reduce((s, m) => s + m.events_moved, 0);
+  return moves.map((m) => retierPerEventTierMove(pricing, m, events));
 }
 
 function projectActionWithRatio(
@@ -1767,10 +1901,10 @@ function projectActionWithRatio(
 
   // Per-event tier (Datadog Flex): the per-GB axes above priced the events at
   // the Standard rate (the tier's per-GB rates equal the Standard ones by
-  // construction). Take the Standard indexing line off and put the Flex
-  // storage line on, both at list, so baseline minus total is exactly
-  // "indexing avoided less storage added". Compute stays out, unpriced, and
-  // the move's text says so.
+  // construction). Take the Standard indexing line off and put the Flex line
+  // on at its tier, both at list, so baseline minus total is exactly
+  // "indexing avoided less Flex added". Scalable compute stays out, unpriced,
+  // and the move's text says so.
   let per_event_move: PerEventTierMove | undefined;
   if (isTierDown && tierTarget?.per_event) {
     per_event_move = projectPerEventTierMove(tierTarget.per_event, args.bytes_in, {

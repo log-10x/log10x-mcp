@@ -35,6 +35,7 @@ import {
   getDestinationCostModel,
   compactsInPlace,
   describeCompactFigure,
+  describePerEventTierRate,
   fmtListRate,
   perEventTierPricing,
   projectAction,
@@ -187,9 +188,9 @@ export interface PlannedRow {
   savedBytes?: number;
   /**
    * Per-event tier rows only (tier_down to Datadog Flex): the line the move
-   * ADDS, Flex storage at list, $/mo. On these rows savedUsd is the Standard
-   * indexing line avoided at list, so neither number is a net, and the
-   * unpriced compute line is named in perEventMove.text.
+   * ADDS at the tier the plan's Flex volume lands in, at list, $/mo. On these
+   * rows savedUsd is the Standard indexing line avoided at list, so neither
+   * number is a net; perEventMove.text names the tier and how compute is billed.
    */
   addedUsd?: number;
   /** Per-event tier rows only: the move as stated lines. Render its text. */
@@ -227,7 +228,7 @@ export interface Plan {
    *  totalAddedUsd where present), so the arithmetic on a rendered plan
    *  closes visibly. */
   totalSavedUsd: number;
-  /** Per-event tier plans only: the Flex storage lines the plan adds, at list. */
+  /** Per-event tier plans only: the Flex lines the plan adds at its tier, at list. */
   totalAddedUsd?: number;
   /**
    * Per-event tier plans only (Datadog Flex): every tier_down row's move,
@@ -271,7 +272,7 @@ export interface Plan {
   /** usd_budget / percent targets: the bill after the plan, in $/mo. Absent
    *  on a percent plan over a per-event tier (Datadog Flex): a before and
    *  after pair there IS a bill percentage, and none can be stated. On a
-   *  Datadog dollar budget it counts priced lines only, Flex compute excluded. */
+   *  Datadog dollar budget it counts priced lines only, scalable Flex compute excluded. */
   landsAtUsd?: number;
   /** gb_budget targets: monthly bytes toward the destination after the plan. */
   landsAtBytesMonthly?: number;
@@ -467,11 +468,11 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
 
   // Resolve the ask into ONE denomination and one target amount.
   const target: PlanTarget = opts.target ?? { kind: 'percent', value: opts.targetPct ?? 0 };
-  // Datadog Flex is billed per event and its compute add-on is unpriced, so no
-  // share of the Datadog bill can be stated for a plan that uses it. There a
-  // percent target counts the volume moved out of the Standard index (to
-  // Flex, to the customer's S3, or away), and a dollar budget counts Flex at
-  // its priced lines only: Standard indexing avoided less Flex storage added.
+  // Datadog Flex is billed per event, so no share of the Datadog bill is
+  // stated for a plan that uses it. There a percent target counts the volume
+  // moved out of the Standard index (to Flex, to the customer's S3, or away),
+  // and a dollar budget counts Flex at its priced lines only: Standard
+  // indexing avoided less the Flex line added at the plan's tier.
   const perEvent = perEventTierPricing(opts.destination);
   const percentBasis: Plan['percentBasis'] = perEvent ? 'standard_index_volume' : 'bill';
   const denom: 'usd' | 'bytes' | 'index_volume' =
@@ -479,8 +480,24 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     : perEvent && target.kind === 'percent' ? 'index_volume'
     : 'usd';
   const poolTotal = denom === 'usd' ? billUsd : bytesIn;
-  const flexMoveOf = (bytes: number, avg: number | undefined): PerEventTierMove | undefined =>
-    perEvent ? projectPerEventTierMove(perEvent, bytes, avg ? { avgEventBytes: avg } : {}) : undefined;
+  // The Flex tier follows the whole plan's volume, so every row is priced at
+  // the tier of all the events the plan moves (tierEvents).
+  const flexMoveOf = (bytes: number, avg: number | undefined, tierEvents?: number): PerEventTierMove | undefined =>
+    perEvent
+      ? projectPerEventTierMove(perEvent, bytes, {
+          ...(avg ? { avgEventBytes: avg } : {}),
+          ...(tierEvents != null ? { tierEventsMonthly: tierEvents } : {}),
+        })
+      : undefined;
+  const flexEventsOf = (moved: Map<string, number>): number => {
+    if (!perEvent) return 0;
+    let n = 0;
+    for (const [h, bytes] of moved) {
+      const avg = rows.find((x) => x.p.hash === h)?.p.avgEventBytes;
+      n += bytes / (avg && avg > 0 ? avg : perEvent.assumed_event_bytes);
+    }
+    return n;
+  };
   const targetAmount =
     target.kind === 'percent' ? (target.value / 100) * poolTotal
     : target.kind === 'usd_budget' ? Math.max(0, billUsd - target.value)
@@ -488,7 +505,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const derivedPct = poolTotal > 0 ? (targetAmount * 100) / poolTotal : 0;
   /** The denomination's gain function: dollars off the bill, bytes off the
    *  wire, or bytes out of the Standard index. */
-  const gain = (action: Action, bytes: number, avg: number | undefined): number => {
+  const gain = (action: Action, bytes: number, avg: number | undefined, tierEvents?: number): number => {
     if (denom === 'index_volume') {
       // tier_down keeps every byte in Datadog but takes all of it out of the
       // Standard index; the other levers take what they take off the wire.
@@ -498,7 +515,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     if (action === 'tier_down' && perEvent) {
       // Priced lines at list, never scaled to a customer blend: the blend is
       // per GB and these lines are per event.
-      const m = flexMoveOf(bytes, avg)!;
+      const m = flexMoveOf(bytes, avg, tierEvents)!;
       return m.standard_indexing_avoided_usd - m.tier_storage_added_usd;
     }
     return saveUsd(action, bytes, opts.destination, avg) * dollarScale;
@@ -544,6 +561,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     return { moved, caps };
   };
   const tierDownMoved = new Map<string, number>();
+  /** Events a month the final plan moves to the per-event tier; set once selection ends. */
+  let planFlexEvents = 0;
 
   const allowed = new Set(getAvailableActions(opts.destination, { selfManaged: opts.selfManaged }));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
@@ -565,9 +584,10 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const ceilingMoved = deepest === 'tier_down' ? tierDownMoves(new Set(nonError.map((r) => r.p.hash))).moved : undefined;
   const ceilingBytesOf = (r: (typeof rows)[number]): number =>
     ceilingMoved ? (ceilingMoved.get(r.p.hash) ?? 0) : r.scopedBytes;
+  const ceilingFlexEvents = ceilingMoved ? flexEventsOf(ceilingMoved) : undefined;
   const ceilingAmount = deepest
     ? nonError.reduce(
-        (s, r) => s + gain(deepest, ceilingBytesOf(r), r.p.avgEventBytes),
+        (s, r) => s + gain(deepest, ceilingBytesOf(r), r.p.avgEventBytes, ceilingFlexEvents),
         0,
       )
     : 0;
@@ -593,7 +613,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     // row states its two priced lines separately: savedUsd is the Standard
     // indexing line avoided and addedUsd the Flex storage line added.
     const movedBytes = action === 'tier_down' ? (tierDownMoved.get(r.p.hash) ?? 0) : undefined;
-    const move = action === 'tier_down' ? flexMoveOf(movedBytes ?? 0, r.p.avgEventBytes) : undefined;
+    const move = action === 'tier_down' ? flexMoveOf(movedBytes ?? 0, r.p.avgEventBytes, planFlexEvents) : undefined;
     const savedUsd =
       action === 'pass' ? 0
       : move ? move.standard_indexing_avoided_usd
@@ -630,14 +650,22 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       if (savedAmount >= targetAmount) break;
       chosen.set(r.p.hash, { action: 'tier_down', saved: 0 });
       const { moved } = tierDownMoves(new Set(chosen.keys()));
+      const tierEvents = flexEventsOf(moved);
       savedAmount = 0;
       for (const [h, bytes] of moved) {
         const src = rows.find((x) => x.p.hash === h)!;
-        const saved = gain('tier_down', bytes, src.p.avgEventBytes);
+        const saved = gain('tier_down', bytes, src.p.avgEventBytes, tierEvents);
         chosen.set(h, { action: 'tier_down', saved });
         tierDownMoved.set(h, bytes);
         savedAmount += saved;
       }
+    }
+    // Toward a dollar budget, Flex at a tier that adds more than the Standard
+    // indexing it avoids is no lever: plan none of it.
+    if (denom === 'usd' && perEvent && savedAmount <= 0) {
+      chosen.clear();
+      tierDownMoved.clear();
+      savedAmount = 0;
     }
     // A pattern whose excess moves nothing, under its container's cap or the
     // share guard, is not planned. Taking it out leaves the other caps as
@@ -718,6 +746,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     }
   }
 
+  planFlexEvents = flexEventsOf(
+    new Map([...tierDownMoved].filter(([h]) => chosen.get(h)?.action === 'tier_down')),
+  );
   const planned: PlannedRow[] = [];
   const kept: PlannedRow[] = [];
   for (const r of ranked) {
@@ -793,7 +824,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
         : target.kind === 'usd_budget'
           ? `Keeping everything, this destination gets the bill to ${fmtUsd(landsAtUsd)}/mo against the ` +
             `${fmtUsd(target.value)}/mo budget, ${fmtUsd(Math.max(0, landsAtUsd - target.value))}/mo over` +
-            (perEventMove ? ', counting priced lines only (Flex compute is unpriced and excluded).' : '.')
+            (perEventMove?.unpriced ? ', counting priced lines only (Flex compute is unpriced and excluded).' : '.')
           : `Keeping everything, this destination gets ingest to ${fmtGb(landsAtBytesMonthly ?? bytesIn)}/mo against the ` +
             `${fmtGb(target.value * 1_000_000_000)}/mo budget, ` +
             `${fmtGb(Math.max(0, (landsAtBytesMonthly ?? bytesIn) - target.value * 1_000_000_000))}/mo over.` +
@@ -820,8 +851,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     structureParts.push(
       `${model.tier_down_target_tier!.name} priced per event at list: Standard indexing avoided ` +
         `${fmtListRate(perEvent.standard_index_usd_per_million_events)} per million events (${perEvent.standard_index_retention_days}-day retention), ` +
-        `Flex storage added ${fmtListRate(perEvent.tier_storage_usd_per_million_events_month)} per million events stored per month, ` +
-        `Flex compute unpriced and excluded (${perEvent.source})`,
+        `${describePerEventTierRate(perEvent, perEventMove?.pricing_tier)} (${perEvent.source})`,
     );
   } else if (lever === 'tier_down' && model.tier_down_target_tier) {
     structureParts.push(

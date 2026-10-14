@@ -21,6 +21,7 @@
  * trusting the savings projection.
  */
 
+import { resolveEnforcingInstances } from '../lib/enforcing-instances.js';
 import { promises as fs } from 'fs';
 import * as nodePath from 'path';
 
@@ -32,7 +33,7 @@ import {
   type LocalSourceOptions,
   type LocalSourceResult,
 } from '../lib/local-source.js';
-import { sampleFromFile } from '../lib/local-file-source.js';
+import { sampleFromFile, resolveFileSpan, describeFileSpan, FileSpanRefusal, type FileSpan } from '../lib/local-file-source.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
@@ -129,11 +130,11 @@ export const pocFromLocalSchema = {
   window: z
     .string()
     .optional()
-    .default('1h')
     .describe(
-      'How far back to read per pod (`source: kubectl`). For `source: file` this is the time span you ' +
-        'declare the sampled file tails to cover — it drives the daily projection, so set it if you know it. ' +
-        'Accepts `1h`, `24h`, etc. Default `1h`.'
+      'How far back to read per pod (`source: kubectl`, default `1h`). For `source: file`, the time span ' +
+        'the files cover: read from the first and last record timestamps when the records carry them, and ' +
+        'from `window` when they do not. With neither, a file run refuses rather than assume a span. ' +
+        'Accepts `30m`, `10h`, `7d`, etc.'
     ),
   per_pod_limit: z
     .number()
@@ -182,7 +183,7 @@ export const pocFromLocalSchema = {
     .optional()
     .describe(
       'DOLLAR BUDGET: keep the projected monthly bill on the assumed SIEM at or under this $/mo. The ' +
-        'sample is scaled to a 30-day month (kubectl window, or file timestamp span) before solving, so ' +
+        'sample is scaled to a 30-day month (kubectl window, or the file span) before solving, so ' +
         'the budget and the bill share a denominator. Mutually exclusive with target_percent_reduction ' +
         'and budget_gb_monthly.'
     ),
@@ -293,6 +294,20 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     inner = await executePocFromLocalInner(args);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof FileSpanRefusal) {
+      const err: PrimitiveError = { error_type: 'missing_input', retryable: false, suggested_backoff_ms: null, hint: msg };
+      const human_summary = `poc_from_local refused: ${msg}`;
+      return buildEnvelope({
+        tool: 'log10x_poc_from_local',
+        view: 'summary',
+        summary: { headline: 'POC from files refused: the files carry no time span' },
+        data: {
+          events_pulled: 0,
+          ...buildUnifiedFields({ status: 'error', telemetry, humanSummary: human_summary, error: err }),
+          human_summary,
+        },
+      });
+    }
     // A kubectl/cluster failure on a host that has no cluster is NOT a
     // transient backend outage — retrying cannot fix an estate that is not
     // Kubernetes. Classify it as environment misconfiguration and say what
@@ -342,8 +357,8 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
             : (pl.met
               ? `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo (projected today: ${fmtBudgetUsd(pl.billUsd)}/mo), keeping everything. ${sampledNote}`
               : `Budget: keep the ${pl.destination} bill under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${fmtBudgetUsd(pl.landsAtUsd ?? pl.billUsd)}/mo. ${pl.gap ? pl.gap.message : ''}`) +
-              // Datadog Flex: the landing counts priced lines only; say which.
-              (pl.perEventMove ? ` Counts priced lines only. ${pl.perEventMove.text}` : ''))
+              // Datadog Flex: on a scalable tier the landing counts priced lines only; say so.
+              (pl.perEventMove ? `${pl.perEventMove.unpriced ? ' Counts priced lines only.' : ''} ${pl.perEventMove.text}` : ''))
         : pl.target.kind === 'gb_budget'
           ? (pl.met && pl.planned.length === 0
               ? `Budget: keep ingest toward ${pl.destination} under ${fmtBytes(pl.target.value * 1_000_000_000)}/mo. Already under: projected ingest is ${fmtBytes(pl.landsAtBytesMonthly ?? 0)}/mo. No action needed. ${sampledNote}`
@@ -446,13 +461,26 @@ interface PocFromLocalInner {
     caps_csv: string;
     actions_csv: string;
     span_seconds: number;
+    /** Where `span_seconds` came from. */
+    span_source: 'timestamps' | 'window' | 'budget_month';
     reset_window_seconds: number;
     unattributed_planned: number;
+  };
+  /** `source: file` only: the span the files cover and where it came from. */
+  span?: {
+    seconds: number;
+    source: 'timestamps' | 'window';
+    statement: string;
+    first_timestamp?: string;
+    last_timestamp?: string;
+    records_with_timestamp: number;
+    records_sampled: number;
   };
   /** Honest note when report generation was skipped or degraded. */
   report_note?: string;
   /** `-` for source: file (no namespace concept). */
   namespace: string;
+  /** The kubectl pull window; for a file, the `window` argument as passed, or `-`. */
   window: string;
   pods_sampled: number;
   pods_failed: number;
@@ -527,6 +555,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         maxFiles: args.max_pods ?? 20,
       });
       extractionInput = sample.events;
+      if (sample.rawBytes && sample.sampledRawBytes) sampleScale = sample.rawBytes / sample.sampledRawBytes;
     } else {
       throw new Error(
         'source "file" requires `path` (one file, wrapper-normalized) or `paths` (files, directories, globs).'
@@ -539,6 +568,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
 
   const srcNoun = source === 'file' ? 'file' : 'pod';
   const namespaceOut = source === 'file' ? '-' : opts.namespace!;
+  const windowOut = source === 'file' ? (args.window ?? '-') : opts.window!;
 
   if (sample.events.length === 0) {
     const lines: string[] = [`## Log10x POC — local source (${source})`, ''];
@@ -560,7 +590,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       ok: false,
       source,
       namespace: namespaceOut,
-      window: opts.window!,
+      window: windowOut,
       pods_sampled: 0,
       pods_failed: sample.failedSources.length,
       events_pulled: 0,
@@ -573,10 +603,16 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     };
   }
 
+  // Resolved before the engine runs, so a file with no span refuses at once.
+  const fileSpan: FileSpan | undefined = source === 'file' ? resolveFileSpan(extractionInput, args.window) : undefined;
+  const fileSpanStatement = fileSpan ? describeFileSpan(fileSpan, 1 / sampleScale) : undefined;
+
   const extraction = await extractPatterns(extractionInput, lineRawBytes ? { lineRawBytes } : {});
 
+  // Hours the sampled bytes stand for: a file's span shrinks by the share of
+  // its bytes the sample holds.
+  const windowHours = fileSpan ? fileSpan.seconds / 3600 / sampleScale : parseWindowHours(opts.window!);
   // Project the sampled-window bytes to a daily figure.
-  const windowHours = parseWindowHours(opts.window!);
   const sampleGb = sample.totalBytes / 1024 ** 3;
   const dailyGbProjected = sampleGb * (24 / Math.max(0.001, windowHours));
 
@@ -596,7 +632,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('');
   lines.push(
     source === 'file'
-      ? `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} file${sample.composition.length === 1 ? '' : 's'} (tail-sampled; the \`window\` parameter does not apply to files)._`
+      ? `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} file${sample.composition.length === 1 ? '' : 's'}. ${fileSpanStatement}_`
       : `_Pulled ${fmtCount(sample.events.length)} log lines (${fmtBytes(sample.totalBytes)}) across ${sample.composition.length} pod${sample.composition.length === 1 ? '' : 's'} in namespace \`${opts.namespace}\` over the last ${opts.window}._`
   );
   lines.push('');
@@ -637,9 +673,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     `**Projected daily ingest** (extrapolated from sample): ${fmtBytes(dailyGbProjected * 1024 ** 3)}.`
   );
   lines.push('');
-  if (source === 'file') {
+  if (fileSpan) {
     lines.push(
-      `_File tails carry no time span of their own; the daily projection assumes the sampled bytes cover \`${opts.window}\` (the \`window\` argument). Pass the window the files actually span to make this projection honest._`
+      `_The daily projection spreads the files' bytes over their span, read from ${fileSpan.source === 'timestamps' ? 'the record timestamps' : 'the `window` argument'}._`
     );
     lines.push('');
   }
@@ -746,15 +782,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     // A percent target is scale-invariant, so the sample solves as-is. A
     // BUDGET is $/mo or GB/mo — the sample must be projected onto a 30-day
     // month first or the comparison is meaningless. kubectl: the pull window;
-    // file: the event-timestamp span (1h floor, same rule the report uses).
-    let sampleWindowHours = source === 'file' ? 0 : windowHours;
-    if (source === 'file') {
-      const fs = patterns.map((p) => p.firstSeenMs).filter((x): x is number => x !== undefined);
-      const ls = patterns.map((p) => p.lastSeenMs).filter((x): x is number => x !== undefined);
-      if (fs.length > 0 && ls.length > 0) {
-        sampleWindowHours = Math.max(1 / 60, (Math.max(...ls) - Math.min(...fs)) / 3_600_000);
-      }
-    }
+    // file: the files' span, over bytes scaled to the whole files.
+    let sampleWindowHours = fileSpan ? fileSpan.seconds / 3600 : windowHours;
     if (sampleWindowHours <= 0) sampleWindowHours = 1;
     const monthScale = budgetCount > 0 ? (24 * 30) / sampleWindowHours : 1;
     planSpanSeconds = Math.round((budgetCount > 0 ? 24 * 30 : sampleWindowHours) * 3600);
@@ -845,7 +874,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     artLines.push(`## Projected commitment — local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
     artLines.push('');
     if (feasibility.budget_usd_monthly !== undefined && volumeBasis) {
-      artLines.push(`- **Budget**: $${feasibility.budget_usd_monthly}/mo (priced lines only; Flex compute is unpriced and excluded)`);
+      artLines.push(
+        `- **Budget**: $${feasibility.budget_usd_monthly}/mo (priced lines only${plan.perEventMove?.unpriced ? '; Flex compute is unpriced and excluded' : ''})`,
+      );
     } else if (feasibility.budget_usd_monthly !== undefined) {
       artLines.push(`- **Budget**: $${feasibility.budget_usd_monthly}/mo (derived reduction ${feasibility.target_percent_reduction}%)`);
     } else if (feasibility.budget_gb_monthly !== undefined) {
@@ -858,6 +889,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     );
     if (plan.perEventMove) artLines.push(`- **Datadog Flex**: ${plan.perEventMove.text}`);
     artLines.push(`- **Sample bytes analyzed**: ${fmtBytes(sample.totalBytes)}`);
+    if (fileSpanStatement) artLines.push(`- **Span**: ${fileSpanStatement.replace(/^Span: /, '')}`);
     artLines.push('');
     if (exceptions.length > 0) {
       artLines.push(`### Exception ${srcNoun}s (stay in log analyzer, full retention)`);
@@ -936,10 +968,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     const siem: SiemId = args.siem ?? 'cloudwatch';
     const siemAssumed = args.siem === undefined;
     const finishedAtIso = new Date().toISOString();
-    // File mode has no pull window; derive the analysed span from
-    // event timestamps when the wrapper carried them, else fall back
-    // to one hour with the fallback visible in the window label math.
-    let windowHoursForReport = source === 'file' ? 0 : windowHours;
+    // The report's figures are on the sampled bytes, so its window is the
+    // span those bytes stand for.
+    let windowHoursForReport = windowHours;
     let windowStartMs: number | undefined;
     let windowEndMs: number | undefined;
     const firstSeen = patterns.map((p) => p.firstSeenMs).filter((x): x is number => x !== undefined);
@@ -947,9 +978,6 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     if (firstSeen.length > 0 && lastSeen.length > 0) {
       windowStartMs = Math.min(...firstSeen);
       windowEndMs = Math.max(...lastSeen);
-      if (source === 'file') {
-        windowHoursForReport = Math.max(1 / 60, (windowEndMs - windowStartMs) / 3_600_000);
-      }
     }
     if (windowHoursForReport <= 0) windowHoursForReport = 1;
 
@@ -987,6 +1015,10 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         generatedAtIso: finishedAtIso,
         mcpVersion: MCP_VERSION,
         ...(plan && planSpanSeconds ? { plan, planSpanSeconds } : {}),
+        enforcingInstances: resolveEnforcingInstances(
+          [...new Set([...Object.keys(plan?.containerCaps ?? {}), ...Object.keys(sample.containerNodes ?? {})])],
+          { fromPods: sample.containerNodes },
+        ),
       },
     );
     const html = renderReportHtml(built.data);
@@ -1005,6 +1037,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         caps_csv: built.capsCsv,
         actions_csv: built.actionsCsv,
         span_seconds: planSpanSeconds ?? Math.round(windowHoursForReport * 3600),
+        span_source: plan && budgetCount > 0 ? 'budget_month' : (fileSpan?.source ?? 'window'),
         reset_window_seconds: 240,
         unattributed_planned: built.unattributedPlanned,
       };
@@ -1029,7 +1062,19 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     engine_policy,
     report_note,
     namespace: namespaceOut,
-    window: opts.window!,
+    window: windowOut,
+    ...(fileSpan && fileSpanStatement
+      ? {
+          span: {
+            seconds: fileSpan.seconds,
+            source: fileSpan.source,
+            statement: fileSpanStatement,
+            ...(fileSpan.firstIso ? { first_timestamp: fileSpan.firstIso, last_timestamp: fileSpan.lastIso } : {}),
+            records_with_timestamp: fileSpan.recordsWithTimestamp,
+            records_sampled: fileSpan.records,
+          },
+        }
+      : {}),
     pods_sampled: sample.composition.length,
     pods_failed: sample.failedSources.length,
     events_pulled: totalEvents,

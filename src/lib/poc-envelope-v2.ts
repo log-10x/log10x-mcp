@@ -20,9 +20,10 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
-import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
+import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
 import { scaleObservedToReceiverWindow } from './window-scaling.js';
+import { csvReason, serviceLimitSentence, serviceLimitsFromPatterns } from './report/user-units.js';
 import { isProtectedSeverity } from './severity-policy.js';
 
 /**
@@ -357,10 +358,11 @@ export interface PatternActions {
    * tier_down the destination's list-price delta, sample=0.9, pass=0).
    * Real dollars, rounded to cents. On a Datadog Flex row it is the Standard
    * indexing line the move avoids at list, and flex_storage_added_usd_per_month
-   * is the line it adds; neither is a net, since Flex compute is unpriced.
+   * is the Flex line it adds at the tier the envelope's Flex volume lands in;
+   * neither is a net.
    */
   expected_savings_usd_per_month: number;
-  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  /** Datadog Flex rows only: the Flex line the move adds at its tier, at list, $/mo. */
   flex_storage_added_usd_per_month?: number;
   /** Datadog Flex rows only: the move as stated lines. Render its text. */
   per_event_move?: PerEventTierMove;
@@ -610,6 +612,17 @@ export function buildPocEnvelopeV2(
     };
   }
 
+  // ── Datadog Flex: the tier follows the envelope's whole Flex volume ──
+  const flexTierPricing = perEventTierPricing(siem);
+  if (flexTierPricing) {
+    const flexOutputs = patternOutputs.filter((p) => p.actions.per_event_move);
+    const flexEvents = flexOutputs.reduce((s, p) => s + p.actions.per_event_move!.events_moved, 0);
+    for (const p of flexOutputs) {
+      const m = retierPerEventTierMove(flexTierPricing, p.actions.per_event_move!, flexEvents);
+      p.actions = { ...p.actions, per_event_move: m, flex_storage_added_usd_per_month: dollars(m.tier_storage_added_usd) };
+    }
+  }
+
   // ── Per-service consequence rollup ──
   // Computed off the post-pin patternOutputs so it reflects the actual
   // committed action surface, not the destination defaults.
@@ -648,8 +661,9 @@ export function buildPocEnvelopeV2(
     // cap_csv + actions_csv are composed from the per-pattern actions the
     // renderer emitted above. configure_engine(from_poc_id=…) reads these
     // fields verbatim instead of re-deriving the policy.
-    capCsv = buildCapCsv(patternOutputs, siem, exceptionSet, windowDurationSeconds);
-    actionsCsv = buildActionsCsv(patternOutputs, siem, exceptionSet);
+    const reasons = pocServiceReasons(patternOutputs, siem, exceptionSet, windowDurationSeconds);
+    capCsv = buildCapCsv(patternOutputs, siem, exceptionSet, windowDurationSeconds, reasons);
+    actionsCsv = buildActionsCsv(patternOutputs, siem, exceptionSet, reasons);
   }
 
   return {
@@ -1002,10 +1016,10 @@ function describeDestination(siem: SiemId, action: CostAction): DestinationDescr
   switch (action) {
     case 'tier_down': {
       if (siem === 'datadog') {
-        // Mechanism only. No Flex percentage, bare or qualified: the compute
-        // add-on is unpriced, so the net saving cannot be stated.
+        // Mechanism only. No Flex percentage, bare or qualified, and no claim
+        // of cheaper: at Flex Starter a moved event can cost more than 15-day indexing.
         return {
-          text: 'Datadog Flex Logs (in-place query in Log Explorer, a cheaper tier than Standard indexing)',
+          text: 'Datadog Flex Logs (in-place query in Log Explorer, billed per event stored instead of per event indexed)',
           recoverable: true, recoverVia: null,
         };
       }
@@ -1499,7 +1513,7 @@ function buildActions(
 
   // 2) Project savings from the action coefficient (matches feasibility).
   // Datadog Flex is priced per event at list instead: the Standard indexing
-  // line avoided, with the Flex storage line it adds stated beside it.
+  // line avoided, with the Flex line it adds at its tier stated beside it.
   const monthlyBytes = (p as unknown as { bytes: number }).bytes * (24 * 30) / Math.max(0.001, _windowDurationSeconds / 3600);
   const flexPricing = action === 'tier_down' ? perEventTierPricing(siem) : undefined;
   const flexMove = flexPricing
@@ -1576,11 +1590,45 @@ function capBytesPerWindow(action: CostAction, monthlyBytes: number, sampleN: nu
  * sibling actions.csv (buildActionsCsv) — the engine never reads an
  * action from this file.
  */
+/**
+ * Each service's row reason: its sentence in user units (the limit in lines
+ * a day, what it moves today in statements and dollars a month), so the
+ * files explain themselves in the repo.
+ */
+function pocServiceReasons(
+  patterns: PatternOutput[],
+  siem: SiemId,
+  exceptionSet: Set<string>,
+  windowDurationSeconds: number,
+): Map<string, string> {
+  const level1: CostAction = getDefaultActionForDestination(siem, 1);
+  const rows = patterns
+    .filter((p) => (p.service ?? '').length > 0)
+    .map((p) => ({
+      service: (p.service ?? '').toLowerCase(),
+      bytes: p.metrics.bytes_in_window,
+      count: p.metrics.events_in_window,
+      moved: p.actions.recommended_action !== 'pass',
+    }));
+  // Exception services keep their sentinel reason; every other service gets
+  // its sentence, with the cap buildCapCsv writes: the largest pattern kept.
+  const caps: Record<string, { action: CostAction; capBytesMonthly: number }> = {};
+  for (const r of rows) {
+    if (exceptionSet.has(r.service)) continue;
+    const c = caps[r.service] ?? { action: level1, capBytesMonthly: 0 };
+    if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.bytes);
+    caps[r.service] = c;
+  }
+  const { limits } = serviceLimitsFromPatterns(caps, rows, (r) => r.moved, Math.max(1, windowDurationSeconds), siem);
+  return new Map(limits.map((l) => [l.service, csvReason(serviceLimitSentence(l, siem))]));
+}
+
 function buildCapCsv(
   patterns: PatternOutput[],
   siem: SiemId,
   exceptionSet: Set<string>,
   windowDurationSeconds: number,
+  reasons?: ReadonlyMap<string, string>,
 ): string {
   const level1: CostAction = getDefaultActionForDestination(siem, 1);
   const services = new Map<string, { bytes: number; keptMax: number; isException: boolean }>();
@@ -1607,9 +1655,9 @@ function buildCapCsv(
   // Per-pattern detail belongs in data/action-intent.json.
   for (const [svc, agg] of [...services.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const action: CostAction = agg.isException ? 'pass' : level1;
-    const reason = agg.isException
-      ? 'service_pinned_by_exception_list'
-      : `MCP poc_envelope (destination_level_1=${level1})`;
+    const reason =
+      reasons?.get(svc) ??
+      (agg.isException ? 'service_pinned_by_exception_list' : `MCP poc_envelope (destination_level_1=${level1})`);
     const hours = Math.max(0.001, windowDurationSeconds / 3600);
     const monthlyBytes = agg.bytes * (24 * 30) / hours;
     const cap =
@@ -1633,6 +1681,7 @@ function buildActionsCsv(
   patterns: PatternOutput[],
   siem: SiemId,
   exceptionSet: Set<string>,
+  reasons?: ReadonlyMap<string, string>,
 ): string {
   const level1: CostAction = getDefaultActionForDestination(siem, 1);
   const services = new Set<string>();
@@ -1643,9 +1692,9 @@ function buildActionsCsv(
   const lines: string[] = ['container,action'];
   for (const svc of [...services].sort()) {
     const action: CostAction = exceptionSet.has(svc) ? 'pass' : level1;
-    const reason = exceptionSet.has(svc)
-      ? 'service_pinned_by_exception_list'
-      : `MCP poc_envelope (destination_level_1=${level1})`;
+    const reason =
+      reasons?.get(svc) ??
+      (exceptionSet.has(svc) ? 'service_pinned_by_exception_list' : `MCP poc_envelope (destination_level_1=${level1})`);
     lines.push(`${svc},${action}::${reason.replace(/[,:]/g, ';')}`);
   }
   return lines.join('\n') + '\n';
