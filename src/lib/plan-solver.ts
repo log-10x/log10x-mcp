@@ -89,6 +89,12 @@ export interface SolverPattern {
   bytes: number;
   /** Average event size in bytes; degrades the compact ratio for tiny events. */
   avgEventBytes?: number;
+  /**
+   * The same bytes in the Receiver's unit, at the pattern's busiest window's
+   * rate (`ExtractedPattern.receiverCapBytes`, scaled like `bytes`). Caps are
+   * set and compared in this unit; `bytes` stays the billing figure.
+   */
+  capBytes?: number;
 }
 
 /**
@@ -403,6 +409,11 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     }
     const prevBytes = prev.bytes;
     prev.bytes += p.bytes;
+    // Rows of one hash are templates of one Receiver counter, which already
+    // carry the counter's figure: keep the larger, never the sum.
+    if (prev.capBytes !== undefined || p.capBytes !== undefined) {
+      prev.capBytes = Math.max(prev.capBytes ?? prevBytes, p.capBytes ?? p.bytes);
+    }
     for (const [svc, b] of Object.entries(p.services)) {
       prev.services[svc] = (prev.services[svc] ?? 0) + b;
     }
@@ -445,7 +456,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
             .filter(([s]) => scopeSet.has(s))
             .reduce((s, [, b]) => s + b, 0)
         : p.bytes;
-      return { p, scopedBytes };
+      // The cap unit, scoped like the bytes.
+      const scopedCapBytes = p.capBytes !== undefined && p.bytes > 0 ? (p.capBytes * scopedBytes) / p.bytes : scopedBytes;
+      return { p, scopedBytes, scopedCapBytes };
     })
     .filter((r) => r.scopedBytes > 0);
 
@@ -544,17 +557,20 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     const caps = new Map<string, { capBytesMonthly: number; keptMaxPattern?: string }>();
     for (const [c, members] of byContainer) {
       const total = members.reduce((s, r) => s + r.scopedBytes, 0);
+      // The cap is in the Receiver's unit: the largest kept pattern there.
       let cap = 0;
       let keptMaxPattern: string | undefined;
       for (const r of members) {
         if (chosenHashes.has(r.p.hash)) continue;
-        if (r.scopedBytes > cap) { cap = r.scopedBytes; keptMaxPattern = r.p.name; }
+        if (r.scopedCapBytes > cap) { cap = r.scopedCapBytes; keptMaxPattern = r.p.name; }
       }
       caps.set(c, { capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) });
       for (const r of members) {
         if (!chosenHashes.has(r.p.hash)) continue;
         const share = total > 0 ? r.scopedBytes / total : 0;
-        const excess = share < ENGINE_MIN_SHARE ? 0 : Math.max(0, r.scopedBytes - cap);
+        // The excess above the cap, in the cap's unit, as a share of the pattern's billed bytes.
+        const excessShare = r.scopedCapBytes > 0 ? Math.max(0, r.scopedCapBytes - cap) / r.scopedCapBytes : 0;
+        const excess = share < ENGINE_MIN_SHARE ? 0 : excessShare * r.scopedBytes;
         moved.set(r.p.hash, excess * (1 - engineSeverityFloor(r.p.severity)));
       }
     }

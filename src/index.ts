@@ -1485,6 +1485,7 @@ registerLog10xTool('log10x_poc_from_siem_submit', pocFromSiemSubmitSchema, (args
       clickhouse_severity_column: args.clickhouse_severity_column,
       target_percent_reduction: args.target_percent_reduction,
       exception_services: args.exception_services,
+      record_overhead_bytes: args.record_overhead_bytes,
     })
   )
 );
@@ -1537,6 +1538,7 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       retriever_installed: args.retriever_installed,
       check_dependencies: args.check_dependencies,
       fleet_default: args.fleet_default,
+      record_overhead_bytes: args.record_overhead_bytes,
       allow_lossy: args.allow_lossy,
       exception_services: args.exception_services,
       pin_services: args.pin_services,

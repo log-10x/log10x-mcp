@@ -2379,6 +2379,7 @@ async function tryConsumePocSnapshot(
   // mapping.
   let capCsv: string | undefined;
   let actionsCsv: string | undefined;
+  let capUnit: string | undefined;
   let feasibility: { feasible: boolean; max_achievable_percent: number; target_percent_reduction: number } | undefined;
   try {
     const { patterns, clusters, redundancyPairs } = enrichForPocEnvelope(snap.renderInput);
@@ -2396,6 +2397,7 @@ async function tryConsumePocSnapshot(
     capCsv = envelope.output.cap_csv;
     actionsCsv = envelope.output.actions_csv;
     feasibility = envelope.output.feasibility;
+    capUnit = envelope.output.cap_unit;
   } catch {
     return undefined;
   }
@@ -2458,6 +2460,8 @@ async function tryConsumePocSnapshot(
   }
 
   const warnings: string[] = [];
+  // The caps' unit and how it was reached travels with every cap file.
+  if (capUnit) warnings.push(capUnit);
   if (!feasibility || !feasibility.feasible) {
     warnings.push(
       `POC snapshot \`${args.from_poc_id}\` reported feasibility=${feasibility?.feasible ?? 'unknown'} ` +

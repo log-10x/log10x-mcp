@@ -140,6 +140,8 @@ export interface BuildReportOptions {
   fleetDefault?: FleetLimit;
   /** Compute the fleet default from this capture (wins over `fleetDefault`). */
   fleetDefaultRequest?: FleetDefaultRequest;
+  /** One sentence on the caps' unit and how it was reached (receiver-bytes.ts). */
+  capUnitStatement?: string;
   /** Datadog: the log monitors and log-based metrics that read each rule's moved lines, printed beside the rule. */
   ruleDependencies?: RuleDependencySummary;
 }
@@ -182,7 +184,9 @@ export interface FleetDefaultReport {
  * as a per-node cell, the rule in `fleet-default.ts` on those cells, and the
  * limit in lines a day for the fleet line.
  */
-export function fleetDefaultFromPatterns<P extends { service?: string; bytes: number; count: number }>(
+export function fleetDefaultFromPatterns<
+  P extends { service?: string; bytes: number; count: number; receiverBytes?: number; receiverCapBytes?: number },
+>(
   patterns: P[],
   isMoved: (p: P) => boolean,
   windowSeconds: number,
@@ -194,18 +198,20 @@ export function fleetDefaultFromPatterns<P extends { service?: string; bytes: nu
   const action = request.action ?? 'tier_down';
   const errorFloor = request.errorFloor ?? defaultErrorFloor(action);
   const headroom = request.headroom ?? FLEET_DEFAULT_HEADROOM;
+  // In the Receiver's unit: each statement at its busiest window's rate.
+  const capBytesOf = (p: P): number => p.receiverCapBytes ?? p.bytes;
   const keptMax = new Map<string, P>();
   for (const p of patterns) {
-    if (!p.service || isMoved(p) || !(p.bytes > 0)) continue;
+    if (!p.service || isMoved(p) || !(capBytesOf(p) > 0)) continue;
     const cur = keptMax.get(p.service);
-    if (!cur || p.bytes > cur.bytes) keptMax.set(p.service, p);
+    if (!cur || capBytesOf(p) > capBytesOf(cur)) keptMax.set(p.service, p);
   }
   const cells: KeptCell[] = [...keptMax].map(([container, p]) => ({
     container,
-    keptMaxBytesPerWindow: (p.bytes * CAP_RESET_WINDOW_SECONDS) / Math.max(1, windowSeconds),
+    keptMaxBytesPerWindow: (capBytesOf(p) * CAP_RESET_WINDOW_SECONDS) / Math.max(1, windowSeconds),
     instances: instancesFor(instances, container),
     statement: nameOf(p),
-    avgBytesPerLine: p.count > 0 ? p.bytes / p.count : undefined,
+    avgBytesPerLine: p.count > 0 ? (p.receiverBytes ?? p.bytes) / p.count : undefined,
   }));
   const median = instances ? medianInstances(instances) : { median: 1, known: 0 };
   const num = fleetDefaultNumber(cells, headroom);
@@ -352,7 +358,9 @@ export function buildReportData(
         let keptMaxPattern: string | undefined;
         for (const p of enriched.patterns) {
           if (p.service !== c || reducibleSet.has(p)) continue;
-          if (p.bytes > cap) { cap = p.bytes; keptMaxPattern = p.symbolMessage ?? p.template.split("\n")[0]; }
+          // The Receiver's unit, at the statement's busiest window's rate.
+          const b = p.receiverCapBytes ?? p.bytes;
+          if (b > cap) { cap = b; keptMaxPattern = p.symbolMessage ?? p.template.split("\n")[0]; }
         }
         containerCaps[c] = { action: 'tier_down', capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) };
       }
@@ -435,6 +443,7 @@ export function buildReportData(
           `A limit is the largest statement the container keeps, so the statements above exceed it and no other does.`,
           `${CAPS_FILE_NAME}: each container's limit in the engine's units, bytes per node, with its sentence as the reason; ` +
             `${ACTIONS_FILE_NAME}: where a container's excess goes.`,
+          ...(opts.capUnitStatement ? [opts.capUnitStatement] : []),
           `Limits are per node: ` +
             Object.keys(containerCaps)
               .sort()

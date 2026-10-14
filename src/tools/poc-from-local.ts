@@ -33,7 +33,16 @@ import {
   type LocalSourceOptions,
   type LocalSourceResult,
 } from '../lib/local-source.js';
-import { sampleFromFile, resolveFileSpan, describeFileSpan, FileSpanRefusal, type FileSpan } from '../lib/local-file-source.js';
+import {
+  sampleFromFile,
+  resolveFileSpan,
+  describeFileSpan,
+  receiverExtractionInputs,
+  containerOrder,
+  FileSpanRefusal,
+  type FileSpan,
+} from '../lib/local-file-source.js';
+import { receiverBytesStatement } from '../lib/receiver-bytes.js';
 import { extractPatterns } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
@@ -175,6 +184,15 @@ export const pocFromLocalSchema = {
     .describe(
       'Set the fleet default from this capture: the limit for every service the plan gives no row, the largest statement the plan keeps per node times the headroom. The report states it in lines a day, and `fleet_default.cap_bytes_per_window_per_node` in the result is the value `log10x_advise_install` writes. On Datadog, the dependency check also lists the log monitors and log-based metrics of the services it covers, error monitors included.'
     ),
+  record_overhead_bytes: z
+    .number()
+    .int()
+    .min(0)
+    .max(100_000)
+    .optional()
+    .describe(
+      'Bytes of forwarder metadata per record, for a capture that carries the log text only (a kubectl sample or plain lines). The Receiver counts each record as the forwarder sends it, metadata included, so the caps add this to every line. Default 760, the median of a Fluent Bit kubernetes record on an EKS capture. A file of the forwarder\'s own JSON records is measured instead.'
+    ),
   check_dependencies: z
     .boolean()
     .optional()
@@ -268,6 +286,8 @@ export interface PocFromLocalArgs {
   retriever_installed?: boolean;
   /** Datadog only, default true: list the log monitors and log-based metrics that read each rule's moved lines. */
   check_dependencies?: boolean;
+  /** Forwarder metadata bytes per record when the capture carries the log text only. */
+  record_overhead_bytes?: number;
   /** Set the fleet default from this capture. */
   fleet_default?: { headroom?: number; action?: 'tier_down' | 'offload'; error_floor?: number };
   allow_lossy?: boolean;
@@ -644,7 +664,20 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   const fileSpan: FileSpan | undefined = source === 'file' ? resolveFileSpan(extractionInput, args.window) : undefined;
   const fileSpanStatement = fileSpan ? describeFileSpan(fileSpan, 1 / sampleScale) : undefined;
 
-  const extraction = await extractPatterns(extractionInput, lineRawBytes ? { lineRawBytes } : {});
+  // Each event in the Receiver's unit: the forwarder's record where the
+  // capture carries it, else the payload plus the assumed metadata. The
+  // records go to the templater grouped by container, so a continuation line
+  // joins its own container's line, as it does in the Receiver.
+  const order = containerOrder(extractionInput);
+  const inOrder = <T,>(a: T[]): T[] => order.map((i) => a[i]);
+  const receiverInputs = receiverExtractionInputs(extractionInput);
+  const extraction = await extractPatterns(inOrder(extractionInput), {
+    ...(lineRawBytes ? { lineRawBytes: inOrder(lineRawBytes) } : {}),
+    lineRecordBytes: inOrder(receiverInputs.lineRecordBytes),
+    linePayloadJsonBytes: inOrder(receiverInputs.linePayloadJsonBytes),
+    lineTimesMs: inOrder(receiverInputs.lineTimesMs),
+    ...(args.record_overhead_bytes !== undefined ? { recordOverheadBytes: args.record_overhead_bytes } : {}),
+  });
 
   // Hours the sampled bytes stand for: a file's span shrinks by the share of
   // its bytes the sample holds.
@@ -836,7 +869,9 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     plan = solvePlan(
       patterns.map((p) => {
         const bytes = (p.rawBytes ?? p.bytes) * sampleScale * monthScale;
+        const capBytes = p.receiverCapBytes !== undefined ? p.receiverCapBytes * sampleScale * monthScale : undefined;
         return {
+          ...(capBytes !== undefined ? { capBytes } : {}),
           hash: p.tenxHash ?? p.hash,
           name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
           ...(p.template ? { skeleton: p.template.split('\n')[0] } : {}),
@@ -1083,6 +1118,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         ...(plan && planSpanSeconds ? { plan, planSpanSeconds } : {}),
         ...(ruleDependencies ? { ruleDependencies } : {}),
         ...(fleetRequest ? { fleetDefaultRequest: fleetRequest } : {}),
+        capUnitStatement: receiverBytesStatement(extraction.receiverBytesBasis, extraction.recordOverheadBytes),
         enforcingInstances: resolveEnforcingInstances(
           [...new Set([...Object.keys(plan?.containerCaps ?? {}), ...Object.keys(sample.containerNodes ?? {})])],
           { fromPods: sample.containerNodes },

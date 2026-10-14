@@ -9,6 +9,7 @@
  * callers can track a long-running pull without blocking the MCP loop.
  */
 
+import { receiverRecordBytes } from '../lib/local-file-source.js';
 import { randomUUID } from 'crypto';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -206,6 +207,15 @@ export const pocFromSiemSubmitSchema = {
         'are pinned to pass on the envelope outputs and their bytes are subtracted from the achievable ' +
         'reduction pool used for the feasibility verdict.'
     ),
+  record_overhead_bytes: z
+    .number()
+    .int()
+    .min(0)
+    .max(100_000)
+    .optional()
+    .describe(
+      'Bytes of forwarder metadata per record. The Receiver counts each record as the forwarder sends it, metadata included, and events read back from a SIEM\'s API seldom carry that record, so the caps add this to every event. Default 760, the median of a Fluent Bit kubernetes record on an EKS capture.'
+    ),
   pin_services: z
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
@@ -372,6 +382,8 @@ function retain(s: Snapshot): void {
 
 export interface PocSubmitArgs {
   siem?: (typeof SIEM_ENUM)[number];
+  /** Forwarder metadata bytes per record assumed for events that do not carry the forwarder's record. */
+  record_overhead_bytes?: number;
   window: string;
   scope?: string;
   query?: string;
@@ -1026,6 +1038,12 @@ export async function runPipeline(
       // The Datadog report sets native index filters against the plan, which
       // needs each pattern's events by service, status and parsed attribute.
       cells: connector.id === 'datadog',
+      // The Receiver's unit: a pulled event that carries the forwarder's
+      // record (a CloudWatch export of fluentd JSON, an Elasticsearch
+      // document) is measured; any other is its text plus the assumed
+      // metadata per record, stated with the caps.
+      ...receiverRecordBytes(pullResult.events),
+      ...(args.record_overhead_bytes !== undefined ? { recordOverheadBytes: args.record_overhead_bytes } : {}),
     });
   } catch (e) {
     snapshot.status = 'failed';

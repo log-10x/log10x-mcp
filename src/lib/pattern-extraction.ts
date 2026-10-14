@@ -14,6 +14,12 @@
  */
 
 import { runDevCli, runDevCliFileOutput, DevCliNotInstalledError } from './dev-cli.js';
+import {
+  ASSUMED_RECORD_OVERHEAD_BYTES,
+  RECEIVER_WINDOW_SECONDS,
+  jsonStringBodyBytes,
+  type ReceiverBytesBasis,
+} from './receiver-bytes.js';
 import { runChunkedTemplater } from './poc-chunked-templater.js';
 import {
   parseTemplates,
@@ -113,6 +119,29 @@ export interface ExtractedPattern {
    * asked for `cells`.
    */
   cells?: PatternCell[];
+  /**
+   * Bytes the Receiver's regulator counts for these events, summed: each
+   * record as the forwarder sends it, metadata included, continuation lines
+   * joined into the head record (see `receiver-bytes.ts`).
+   */
+  receiverBytes?: number;
+  /**
+   * The largest `receiverBytes` within any 240-second interval, when the
+   * events carry times: the busiest window whatever its alignment, so a cap
+   * set from it holds wherever the Receiver's window falls.
+   */
+  receiverPeakWindowBytes?: number;
+  /** The extraction's timed span in seconds, which the peak's rate is taken over. */
+  receiverSpanSeconds?: number;
+  /**
+   * The bytes a cap compares against, over the capture: the Receiver's
+   * counter for this statement (its message pattern in its container, every
+   * template that shares them), at its busiest window's rate over the timed
+   * span when that is higher than its total. A cap set from it holds that
+   * window. Templates of one counter carry the same value, so rows that merge
+   * take the larger, never the sum.
+   */
+  receiverCapBytes?: number;
 }
 
 /** One envelope combination a pattern's events arrived with. */
@@ -138,6 +167,12 @@ export interface ExtractedPatterns {
   patterns: ExtractedPattern[];
   totalEvents: number;
   totalBytes: number;
+  /** How `receiverBytes` was reached: measured on the forwarder's records, or the payload plus an assumed metadata size. */
+  receiverBytesBasis?: ReceiverBytesBasis;
+  /** The metadata bytes assumed per record on the assumed path. */
+  recordOverheadBytes?: number;
+  /** Seconds between the first and last event time, when the events carry times. */
+  receiverTimedSpanSeconds?: number;
   /** Number of raw input lines the caller passed in. */
   inputLineCount: number;
   /** Wall time spent in the engine (CLI). */
@@ -232,6 +267,18 @@ export interface ExtractPatternsOptions {
   lineRawBytes?: number[];
   /** Keep per-pattern envelope cells (`ExtractedPattern.cells`). */
   cells?: boolean;
+  /**
+   * The forwarder's records, aligned with `events`: each record's compact
+   * JSON bytes, and its payload's bytes as a JSON string body. With both,
+   * `receiverBytes` is measured; without, it is the payload plus
+   * `recordOverheadBytes` per record.
+   */
+  lineRecordBytes?: Array<number | undefined>;
+  linePayloadJsonBytes?: Array<number | undefined>;
+  /** Metadata bytes assumed per record when the records are not supplied. Default `ASSUMED_RECORD_OVERHEAD_BYTES`. */
+  recordOverheadBytes?: number;
+  /** Each event's time in epoch ms, aligned with `events`; a gap takes the previous event's time. */
+  lineTimesMs?: Array<number | undefined>;
 }
 
 /**
@@ -354,12 +401,36 @@ export async function extractPatterns(
       const enrichment = typeof e === 'object' && e !== null
         ? extractEnrichmentFromEnvelope(e as Record<string, unknown>)
         : {};
-      return { line, enrichment, rawBytes: opts.lineRawBytes?.[idx] };
+      return {
+        line,
+        enrichment,
+        rawBytes: opts.lineRawBytes?.[idx],
+        recordBytes: opts.lineRecordBytes?.[idx],
+        payloadJsonBytes: opts.linePayloadJsonBytes?.[idx],
+        timeMs: opts.lineTimesMs?.[idx],
+      };
     })
     .filter((p) => p.line && p.line.trim().length > 0);
   const lines = pairs.map((p) => p.line);
   const enrichments = pairs.map((p) => p.enrichment);
   const rawLineBytes = pairs.map((p) => p.rawBytes);
+  // The Receiver's unit: a line's forwarder record when the caller holds it,
+  // else its payload plus the assumed metadata per record.
+  const hasRecord = (p: (typeof pairs)[number]): boolean =>
+    typeof p.recordBytes === 'number' && typeof p.payloadJsonBytes === 'number';
+  const measuredRecords = pairs.length > 0 && pairs.every(hasRecord);
+  const recordOverhead = opts.recordOverheadBytes ?? ASSUMED_RECORD_OVERHEAD_BYTES;
+  // Event times: the caller's, else the envelope's; a gap takes the previous
+  // line's time (a capture is in arrival order).
+  const lineTimes: Array<number | undefined> = [];
+  let lastTime: number | undefined;
+  for (const p of pairs) {
+    const t = opts.lineTimesMs ? p.timeMs : p.enrichment.timestampMs;
+    if (typeof t === 'number' && Number.isFinite(t)) lastTime = t;
+    lineTimes.push(lastTime);
+  }
+  let minTime: number | undefined;
+  let maxTime: number | undefined;
 
   if (lines.length === 0) {
     return {
@@ -425,6 +496,8 @@ export async function extractPatterns(
     count: number;
     bytes: number;
     rawBytes: number;
+    receiverBytes: number;
+    receiverEvents: Array<[number, number]>;
     encodedBytes: number;
     sampleEvent: string;
     variables: Map<string, Set<string>>;
@@ -475,6 +548,8 @@ export async function extractPatterns(
       count: 0,
       bytes: 0,
       rawBytes: 0,
+      receiverBytes: 0,
+      receiverEvents: [],
       encodedBytes: 0,
       sampleEvent: '',
       variables: new Map<string, Set<string>>(),
@@ -500,6 +575,7 @@ export async function extractPatterns(
     cursor = head ?? cursor;
     // Raw bytes are the sum over every input line this record covers, so a
     // grouped stack trace is charged its real size instead of its head line.
+    const eventLines: ReceiverLine[] = [];
     for (let k = 0; k < span; k++) {
       const raw = cursor + k < lines.length ? lines[cursor + k] : undefined;
       if (!raw) continue;
@@ -507,6 +583,16 @@ export async function extractPatterns(
       rec.rawBytes += rawLineBytes[cursor + k] ?? Buffer.byteLength(raw, 'utf8');
       if (!rec.sampleEvent) rec.sampleEvent = raw;
       rec.lineIndices.push(cursor + k);
+      const pr = pairs[cursor + k];
+      eventLines.push(hasRecord(pr) ? { line: raw, recordBytes: pr.recordBytes!, payloadJsonBytes: pr.payloadJsonBytes! } : { line: raw });
+    }
+    const eventReceiverBytes = eventReceiverSize(eventLines, recordOverhead);
+    rec.receiverBytes += eventReceiverBytes;
+    const eventTime = cursor < lineTimes.length ? lineTimes[cursor] : undefined;
+    if (eventTime !== undefined && eventReceiverBytes > 0) {
+      rec.receiverEvents.push([eventTime, eventReceiverBytes]);
+      if (minTime === undefined || eventTime < minTime) minTime = eventTime;
+      if (maxTime === undefined || eventTime > maxTime) maxTime = eventTime;
     }
     // Capture engine-emitted Reporter-tier name + hash from the first
     // event we see for this templateHash. They're constant per template
@@ -552,7 +638,12 @@ export async function extractPatterns(
     if (h) aggByHash.set(h, r);
   }
 
+  const timedSpanSeconds =
+    minTime !== undefined && maxTime !== undefined && maxTime > minTime ? (maxTime - minTime) / 1000 : undefined;
   const patterns: ExtractedPattern[] = [];
+  // The Receiver keeps one counter per message pattern per container, so the
+  // busiest window is measured over every template that shares both.
+  const counterGroups = new Map<string, { events: Array<[number, number]>; bytes: number; members: ExtractedPattern[] }>();
   for (const [hash, rec] of byHash) {
     const tpl = mergedTemplates.get(hash);
     const body = tpl?.template || hash;
@@ -607,6 +698,7 @@ export async function extractPatterns(
       count: rec.count,
       bytes: rec.bytes,
       ...(opts.lineRawBytes ? { rawBytes: rec.rawBytes } : {}),
+      ...receiverFields(rec.receiverBytes, slidingWindowPeak(rec.receiverEvents), timedSpanSeconds),
       encodedBytes: rec.encodedBytes,
       sampleEvent: rec.sampleEvent,
       variables,
@@ -616,6 +708,21 @@ export async function extractPatterns(
       eventsByHour: rec.eventsByHour.size > 0 ? Object.fromEntries(rec.eventsByHour) : undefined,
       ...(opts.cells ? { cells: [...rec.cells.values()] } : {}),
     });
+    const made = patterns[patterns.length - 1];
+    const groupKey = `${made.symbolMessage || hash}\u0000${made.service ?? ''}`;
+    const g = counterGroups.get(groupKey) ?? { events: [], bytes: 0, members: [] };
+    for (const e of rec.receiverEvents) g.events.push(e);
+    g.bytes += rec.receiverBytes;
+    g.members.push(made);
+    counterGroups.set(groupKey, g);
+  }
+  for (const g of counterGroups.values()) {
+    if (g.members.length < 2) continue;
+    const group = receiverFields(g.bytes, slidingWindowPeak(g.events), timedSpanSeconds);
+    for (const m of g.members) {
+      if (group.receiverPeakWindowBytes !== undefined) m.receiverPeakWindowBytes = group.receiverPeakWindowBytes;
+      m.receiverCapBytes = group.receiverCapBytes;
+    }
   }
 
   patterns.sort((a, b) => b.count - a.count);
@@ -626,6 +733,9 @@ export async function extractPatterns(
     patterns,
     totalEvents: mergedEncoded.length,
     totalBytes,
+    receiverBytesBasis: measuredRecords ? 'records' : 'assumed_overhead',
+    ...(measuredRecords ? {} : { recordOverheadBytes: recordOverhead }),
+    ...(timedSpanSeconds !== undefined ? { receiverTimedSpanSeconds: timedSpanSeconds } : {}),
     inputLineCount: lines.length,
     templaterWallTimeMs: totalWallTimeMs,
     executionMode,
@@ -742,6 +852,8 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     service: head.service,
     count: group.reduce((s, p) => s + p.count, 0),
     bytes: group.reduce((s, p) => s + p.bytes, 0),
+    ...(group.every((p) => p.rawBytes !== undefined) ? { rawBytes: group.reduce((s, p) => s + (p.rawBytes ?? 0), 0) } : {}),
+    ...(group.every((p) => p.receiverBytes !== undefined) ? mergeReceiverFields(group) : {}),
     encodedBytes: group.reduce((s, p) => s + (p.encodedBytes ?? 0), 0),
     sampleEvent: head.sampleEvent,
     variables,
@@ -750,6 +862,85 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     lastSeenMs,
     eventsByHour: Object.keys(mergedEventsByHour).length > 0 ? mergedEventsByHour : undefined,
     ...(group.some((p) => p.cells) ? { cells: mergeCells(group) } : {}),
+  };
+}
+
+/** One input line of an event, with its forwarder record's sizes when known. */
+export interface ReceiverLine {
+  line: string;
+  recordBytes?: number;
+  payloadJsonBytes?: number;
+}
+
+/**
+ * One event's size as the Receiver counts it: one record, the head line's
+ * whole record and then each continuation line's payload joined with an
+ * escaped newline. A line with no record of its own counts as its text as a
+ * JSON string body, plus `overhead` for the head.
+ */
+export function eventReceiverSize(lines: ReceiverLine[], overhead: number = ASSUMED_RECORD_OVERHEAD_BYTES): number {
+  let total = 0;
+  lines.forEach((l, i) => {
+    const measured = typeof l.recordBytes === 'number' && typeof l.payloadJsonBytes === 'number';
+    if (i === 0) total += measured ? l.recordBytes! : overhead + jsonStringBodyBytes(l.line);
+    else total += 2 + (measured ? l.payloadJsonBytes! : jsonStringBodyBytes(l.line));
+  });
+  return total;
+}
+
+/**
+ * The largest sum of bytes within any 240-second interval of the events'
+ * times, or undefined when no event carries a time.
+ */
+export function slidingWindowPeak(events: Array<[number, number]>): number | undefined {
+  if (events.length === 0) return undefined;
+  const sorted = [...events].sort((a, b) => a[0] - b[0]);
+  const span = RECEIVER_WINDOW_SECONDS * 1000;
+  let left = 0;
+  let sum = 0;
+  let peak = 0;
+  for (let right = 0; right < sorted.length; right++) {
+    sum += sorted[right][1];
+    while (sorted[right][0] - sorted[left][0] >= span) {
+      sum -= sorted[left][1];
+      left++;
+    }
+    if (sum > peak) peak = sum;
+  }
+  return peak;
+}
+
+/**
+ * The receiver fields of one pattern. The cap's bytes are the larger of the
+ * total and the peak window's rate over the timed span.
+ */
+function receiverFields(
+  receiverBytes: number,
+  peak: number | undefined,
+  timedSpanSeconds: number | undefined,
+): Pick<ExtractedPattern, 'receiverBytes' | 'receiverPeakWindowBytes' | 'receiverSpanSeconds' | 'receiverCapBytes'> {
+  const atPeakRate = peak !== undefined && timedSpanSeconds ? (peak * timedSpanSeconds) / RECEIVER_WINDOW_SECONDS : 0;
+  return {
+    receiverBytes,
+    ...(peak !== undefined ? { receiverPeakWindowBytes: peak } : {}),
+    ...(timedSpanSeconds !== undefined ? { receiverSpanSeconds: timedSpanSeconds } : {}),
+    receiverCapBytes: Math.max(receiverBytes, atPeakRate),
+  };
+}
+
+/**
+ * Merged members share a message pattern; members in one container already
+ * carry their counter's figures, so the merge keeps the largest.
+ */
+function mergeReceiverFields(group: ExtractedPattern[]): ReturnType<typeof receiverFields> {
+  const total = group.reduce((s, p) => s + (p.receiverBytes ?? 0), 0);
+  const peaks = group.map((p) => p.receiverPeakWindowBytes).filter((v): v is number => v !== undefined);
+  const span = group.find((p) => p.receiverSpanSeconds !== undefined)?.receiverSpanSeconds;
+  return {
+    receiverBytes: total,
+    ...(peaks.length > 0 ? { receiverPeakWindowBytes: Math.max(...peaks) } : {}),
+    ...(span !== undefined ? { receiverSpanSeconds: span } : {}),
+    receiverCapBytes: Math.max(...group.map((p) => p.receiverCapBytes ?? p.receiverBytes ?? 0)),
   };
 }
 

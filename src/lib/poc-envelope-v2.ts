@@ -19,6 +19,7 @@ import type { IncidentCluster } from './detectors/incident-cluster.js';
 import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
+import { receiverBytesStatement } from './receiver-bytes.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
@@ -189,6 +190,8 @@ export interface PocOutput {
    * cap is never 0 — a 0 cap is a per-container regulator opt-out.
    */
   cap_csv?: string;
+  /** The caps' unit and how it was reached, one sentence for the plan. */
+  cap_unit?: string;
   /**
    * Sibling actions.csv body — the ENGINE's per-service action file
    * (rateReceiverActionLookupFile). Grammar:
@@ -296,6 +299,12 @@ export interface PatternOutput {
     events_per_day_avg: number;
     events_last_24h: number;
     bytes_in_window: number;
+    /**
+     * The same events in the Receiver's unit (each record as the forwarder
+     * sends it, metadata included), at the busiest window's rate. Caps are
+     * set from this; `bytes_in_window` stays the billing figure.
+     */
+    receiver_cap_bytes_in_window: number;
     cost_per_month_usd: number;
     cost_per_year_usd: number;
     share_of_total: number;
@@ -741,6 +750,7 @@ export function buildPocEnvelopeV2(
       ...(feasibility ? { feasibility } : {}),
       ...(commitmentArtifact ? { commitment_artifact: commitmentArtifact } : {}),
       ...(capCsv ? { cap_csv: capCsv } : {}),
+      ...(capCsv ? { cap_unit: receiverBytesStatement(input.extraction.receiverBytesBasis, input.extraction.recordOverheadBytes) } : {}),
       ...(actionsCsv ? { actions_csv: actionsCsv } : {}),
     },
   };
@@ -1397,6 +1407,7 @@ function buildPatternOutput(
       events_per_day_avg: Math.round(eventsPerDayAvg),
       events_last_24h: eventsLast24h,
       bytes_in_window: p.bytes,
+      receiver_cap_bytes_in_window: Math.round(p.receiverCapBytes ?? p.bytes),
       cost_per_month_usd: dollars(monthlyCost),
       cost_per_year_usd: dollars(monthlyCost * 12),
       share_of_total: ratio(monthlyCost / Math.max(0.001, totalMonthlyCostUsd)),
@@ -1607,6 +1618,7 @@ function pocServiceReasons(
     .map((p) => ({
       service: (p.service ?? '').toLowerCase(),
       bytes: p.metrics.bytes_in_window,
+      capBytes: p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window,
       count: p.metrics.events_in_window,
       moved: p.actions.recommended_action !== 'pass',
     }));
@@ -1616,7 +1628,7 @@ function pocServiceReasons(
   for (const r of rows) {
     if (exceptionSet.has(r.service)) continue;
     const c = caps[r.service] ?? { action: level1, capBytesMonthly: 0 };
-    if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.bytes);
+    if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.capBytes);
     caps[r.service] = c;
   }
   const { limits } = serviceLimitsFromPatterns(caps, rows, (r) => r.moved, Math.max(1, windowDurationSeconds), siem);
@@ -1638,7 +1650,9 @@ function buildCapCsv(
     // The cap that moves the service's planned patterns and no other is the
     // largest pattern it keeps: a pattern over it takes the action, one under
     // it passes.
-    const kept = p.actions.recommended_action === 'pass' ? p.metrics.bytes_in_window : 0;
+    // In the Receiver's unit, at the statement's busiest window's rate.
+    const kept =
+      p.actions.recommended_action === 'pass' ? (p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window) : 0;
     const existing = services.get(svc);
     if (existing) {
       existing.bytes += p.metrics.bytes_in_window;
