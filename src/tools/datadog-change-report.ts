@@ -437,7 +437,7 @@ export function buildChangeReport(input: BuildChangeReportInput): ChangeReport {
 
   const shown = statements.slice(0, input.limit);
   const caveats: string[] = [
-    'Lines a day are averages over the report window.',
+    'Lines a day are averages over the days the report covers.',
     'The Datadog output publishes the tag sets with the most bytes (200 as shipped), so a statement outside that set appears here once it enters it.',
   ];
   if (!teamTag) caveats.push('The series carry no team tag, so statements are grouped by service only.');
@@ -449,7 +449,7 @@ export function buildChangeReport(input: BuildChangeReportInput): ChangeReport {
   const proposedServiceBasis = proposed.some((p) => p.basis === 'service');
   const proposedFleetBasis = proposed.some((p) => p.basis === 'fleet');
   if (proposedServiceBasis) {
-    caveats.push('A proposed row\'s limit is the largest statement that service kept at Standard in the window, the same rule the plan uses.');
+    caveats.push('A proposed row\'s limit is the largest statement that service kept at Standard over those days, the same rule the plan uses.');
   }
   if (proposedFleetBasis) {
     caveats.push(
@@ -752,7 +752,7 @@ export async function executeDatadogChangeReport(
     },
     payload: view === 'markdown' ? { ...payload, markdown } : payload,
     human_summary: noSignal
-      ? `No ${DD_VOLUME_METRIC} series at ${creds.site} in the window. Check that the engine's Datadog metric output posts to this site (DD_SITE on the Receiver) and that tenx_env matches.`
+      ? `No ${DD_VOLUME_METRIC} series at ${creds.site} since ${report.since_iso.slice(0, 10)}. Check that the engine's Datadog metric output posts to this site (DD_SITE on the Receiver) and that tenx_env matches.`
       : humanSummary,
     ...(view === 'markdown' ? { must_render_verbatim: markdown } : {}),
     telemetry,

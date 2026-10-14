@@ -10,15 +10,22 @@
  * probability of its severity floor, and the rest take the action.
  */
 
-import { ALWAYS_PASS_LINES } from './report/user-units.js';
+import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS, SECONDS_PER_DAY, fmtLinesPerDay } from './report/user-units.js';
 
 export type FleetDefaultAction = 'tier_down' | 'offload';
 
 /** Headroom on the baseline when the caller names none. */
 export const FLEET_DEFAULT_HEADROOM = 2;
 
-/** Minutes in the engine's reset window (`rateReceiverResetIntervalMs` 240000). */
-export const FLEET_WINDOW_MINUTES = 4;
+/**
+ * The always-pass sample in lines a day per statement per node: the lines
+ * that pass in every reset window, times the windows in a day (5 x 360 =
+ * 1,800 at the engine defaults). People read rules in lines a day, never in
+ * the window's length.
+ */
+export function alwaysPassLinesPerDay(alwaysPass: number = ALWAYS_PASS_LINES): number {
+  return alwaysPass * (SECONDS_PER_DAY / REGULATOR_WINDOW_SECONDS);
+}
 
 /**
  * The number rule, isolated: the baseline times the headroom. The baseline is
@@ -56,10 +63,7 @@ export function fleetDestination(action: FleetDefaultAction): string {
 
 /** The always-pass sample, in user units. */
 export function alwaysPassSentence(alwaysPass: number = ALWAYS_PASS_LINES): string {
-  return (
-    `The first ${alwaysPass} lines of every statement reach Standard every ${FLEET_WINDOW_MINUTES} minutes on each node, ` +
-    `whatever the limit.`
-  );
+  return `Up to ${fmtLinesPerDay(alwaysPassLinesPerDay(alwaysPass))} lines a day of every statement always reach Standard on each node.`;
 }
 
 /**
@@ -73,7 +77,7 @@ export function errorMonitorVisibility(
   alwaysPass: number = ALWAYS_PASS_LINES,
 ): string {
   const f = Math.min(1, Math.max(0, Number.isFinite(errorFloor) ? errorFloor : defaultErrorFloor(action)));
-  const first = `the first ${alwaysPass} of each statement every ${FLEET_WINDOW_MINUTES} minutes on each node`;
+  const first = `up to ${fmtLinesPerDay(alwaysPassLinesPerDay(alwaysPass))} lines a day of each statement on each node`;
   if (f >= 1) {
     return 'An error monitor sees every ERROR and CRITICAL line: none leaves Standard, whatever the limit.';
   }

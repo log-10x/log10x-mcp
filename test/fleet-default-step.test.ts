@@ -10,6 +10,7 @@ import {
   errorMonitorVisibility,
   fleetDefaultLimit,
   alwaysPassSentence,
+  alwaysPassLinesPerDay,
 } from '../src/lib/fleet-default.js';
 import { buildFleetDefaultStep, FLEX_INDEX_FILTER } from '../src/lib/advisor/fleet-default-step.js';
 import { putSnapshot } from '../src/lib/discovery/snapshot-store.js';
@@ -33,20 +34,18 @@ test('error floor defaults: half under offload, none under tier_down', () => {
 test('what an error monitor sees, per action and floor', () => {
   assert.equal(
     errorMonitorVisibility('offload'),
-    'An error monitor sees every ERROR and CRITICAL line under the limit, the first 5 of each statement every 4 minutes on each node, and half of the rest. ' +
+    'An error monitor sees every ERROR and CRITICAL line under the limit, up to 1,800 lines a day of each statement on each node, and half of the rest. ' +
       'The other error lines above the limit go to S3: no Datadog log monitor sees them and no log-based metric counts them.',
   );
   assert.equal(
     errorMonitorVisibility('tier_down'),
-    'An error monitor sees every ERROR and CRITICAL line under the limit and the first 5 of each statement every 4 minutes on each node, in Standard. ' +
+    'An error monitor sees every ERROR and CRITICAL line under the limit and up to 1,800 lines a day of each statement on each node, in Standard. ' +
       'The other error lines above the limit go to Flex, where Datadog runs no log monitors; log-based metrics still count them, because Datadog computes those at ingestion.',
   );
   assert.ok(errorMonitorVisibility('tier_down', 0.25).includes(', and 25% of the rest, in Standard.'));
   assert.ok(errorMonitorVisibility('offload', 1).startsWith('An error monitor sees every ERROR and CRITICAL line: none leaves Standard'));
-  assert.equal(
-    alwaysPassSentence(),
-    'The first 5 lines of every statement reach Standard every 4 minutes on each node, whatever the limit.',
-  );
+  assert.equal(alwaysPassLinesPerDay(), 1800);
+  assert.equal(alwaysPassSentence(), 'Up to 1,800 lines a day of every statement always reach Standard on each node.');
 });
 
 test('tier_down step: the Flex index with its routeState filter, the sample, the error monitors', () => {
@@ -63,6 +62,7 @@ test('tier_down step: the Flex index with its routeState filter, the sample, the
   assert.ok(s.markdown.includes('The fleet default holds error statements too.'));
   assert.ok(s.markdown.includes('until then a service with no rule keeps every statement in Standard'));
   assert.ok(!s.markdown.includes('\u2014'), 'no em dash');
+  assert.ok(!/minute|window|240/i.test(s.markdown.split('```')[0] + s.markdown.split('```').slice(-1)[0]), 'no window length in the prose');
 });
 
 test('offload step: the forwarder routing to the bucket, marker kept for Datadog, half the errors kept', () => {
