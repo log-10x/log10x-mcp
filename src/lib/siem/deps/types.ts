@@ -150,6 +150,16 @@ export interface InventoryObject {
   hasQueryText: boolean;
 }
 
+/** A log monitor or log-based metric with the log searches it evaluates. */
+export interface LogQueryObject {
+  kind: 'log_monitor' | 'log_metric';
+  id: string;
+  name: string;
+  url?: string;
+  /** Log search strings; empty when none could be read from the definition. */
+  searches: string[];
+}
+
 export interface VendorInventory {
   vendor: SiemId;
   objects: InventoryObject[];
@@ -159,6 +169,13 @@ export interface VendorInventory {
   scanDepth: string;
   /** Set when the fetch couldn't run at all (credentials, endpoint). */
   error?: string;
+  /** Datadog: log monitors and log-based metrics, for the per-rule check. */
+  logQueries?: {
+    objects: LogQueryObject[];
+    monitorsRead: boolean;
+    metricsRead: boolean;
+    notes: string[];
+  };
 }
 
 /** Match one pattern's tokens against one object; returns the surfaces hit. */

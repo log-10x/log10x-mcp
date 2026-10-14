@@ -1385,7 +1385,7 @@ export async function runEstimateForecast(
           ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
         }, planDeps);
         ladderPlan = res.plan;
-        planDeps = { ...planDeps, excluded: res.excluded };
+        planDeps = { ...planDeps, excluded: res.excluded, rule_dependencies: res.rule_dependencies };
       }
     }
     for (const r of ladderPlan.planned) {

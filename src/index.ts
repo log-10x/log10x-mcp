@@ -1534,6 +1534,7 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       budget_usd_monthly: args.budget_usd_monthly,
       budget_gb_monthly: args.budget_gb_monthly,
       retriever_installed: args.retriever_installed,
+      check_dependencies: args.check_dependencies,
       allow_lossy: args.allow_lossy,
       exception_services: args.exception_services,
       pin_services: args.pin_services,
