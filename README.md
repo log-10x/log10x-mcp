@@ -13,7 +13,7 @@ This server is open source under MIT. A Log10x product license (API key) unlocks
 | "Where do I start? Help me cut log costs." | A guided menu asks what you want (cut cost, investigate, install) and routes to the right next step, plus what's new and what changed. `log10x_start`, `log10x_whats_new`, `log10x_whats_changing` |
 | "Sign me in." / "Who am I connected as?" | GitHub sign-in mints and stores an API key, and shows the environments your account can reach. `log10x_signin_start`, `log10x_login_status`, `log10x_create_env` |
 | "Show me how to install this on my stack." | Paste-ready setup steps for your own pipeline, fetch-back wiring, and a recommended action per service. A policy ships as a pull request to merge, or, for a ConfigMap, is written only by a second, explicit call. `log10x_advise_install`, `log10x_advise_retriever`, `log10x_configure_engine` |
-| "Estimate savings on my data before I deploy." | A no-install savings report from a local log file or your existing log platform. `log10x_poc_from_local`, `log10x_poc_from_siem_submit`, `log10x_poc_from_siem_status`. **POC mode only**: a keyless boot attaches to the public demo dataset and does not register these three. Set `LOG10X_DEMO_FALLBACK=off` to boot into POC mode. The cost is a smaller tool set: POC mode drops `log10x_top_patterns`, `log10x_investigate`, `log10x_savings` and every Retriever tool. |
+| "Estimate savings on my data before I deploy." | A no-install savings report from a local log file or your existing log platform. `log10x_poc_from_local`, `log10x_poc_from_siem_submit`, `log10x_poc_from_siem_status`. A keyless boot attaches to the public demo dataset and registers these three as well, since they run on the user's machine and never touch the demo backend. `LOG10X_DEMO_FALLBACK=off` boots into POC mode instead, which drops `log10x_top_patterns`, `log10x_investigate`, `log10x_savings` and every Retriever tool. |
 | "How much can I cut, and how much have I cut?" | Projected and realized savings with the per-pattern math behind every number. `log10x_estimate_savings`, `log10x_savings`, `log10x_commitment_report` |
 | "What's driving my cost right now?" | The repeating message types and services driving volume and cost, and what moved week over week. `log10x_top_patterns`, `log10x_whats_changing`, `log10x_services` |
 | "Why did payments-svc spike?" | A single-call investigation: timeline, correlated patterns, and the strongest temporal evidence, with confidence shown so nothing is presented as proven cause. `log10x_investigate`, `log10x_metrics_that_moved`, `log10x_metric_overlay` |
@@ -149,3 +149,5 @@ one.
 ## Documentation
 
 https://doc.log10x.com/apps/mcp/
+
+Why the tools key on a stable pattern ID: [blog post](https://www.log10x.com/blog/mcp-tools-for-cutting-log-costs/).
