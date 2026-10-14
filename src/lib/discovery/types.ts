@@ -463,6 +463,13 @@ export interface WizardSession {
    * forms render never set this, so their behaviour is unchanged.
    */
   formsDismissed?: boolean;
+  /**
+   * Where the forwarder ships the log events (not the metrics). `datadog`
+   * adds the fleet-default step after the POC to a Receiver plan.
+   */
+  logDestination?: 'datadog';
+  /** The fleet default's route and error share, when the caller set them. */
+  fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number };
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

@@ -79,6 +79,13 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
     renderGitopsExplainer(lines, plan.gitopsExplainer);
   }
 
+  // ── Fleet default (Datadog Receiver plans) ──
+  // The step after the POC: the route for services with no rule, its
+  // destination side, and what error monitors see.
+  if ((action === 'install' || action === 'all') && plan.fleetDefault) {
+    lines.push(plan.fleetDefault.markdown);
+  }
+
   // ── Forwarder offload ──
   // Retriever only: how to route the routeState="offload" slice to the customer's S3
   // (the bucket the Retriever already reads), plus SIEM down-tier alternatives.

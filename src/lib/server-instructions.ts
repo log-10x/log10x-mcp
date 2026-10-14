@@ -126,6 +126,13 @@ Cost investigation:
    for each pattern in one call. Use the \`comparison_window\` arg for "what changed
    since last week" framing.)
 - "pipeline savings / ROI"                                       → log10x_savings
+- Datadog install: "what is new this week" / "weekly change
+  report" / "which new statements were held"                    → log10x_datadog_change_report
+  (reads the engine's Datadog series with the org's own keys; \`view: "monitors"\`
+   returns the two Datadog monitor definitions: a statement turning tier_down or
+   offload, a statement above its weekly baseline. Writes nothing.)
+- After a Datadog POC: "set the default for the other services" → log10x_advise_install
+  with \`log_destination: "datadog"\` (the fleet-default step on a Receiver plan)
 
 Offloaded cohort: RAW EVENTS the Receiver held back from the SIEM (the overflow bucket):
 - "show me what's being offloaded for <pattern>", "sample the held-back events",

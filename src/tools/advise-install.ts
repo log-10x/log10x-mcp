@@ -74,6 +74,7 @@ import {
   defaultSecretNameFor,
 } from '../lib/advisor/reporter-forwarders.js';
 import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
+import { buildFleetDefaultStep } from '../lib/advisor/fleet-default-step.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -205,6 +206,27 @@ export const adviseInstallSchema = {
     .enum(['install', 'verify', 'teardown', 'all'])
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
+  log_destination: z
+    .enum(['datadog'])
+    .optional()
+    .describe(
+      'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees.'
+    ),
+  fleet_default: z
+    .object({
+      action: z
+        .enum(['tier_down', 'offload'])
+        .optional()
+        .describe('Where a statement above the fleet limit goes: `tier_down` (Flex, the default where the account has Flex) or `offload` (S3).'),
+      error_floor: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe('Share of ERROR and CRITICAL lines above the limit that stay in Standard. Default 0.5 with offload, 0 with tier_down.'),
+    })
+    .optional()
+    .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`).'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
@@ -1082,6 +1104,14 @@ export async function executeAdviseInstall(
     licenseJwt: args.license_jwt_paste,
     releaseName: args.release_name,
     namespace: args.namespace,
+    logDestination: args.log_destination,
+    fleetDefault: args.fleet_default
+      ? {
+          ...(prior?.fleetDefault ?? {}),
+          ...(args.fleet_default.action !== undefined ? { action: args.fleet_default.action } : {}),
+          ...(args.fleet_default.error_floor !== undefined ? { errorFloor: args.fleet_default.error_floor } : {}),
+        }
+      : undefined,
   });
   if (!session) {
     // Should be unreachable — getSnapshot would've failed first.
@@ -2227,6 +2257,21 @@ async function renderInstallPlan(
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
   });
+  if (session.logDestination === 'datadog') {
+    if (app === 'receiver') {
+      plan.fleetDefault = buildFleetDefaultStep({
+        action: session.fleetDefault?.action,
+        errorFloor: session.fleetDefault?.errorFloor,
+        forwarder: session.forwarder,
+        bucket: snapshot.recommendations?.retrieverS3Bucket,
+        region: snapshot.aws?.region,
+      });
+    } else {
+      plan.notes.push(
+        'The fleet default routes lines above a limit to Flex or S3, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that step.'
+      );
+    }
+  }
   lines.push(renderPlan(plan, action));
   return { markdown: lines.join('\n'), plan, action };
 }
