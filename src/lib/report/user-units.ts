@@ -117,7 +117,8 @@ export function fleetSentence(siem: string | null, fleet?: FleetLimit, alwaysPas
   const first = fleet
     ? `Any service not listed: a statement above ${fmtLinesPerDay(fleet.limitLinesPerDay)} lines a day ${routeVerb(siem, fleet.action)}.`
     : `Any service not listed keeps every statement in ${kept}.`;
-  return `${first} The first ${alwaysPass} lines of every statement always reach ${kept}.`;
+  const perDay = alwaysPass * (SECONDS_PER_DAY / REGULATOR_WINDOW_SECONDS);
+  return `${first} Up to ${fmtLinesPerDay(perDay)} lines a day of every statement always reach ${kept} on each node.`;
 }
 
 /**

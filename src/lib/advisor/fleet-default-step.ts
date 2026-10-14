@@ -22,6 +22,7 @@ import {
   type FleetDefaultAction,
 } from '../fleet-default.js';
 import { ALWAYS_PASS_LINES } from '../report/user-units.js';
+import type { ReceiverFleetValues } from '../fleet-default-install.js';
 
 export const FLEX_INDEX_FILTER = '@routeState:tier_down';
 
@@ -34,6 +35,10 @@ export interface FleetDefaultStepInput {
   /** The offload bucket, when discovery found one. */
   bucket?: string;
   region?: string;
+  /** The Receiver values the plan writes, and why any are held back. */
+  receiverValues?: ReceiverFleetValues;
+  /** True when the caller passed the limit (`cap_bytes_per_window_per_node`). */
+  capGiven?: boolean;
 }
 
 export type FleetDefaultDestinationSetup =
@@ -60,6 +65,12 @@ export interface FleetDefaultStep {
   destination_setup: FleetDefaultDestinationSetup;
   /** The Receiver side, and what holds until the engine reads the default action. */
   receiver: string;
+  /** True when the plan's Receiver values carry the fleet default. */
+  receiver_values_written: boolean;
+  /** The options after the app, in order, when written. */
+  receiver_options?: Array<[string, string]>;
+  /** Env vars on the Receiver container, when written. */
+  receiver_env?: Array<[string, string]>;
   markdown: string;
 }
 
@@ -86,10 +97,22 @@ export function buildFleetDefaultStep(input: FleetDefaultStepInput = {}): FleetD
   const alwaysPass = alwaysPassSentence(ALWAYS_PASS_LINES);
   const errorMonitors =
     `The fleet default holds error statements too. ${errorMonitorVisibility(action, errorFloor, ALWAYS_PASS_LINES)}`;
-  const receiver =
-    'The limit, the action and the always-pass sample are Receiver settings. This plan writes them once the engine ' +
-    'it installs reads the default action for a service with no rule; until then a service with no rule keeps every ' +
-    'statement in Standard.';
+  const rv = input.receiverValues;
+  const written = !!rv?.fleetDefaultWritten;
+  const receiver = written
+    ? 'The plan writes these Receiver options after the app in the values above, where a later value wins over the ' +
+      "app's config, and the env var `outputOffload=true`, which puts `routeState` on every line the Receiver returns. " +
+      '`rateReceiverAbsoluteCap` is the limit in the engine\'s unit, bytes per node; the POC report states it in lines a day.'
+    : !rv
+      ? 'The limit, the action and the always-pass sample are Receiver settings. This plan writes them once the engine ' +
+        'it installs reads the default action for a service with no rule; until then a service with no rule keeps every ' +
+        'statement in Standard.'
+      : !input.capGiven
+        ? 'No limit was given. `log10x_poc_from_local` or `log10x_configure_engine` with `fleet_default` computes it from ' +
+          'the POC capture and returns `fleet_default.cap_bytes_per_window_per_node`; passed back here as ' +
+          '`fleet_default.cap_bytes_per_window_per_node`, it goes into the Receiver values. Until then the plan writes ' +
+          'no fleet default, and a service with no rule keeps every statement in Standard.'
+        : rv.notes.find((n) => n.includes('fleet default')) ?? 'The plan writes no fleet default.';
 
   const md: string[] = [];
   md.push('## After the POC: the fleet default (Datadog)');
@@ -166,6 +189,14 @@ export function buildFleetDefaultStep(input: FleetDefaultStepInput = {}): FleetD
   md.push('');
   md.push(receiver);
   md.push('');
+  if (written && rv) {
+    const fleetKeys = new Set(['symbolMessageHashField', 'k8sTeamLabel']);
+    md.push('```text');
+    for (const [k, v] of rv.options.filter(([k]) => !fleetKeys.has(k))) md.push(`${k} ${v}`);
+    for (const [k, v] of rv.env) md.push(`${k}=${v}   # env`);
+    md.push('```');
+    md.push('');
+  }
 
   return {
     destination: 'datadog',
@@ -177,6 +208,8 @@ export function buildFleetDefaultStep(input: FleetDefaultStepInput = {}): FleetD
     error_monitors: errorMonitors,
     destination_setup: setup,
     receiver,
+    receiver_values_written: written,
+    ...(written && rv ? { receiver_options: rv.options, receiver_env: rv.env } : {}),
     markdown: md.join('\n'),
   };
 }

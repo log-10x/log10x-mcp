@@ -148,6 +148,14 @@ import {
   statementsUsdMonthly,
   type ServiceLimit,
 } from '../lib/report/user-units.js';
+import { defaultErrorFloor, fleetDefaultNumber, FLEET_DEFAULT_HEADROOM, type KeptCell } from '../lib/fleet-default.js';
+import {
+  FLEET_DEFAULT_ENGINE_ENV,
+  FLEET_DEFAULT_MIN_ENGINE,
+  fleetDefaultEngineOptions,
+} from '../lib/fleet-default-install.js';
+import { medianInstances } from '../lib/enforcing-instances.js';
+import type { FleetDefaultReport } from '../lib/report/build-report-data.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -536,12 +544,41 @@ export const configureEngineSchema = {
     .describe(
       'Datadog only, default true: before a rule moves statements off Standard, read the account\'s log monitors and log-based metrics (read-only GETs, needs DD_API_KEY + DD_APP_KEY in the session) and list the ones whose query matches each rule\'s service or statement text, as `rule_dependencies` and as lines in human_summary. Set false to skip the read.'
     ),
+  fleet_default: z
+    .object({
+      headroom: z.number().min(1).max(10).optional().describe('Multiplier on the largest kept per-node cell. Default 2.'),
+      action: z
+        .enum(['tier_down', 'offload'])
+        .optional()
+        .describe('Where a statement above the limit goes: `tier_down` (Flex on Datadog, the default) or `offload` (S3).'),
+      error_floor: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe('Share of ERROR and CRITICAL lines above the limit kept in Standard. Default 0.5 with offload, 0 with tier_down.'),
+    })
+    .optional()
+    .describe(
+      'The fleet default for every service with no row: the largest statement these rows keep, per node, times the headroom, returned as `fleet_default` with the Receiver options that install it (`rateReceiverAbsoluteCap`, `rateReceiverDefaultAction`, the always-pass sample) and stated in lines a day in human_summary. A Receiver value, not a policy-file row: `log10x_advise_install` writes it, on an engine release that reads `rateReceiverDefaultAction`. Needs rows with a kept statement; without one the tool says so and writes no default.'
+    ),
 };
 
 const schemaObj = z.object(configureEngineSchema);
 export type ConfigureEngineArgs = z.infer<typeof schemaObj>;
 
 // ─── output types ─────────────────────────────────────────────────────
+export interface ConfigureFleetDefault extends FleetDefaultReport {
+  /** The Receiver options after the app, in order, when computed. */
+  engine_options?: Array<[string, string]>;
+  /** Env vars on the Receiver container. */
+  engine_env?: Array<[string, string]>;
+  /** The first engine release that reads these options. */
+  min_engine: string;
+  /** How the value is installed. */
+  install_note: string;
+}
+
 export interface PerPatternRow {
   pattern_hash: string;
   /** Human pattern name — renderers lead with this, never the hash. */
@@ -784,6 +821,8 @@ interface ConfigureEngineData {
   };
   /** Datadog: log monitors and log-based metrics each rule's moved statements feed. */
   rule_dependencies?: RuleDependencySummary;
+  /** The fleet default these rows set, when `fleet_default` was passed. */
+  fleet_default?: ConfigureFleetDefault;
   /**
    * One-paragraph plain-prose distillation of the structured data.
    * Agents quote this directly; dollars omitted unless feasible derivation ran.
@@ -1699,6 +1738,10 @@ export async function executeConfigureEngine(
   const limitByContainer = new Map(limits.map((l) => [l.service, l] as const));
   const sentenceByContainer = new Map(limits.map((l) => [l.service, serviceLimitSentence(l, destination)] as const));
   const reasonByContainer = new Map([...sentenceByContainer].map(([c, t]) => [c, csvReason(t)] as const));
+  const fleetDefault = args.fleet_default
+    ? fleetDefaultFromRows(rows, instances, args.fleet_default, destination)
+    : undefined;
+  const fleetLine = fleetDefault ? fleetDefault.sentence : fleetSentence(destination);
   const csvDiff = renderCsvDiff(
     args.containers,
     args.current_csv,
@@ -1949,7 +1992,7 @@ export async function executeConfigureEngine(
     },
     per_pattern_rows: rows,
     per_service_summary: perServiceSummary,
-    plan_in_user_units: { services: [...sentenceByContainer.values()], fleet: fleetSentence(destination) },
+    plan_in_user_units: { services: [...sentenceByContainer.values()], fleet: fleetLine },
     checks: {
       coverage_pct: roundPct(coveragePct),
       feasible,
@@ -1988,6 +2031,7 @@ export async function executeConfigureEngine(
       : undefined,
     next_actions: nextActions,
     ...(ruleDependencies ? { rule_dependencies: ruleDependencies } : {}),
+    ...(fleetDefault ? { fleet_default: fleetDefault } : {}),
     human_summary: buildConfigureEngineHumanSummary({
       feasible,
       targetPercent,
@@ -1999,7 +2043,10 @@ export async function executeConfigureEngine(
       applied,
       refreshMode: !!refreshState,
       flexStatement: flexPlanMove?.text,
-      userUnitLines: userUnitLinesWithDependencies(sentenceByContainer, fleetSentence(destination), ruleDependencies),
+      userUnitLines: [
+        ...userUnitLinesWithDependencies(sentenceByContainer, fleetLine, ruleDependencies),
+        ...(fleetDefault ? [fleetDefault.install_note] : []),
+      ],
     }),
   };
 
@@ -2277,6 +2324,7 @@ function buildSummaryPayload(params: {
     action_default_resolution: data.action_default_resolution,
     refresh: data.refresh,
     ...(data.rule_dependencies ? { rule_dependencies: data.rule_dependencies } : {}),
+    ...(data.fleet_default ? { fleet_default: data.fleet_default } : {}),
     next_actions: slimNextActions,
     human_summary: data.human_summary,
     details_available: {
@@ -3647,6 +3695,83 @@ function reconstructAfterCsv(diff: string, currentCsv: string | undefined): stri
     );
   }
   return renderCsv(merged, preamble);
+}
+
+// ─── fleet default ────────────────────────────────────────────────────
+/**
+ * The fleet default from the rows: each container's largest pass row as a
+ * per-node cell (its bytes per reset window over the Receivers that enforce
+ * the container), the rule in `fleet-default.ts`, the limit in lines a day at
+ * that statement's line size across the median nodes per container, and the
+ * Receiver options that install it.
+ */
+export function fleetDefaultFromRows(
+  rows: PerPatternRow[],
+  instances: EnforcingInstances,
+  request: { headroom?: number; action?: 'tier_down' | 'offload'; error_floor?: number },
+  destination: SiemId,
+): ConfigureFleetDefault {
+  const action = request.action ?? 'tier_down';
+  const errorFloor = request.error_floor ?? defaultErrorFloor(action);
+  const headroom = request.headroom ?? FLEET_DEFAULT_HEADROOM;
+  const keptMax = new Map<string, PerPatternRow>();
+  for (const r of rows) {
+    if (!r.container || r.action !== 'pass' || !(r.cap_bytes_per_window > 0)) continue;
+    const cur = keptMax.get(r.container);
+    if (!cur || r.cap_bytes_per_window > cur.cap_bytes_per_window) keptMax.set(r.container, r);
+  }
+  const cells: KeptCell[] = [...keptMax].map(([container, r]) => ({
+    container,
+    keptMaxBytesPerWindow: r.cap_bytes_per_window,
+    instances: instances.byContainer[container]?.instances ?? 1,
+    statement: r.pattern,
+    avgBytesPerLine: r.events_monthly && r.events_monthly > 0 ? r.current_bytes_30d / r.events_monthly : undefined,
+  }));
+  const median = medianInstances(instances);
+  const num = fleetDefaultNumber(cells, headroom);
+  if (!num) {
+    return {
+      computed: false,
+      reason: 'no row keeps a statement in a named container, so there is no baseline for the limit',
+      action,
+      error_floor: errorFloor,
+      headroom,
+      nodes_for_lines: median.median,
+      containers_with_known_nodes: median.known,
+      sentence: fleetSentence(destination),
+      min_engine: FLEET_DEFAULT_MIN_ENGINE,
+      install_note: 'No fleet default: no row keeps a statement in a named container, so there is no baseline for the limit.',
+    };
+  }
+  const limitLinesPerDay =
+    num.baseline.avgBytesPerLine !== undefined
+      ? linesPerDayFromCap(num.capBytesPerWindowPerNode, median.median, num.baseline.avgBytesPerLine)
+      : undefined;
+  const sentence =
+    limitLinesPerDay !== undefined
+      ? fleetSentence(destination, { limitLinesPerDay, action })
+      : fleetSentence(destination);
+  return {
+    computed: true,
+    action,
+    error_floor: errorFloor,
+    headroom: num.headroom,
+    cap_bytes_per_window_per_node: num.capBytesPerWindowPerNode,
+    baseline_bytes_per_window_per_node: num.baselineBytesPerWindowPerNode,
+    ...(num.baseline.statement ? { baseline_statement: num.baseline.statement } : {}),
+    baseline_container: num.baseline.container,
+    ...(limitLinesPerDay !== undefined ? { limit_lines_per_day: limitLinesPerDay } : {}),
+    nodes_for_lines: median.median,
+    containers_with_known_nodes: median.known,
+    sentence,
+    engine_options: fleetDefaultEngineOptions({ capBytesPerWindowPerNode: num.capBytesPerWindowPerNode, action, errorFloor }),
+    engine_env: [...FLEET_DEFAULT_ENGINE_ENV],
+    min_engine: FLEET_DEFAULT_MIN_ENGINE,
+    install_note:
+      `The fleet default is a Receiver value, not a row in either file: log10x_advise_install writes it with ` +
+      `fleet_default.cap_bytes_per_window_per_node ${num.capBytesPerWindowPerNode}, on engine ${FLEET_DEFAULT_MIN_ENGINE} or later.` +
+      (limitLinesPerDay === undefined ? ' The rows carry no line count, so the limit is not stated in lines a day.' : ''),
+  };
 }
 
 // ─── monitor and log-based-metric check ───────────────────────────────

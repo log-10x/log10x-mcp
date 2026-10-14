@@ -201,6 +201,14 @@ export interface ForwarderSpec {
      * and overlay-on-existing).
      */
     installMode?: 'upgrade-existing' | 'fresh-release';
+    /**
+     * Receiver only: engine options after the app, in order (the fleet
+     * default, the team label, the Datadog hash field). A later value wins
+     * over the app's config.
+     */
+    engineOptions?: Array<[string, string]>;
+    /** Receiver only: env vars on the engine container (`outputOffload`). */
+    engineEnv?: Array<[string, string]>;
   }) => string;
   /**
    * Optional: extra files to emit alongside the values.yaml. Used by
@@ -225,6 +233,14 @@ export interface ForwarderSpec {
     licenseSecretKey: string;
     /** No licence: the patch carries no licence env, volume or mount. */
     builtinLicense?: boolean;
+    /**
+     * Receiver only: engine options after the app, in order (the fleet
+     * default, the team label, the Datadog hash field). A later value wins
+     * over the app's config.
+     */
+    engineOptions?: Array<[string, string]>;
+    /** Receiver only: env vars on the engine container (`outputOffload`). */
+    engineEnv?: Array<[string, string]>;
   }) => import('./types.js').PlanFile[];
   /**
    * Optional: extra command-line flags appended to the
@@ -574,6 +590,32 @@ subjects:
 `;
 }
 
+/** YAML list items for engine options, at the given indent, quoted. */
+function engineOptionArgLines(indent: string, options: Array<[string, string]> | undefined): string[] {
+  const out: string[] = [];
+  for (const [k, v] of options ?? []) out.push(`${indent}- "${k}"`, `${indent}- "${v}"`);
+  return out;
+}
+
+/** `- name:` / `value:` env entries at the given indent. */
+function engineEnvLines(indent: string, env: Array<[string, string]> | undefined): string[] {
+  const out: string[] = [];
+  for (const [k, v] of env ?? []) out.push(`${indent}- name: ${k}`, `${indent}  value: "${v}"`);
+  return out;
+}
+
+/**
+ * Options to append after the destination's own: the caller's, less any the
+ * destination already sets (the Datadog hash field appears once).
+ */
+function extraEngineOptions(
+  destination: OutputDestination | undefined,
+  options: Array<[string, string]> | undefined,
+): Array<[string, string]> {
+  const own = new Set(destinationEngineOptions(destination).map(([k]) => k));
+  return (options ?? []).filter(([k]) => !own.has(k));
+}
+
 function renderLog10xSidecar(opts: {
   /** Forwarder kind used in the engine's `@run/input/forwarder/<kind>` arg. */
   forwarderKind: 'fluentbit' | 'fluentd' | 'otel-collector' | 'vector' | 'logstash';
@@ -597,6 +639,10 @@ function renderLog10xSidecar(opts: {
   /** Metrics backends; each non-log10x one gets its output module and env. */
   backends?: MetricsBackendKind[];
   backendCredentials?: Partial<Record<MetricsBackendKind, BackendCredentialConfig>>;
+  /** Engine options after the app, in order. */
+  engineOptions?: Array<[string, string]>;
+  /** Env vars on the engine container. */
+  engineEnv?: Array<[string, string]>;
 }): string {
   const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
   const argLines: string[] = [
@@ -618,6 +664,7 @@ function renderLog10xSidecar(opts: {
     argLines.push(`      - "${k}"`);
     argLines.push(`      - "${v}"`);
   }
+  argLines.push(...engineOptionArgLines('      ', extraEngineOptions(opts.destination, opts.engineOptions)));
   const envLines: string[] = opts.builtinLicense
     ? []
     : [
@@ -651,6 +698,7 @@ function renderLog10xSidecar(opts: {
     }
   }
   envLines.push(...renderPolicyPullEnvLines('      '));
+  envLines.push(...engineEnvLines('      ', opts.engineEnv));
   // No licence: no mount and no volume. The container then has nothing to
   // wait on, and the engine logs that it runs the built-in evaluation licence.
   const mountBlock = opts.builtinLicense
@@ -700,8 +748,10 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
       const sidecar = renderLog10xSidecar({
+        engineOptions,
+        engineEnv,
         destination,
         backends,
         backendCredentials,
@@ -1002,7 +1052,7 @@ podSecurityPolicy:
 # on :24225 and writes them to your destinations.
 ${fileConfigsBlock}`;
     },
-    renderExtraFiles: ({ releaseName, destination, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
+    renderExtraFiles: ({ releaseName, destination, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
       const deploymentName = `${releaseName}-fluentd`;
       // engine args for the sidecar — same convention as
       // renderLog10xSidecar but inline because the patch YAML lives
@@ -1026,6 +1076,7 @@ ${fileConfigsBlock}`;
         argLines.push(`                    - "${k}"`);
         argLines.push(`                    - "${v}"`);
       }
+      argLines.push(...engineOptionArgLines('                    ', extraEngineOptions(destination, engineOptions)));
       const envLines: string[] = builtinLicense
         ? []
         : [
@@ -1037,6 +1088,7 @@ ${fileConfigsBlock}`;
         envLines.push(`                      value: "true"`);
       }
       envLines.push(...renderPolicyPullEnvLines('                    '));
+      envLines.push(...engineEnvLines('                    ', engineEnv));
       // No licence: the patch adds the container only, with no licence
       // mount and no pod volume (see renderLog10xSidecar).
       const patchMounts = builtinLicense
@@ -1193,7 +1245,7 @@ bash "%~dp0post-render.sh"
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
+    renderValues: ({ destination, optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
       // Build TENX_RUN_ARGS. Default args wire the filebeat input and
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
@@ -1204,6 +1256,7 @@ bash "%~dp0post-render.sh"
       if (readOnly) runArgs.push('receiverReadOnly', 'true');
       for (const [k, v] of destinationEngineOptions(destination)) runArgs.push(k, v);
       for (const b of nonLog10xBackends) runArgs.push(`@run/output/metric/${b}`);
+      for (const [k, v] of extraEngineOptions(destination, engineOptions)) runArgs.push(k, v);
 
       // Build the daemonset.extraEnvs block. Emits TENX_RUN_ARGS, plus
       // TENX_LICENSE_FILE when the plan carries a licence (the
@@ -1226,6 +1279,7 @@ bash "%~dp0post-render.sh"
         envLines.push(`      value: "true"`);
       }
       envLines.push(...renderPolicyPullEnvLines('    '));
+      envLines.push(...engineEnvLines('    ', engineEnv));
       for (const b of nonLog10xBackends) {
         const spec = BACKEND_ENV_SPECS[b];
         if (!spec) continue;
@@ -1369,7 +1423,7 @@ ${envLines.join('\n')}${licenseVolumes}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
       // Logstash chart quirks (vs the other receiver overlays):
       //   - `extraContainers` is a YAML pipe-string, not a list, so the
       //     log10x container block is inlined here rather than taken from
@@ -1392,6 +1446,7 @@ ${envLines.join('\n')}${licenseVolumes}
         argLines.push(`      - "${k}"`);
         argLines.push(`      - "${v}"`);
       }
+      argLines.push(...engineOptionArgLines('      ', extraEngineOptions(destination, engineOptions)));
       const envLines: string[] = builtinLicense
         ? []
         : [
@@ -1403,6 +1458,7 @@ ${envLines.join('\n')}${licenseVolumes}
         envLines.push(`        value: "true"`);
       }
       envLines.push(...renderPolicyPullEnvLines('      '));
+      envLines.push(...engineEnvLines('      ', engineEnv));
       const destOutput = renderLogstashDestinationOutput(destination, outputHost);
       // No licence: no mount and no secretMounts entry (see renderLog10xSidecar).
       const licenseMount = builtinLicense
@@ -1563,8 +1619,10 @@ ${indent(destOutput, 6)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
       const sidecar = renderLog10xSidecar({
+        engineOptions,
+        engineEnv,
         destination,
         backends,
         backendCredentials,
@@ -1699,8 +1757,10 @@ ${indent(destSink, 4)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
       const sidecar = renderLog10xSidecar({
+        engineOptions,
+        engineEnv,
         destination,
         backends,
         backendCredentials,

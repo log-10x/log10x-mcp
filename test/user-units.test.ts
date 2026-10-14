@@ -51,15 +51,15 @@ test('a service line reads in lines a day and dollars a month, by destination', 
 test('the fleet line names the default when there is one, and the always-pass sample', () => {
   assert.equal(
     fleetSentence('datadog'),
-    'Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.',
+    'Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.',
   );
   assert.equal(
     fleetSentence('datadog', { limitLinesPerDay: 250_000, action: 'tier_down' }),
-    'Any service not listed: a statement above 250,000 lines a day goes to Flex. The first 5 lines of every statement always reach Standard.',
+    'Any service not listed: a statement above 250,000 lines a day goes to Flex. Up to 1,800 lines a day of every statement always reach Standard on each node.',
   );
   assert.equal(
     fleetSentence('splunk'),
-    'Any service not listed keeps every statement in the ingest path. The first 5 lines of every statement always reach the ingest path.',
+    'Any service not listed keeps every statement in the ingest path. Up to 1,800 lines a day of every statement always reach the ingest path on each node.',
   );
 });
 
