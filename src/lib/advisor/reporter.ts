@@ -100,6 +100,13 @@ export interface ReporterAdviseArgs {
   builtinLicense?: boolean;
   /** Output destination flavor. Default: 'mock' (safe for dogfooding). */
   destination?: OutputDestination;
+  /**
+   * Receiver only: engine options after the app, in order, and env vars on
+   * the engine container (the fleet default, the team label, the Datadog
+   * hash field; see fleet-default-install.ts). Ignored for the Reporter.
+   */
+  engineOptions?: Array<[string, string]>;
+  engineEnv?: Array<[string, string]>;
   /** Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). */
   outputHost?: string;
   /** Splunk HEC token if destination=splunk. */
@@ -723,6 +730,9 @@ function buildInstallSteps(opts: {
    * (Reporter path, or Receiver fallback when no helm release detected).
    */
   installMode: 'upgrade-existing' | 'fresh-release';
+  /** Receiver only: engine options after the app, and env on the engine container. */
+  engineOptions?: Array<[string, string]>;
+  engineEnv?: Array<[string, string]>;
 }): PlanStep[] {
   const {
     spec,
@@ -830,6 +840,7 @@ function buildInstallSteps(opts: {
       backendCredentials,
       airgapped,
       installMode,
+      ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv } : {}),
     }),
     language: 'yaml' as const,
   };
@@ -847,6 +858,7 @@ function buildInstallSteps(opts: {
         licenseSecretName,
         licenseSecretKey,
         builtinLicense,
+        ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv } : {}),
       })
     : [];
   const allFiles = [valuesPlanFile, ...extraFiles];

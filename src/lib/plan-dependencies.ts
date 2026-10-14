@@ -199,6 +199,31 @@ export function dependencyRulesFromPlan(plan: Plan): DependencyRule[] {
   return [...byKey.values()];
 }
 
+/**
+ * One fleet-default rule per service the plan gives no row: the fleet default
+ * can move any of its statements once one passes the limit, so each rule
+ * carries all of them, and none counts its error lines as kept.
+ */
+export function fleetDefaultDependencyRules(
+  statements: Array<{ service?: string; name: string; text?: string; severity?: string }>,
+  listedServices: Iterable<string>,
+  action: 'tier_down' | 'offload',
+): DependencyRule[] {
+  const listed = new Set(listedServices);
+  const byService = new Map<string, DependencyRule>();
+  for (const st of statements) {
+    const svc = st.service;
+    if (!svc || listed.has(svc)) continue;
+    let rule = byService.get(svc);
+    if (!rule) {
+      rule = { service: svc, action, statements: [], fleetDefault: true };
+      byService.set(svc, rule);
+    }
+    rule.statements.push({ name: st.name, ...(st.text ? { text: st.text } : {}), ...(st.severity ? { severity: st.severity } : {}) });
+  }
+  return [...byService.values()].sort((a, b) => a.service.localeCompare(b.service));
+}
+
 const capitalize = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** Match rules against an already-fetched inventory. */

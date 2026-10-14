@@ -76,8 +76,11 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * 1.1.86 (2026-09-28): all five images answer; the Receiver's receive-mode
  * pass-through fix (config #74) ships in this image, checked with a Fluent
  * Bit sidecar: 0 fullText fallbacks, 2,000 of 2,000 lines.
+ * 1.1.141: the first release whose receiver reads rateReceiverDefaultAction and
+ * k8sTeamLabel, which the fleet-default gate requires. Pinned by digest.
  */
-export const EDGE_MANIFEST_IMAGE = 'log10x/edge-10x:1.1.136';
+export const EDGE_MANIFEST_IMAGE =
+  'log10x/edge-10x:1.1.141@sha256:45157d0bdf506615aa015db7b8b7251ae39be5f4330233d2d2d659c69d1f93d1';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

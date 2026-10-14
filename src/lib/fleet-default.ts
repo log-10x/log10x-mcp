@@ -41,6 +41,65 @@ export function fleetDefaultLimit(baseline: number, headroom: number = FLEET_DEF
 }
 
 /**
+ * A kept statement in one container, as the capture measured it. The cell is
+ * per node: the statement's bytes per reset window over the whole stream,
+ * divided by the Receivers that enforce the container's cap.
+ */
+export interface KeptCell {
+  container: string;
+  /** Bytes per reset window of the container's largest kept statement, whole stream. */
+  keptMaxBytesPerWindow: number;
+  /** Receivers enforcing the container's cap: its nodes for a DaemonSet, 1 for a sidecar. */
+  instances: number;
+  /** The statement's name, for the plan. */
+  statement?: string;
+  /** Average bytes per line of that statement. */
+  avgBytesPerLine?: number;
+}
+
+export interface FleetDefaultNumber {
+  /** The engine value: bytes per reset window per node (`rateReceiverAbsoluteCap`). */
+  capBytesPerWindowPerNode: number;
+  /** The baseline the cap multiplies, in the same unit. */
+  baselineBytesPerWindowPerNode: number;
+  headroom: number;
+  /** The cell the baseline came from. */
+  baseline: KeptCell;
+}
+
+/** The baseline: the largest kept per-window cell of the capture, per node. */
+export function fleetDefaultBaseline(cells: KeptCell[]): (KeptCell & { perNode: number }) | undefined {
+  let best: (KeptCell & { perNode: number }) | undefined;
+  for (const c of cells) {
+    if (!(c.keptMaxBytesPerWindow > 0)) continue;
+    const perNode = c.keptMaxBytesPerWindow / Math.max(1, c.instances);
+    if (!best || perNode > best.perNode) best = { ...c, perNode };
+  }
+  return best;
+}
+
+/**
+ * The fleet default's number: the baseline cell times the headroom, in bytes
+ * per reset window per node. Undefined without a kept cell, so a caller
+ * writes no default and says why.
+ */
+export function fleetDefaultNumber(
+  cells: KeptCell[],
+  headroom: number = FLEET_DEFAULT_HEADROOM,
+): FleetDefaultNumber | undefined {
+  const b = fleetDefaultBaseline(cells);
+  if (!b) return undefined;
+  const h = Number.isFinite(headroom) && headroom >= 1 ? headroom : FLEET_DEFAULT_HEADROOM;
+  const { perNode, ...baseline } = b;
+  return {
+    capBytesPerWindowPerNode: Math.max(1, Math.round(fleetDefaultLimit(perNode, h))),
+    baselineBytesPerWindowPerNode: perNode,
+    headroom: h,
+    baseline,
+  };
+}
+
+/**
  * Share of ERROR and CRITICAL lines above the limit that stay in Standard.
  * Ruled 2026-10-13: 0.5 when the excess is offloaded (S3 has no monitors),
  * 0 when it goes to Flex. A parameter, because the containment demo may move it.

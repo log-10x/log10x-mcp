@@ -37,16 +37,28 @@ import {
   type ReportData,
   type VerifyCheck,
 } from './report-data.js';
-import { perInstanceCap, instancesFor, describeInstances, type EnforcingInstances } from '../enforcing-instances.js';
+import { perInstanceCap, instancesFor, describeInstances, medianInstances, type EnforcingInstances } from '../enforcing-instances.js';
 import {
   csvReason,
   fleetSentence,
   flexAddedSentence,
+  linesPerDayFromCap,
   serviceLimitSentence,
   serviceLimitsFromPatterns,
   type FleetLimit,
 } from './user-units.js';
-import { dependencyLinesForService, type RuleDependencySummary } from '../siem/deps/datadog-log-queries.js';
+import {
+  dependencyLinesForFleetDefault,
+  dependencyLinesForService,
+  type RuleDependencySummary,
+} from '../siem/deps/datadog-log-queries.js';
+import {
+  FLEET_DEFAULT_HEADROOM,
+  defaultErrorFloor,
+  fleetDefaultNumber,
+  type FleetDefaultAction,
+  type KeptCell,
+} from '../fleet-default.js';
 
 /** A cluster must carry at least this share of window bytes to drive
  * the verdict + an operational action. */
@@ -126,11 +138,105 @@ export interface BuildReportOptions {
   enforcingInstances?: EnforcingInstances;
   /** The fleet-wide default for services with no row, when the plan writes one. */
   fleetDefault?: FleetLimit;
+  /** Compute the fleet default from this capture (wins over `fleetDefault`). */
+  fleetDefaultRequest?: FleetDefaultRequest;
   /** Datadog: the log monitors and log-based metrics that read each rule's moved lines, printed beside the rule. */
   ruleDependencies?: RuleDependencySummary;
 }
 
 export class ReportRefusal extends Error {}
+
+export interface FleetDefaultRequest {
+  /** Multiplier on the baseline. Default 2. */
+  headroom?: number;
+  /** Where a statement above the limit goes. Default `tier_down`. */
+  action?: FleetDefaultAction;
+  /** Share of ERROR and CRITICAL lines above the limit kept in Standard. Default by action. */
+  errorFloor?: number;
+}
+
+/** The fleet default a capture sets, for the plan and for `log10x_advise_install`. */
+export interface FleetDefaultReport {
+  /** False when the capture keeps no statement to set the limit from. */
+  computed: boolean;
+  reason?: string;
+  action: FleetDefaultAction;
+  error_floor: number;
+  headroom: number;
+  /** The engine value, `rateReceiverAbsoluteCap`: bytes per reset window per node. */
+  cap_bytes_per_window_per_node?: number;
+  baseline_bytes_per_window_per_node?: number;
+  baseline_statement?: string;
+  baseline_container?: string;
+  /** The limit in lines a day at the baseline statement's line size, across `nodes_for_lines` nodes. */
+  limit_lines_per_day?: number;
+  /** The median Receivers per container with a known count; 1 when none is known. */
+  nodes_for_lines: number;
+  containers_with_known_nodes: number;
+  /** The fleet line in user units. */
+  sentence: string;
+}
+
+/**
+ * The fleet default from a capture: each container's largest kept statement
+ * as a per-node cell, the rule in `fleet-default.ts` on those cells, and the
+ * limit in lines a day for the fleet line.
+ */
+export function fleetDefaultFromPatterns<P extends { service?: string; bytes: number; count: number }>(
+  patterns: P[],
+  isMoved: (p: P) => boolean,
+  windowSeconds: number,
+  instances: EnforcingInstances | undefined,
+  request: FleetDefaultRequest,
+  siem: string | null,
+  nameOf: (p: P) => string,
+): FleetDefaultReport {
+  const action = request.action ?? 'tier_down';
+  const errorFloor = request.errorFloor ?? defaultErrorFloor(action);
+  const headroom = request.headroom ?? FLEET_DEFAULT_HEADROOM;
+  const keptMax = new Map<string, P>();
+  for (const p of patterns) {
+    if (!p.service || isMoved(p) || !(p.bytes > 0)) continue;
+    const cur = keptMax.get(p.service);
+    if (!cur || p.bytes > cur.bytes) keptMax.set(p.service, p);
+  }
+  const cells: KeptCell[] = [...keptMax].map(([container, p]) => ({
+    container,
+    keptMaxBytesPerWindow: (p.bytes * CAP_RESET_WINDOW_SECONDS) / Math.max(1, windowSeconds),
+    instances: instancesFor(instances, container),
+    statement: nameOf(p),
+    avgBytesPerLine: p.count > 0 ? p.bytes / p.count : undefined,
+  }));
+  const median = instances ? medianInstances(instances) : { median: 1, known: 0 };
+  const num = fleetDefaultNumber(cells, headroom);
+  if (!num) {
+    return {
+      computed: false,
+      reason: 'the capture keeps no statement in a named container, so there is no baseline for the limit',
+      action,
+      error_floor: errorFloor,
+      headroom,
+      nodes_for_lines: median.median,
+      containers_with_known_nodes: median.known,
+      sentence: fleetSentence(siem),
+    };
+  }
+  const limitLinesPerDay = linesPerDayFromCap(num.capBytesPerWindowPerNode, median.median, num.baseline.avgBytesPerLine ?? 1);
+  return {
+    computed: true,
+    action,
+    error_floor: errorFloor,
+    headroom: num.headroom,
+    cap_bytes_per_window_per_node: num.capBytesPerWindowPerNode,
+    baseline_bytes_per_window_per_node: num.baselineBytesPerWindowPerNode,
+    ...(num.baseline.statement ? { baseline_statement: num.baseline.statement } : {}),
+    baseline_container: num.baseline.container,
+    limit_lines_per_day: limitLinesPerDay,
+    nodes_for_lines: median.median,
+    containers_with_known_nodes: median.known,
+    sentence: fleetSentence(siem, { limitLinesPerDay, action }),
+  };
+}
 
 export interface BuiltReport {
   data: ReportData;
@@ -142,6 +248,8 @@ export interface BuiltReport {
   actionsCsv: string | null;
   /** Planned patterns with no container, which no cap row can key. */
   unattributedPlanned: number;
+  /** The fleet default this capture sets, when the caller asked for one. */
+  fleetDefault?: FleetDefaultReport;
 }
 
 export function buildReportData(
@@ -211,6 +319,7 @@ export function buildReportData(
   let capsCsv: string | null = null;
   let actionsCsv: string | null = null;
   let unattributedPlanned = 0;
+  let fleetDefault: FleetDefaultReport | undefined;
   if (reducible.length > 0) {
     const impact = reducible.reduce((s, p) => s + p.bytes, 0);
     const faces = reducible.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
@@ -267,6 +376,33 @@ export function buildReportData(
       ...(deps?.checked ? dependencyLinesForService(deps, l.service) : []),
     ]);
     const unscopedLines = deps ? deps.lines.slice(deps.rules.reduce((n, r) => n + r.lines.length, 0)) : [];
+    const nameOfPattern = (p: _EnrichedPattern): string => p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash;
+    if (opts.fleetDefaultRequest) {
+      fleetDefault = fleetDefaultFromPatterns(
+        enriched.patterns,
+        isMoved,
+        windowSeconds,
+        opts.enforcingInstances,
+        opts.fleetDefaultRequest,
+        opts.siem,
+        nameOfPattern,
+      );
+    }
+    const fleetLine = fleetDefault ? fleetDefault.sentence : fleetSentence(opts.siem, opts.fleetDefault);
+    const fleetLines = fleetDefault?.computed
+      ? [
+          fleetLine,
+          `The fleet default is the largest statement kept, ${fleetDefault.baseline_statement ?? 'one statement'} in ` +
+            `${fleetDefault.baseline_container}, per node, times ${fleetDefault.headroom}. It is a Receiver value, not a row in ` +
+            `either file: log10x_advise_install writes it as rateReceiverAbsoluteCap with rateReceiverDefaultAction ` +
+            `${fleetDefault.action}.`,
+          ...dependencyLinesForFleetDefault(deps),
+        ]
+      : [
+          fleetLine,
+          ...(fleetDefault && !fleetDefault.computed ? [`No fleet default: ${fleetDefault.reason}.`] : []),
+          ...dependencyLinesForFleetDefault(deps),
+        ];
     const flexLine = flexAddedSentence(opts.siem, units.movedBytesMonthly, units.movedEventsMonthly);
     const files = engineFilesFromContainerCaps(
       containerCaps,
@@ -293,7 +429,7 @@ export function buildReportData(
       change: {
         commentLines: [
           ...serviceBlocks,
-          fleetSentence(opts.siem, opts.fleetDefault),
+          ...fleetLines,
           ...unscopedLines,
           ...(flexLine ? [flexLine] : []),
           `A limit is the largest statement the container keeps, so the statements above exceed it and no other does.`,
@@ -304,6 +440,13 @@ export function buildReportData(
               .sort()
               .map((c) => (opts.enforcingInstances ? describeInstances(opts.enforcingInstances, c) : `${c}: node count unknown, written for one Receiver`))
               .join('; ') +
+            (fleetDefault?.computed
+              ? `; the fleet default: per node, its lines a day stated for ${fleetDefault.nodes_for_lines} ` +
+                `node${fleetDefault.nodes_for_lines === 1 ? '' : 's'}, the median per container` +
+                (fleetDefault.containers_with_known_nodes > 0
+                  ? ` across ${fleetDefault.containers_with_known_nodes} with a known count`
+                  : ', no container\'s count known')
+              : '') +
             '.',
         ],
         rows,
@@ -428,7 +571,7 @@ export function buildReportData(
     verify,
     kept: { protectedEvents, sentences: keptSentences },
   };
-  return { data, capsCsv, actionsCsv, unattributedPlanned };
+  return { data, capsCsv, actionsCsv, unattributedPlanned, ...(fleetDefault ? { fleetDefault } : {}) };
 }
 
 function attachAnnotations(

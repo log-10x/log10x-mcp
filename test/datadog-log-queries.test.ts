@@ -219,13 +219,13 @@ test('the summary prints each service line, then its monitors, then the fleet li
       ['checkout', 'checkout: any statement above 10,000 lines a day goes to Flex. Today that is these 2 statements, about $17 a month.'],
       ['ad', 'ad: every statement goes to the offload bucket. Today that is this one statement, about $2 a month.'],
     ]),
-    'Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.',
+    'Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.',
     s,
   );
   assert.equal(lines[0].slice(0, 9), 'checkout:');
   assert.equal(lines[1], s.rules[0].lines[0]);
   assert.equal(lines[1 + s.rules[0].lines.length].slice(0, 3), 'ad:');
-  assert.ok(lines.includes('Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.'));
+  assert.ok(lines.includes('Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.'));
   assert.equal(lines[lines.length - 3], 'Not tied to one service: 2 log monitors also read lines from the services above.');
   const unchecked = userUnitLinesWithDependencies(new Map([['a', 'a: x.']]), 'fleet.', ruleDependenciesNotChecked('no Datadog credentials in this session'));
   assert.deepEqual(unchecked, ['a: x.', 'fleet.', 'Log monitors and log-based metrics were not checked: no Datadog credentials in this session.']);

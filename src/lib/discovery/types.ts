@@ -469,7 +469,9 @@ export interface WizardSession {
    */
   logDestination?: 'datadog';
   /** The fleet default's route and error share, when the caller set them. */
-  fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number };
+  fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number };
+  /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */
+  teamLabel?: string;
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

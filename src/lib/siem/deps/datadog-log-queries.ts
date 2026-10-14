@@ -356,6 +356,12 @@ export interface DependencyRule {
   aliases?: string[];
   action: RuleAction;
   statements: RuleStatement[];
+  /**
+   * The fleet default, not a row of the service's own: it holds every
+   * statement above the limit, error statements included, so no query that
+   * reads only error lines is treated as kept in Standard.
+   */
+  fleetDefault?: boolean;
 }
 
 export type DependencyEffect = 'goes_blind' | 'not_blinded' | 'stops_counting' | 'still_counts';
@@ -377,6 +383,8 @@ export interface RuleDependencyMatch {
 export interface RuleDependencyCheck {
   service: string;
   action: RuleAction;
+  /** Set for a service the fleet default covers. */
+  fleet_default?: boolean;
   statements: number;
   monitors: RuleDependencyMatch[];
   metrics: RuleDependencyMatch[];
@@ -564,7 +572,9 @@ function parseObjects(objects: LogQueryObject[]): ParsedObject[] {
 }
 
 function ruleHeader(rule: DependencyRule, monitors: number, metrics: number): string {
-  const head = `${rule.service} (${ACTION_PHRASE[rule.action]}, ${plural(rule.statements.length, 'statement', 'statements')})`;
+  const head = rule.fleetDefault
+    ? `${rule.service} (fleet default, ${ACTION_PHRASE[rule.action]} above the limit, ${plural(rule.statements.length, 'statement', 'statements')})`
+    : `${rule.service} (${ACTION_PHRASE[rule.action]}, ${plural(rule.statements.length, 'statement', 'statements')})`;
   if (monitors === 0 && metrics === 0) {
     return `${head}: no log monitor or log-based metric queries this service or the text of these statements.`;
   }
@@ -577,7 +587,13 @@ function ruleHeader(rule: DependencyRule, monitors: number, metrics: number): st
 /** The lines to print beside one service's rule (both blocks when it has two actions). */
 export function dependencyLinesForService(summary: RuleDependencySummary | undefined, service: string): string[] {
   if (!summary) return [];
-  return summary.rules.filter((r) => r.service === service).flatMap((r) => r.lines);
+  return summary.rules.filter((r) => r.service === service && !r.fleet_default).flatMap((r) => r.lines);
+}
+
+/** The lines for the services the fleet default covers, printed beside the fleet line. */
+export function dependencyLinesForFleetDefault(summary: RuleDependencySummary | undefined): string[] {
+  if (!summary) return [];
+  return summary.rules.filter((r) => r.fleet_default).flatMap((r) => r.lines);
 }
 
 function renderRule(rule: DependencyRule, monitors: RuleDependencyMatch[], metrics: RuleDependencyMatch[]): string[] {
@@ -641,7 +657,7 @@ export function matchRuleDependencies(
       .map((s) => s.trim().toLowerCase())
       .filter((s, i, a) => s.length > 0 && a.indexOf(s) === i);
     const stmts = prepare(rule.statements);
-    const errorsStay = !rule.statements.some((s) => isProtectedSeverity(s.severity));
+    const errorsStay = rule.fleetDefault ? false : !rule.statements.some((s) => isProtectedSeverity(s.severity));
     const monitors: RuleDependencyMatch[] = [];
     const metrics: RuleDependencyMatch[] = [];
 
@@ -694,6 +710,7 @@ export function matchRuleDependencies(
     checks.push({
       service: rule.service,
       action: rule.action,
+      ...(rule.fleetDefault ? { fleet_default: true } : {}),
       statements: rule.statements.length,
       monitors,
       metrics,

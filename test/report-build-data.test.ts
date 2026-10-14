@@ -114,7 +114,7 @@ test('volume action: reducible statements only, container-keyed change rows in t
   const lines = tier!.change!.commentLines;
   assert.match(lines[0], /^cartservice: any statement above 1,200 lines a day goes to Infrequent Access\. Today that is this one statement, about \$[\d.]+ a month\.$/);
   assert.match(lines[1], /^otelcol: any statement above 72,000 lines a day goes to Infrequent Access\. Today that is this one statement, about \$[\d.]+ a month\.$/);
-  assert.equal(lines[2], 'Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.');
+  assert.equal(lines[2], 'Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.');
   for (const l of [...lines, tier!.change!.engineGapNote!]) {
     assert.ok(!/240|regulator|severity floor|bytes per window/i.test(l), `engine units leaked into a user line: ${l}`);
   }

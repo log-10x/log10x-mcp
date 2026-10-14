@@ -75,6 +75,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
 import { buildFleetDefaultStep } from '../lib/advisor/fleet-default-step.js';
+import { receiverFleetValues } from '../lib/fleet-default-install.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -224,9 +225,18 @@ export const adviseInstallSchema = {
         .max(1)
         .optional()
         .describe('Share of ERROR and CRITICAL lines above the limit that stay in Standard. Default 0.5 with offload, 0 with tier_down.'),
+      cap_bytes_per_window_per_node: z
+        .number()
+        .positive()
+        .optional()
+        .describe('The limit in the engine\'s unit, as `log10x_configure_engine` or `log10x_poc_from_local` with `fleet_default` returns it (`fleet_default.cap_bytes_per_window_per_node`). Without it the plan writes no fleet default.'),
     })
     .optional()
-    .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`).'),
+    .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`). The Receiver values are written only on an engine release that reads `rateReceiverDefaultAction`.'),
+  k8s_team_label: z
+    .string()
+    .optional()
+    .describe('A pod label key whose value names the owning team (e.g. `team`). Receiver plans write `k8sTeamLabel` with it, on an engine release that reads that option, so the metrics carry `tenx_team`.'),
 };
 
 const schemaObj = z.object(adviseInstallSchema);
@@ -1105,11 +1115,15 @@ export async function executeAdviseInstall(
     releaseName: args.release_name,
     namespace: args.namespace,
     logDestination: args.log_destination,
+    teamLabel: args.k8s_team_label,
     fleetDefault: args.fleet_default
       ? {
           ...(prior?.fleetDefault ?? {}),
           ...(args.fleet_default.action !== undefined ? { action: args.fleet_default.action } : {}),
           ...(args.fleet_default.error_floor !== undefined ? { errorFloor: args.fleet_default.error_floor } : {}),
+          ...(args.fleet_default.cap_bytes_per_window_per_node !== undefined
+            ? { capBytesPerWindowPerNode: args.fleet_default.cap_bytes_per_window_per_node }
+            : {}),
         }
       : undefined,
   });
@@ -2238,6 +2252,25 @@ async function renderInstallPlan(
   // when session.app is undefined (unreachable after Q1 is answered).
   const app = session.app ?? 'reporter';
 
+  // Receiver values for a Datadog fleet default and a team label, each written
+  // only on an engine that declares its options (an undeclared option fails
+  // the launch). The Reporter chart pins no engine version, so it gets none.
+  const datadogLogs = session.logDestination === 'datadog';
+  const fleetValues = receiverFleetValues({
+    datadog: datadogLogs && app === 'receiver',
+    ...(datadogLogs && app === 'receiver' && session.fleetDefault
+      ? {
+          fleetDefault: {
+            capBytesPerWindowPerNode: session.fleetDefault.capBytesPerWindowPerNode ?? 0,
+            action: session.fleetDefault.action ?? 'tier_down',
+            ...(session.fleetDefault.errorFloor !== undefined ? { errorFloor: session.fleetDefault.errorFloor } : {}),
+          },
+        }
+      : {}),
+    ...(session.teamLabel !== undefined ? { teamLabel: session.teamLabel } : {}),
+    ...(app === 'receiver' ? {} : { engineVersion: '' }),
+  });
+
   const plan = await buildReporterPlan({
     snapshot,
     app,
@@ -2256,7 +2289,14 @@ async function renderInstallPlan(
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
+    ...(app === 'receiver' ? { engineOptions: fleetValues.options, engineEnv: fleetValues.env } : {}),
   });
+  if (session.teamLabel !== undefined) {
+    plan.notes.push(
+      ...fleetValues.notes.filter((n) => n.includes('team label')),
+      ...(fleetValues.teamLabelWritten ? [`The Receiver reads the team from the pod label \`${session.teamLabel}\` (\`k8sTeamLabel\`); its metrics carry it as \`tenx_team\`.`] : []),
+    );
+  }
   if (session.logDestination === 'datadog') {
     if (app === 'receiver') {
       plan.fleetDefault = buildFleetDefaultStep({
@@ -2265,6 +2305,8 @@ async function renderInstallPlan(
         forwarder: session.forwarder,
         bucket: snapshot.recommendations?.retrieverS3Bucket,
         region: snapshot.aws?.region,
+        receiverValues: fleetValues,
+        capGiven: (session.fleetDefault?.capBytesPerWindowPerNode ?? 0) > 0,
       });
     } else {
       plan.notes.push(

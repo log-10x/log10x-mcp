@@ -41,9 +41,15 @@ import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
 import type { PrimitiveError } from '../lib/primitive-errors.js';
 import { DEFAULT_ANALYZER_COST_PER_GB, SIEM_DISPLAY_NAMES, defaultRateNote, type SiemId } from '../lib/siem/pricing.js';
 import { _enrichForEnvelope, type RenderInput } from '../lib/poc-report-renderer.js';
-import { buildReportData, ReportRefusal, CAPS_FILE_NAME, ACTIONS_FILE_NAME } from '../lib/report/build-report-data.js';
+import {
+  buildReportData,
+  ReportRefusal,
+  CAPS_FILE_NAME,
+  ACTIONS_FILE_NAME,
+  type FleetDefaultReport,
+} from '../lib/report/build-report-data.js';
 import { solvePlan, type Plan, type PlanTarget } from '../lib/plan-solver.js';
-import { checkRuleDependencies, dependencyRulesFromPlan } from '../lib/plan-dependencies.js';
+import { checkRuleDependencies, dependencyRulesFromPlan, fleetDefaultDependencyRules } from '../lib/plan-dependencies.js';
 import { renderReportHtml } from '../lib/report/html-template-v1.js';
 import { readClientVersion } from '../lib/manifest.js';
 import { isFenced, fencedOffer, fencedVerification } from '../lib/fenced.js';
@@ -151,6 +157,24 @@ export const pocFromLocalSchema = {
     .optional()
     .default(20)
     .describe('Cap on number of pods sampled. Default 20.'),
+  fleet_default: z
+    .object({
+      headroom: z.number().min(1).max(10).optional().describe('Multiplier on the largest kept per-node cell of the capture. Default 2.'),
+      action: z
+        .enum(['tier_down', 'offload'])
+        .optional()
+        .describe('Where a statement above the limit goes: `tier_down` (Flex on Datadog, the default) or `offload` (S3).'),
+      error_floor: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe('Share of ERROR and CRITICAL lines above the limit kept in Standard. Default 0.5 with offload, 0 with tier_down.'),
+    })
+    .optional()
+    .describe(
+      'Set the fleet default from this capture: the limit for every service the plan gives no row, the largest statement the plan keeps per node times the headroom. The report states it in lines a day, and `fleet_default.cap_bytes_per_window_per_node` in the result is the value `log10x_advise_install` writes. On Datadog, the dependency check also lists the log monitors and log-based metrics of the services it covers, error monitors included.'
+    ),
   check_dependencies: z
     .boolean()
     .optional()
@@ -244,6 +268,8 @@ export interface PocFromLocalArgs {
   retriever_installed?: boolean;
   /** Datadog only, default true: list the log monitors and log-based metrics that read each rule's moved lines. */
   check_dependencies?: boolean;
+  /** Set the fleet default from this capture. */
+  fleet_default?: { headroom?: number; action?: 'tier_down' | 'offload'; error_floor?: number };
   allow_lossy?: boolean;
   target_percent_reduction?: number;
   budget_usd_monthly?: number;
@@ -466,6 +492,8 @@ interface PocFromLocalInner {
    * figures cover: a cap row is bytes per `reset_window_seconds`, scaled from
    * that span.
    */
+  /** The fleet default this capture sets, when `fleet_default` was passed. */
+  fleet_default?: FleetDefaultReport;
   engine_policy?: {
     caps_csv: string;
     actions_csv: string;
@@ -972,6 +1000,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   let report_caps_path: string | undefined;
   let report_actions_path: string | undefined;
   let engine_policy: PocFromLocalInner['engine_policy'];
+  let fleet_default: FleetDefaultReport | undefined;
   let report_note: string | undefined;
   try {
     const siem: SiemId = args.siem ?? 'cloudwatch';
@@ -1012,9 +1041,31 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     const enrichment = _enrichForEnvelope(renderInput);
     // Datadog: before a rule moves statements off Standard, the log monitors and
     // log-based metrics that read them. Read-only, credential-gated, never throws.
+    // With a fleet default, every service the plan gives no row is covered by
+    // it, error statements included, so those services are checked as well.
+    const fleetRequest = args.fleet_default
+      ? {
+          ...(args.fleet_default.headroom !== undefined ? { headroom: args.fleet_default.headroom } : {}),
+          action: args.fleet_default.action ?? 'tier_down',
+          ...(args.fleet_default.error_floor !== undefined ? { errorFloor: args.fleet_default.error_floor } : {}),
+        }
+      : undefined;
+    const fleetRules =
+      fleetRequest && plan
+        ? fleetDefaultDependencyRules(
+            enrichment.patterns.map((p) => ({
+              service: p.service,
+              name: p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
+              text: p.template,
+              severity: p.severity,
+            })),
+            Object.keys(plan.containerCaps),
+            fleetRequest.action,
+          )
+        : [];
     const ruleDependencies =
       siem === 'datadog' && plan && args.check_dependencies !== false
-        ? await checkRuleDependencies('datadog', dependencyRulesFromPlan(plan))
+        ? await checkRuleDependencies('datadog', [...dependencyRulesFromPlan(plan), ...fleetRules])
         : undefined;
     const built = buildReportData(
       renderInput,
@@ -1031,12 +1082,24 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         mcpVersion: MCP_VERSION,
         ...(plan && planSpanSeconds ? { plan, planSpanSeconds } : {}),
         ...(ruleDependencies ? { ruleDependencies } : {}),
+        ...(fleetRequest ? { fleetDefaultRequest: fleetRequest } : {}),
         enforcingInstances: resolveEnforcingInstances(
           [...new Set([...Object.keys(plan?.containerCaps ?? {}), ...Object.keys(sample.containerNodes ?? {})])],
           { fromPods: sample.containerNodes },
         ),
       },
     );
+    fleet_default = built.fleetDefault;
+    if (fleet_default) {
+      lines.push('');
+      lines.push(
+        fleet_default.computed
+          ? `**Fleet default.** ${fleet_default.sentence} To install it, call \`log10x_advise_install\` with the ` +
+              `\`fleet_default\` from this result` +
+              (siem === 'datadog' ? ' and `log_destination: "datadog"`.' : '.')
+          : `**Fleet default.** None: ${fleet_default.reason}.`,
+      );
+    }
     const html = renderReportHtml(built.data);
     report_path = nodePath.resolve(process.cwd(), REPORT_FILE_NAME);
     await fs.writeFile(report_path, html, 'utf8');
@@ -1076,6 +1139,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     report_caps_path,
     report_actions_path,
     engine_policy,
+    ...(fleet_default ? { fleet_default } : {}),
     report_note,
     namespace: namespaceOut,
     window: windowOut,
