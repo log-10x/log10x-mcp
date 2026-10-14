@@ -36,7 +36,11 @@ for action in $ACTIONS; do
   rm -rf "$run" && mkdir -p "$run/data" "$run/lookups"
   printf 'container,cap\ntenx-seed,1::check seed\n' > "$run/lookups/caps.csv"
   printf 'container,action\ntenx-seed,pass::check seed\n' > "$run/lookups/actions.csv"
-  node "$HERE/gen.mjs" "$run/data/in.jsonl" "$N" >/dev/null
+  node "$HERE/gen.mjs" "$run/measure.jsonl" "$N" >/dev/null
+  # One warm-up line first: the regulator passes every event of a container it
+  # has not yet seen, and parallel workers can see the same burst as first, so
+  # the measured lines start once the container is known.
+  printf '{"log":"DEBUG check warm-up line"}\n' > "$run/data/in.jsonl"
   plan="$(node "$HERE/plan-args.mjs" "$action" "$CAP")"
   echo "$plan" > "$run/plan.json"
   floor="$(node -e 'const p=JSON.parse(process.argv[1]);const a=p.args;for(let i=0;i<a.length-1;i++)if(a[i]==="rateReceiverSeverityFloors"&&a[i+1].startsWith("ERROR="))console.log(a[i+1].slice(6))' "$plan")"
@@ -58,7 +62,10 @@ for action in $ACTIONS; do
   for i in $(seq 1 60); do docker logs fdcheck-tenx 2>&1 | grep -q "Forward protocol server listening" && break; sleep 2; done
   docker run -d --name fdcheck-fb --network "$NET" -v "$HERE/fluent-bit.conf:/fluent-bit/etc/check.conf:ro" \
     -v "$run/data:/data" "$FB_IMAGE" /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/check.conf >/dev/null
-  total=$((N * 4)); prev=-1
+  for i in $(seq 1 60); do grep -qs 'warm-up' "$run/data/pass.jsonl" "$run/data/moved.jsonl" && break; sleep 2; done
+  sleep 2
+  cat "$run/measure.jsonl" >> "$run/data/in.jsonl"
+  total=$((N * 4 + 1)); prev=-1
   for i in $(seq 1 90); do
     got=$(( $(cat "$run/data/pass.jsonl" "$run/data/moved.jsonl" 2>/dev/null | grep -c '"log"' || true) ))
     [ "$got" -ge "$total" ] && break

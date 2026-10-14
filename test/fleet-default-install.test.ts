@@ -59,6 +59,10 @@ test('the engine gate: the first release that reads rateReceiverDefaultAction is
   assert.equal(imageEngineVersion('log10x/edge-10x:1.1.136'), '1.1.136');
   assert.equal(imageEngineVersion('log10x/edge-10x:latest'), undefined);
   assert.equal(manifestEngineVersion(), imageEngineVersion(EDGE_MANIFEST_IMAGE));
+  // The install manifest pins the release that reads the fleet default, by digest, so the gate opens.
+  assert.equal(imageEngineVersion('log10x/edge-10x:1.1.141@sha256:45157d0b'), '1.1.141');
+  assert.match(EDGE_MANIFEST_IMAGE, /^log10x\/edge-10x:1\.1\.141@sha256:[0-9a-f]{64}$/);
+  assert.equal(engineReadsFleetDefault(manifestEngineVersion()), true);
 });
 
 test('the Receiver options: cap, default action, the always-pass sample, every floor named', () => {
@@ -323,8 +327,15 @@ test('advise_install: with the limit given, the plan pinned below 1.1.141 holds 
   assert.equal(data.mode, 'plan');
   const md = String(data.markdown);
   const pinned = manifestEngineVersion()!;
+  assert.equal(pinned, '1.1.141');
   if (engineReadsFleetDefault(pinned)) {
-    assert.ok(md.includes('- "rateReceiverDefaultAction"'));
+    assert.ok(md.includes('- "rateReceiverAbsoluteCap"\n      - "6000"'));
+    assert.ok(md.includes('- "rateReceiverDefaultAction"\n      - "tier_down"'));
+    assert.ok(md.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0"'));
+    assert.ok(md.includes('- "k8sTeamLabel"\n      - "team"'));
+    assert.ok(md.includes('- name: outputOffload\n        value: "true"'));
+    assert.ok(md.includes('rateReceiverAbsoluteCap 6000\nrateReceiverDefaultAction tier_down'), 'the step lists the written values');
+    assert.ok(!md.includes('needs engine 1.1.141 or later'));
   } else {
     assert.ok(!md.includes('rateReceiverDefaultAction"'), 'no fleet value in the overlay');
     assert.ok(md.includes(`The fleet default needs engine 1.1.141 or later, the first that reads rateReceiverDefaultAction; this plan installs ${pinned}`));
