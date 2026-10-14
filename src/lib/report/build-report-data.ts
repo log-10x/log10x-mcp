@@ -37,6 +37,15 @@ import {
   type ReportData,
   type VerifyCheck,
 } from './report-data.js';
+import { perInstanceCap, instancesFor, describeInstances, type EnforcingInstances } from '../enforcing-instances.js';
+import {
+  csvReason,
+  fleetSentence,
+  flexAddedSentence,
+  serviceLimitSentence,
+  serviceLimitsFromPatterns,
+  type FleetLimit,
+} from './user-units.js';
 
 /** A cluster must carry at least this share of window bytes to drive
  * the verdict + an operational action. */
@@ -67,19 +76,26 @@ export { ACTIONS_FILE_NAME } from './command-matrix.js';
  * patterns and no other exceed it; offload and drop act on the whole
  * container, so their cap is the 1-byte minimum (0 would switch the
  * regulator off for that container). `spanSeconds` is the span the plan's
- * byte figures cover.
+ * byte figures cover. A container's row carries its own reason from
+ * `reasonByContainer` when one is given (the plan's sentence in user units),
+ * else `reason`.
  */
 export function engineFilesFromContainerCaps(
   caps: Plan['containerCaps'],
   spanSeconds: number,
   reason: string,
+  instances?: EnforcingInstances,
+  reasonByContainer?: Record<string, string>,
 ): { capsCsv: string; actionsCsv: string; capRows: string[] } {
-  const r = reason.replace(/[,:]/g, ';');
+  const fallback = reason.replace(/[,:]/g, ';');
   const capRows: string[] = [];
   const actionRows: string[] = [];
   for (const [container, v] of Object.entries(caps).sort(([a], [b]) => a.localeCompare(b))) {
-    const perWindow = Math.round((v.capBytesMonthly * CAP_RESET_WINDOW_SECONDS) / Math.max(1, spanSeconds));
-    const cap = v.action === 'offload' || v.action === 'drop' ? 1 : Math.max(1, perWindow);
+    const perWindow = (v.capBytesMonthly * CAP_RESET_WINDOW_SECONDS) / Math.max(1, spanSeconds);
+    const cap =
+      v.action === 'offload' || v.action === 'drop' ? 1 : perInstanceCap(perWindow, instancesFor(instances, container));
+    const own = reasonByContainer?.[container];
+    const r = own ? csvReason(own) : fallback;
     capRows.push(`${container},${cap}::${r}`);
     actionRows.push(`${container},${v.action}::${r}`);
   }
@@ -105,6 +121,10 @@ export interface BuildReportOptions {
   plan?: Plan;
   /** The span the plan's byte figures cover, in seconds. */
   planSpanSeconds?: number;
+  /** Receivers enforcing each container's cap; caps are divided by them. */
+  enforcingInstances?: EnforcingInstances;
+  /** The fleet-wide default for services with no row, when the plan writes one. */
+  fleetDefault?: FleetLimit;
 }
 
 export class ReportRefusal extends Error {}
@@ -198,16 +218,21 @@ export function buildReportData(
     // tier_down cap at the largest pattern the container keeps.
     let containerCaps: Plan['containerCaps'];
     let spanSeconds: number;
+    /** The statements the files move, by the identity the plan keys on. */
+    let isMoved: (p: _EnrichedPattern) => boolean;
     if (opts.plan && opts.planSpanSeconds) {
       containerCaps = opts.plan.containerCaps;
       spanSeconds = opts.planSpanSeconds;
       unattributedPlanned = opts.plan.planned.filter(
         (r) => r.action !== 'pass' && (!r.dominantService || r.dominantService === '(unattributed)'),
       ).length;
+      const movedHashes = new Set(opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash));
+      isMoved = (p) => movedHashes.has(p.tenxHash ?? p.hash);
     } else {
       containerCaps = {};
       spanSeconds = windowSeconds;
       const reducibleSet = new Set(reducible);
+      isMoved = (p) => reducibleSet.has(p);
       const hosts = new Set(reducible.map((p) => p.service).filter((s): s is string => !!s));
       unattributedPlanned = reducible.filter((p) => !p.service).length;
       for (const c of hosts) {
@@ -220,10 +245,25 @@ export function buildReportData(
         containerCaps[c] = { action: 'tier_down', capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) };
       }
     }
+    // The plan in user units: one sentence per container, lines a day and
+    // dollars a month. The same sentence is each row's reason.
+    const units = serviceLimitsFromPatterns(
+      containerCaps,
+      enriched.patterns,
+      isMoved,
+      windowSeconds,
+      opts.siem,
+      (p) => p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
+    );
+    const serviceLines = units.limits.map((l) => serviceLimitSentence(l, opts.siem));
+    const reasonByContainer = Object.fromEntries(units.limits.map((l, i) => [l.service, serviceLines[i]]));
+    const flexLine = flexAddedSentence(opts.siem, units.movedBytesMonthly, units.movedEventsMonthly);
     const files = engineFilesFromContainerCaps(
       containerCaps,
       spanSeconds,
       `MCP poc_from_local${opts.plan ? ` plan ${opts.plan.targetPct} pct` : ''}`,
+      opts.enforcingInstances,
+      reasonByContainer,
     );
     const rows = files.capRows;
     capsCsv = files.capsCsv;
@@ -242,14 +282,23 @@ export function buildReportData(
         : {}),
       change: {
         commentLines: [
-          `${CAPS_FILE_NAME} — bytes a pattern may spend per ${CAP_RESET_WINDOW_SECONDS}s regulator window, keyed by container; ` +
-            `${ACTIONS_FILE_NAME} — the action a container's excess takes.`,
-          `A tier_down cap is the largest pattern the container keeps, so the statements above exceed it and no other does.`,
+          ...serviceLines,
+          fleetSentence(opts.siem, opts.fleetDefault),
+          ...(flexLine ? [flexLine] : []),
+          `A limit is the largest statement the container keeps, so the statements above exceed it and no other does.`,
+          `${CAPS_FILE_NAME}: each container's limit in the engine's units, bytes per node, with its sentence as the reason; ` +
+            `${ACTIONS_FILE_NAME}: where a container's excess goes.`,
+          `Limits are per node: ` +
+            Object.keys(containerCaps)
+              .sort()
+              .map((c) => (opts.enforcingInstances ? describeInstances(opts.enforcingInstances, c) : `${c}: node count unknown, written for one Receiver`))
+              .join('; ') +
+            '.',
         ],
         rows,
         engineGapNote:
-          `the engine acts per container: every pattern over the cap in a routed container takes the action, ` +
-          `at the share the severity floors leave` +
+          `the engine applies each limit per container: every statement above it in a listed container takes the route, ` +
+          `less the share its severity keeps` +
           (unattributedPlanned > 0
             ? `; ${unattributedPlanned} planned statement${unattributedPlanned === 1 ? '' : 's'} carried no container and ${unattributedPlanned === 1 ? 'is' : 'are'} not in these rows`
             : ''),

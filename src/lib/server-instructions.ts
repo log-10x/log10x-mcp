@@ -363,18 +363,20 @@ Order the remedies exactly as gap.remedies orders them. Never pick for the user,
 word "lossy", and render the choice list even when the user seems to lean one way.
 
 DATADOG FLEX PLANS (plan.percentBasis is "standard_index_volume"): Flex is Datadog's first lever,
-because the moved events stay searchable in Datadog. Flex is billed per event and its compute add-on
-is unpriced, so NO percentage of the Datadog bill is ever stated for it, bare or qualified. Every
+because the moved events stay searchable in Datadog. Flex is billed per event, priced by the tier the
+plan's volume lands in, so NO percentage of the Datadog bill is ever stated for it, bare or qualified. Every
 percentage on such a plan (targetPct, achievedPct, keepEverythingCeilingPct) is the share of VOLUME
 moved out of the Standard index: write "of the volume out of the Standard index" beside each one.
 The money line becomes "**<GB moved> out of the Standard index**" followed by plan.perEventMove.text
-verbatim: events and GB moved, the Standard indexing line avoided and the Flex storage line added,
-both at Datadog list, and Flex compute unpriced and excluded. Never render billUsd → landsAtUsd on a
-percent plan, never subtract the two lines into a net, and never quote a Flex fraction or a per-GB
-Flex rate. A Flex card's action line reads "→ tier down to Flex · **moves <GB> out of the Standard
-index** · Standard indexing avoided <savedUsd verbatim>, Flex storage added <addedUsd verbatim>";
-the closing-arithmetic rule for cards does not apply to Flex rows. On a dollar budget the landing
-counts priced lines only, and the money line says so. The same form holds for configure_engine
+verbatim: events and GB moved, the Standard indexing line avoided, and the Flex line added at its
+tier, both at Datadog list: Flex Starter with compute included and held at least 3 months, or Flex
+storage on a scalable compute tier with Flex compute unpriced and excluded. Name the tier the text
+names. Never render billUsd → landsAtUsd on a percent plan, never subtract the two lines into a net,
+and never quote a Flex fraction or a per-GB Flex rate. A Flex card's action line reads "→ tier down
+to Flex · **moves <GB> out of the Standard index** · Standard indexing avoided <savedUsd verbatim>,
+<Flex Starter or Flex storage, as the row's perEventMove.text names it> added <addedUsd verbatim>";
+the closing-arithmetic rule for cards does not apply to Flex rows. On a dollar budget on a scalable
+tier the landing counts priced lines only, and the money line says so. The same form holds for configure_engine
 (totals.datadog_flex) and estimate_savings (totals.datadog_flex): quote its text, never a net.
 
 Every plan render ENDS with the pricing basis, one italic line, plan.rateBasis verbatim. Two

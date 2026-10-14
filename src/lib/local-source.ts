@@ -21,6 +21,7 @@
  * sample representative via the sample-composition table.
  */
 
+import { nodesPerContainerFromPods } from './enforcing-instances.js';
 import { spawn } from 'child_process';
 import { open, readdir, stat } from 'fs/promises';
 import { join, resolve, sep } from 'path';
@@ -56,6 +57,12 @@ export interface LocalSourceResult {
   wallTimeMs: number;
   /** Notes for the report (kubectl-not-installed, no-pods-found, etc.). */
   notes: string[];
+  /** Distinct nodes per container across the listed pods (kubectl source only). */
+  containerNodes?: Record<string, number>;
+  /** Files only: on-disk bytes of the files read. */
+  rawBytes?: number;
+  /** Files only: on-disk bytes of the lines sampled from them; equals `rawBytes` when every file was read whole. */
+  sampledRawBytes?: number;
 }
 
 export interface FileSourceOptions {
@@ -100,7 +107,7 @@ export async function sampleFromKubectl(
   const compositionMap = new Map<string, { bytes: number; lines: number }>();
 
   // 1. Enumerate pods.
-  let podRefs: Array<{ namespace: string; name: string }>;
+  let podRefs: Array<{ namespace: string; name: string; nodeName?: string; containers?: string[] }>;
   try {
     podRefs = await listPods(kubectlPath, namespace, perPodTimeoutMs);
   } catch (e) {
@@ -184,6 +191,7 @@ export async function sampleFromKubectl(
     failedSources,
     wallTimeMs: Date.now() - start,
     notes,
+    containerNodes: nodesPerContainerFromPods(podRefs),
   };
 }
 
@@ -205,20 +213,25 @@ async function listPods(
   kubectlPath: string,
   namespace: string,
   timeoutMs: number
-): Promise<Array<{ namespace: string; name: string }>> {
+): Promise<Array<{ namespace: string; name: string; nodeName?: string; containers?: string[] }>> {
   const args =
     namespace === '*'
       ? ['get', 'pods', '--all-namespaces', '-o', 'json']
       : ['get', 'pods', '-n', namespace, '-o', 'json'];
   const stdout = await runCommand(kubectlPath, args, timeoutMs);
   const parsed = JSON.parse(stdout) as {
-    items?: Array<{ metadata?: { namespace?: string; name?: string } }>;
+    items?: Array<{
+      metadata?: { namespace?: string; name?: string };
+      spec?: { nodeName?: string; containers?: Array<{ name?: string }> };
+    }>;
   };
   const items = parsed.items ?? [];
   return items
     .map((it) => ({
       namespace: it.metadata?.namespace ?? '',
       name: it.metadata?.name ?? '',
+      nodeName: it.spec?.nodeName,
+      containers: (it.spec?.containers ?? []).map((c) => c.name ?? '').filter(Boolean),
     }))
     .filter((p) => p.name);
 }
@@ -344,19 +357,26 @@ export async function sampleFromFiles(opts: FileSourceOptions): Promise<LocalSou
     notes.push(`${matched.length} files matched; sampled ${maxFiles} (raise maxFiles to widen).`);
   }
 
-  // 3. Tail each file.
+  // 3. Sample each file.
+  let rawBytes = 0;
+  let sampledRawBytes = 0;
   for (const file of sampled) {
     try {
-      const lines = await readStridedFileLines(file, perFileLimit, maxBytesPerFile);
+      const read = await readStridedFileSample(file, perFileLimit, maxBytesPerFile);
       let fileBytes = 0;
       let fileLines = 0;
-      for (const line of lines) {
+      let lineRawBytes = 0;
+      for (const line of read.lines) {
         if (line.length === 0) continue;
         events.push(line);
-        fileBytes += Buffer.byteLength(line, 'utf8');
+        const b = Buffer.byteLength(line, 'utf8');
+        fileBytes += b;
+        lineRawBytes += b + 1;
         fileLines++;
       }
       compositionMap.set(file, { bytes: fileBytes, lines: fileLines });
+      rawBytes += read.fileBytes;
+      sampledRawBytes += read.whole ? read.fileBytes : lineRawBytes;
     } catch (e) {
       failedSources.push(`${file}: ${(e as Error).message.slice(0, 80)}`);
     }
@@ -380,6 +400,8 @@ export async function sampleFromFiles(opts: FileSourceOptions): Promise<LocalSou
     failedSources,
     wallTimeMs: Date.now() - start,
     notes,
+    rawBytes,
+    sampledRawBytes,
   };
 }
 
@@ -507,15 +529,26 @@ const STRIDE_WINDOWS = 8;
  * dominates.
  */
 export async function readStridedFileLines(path: string, maxLines: number, maxBytes: number): Promise<string[]> {
+  return (await readStridedFileSample(path, maxLines, maxBytes)).lines;
+}
+
+/** `readStridedFileLines`, plus the file's size and whether every line was kept. */
+export async function readStridedFileSample(
+  path: string,
+  maxLines: number,
+  maxBytes: number,
+): Promise<{ lines: string[]; fileBytes: number; whole: boolean }> {
   const fh = await open(path, 'r');
   try {
     const st = await fh.stat();
-    if (st.size === 0) return [];
+    if (st.size === 0) return { lines: [], fileBytes: 0, whole: true };
     if (st.size <= maxBytes) {
       const buf = Buffer.alloc(st.size);
       await fh.read(buf, 0, st.size, 0);
       const lines = buf.toString('utf8').split('\n').filter((l) => l.length > 0);
-      return lines.length > maxLines ? evenSubsample(lines, maxLines) : lines;
+      return lines.length > maxLines
+        ? { lines: evenSubsample(lines, maxLines), fileBytes: st.size, whole: false }
+        : { lines, fileBytes: st.size, whole: true };
     }
     const windows = STRIDE_WINDOWS;
     const chunkBytes = Math.floor(maxBytes / windows);
@@ -538,7 +571,11 @@ export async function readStridedFileLines(path: string, maxLines: number, maxBy
       }
       for (const l of text.split('\n')) if (l.length > 0) collected.push(l);
     }
-    return collected.length > maxLines ? evenSubsample(collected, maxLines) : collected;
+    return {
+      lines: collected.length > maxLines ? evenSubsample(collected, maxLines) : collected,
+      fileBytes: st.size,
+      whole: false,
+    };
   } finally {
     await fh.close();
   }

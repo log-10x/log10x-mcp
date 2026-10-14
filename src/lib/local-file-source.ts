@@ -25,6 +25,7 @@
 
 import { promises as fs } from 'fs';
 import { readStridedFileLines } from './local-source.js';
+import { envelopeTimestampMs } from './pattern-extraction.js';
 
 import type { LocalSourceResult } from './local-source.js';
 
@@ -231,5 +232,181 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
   };
 }
 
+/** The time span a file sample covers, and what it was read from. */
+export interface FileSpan {
+  seconds: number;
+  source: 'timestamps' | 'window';
+  /** First and last record timestamps, when the span came from them. */
+  firstIso?: string;
+  lastIso?: string;
+  recordsWithTimestamp: number;
+  records: number;
+  /** The caller's `window`, when one was passed. */
+  window?: string;
+}
+
+/** A file run with no way to know the span its bytes cover. */
+export class FileSpanRefusal extends Error {}
+
+const TIMESTAMP_FIELDS = '`timestamp`, `@timestamp`, `_time`, `TimeGenerated`, `_messagetime` or `time`';
+
+// An ISO-8601 time at the start of a plain line, optionally bracketed. A time
+// with no zone is read as UTC: only differences between lines are used.
+const LINE_TIMESTAMP =
+  /^\s*\[?(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})?/;
+
+function lineTimestampMs(line: string): number | undefined {
+  const m = LINE_TIMESTAMP.exec(line);
+  if (!m) return undefined;
+  const [, y, mo, d, h, mi, s, frac, zone] = m;
+  const ms = frac ? Number(frac.slice(0, 3).padEnd(3, '0')) : 0;
+  let t = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s), ms);
+  if (zone && zone !== 'Z') {
+    const z = zone.replace(':', '');
+    const offsetMin = (z[0] === '-' ? -1 : 1) * (Number(z.slice(1, 3)) * 60 + Number(z.slice(3, 5)));
+    t -= offsetMin * 60_000;
+  }
+  return Number.isFinite(t) ? t : undefined;
+}
+
+/**
+ * A JSON record's own event time: an envelope field; else, for a docker or
+ * CRI wrapper, its top-level `time`, or the ISO-8601 time that leads the
+ * wrapped `log` or `message` payload.
+ */
+function objectTimestampMs(obj: Record<string, unknown>): number | undefined {
+  const env = envelopeTimestampMs(obj);
+  if (env !== undefined) return env;
+  const time = obj.time;
+  if (typeof time === 'string') {
+    const t = Date.parse(time);
+    if (Number.isFinite(t)) return t;
+  }
+  for (const key of ['log', 'message', 'msg']) {
+    const payload = obj[key];
+    if (typeof payload !== 'string') continue;
+    const t = lineTimestampMs(payload);
+    if (t !== undefined) return t;
+  }
+  return undefined;
+}
+
+/** A record's own event time: an envelope or wrapper field for a JSON record, a leading ISO-8601 time for a plain line. */
+export function recordTimestampMs(rec: unknown): number | undefined {
+  if (rec !== null && typeof rec === 'object' && !Array.isArray(rec)) {
+    return objectTimestampMs(rec as Record<string, unknown>);
+  }
+  if (typeof rec !== 'string') return undefined;
+  const t = rec.trim();
+  if (t.startsWith('{') && t.endsWith('}')) {
+    try {
+      const obj = JSON.parse(t) as unknown;
+      if (obj !== null && typeof obj === 'object' && !Array.isArray(obj)) {
+        return objectTimestampMs(obj as Record<string, unknown>);
+      }
+    } catch {
+      // not JSON: read it as a plain line
+    }
+  }
+  return lineTimestampMs(rec);
+}
+
+function windowSeconds(window: string): number | undefined {
+  const m = window.trim().match(/^(\d+)([smhd])$/i);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  const unit = { s: 1, m: 60, h: 3600, d: 86_400 }[m[2].toLowerCase() as 's' | 'm' | 'h' | 'd'];
+  return n > 0 ? n * unit : undefined;
+}
+
+/**
+ * The span a file sample covers: first to last record timestamp; else the
+ * caller's `window`; else a refusal. A plan's per-window caps divide bytes by
+ * this span, so it is never assumed.
+ */
+export function resolveFileSpan(records: unknown[], window: string | undefined): FileSpan {
+  let first: number | undefined;
+  let last: number | undefined;
+  let stamped = 0;
+  for (const r of records) {
+    const t = recordTimestampMs(r);
+    if (t === undefined) continue;
+    stamped += 1;
+    if (first === undefined || t < first) first = t;
+    if (last === undefined || t > last) last = t;
+  }
+  const base = { recordsWithTimestamp: stamped, records: records.length, ...(window !== undefined ? { window } : {}) };
+  if (first !== undefined && last !== undefined && last > first) {
+    return {
+      ...base,
+      seconds: (last - first) / 1000,
+      source: 'timestamps',
+      firstIso: new Date(first).toISOString(),
+      lastIso: new Date(last).toISOString(),
+    };
+  }
+  const why =
+    stamped === 0
+      ? `none of the ${records.length.toLocaleString()} sampled records carries a timestamp (a ${TIMESTAMP_FIELDS} field, or an ISO-8601 time at the start of the line or of the wrapped \`log\` payload)`
+      : `the ${stamped.toLocaleString()} timestamped records all carry the same time`;
+  if (window !== undefined) {
+    const secs = windowSeconds(window);
+    if (secs === undefined) {
+      throw new FileSpanRefusal(
+        `No time span for these files: ${why}, and \`window: "${window}"\` is not a duration. ` +
+          'Pass `window` as the span the files cover, for example `window: "10h"`, and re-run.',
+      );
+    }
+    return { ...base, seconds: secs, source: 'window' };
+  }
+  throw new FileSpanRefusal(
+    `No time span for these files: ${why}. A plan's caps are bytes per unit of time, so the span is required. ` +
+      'Pass `window` with the span the files cover, for example `window: "10h"` for ten hours of logs, and re-run.',
+  );
+}
+
+function fmtSpanDuration(seconds: number): string {
+  if (seconds >= 3600) {
+    const h = Math.round((seconds / 3600) * 10) / 10;
+    return `${h} hour${h === 1 ? '' : 's'}`;
+  }
+  if (seconds >= 60) {
+    const m = Math.round((seconds / 60) * 10) / 10;
+    return `${m} minute${m === 1 ? '' : 's'}`;
+  }
+  const s = Math.round(seconds * 1000) / 1000;
+  return `${s} second${s === 1 ? '' : 's'}`;
+}
+
+/**
+ * One sentence naming the span and where it came from. `sampleShare` is the
+ * sampled share of the files' bytes, when less than all of them was read.
+ */
+export function describeFileSpan(span: FileSpan, sampleShare?: number): string {
+  const amount = `${fmtSpanDuration(span.seconds)} (${Math.round(span.seconds).toLocaleString()} s)`;
+  const parts: string[] = [];
+  if (span.source === 'timestamps') {
+    parts.push(
+      `Span: ${amount}, from the first to the last record timestamp (${span.firstIso} to ${span.lastIso}; ` +
+        `${span.recordsWithTimestamp.toLocaleString()} of ${span.records.toLocaleString()} sampled records carry one).`,
+    );
+    if (span.window !== undefined) parts.push(`The \`window\` argument (${span.window}) was not used.`);
+  } else {
+    parts.push(
+      `Span: ${amount}, from the \`window\` argument: ` +
+        (span.recordsWithTimestamp === 0
+          ? 'the sampled records carry no timestamp.'
+          : 'the timestamped records all carry the same time.'),
+    );
+  }
+  if (sampleShare !== undefined && sampleShare < 1) {
+    parts.push(
+      `The sample holds ${Math.max(1, Math.round(sampleShare * 100))}% of the files' bytes, drawn from start to end of each file; ` +
+        'byte figures are scaled to the whole files.',
+    );
+  }
+  return parts.join(' ');
+}
+
 /** Exported for tests. */
-export const _internals = { isWrappedLine, containerOf, payloadOf };
+export const _internals = { isWrappedLine, containerOf, payloadOf, lineTimestampMs };

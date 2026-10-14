@@ -1526,7 +1526,8 @@ registerLog10xTool('log10x_poc_from_local', pocFromLocalSchema, (args) =>
       forwarder: args.forwarder,
       workload: args.workload,
       report_annotations: args.report_annotations,
-      window: args.window ?? '1h',
+      // No default here: for a file, an absent window means "read the span from the timestamps".
+      window: args.window,
       per_pod_limit: args.per_pod_limit ?? 5000,
       max_pods: args.max_pods ?? 20,
       target_percent_reduction: args.target_percent_reduction,

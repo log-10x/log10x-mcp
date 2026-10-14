@@ -235,6 +235,8 @@ export interface KubectlProbes {
    * backends in their default order. It never falls back to log10x.
    */
   backendAgents: DetectedMetricsBackend[];
+  /** Distinct nodes each container's pods run on, across the probed namespaces. */
+  containerNodes?: Record<string, number>;
 }
 
 /** AWS-side probe results. `available=false` means AWS CLI not configured. */

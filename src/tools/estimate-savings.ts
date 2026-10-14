@@ -57,6 +57,7 @@ import {
   resolveTierDownTier,
   perEventTierPricing,
   sumPerEventTierMoves,
+  retierPerEventTierMove,
   type PerEventTierMove,
   getDestinationCostModel,
   getDefaultActionForDestination,
@@ -399,12 +400,12 @@ export interface ForecastRow {
   /**
    * On a Datadog Flex row (tier_down) the three dollars_saved legs are the
    * Standard indexing line the move avoids, at list, and dollars_added_expected
-   * is the Flex storage line it adds. Neither is a net: Flex compute is
-   * unpriced and excluded.
+   * is the Flex line it adds at the tier the plan's Flex volume lands in.
+   * Neither is a net.
    */
   dollars_saved_expected: number;
   dollars_saved_high: number;
-  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  /** Datadog Flex rows only: the Flex line the move adds at its tier, at list, $/mo. */
   dollars_added_expected?: number;
   /** Datadog Flex rows only: the move as stated lines. */
   per_event_move?: PerEventTierMove;
@@ -511,10 +512,10 @@ export interface ForecastResult {
      */
     action_mix?: ActionMix;
     /**
-     * Datadog only, when any row moves to Flex: the Flex storage lines the
-     * plan adds, at list. dollars_*_monthly above then count the Standard
-     * indexing line avoided for those rows, gross. Flex compute is unpriced
-     * and in neither.
+     * Datadog only, when any row moves to Flex: the Flex line the plan adds
+     * at the tier its volume lands in, at list. dollars_*_monthly above then
+     * count the Standard indexing line avoided for those rows, gross. On a
+     * scalable tier Flex compute is unpriced and in neither.
      */
     dollars_added_monthly?: number;
     /** Datadog only: every Flex move, summed and stated as lines. Render its text. */
@@ -522,6 +523,8 @@ export interface ForecastResult {
       events_moved_monthly: number;
       gb_moved_monthly: number;
       events_basis: 'measured' | 'assumed';
+      /** The Flex pricing tier the summed volume lands in. */
+      flex_tier: 'starter' | 'scalable';
       standard_indexing_avoided_usd_monthly: number;
       flex_storage_added_usd_monthly: number;
       flex_compute: string;
@@ -1400,9 +1403,8 @@ export async function runEstimateForecast(
   let totalLow = 0;
   let totalExpected = 0;
   let totalHigh = 0;
-  // Datadog Flex rows: their moves, and the Flex storage lines they add.
+  // Datadog Flex rows: their moves, priced after the loop at the plan's tier.
   const flexMoves: PerEventTierMove[] = [];
-  let totalAdded = 0;
   const smallEventPatterns: string[] = [];
   let noOpCompactCount = 0;
 
@@ -1496,10 +1498,7 @@ export async function runEstimateForecast(
       ...(actionRange.expected.modeled ? { modeled: true } : {}),
       notes: actionRange.expected.notes,
     });
-    if (flexMove) {
-      flexMoves.push(flexMove);
-      totalAdded += flexMove.tier_storage_added_usd;
-    }
+    if (flexMove) flexMoves.push(flexMove);
     totalIn += monthlyBytes;
     totalSavedBytes += Math.max(0, savedBytes);
     // Rows that never reach the cluster. Only these move compute; compact and
@@ -1522,6 +1521,18 @@ export async function runEstimateForecast(
   }
   const flexPricing = perEventTierPricing(args.destination);
   const flexTotal = flexPricing ? sumPerEventTierMoves(flexPricing, flexMoves) : undefined;
+  // The Flex tier follows the plan's whole volume, so each row is re-priced at it.
+  if (flexPricing && flexTotal) {
+    for (const r of per_pattern) {
+      if (!r.per_event_move) continue;
+      const own = r.per_event_move;
+      const m = retierPerEventTierMove(flexPricing, own, flexTotal.events_moved);
+      r.per_event_move = m;
+      r.dollars_added_expected = m.tier_storage_added_usd;
+      if (r.notes) r.notes = r.notes.map((n) => (n === own.text ? m.text : n));
+    }
+  }
+  const totalAdded = flexTotal ? flexTotal.tier_storage_added_usd : 0;
 
   // Coverage: fraction of TOTAL observed bytes (monthly-scaled) that the
   // forecast modeled. Patterns not in proposed_config and not picked by
@@ -1829,9 +1840,10 @@ export async function runEstimateForecast(
               events_moved_monthly: Math.round(flexTotal.events_moved),
               gb_moved_monthly: Number(flexTotal.gb_moved.toFixed(1)),
               events_basis: flexTotal.events_basis,
+              flex_tier: flexTotal.pricing_tier,
               standard_indexing_avoided_usd_monthly: Math.round(flexTotal.standard_indexing_avoided_usd * 100) / 100,
               flex_storage_added_usd_monthly: Math.round(flexTotal.tier_storage_added_usd * 100) / 100,
-              flex_compute: flexTotal.unpriced,
+              flex_compute: flexTotal.compute,
               text: flexTotal.text,
             },
           }
@@ -2633,9 +2645,9 @@ export async function executeEstimateSavings(
             : pl.met
               ? `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo (today: ${fmtBudgetUsd(pl.billUsd)}/mo), ${keepNote}.`
               : `Budget: keep the ${scopeNoun} under ${fmtBudgetUsd(pl.target.value)}/mo. This plan lands at ${landsAt}/mo. ${pl.gap ? pl.gap.message : ''}`;
-          // Datadog Flex: the landing counts priced lines only; say which.
+          // Datadog Flex: on a scalable tier the landing counts priced lines only; say so.
           if (pl.perEventMove) {
-            headline += ` Counts priced lines only. ${pl.perEventMove.text}`;
+            headline += `${pl.perEventMove.unpriced ? ' Counts priced lines only.' : ''} ${pl.perEventMove.text}`;
           }
         } else if (pl.target.kind === 'gb_budget') {
           const scopeVol = args.service

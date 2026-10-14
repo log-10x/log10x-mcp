@@ -29,8 +29,9 @@
  * On Datadog `target_percent` is the share of volume moved OUT OF THE
  * STANDARD INDEX (to Flex, or out of Datadog), and a Flex move is reported as
  * the events and GB moved, the Standard indexing line avoided and the Flex
- * storage line added, both at Datadog list, with Flex compute unpriced and
- * excluded. No share of the Datadog bill is stated for it and the dollar axis
+ * line added at the tier the plan's volume lands in, both at Datadog list,
+ * with scalable Flex compute unpriced and excluded. No share of the Datadog
+ * bill is stated for it and the dollar axis
  * of isPlanFeasible is not used there (lib/cost.ts projectPerEventTierMove).
  *
  * ClickHouse is in the no-op list on a measurement rather than a missing
@@ -116,6 +117,7 @@ import {
   expectedCompactRatio,
   perEventTierPricing,
   sumPerEventTierMoves,
+  retierPerEventTierMove,
   type Action,
   type PerEventTierMove,
 } from '../lib/cost.js';
@@ -128,6 +130,22 @@ import { resolveClusterConfig } from '../lib/env-config/resolve-cluster-config.j
 import { requireWriteAccess } from '../lib/read-only-guard.js';
 import { putCommitment, type CommitmentRecord } from './commitment-report.js';
 import { randomUUID } from 'node:crypto';
+import {
+  resolveEnforcingInstances,
+  perInstanceCap,
+  describeInstances,
+  anyUnknown,
+  divideCapCsv,
+  type EnforcingInstances,
+} from '../lib/enforcing-instances.js';
+import {
+  csvReason,
+  fleetSentence,
+  linesPerDayFromCap,
+  serviceLimitSentence,
+  statementsUsdMonthly,
+  type ServiceLimit,
+} from '../lib/report/user-units.js';
 
 // ─── constants ────────────────────────────────────────────────────────
 const DEFAULT_LOOKUP_PATH = 'pipelines/run/receive/rate/caps.csv';
@@ -372,7 +390,19 @@ export const configureEngineSchema = {
     .string()
     .optional()
     .describe(
-      'ID returned by `log10x_discover_env`. Used to resolve `gitops_repo`, `lookup_path`, and `destination` defaults.'
+      'ID returned by `log10x_discover_env`. Used to resolve `gitops_repo`, `lookup_path`, and `destination` defaults, and the nodes each container runs on.'
+    ),
+  receiver_mode: z
+    .enum(['daemonset', 'sidecar'])
+    .optional()
+    .describe(
+      'How the Receiver runs. `daemonset` (default): one Receiver per node, each enforcing caps on the pods of its node, so a container\'s cap is divided by the nodes its pods run on. `sidecar`: one Receiver beside a central forwarder sees the container\'s whole stream, so the cap is not divided.'
+    ),
+  nodes_by_container: z
+    .record(z.string(), z.number().int().min(1))
+    .optional()
+    .describe(
+      'Nodes each container\'s pods run on, keyed by container. Wins over a discover_env snapshot. Without either, caps are written for one Receiver and the plan says so.'
     ),
   gitops_repo: z
     .string()
@@ -510,6 +540,8 @@ export interface PerPatternRow {
   pattern: string;
   current_bytes_30d: number;
   cap_bytes_per_window: number;
+  /** Events a month, scaled from the window like current_bytes_30d; absent when the window carried no count. */
+  events_monthly?: number;
   action: Action;
   /** k8s_container this slice belongs to (== the engine's actions.csv key). */
   container?: string;
@@ -519,11 +551,11 @@ export interface PerPatternRow {
   saved_bytes_monthly: number;
   /**
    * On a Datadog Flex row this is the Standard indexing line the move avoids,
-   * at list, and added_dollars_monthly is the Flex storage line it adds.
-   * Neither is a net: Flex compute is unpriced and excluded.
+   * at list, and added_dollars_monthly is the Flex line it adds at the plan's
+   * tier. Neither is a net.
    */
   saved_dollars_monthly: number;
-  /** Datadog Flex rows only: Flex storage the move adds, at list, $/mo. */
+  /** Datadog Flex rows only: the Flex line the move adds at the plan's tier, at list, $/mo. */
   added_dollars_monthly?: number;
   /** Datadog Flex rows only: the move as stated lines. */
   per_event_move?: PerEventTierMove;
@@ -551,8 +583,17 @@ interface PerServiceSummaryRow {
   bytes_share_pct: number;
   saved_bytes_monthly: number;
   saved_dollars_monthly: number;
-  /** Datadog Flex only: Flex storage this service's moves add, at list, $/mo. */
+  /** Datadog Flex only: the Flex line this service's moves add at the plan's tier, at list, $/mo. */
   added_dollars_monthly?: number;
+  /** Receivers that enforce this container's cap, and where that count came from. */
+  enforcing_instances: number;
+  instances_note: string;
+  /** Lines a day above which a statement takes the action; null when every statement does; absent when no count was available. */
+  limit_lines_per_day?: number | null;
+  /** Statements this plan moves in the service today. */
+  moved_statements: number;
+  /** The service's line in user units: the limit in lines a day, and what it moves today in statements and dollars a month. */
+  statement: string;
   /** Measured compaction (1 - optimized/input) as a percent, or null when no measurement was available and the static band was used. */
   measured_compression_pct: number | null;
   ratio_source: 'measured_live' | 'measured_sample' | 'static_band';
@@ -598,6 +639,8 @@ interface ConfigureEngineData {
   per_pattern_rows?: PerPatternRow[];
   /** Phase-2 per-service advisory: one entry per k8s_container, sorted DESC by volume. */
   per_service_summary?: PerServiceSummaryRow[];
+  /** The plan in the units a person reads: one sentence per service, then the fleet line. */
+  plan_in_user_units?: { services: string[]; fleet: string };
   checks?: {
     coverage_pct: number;
     feasible: boolean;
@@ -1375,6 +1418,7 @@ export async function executeConfigureEngine(
       container: c.container,
       current_bytes_30d: Math.round(monthlyBytes),
       cap_bytes_per_window: Math.round(capBytesPerWindow),
+      ...(c.events > 0 ? { events_monthly: Math.round(c.events * scaleToMonth) } : {}),
       action,
       // Actual per-pattern shed. 0 bytes for pass / tier_down (no on-wire
       // reduction); tier_down's saving shows up in dollars via the rate delta.
@@ -1410,6 +1454,19 @@ export async function executeConfigureEngine(
       )
     : undefined;
   if (flexPlanMove) warnings.push(flexPlanMove.text);
+  // The Flex tier follows the plan's whole volume, so each row is re-priced at it.
+  if (perEvent && flexPlanMove) {
+    for (const r of rows) {
+      if (!r.per_event_move) continue;
+      const m = retierPerEventTierMove(perEvent, r.per_event_move, flexPlanMove.events_moved);
+      const delta = m.tier_storage_added_usd - r.per_event_move.tier_storage_added_usd;
+      r.per_event_move = m;
+      r.added_dollars_monthly = roundCents(m.tier_storage_added_usd);
+      r.projected_monthly_usd_low = roundCents(r.projected_monthly_usd_low + delta);
+      r.projected_monthly_usd_expected = roundCents(r.projected_monthly_usd_expected + delta);
+      r.projected_monthly_usd_high = roundCents(r.projected_monthly_usd_high + delta);
+    }
+  }
 
   // Emit the destination-compat fallback warning IF and only IF rows
   // actually survived carrying the fallback action. When zero rows
@@ -1602,14 +1659,39 @@ export async function executeConfigureEngine(
   // CSV diff. Preamble captures the committed target + observed baseline so
   // a later `mode='refresh'` call can compute volume drift without
   // re-running the SIEM / live-Prometheus path against the original window.
+  const discoveredNodes = args.snapshot_id
+    ? ((getSnapshot(args.snapshot_id) as { kubectl?: { containerNodes?: Record<string, number> } } | undefined)
+        ?.kubectl?.containerNodes)
+    : undefined;
+  const instances = resolveEnforcingInstances(args.containers, {
+    mode: args.receiver_mode,
+    nodesByContainer: args.nodes_by_container,
+    discovered: discoveredNodes,
+  });
+  if (anyUnknown(instances)) {
+    warnings.push(
+      'Node counts unknown for ' +
+        args.containers.filter((c) => instances.byContainer[c]?.basis === 'unknown').join(', ') +
+        ': those caps are written for one Receiver. With a DaemonSet Receiver each node enforces its own cap, so pass `nodes_by_container` or a `snapshot_id` from log10x_discover_env.'
+    );
+  }
+  // The plan in user units, one sentence per container; the same sentence is
+  // each container's reason in both CSVs.
+  const actionByContainer = new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const));
+  const limits = serviceLimitsFromRows(args.containers, rows, actionByContainer, effectiveStandardAction, destination);
+  const limitByContainer = new Map(limits.map((l) => [l.service, l] as const));
+  const sentenceByContainer = new Map(limits.map((l) => [l.service, serviceLimitSentence(l, destination)] as const));
+  const reasonByContainer = new Map([...sentenceByContainer].map(([c, t]) => [c, csvReason(t)] as const));
   const csvDiff = renderCsvDiff(
     args.containers,
     args.current_csv,
     rows,
     effectiveStandardAction,
-    new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const)),
+    actionByContainer,
     args.reduction ?? 'hard',
-    { targetPercent, baselineMonthlyBytes: currentMonthlyBytes }
+    { targetPercent, baselineMonthlyBytes: currentMonthlyBytes },
+    instances,
+    reasonByContainer
   );
 
   // Engine delivery is TWO container-keyed files: caps.csv (byte caps,
@@ -1627,10 +1709,11 @@ export async function executeConfigureEngine(
     (args.delivery ?? 'gitops') === 'gitops' ? await fetchActionsCsvForEnv(env) : undefined;
   const actionsCsv = renderActionsCsv(
     args.containers,
-    new Map([...serviceActionByContainer].map(([k, v]) => [k, v.action] as const)),
+    actionByContainer,
     effectiveStandardAction,
     existingActionsCsv,
-    args.reduction ?? 'hard'
+    args.reduction ?? 'hard',
+    reasonByContainer
   );
   const intentJson = mergeIntentJson(undefined, buildIntentEntriesFromRows(rows));
 
@@ -1806,6 +1889,13 @@ export async function executeConfigureEngine(
         saved_bytes_monthly: Math.round(agg.savedBytes),
         saved_dollars_monthly: roundCents(agg.savedDollars),
         ...(perEvent ? { added_dollars_monthly: roundCents(agg.addedDollars) } : {}),
+        enforcing_instances: instances.byContainer[service]?.instances ?? 1,
+        instances_note: describeInstances(instances, service),
+        ...(limitByContainer.get(service)?.limitLinesPerDay !== undefined
+          ? { limit_lines_per_day: limitByContainer.get(service)!.limitLinesPerDay }
+          : {}),
+        moved_statements: limitByContainer.get(service)?.movedStatements ?? 0,
+        statement: sentenceByContainer.get(service) ?? '',
         measured_compression_pct: decision?.measured_compression_pct ?? null,
         ratio_source: decision?.ratio_source ?? 'static_band',
         keep_queryable: decision?.keep_queryable ?? false,
@@ -1842,6 +1932,7 @@ export async function executeConfigureEngine(
     },
     per_pattern_rows: rows,
     per_service_summary: perServiceSummary,
+    plan_in_user_units: { services: [...sentenceByContainer.values()], fleet: fleetSentence(destination) },
     checks: {
       coverage_pct: roundPct(coveragePct),
       feasible,
@@ -1890,6 +1981,7 @@ export async function executeConfigureEngine(
       applied,
       refreshMode: !!refreshState,
       flexStatement: flexPlanMove?.text,
+      userUnitLines: [...sentenceByContainer.values(), fleetSentence(destination)],
     }),
   };
 
@@ -2030,16 +2122,18 @@ function buildSummaryPayload(params: {
   void targetMonthlyBytes;
   // Datadog Flex: the move's lines, summed. dollars_saved_monthly then holds
   // the Standard indexing line avoided (plus any offload/drop savings), and
-  // the Flex storage line is reported apart as added; no net is stated.
+  // the Flex line at the plan's tier is reported apart as added; no net is stated.
   const perEvent = perEventTierPricing(model);
   const flexRows = rows.map((r) => r.per_event_move).filter((m): m is PerEventTierMove => !!m);
   const flexMove = perEvent ? sumPerEventTierMoves(perEvent, flexRows) : undefined;
   const flexTotals = flexMove
     ? {
-        dollars_added_monthly: roundCents(rows.reduce((s, r) => s + (r.added_dollars_monthly ?? 0), 0)),
+        dollars_added_monthly: roundCents(flexMove.tier_storage_added_usd),
         dollars_note:
           'dollars_saved_monthly counts the Standard indexing line the Flex move avoids, at Datadog list, plus any offload or drop saving; ' +
-          'dollars_added_monthly is the Flex storage line the move adds, at list; Flex compute is unpriced and excluded from both. ' +
+          (flexMove.unpriced
+            ? 'dollars_added_monthly is the Flex storage line the move adds on a scalable compute tier, at list; Flex compute is unpriced and excluded from both. '
+            : 'dollars_added_monthly is the Flex Starter line the move adds, storage and compute together, at list. ') +
           'Quote the lines, not a net and not a percentage of the Datadog bill.',
       }
     : {};
@@ -2049,9 +2143,10 @@ function buildSummaryPayload(params: {
           events_moved_monthly: Math.round(flexMove.events_moved),
           gb_moved_monthly: Number(flexMove.gb_moved.toFixed(1)),
           events_basis: flexMove.events_basis,
+          flex_tier: flexMove.pricing_tier,
           standard_indexing_avoided_usd_monthly: roundCents(flexMove.standard_indexing_avoided_usd),
           flex_storage_added_usd_monthly: roundCents(flexMove.tier_storage_added_usd),
-          flex_compute: flexMove.unpriced,
+          flex_compute: flexMove.compute,
           text: flexMove.text,
         },
       }
@@ -2155,6 +2250,7 @@ function buildSummaryPayload(params: {
     // the slim view stays within budget (services << patterns; full list is
     // in view='detail'). Each entry leads with volume, then the chosen action.
     per_service_summary: (data.per_service_summary ?? []).slice(0, 12),
+    plan_in_user_units: data.plan_in_user_units,
     pr_command_summary: prCommandSummary,
     derivation: data.derivation,
     checks: data.checks,
@@ -2237,6 +2333,22 @@ async function tryConsumePocSnapshot(
     return undefined;
   }
   if (!capCsv) return undefined;
+
+  // The POC measured each container's whole stream; each enforcing Receiver
+  // gets its share.
+  const pocContainers = capCsv
+    .split('\n')
+    .map((l) => /^([^,#][^,]*),\d+/.exec(l)?.[1])
+    .filter((c): c is string => !!c && c !== 'container');
+  const pocInstances = resolveEnforcingInstances(pocContainers, {
+    mode: args.receiver_mode,
+    nodesByContainer: args.nodes_by_container,
+    discovered: args.snapshot_id
+      ? (getSnapshot(args.snapshot_id) as { kubectl?: { containerNodes?: Record<string, number> } } | undefined)
+          ?.kubectl?.containerNodes
+      : undefined,
+  });
+  capCsv = divideCapCsv(capCsv, pocInstances);
 
   // Render the PR diff: the new CSV is the POC's cap_csv body, the
   // baseline is whatever the caller passed in `current_csv` (or empty).
@@ -3075,6 +3187,57 @@ function renderCsv(rows: Map<string, string>, preamble?: string[]): string {
   return out.join('\n') + '\n';
 }
 
+/**
+ * Service limits from the per-pattern rows: a tier_down container's limit is
+ * its largest pass row in lines a day; compact and sample caps are stated at
+ * the container's average line size; offload and drop move every statement.
+ * The moved statements are priced at a month.
+ */
+export function serviceLimitsFromRows(
+  containers: string[],
+  rows: PerPatternRow[],
+  actionByContainer: ReadonlyMap<string, Action>,
+  defaultAction: Action,
+  destination: SiemId
+): ServiceLimit[] {
+  const out: ServiceLimit[] = [];
+  const eventsOf = (rs: PerPatternRow[]): number | undefined =>
+    rs.length > 0 && rs.every((r) => r.events_monthly !== undefined)
+      ? rs.reduce((s, r) => s + (r.events_monthly ?? 0), 0)
+      : undefined;
+  for (const c of containers) {
+    const action = actionByContainer.get(c) ?? defaultAction;
+    const inContainer = rows.filter((r) => r.container === c);
+    const moved = inContainer.filter((r) => r.action !== 'pass');
+    const movedBytes = moved.reduce((s, r) => s + r.current_bytes_30d, 0);
+    let limit: number | null | undefined;
+    if (action === 'pass') {
+      limit = undefined;
+    } else if (action === 'offload' || action === 'drop') {
+      limit = null;
+    } else if (action === 'tier_down') {
+      const keptMax = inContainer
+        .filter((r) => r.action === 'pass')
+        .reduce<PerPatternRow | undefined>((m, r) => (!m || r.cap_bytes_per_window > m.cap_bytes_per_window ? r : m), undefined);
+      limit = !keptMax ? null : keptMax.events_monthly !== undefined ? keptMax.events_monthly / 30 : undefined;
+    } else {
+      const capSum = inContainer.reduce((s, r) => s + r.cap_bytes_per_window, 0);
+      const bytes = inContainer.reduce((s, r) => s + r.current_bytes_30d, 0);
+      const events = eventsOf(inContainer);
+      limit = events && bytes > 0 ? linesPerDayFromCap(capSum, 1, bytes / events) : undefined;
+    }
+    const usd = statementsUsdMonthly(destination, movedBytes, eventsOf(moved));
+    out.push({
+      service: c,
+      action,
+      limitLinesPerDay: limit,
+      movedStatements: moved.length,
+      ...(usd !== undefined ? { movedUsdMonthly: usd } : {}),
+    });
+  }
+  return out;
+}
+
 export function renderCsvDiff(
   containers: string[],
   currentCsv: string | undefined,
@@ -3082,7 +3245,9 @@ export function renderCsvDiff(
   defaultAction: Action,
   actionByContainer: ReadonlyMap<string, Action>,
   reduction: 'soft' | 'hard',
-  commitment?: { targetPercent: number; baselineMonthlyBytes: number }
+  commitment?: { targetPercent: number; baselineMonthlyBytes: number },
+  instances?: EnforcingInstances,
+  reasonByContainer?: ReadonlyMap<string, string>
 ): string {
   const baseline = parseCsv(currentCsv);
   const merged = new Map(baseline.rows);
@@ -3138,16 +3303,19 @@ export function renderCsvDiff(
     // per-service advisory), falling back to defaultAction only when a
     // container has no decision.
     const action = actionByContainer.get(c) ?? defaultAction;
+    // Caps are per Receiver: the measured rate is the container's whole
+    // stream, so each enforcing instance gets its share.
+    const n = instances?.byContainer[c]?.instances ?? 1;
     const cap =
       action === 'offload' || action === 'drop'
         ? 1
         : action === 'tier_down'
-          ? Math.max(1, Math.round(keptMaxByContainer.get(c) ?? 0))
-          : Math.max(1, Math.round(capSumByContainer.get(c) ?? 0));
+          ? perInstanceCap(keptMaxByContainer.get(c) ?? 0, n)
+          : perInstanceCap(capSumByContainer.get(c) ?? 0, n);
     // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
     // never break the `<bytes>::<reason>` parse. The empty second field is
     // the engine's "no expiry" slot.
-    const value = `${cap}::${reason.replace(/[,:]/g, ';')}`;
+    const value = `${cap}::${reasonByContainer?.get(c) ?? reason.replace(/[,:]/g, ';')}`;
     merged.set(c, value);
   }
   // Preserve any existing preamble from the baseline (so refresh PRs
@@ -3198,13 +3366,14 @@ export function renderActionsCsv(
   actionByContainer: ReadonlyMap<string, Action>,
   defaultAction: Action,
   existingActionsCsv: string | undefined,
-  reduction: 'soft' | 'hard'
+  reduction: 'soft' | 'hard',
+  reasonByContainer?: ReadonlyMap<string, string>
 ): string {
   const merged = new Map(parseCsv(existingActionsCsv).rows);
   const reason = `MCP configure_engine (${reduction})`.replace(/[,:]/g, ';');
   for (const c of containers) {
     const action = actionByContainer.get(c) ?? defaultAction;
-    merged.set(c, `${action}::${reason}`);
+    merged.set(c, `${action}::${reasonByContainer?.get(c) ?? reason}`);
   }
   const out: string[] = ['container,action'];
   for (const [k, v] of [...merged.entries()].sort()) out.push(`${k},${v}`);
@@ -3474,6 +3643,8 @@ function buildConfigureEngineHumanSummary(args: {
   refreshMode?: boolean;
   /** Datadog Flex plans: the summed move, stated as lines. */
   flexStatement?: string;
+  /** The plan in user units: one sentence per service, then the fleet line. */
+  userUnitLines?: string[];
 }): string {
   const containerWord = `${args.containerCount} container${args.containerCount === 1 ? '' : 's'}`;
   const verb = args.refreshMode ? 'refresh re-derived' : 'derived';
@@ -3491,7 +3662,8 @@ function buildConfigureEngineHumanSummary(args: {
     (perEvent
       ? `configure_engine ${verb} a policy on ${args.service} ${goal} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`
       : `configure_engine ${verb} a ${args.targetPercent.toFixed(1)}% reduction policy on ${args.service} across ${containerWord} (${args.destination}); ${args.patternCount} pattern${args.patternCount === 1 ? '' : 's'} capped.`) +
-    (args.flexStatement ? ` ${args.flexStatement}` : '');
+    (args.flexStatement ? ` ${args.flexStatement}` : '') +
+    (args.userUnitLines && args.userUnitLines.length > 0 ? ` ${args.userUnitLines.join(' ')}` : '');
   if (args.applied?.ok && args.applied.pr_url) {
     return `${headline} PR opened at ${args.applied.pr_url}; the engine hot-reloads the cap CSV on the next gitops poll, no pipeline restart.`;
   }

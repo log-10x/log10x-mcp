@@ -6,9 +6,12 @@
  * because the data is still searchable in Datadog. The planner plans tier_down
  * to Flex before offload. The plan reports the events and GB moved out of the
  * Standard index, the Standard indexing line avoided at Datadog list, and the
- * Flex storage line added at list, and states Flex compute as unpriced and
- * excluded. It prints no percentage of the Datadog bill and no 0.6/0.4 blend
- * (claims charter: never a Datadog Flex percentage, bare or qualified).
+ * Flex line added at the tier the moved volume lands in: Flex Starter, storage
+ * and compute at one rate for at least 3 months, below 2 billion events a
+ * month and 10 billion stored; above that, Flex storage on a scalable compute
+ * tier, with compute unpriced and excluded. It prints no percentage of the
+ * Datadog bill and no 0.6/0.4 blend (claims charter: never a Datadog Flex
+ * percentage, bare or qualified).
  *
  * Before this, the model priced Flex at $1.00/GB, which was $2.50 x 0.40: a
  * modeled 0.6 fraction of the bill that every Datadog plan printed as "cut N%
@@ -57,13 +60,28 @@ test('a 1,000 GB/mo Flex move is priced per event at Datadog list, as lines', ()
   assert.equal(move.events_moved, 1e9);
   assert.equal(move.events_basis, 'measured');
   assert.equal(move.standard_indexing_avoided_usd, 1700); // $1.70 per million, 15-day retention
-  assert.equal(move.tier_storage_added_usd, 50); // $0.05 per million stored per month, held 30 days
+  // One billion events a month, held 3 months, is 3 billion stored: inside
+  // Flex Starter, so the line is $0.60 per million stored per month for 3 months.
+  assert.equal(move.pricing_tier, 'starter');
+  assert.equal(move.tier_storage_added_usd, 1800);
+  assert.equal(move.tier_retention_months, 3);
   assert.match(move.text, /1 billion events \(1000 GB\) a month out of the Standard index into Datadog Flex Logs/);
   assert.match(move.text, /Standard indexing avoided: \$1,700\/mo at \$1\.70 per million events \(15-day retention\)/);
-  assert.match(move.text, /Flex storage added: \$50\/mo at \$0\.05 per million events stored per month, held 30 days/);
-  assert.match(move.text, /Flex compute is unpriced .* excluded from both figures/);
-  assert.match(move.text, /read 2026-09-30/);
+  assert.match(move.text, /Flex Starter added: \$1,800\/mo at \$0\.60 per million events stored per month, compute included, held 3 months/);
+  assert.ok(!/unpriced/.test(move.text), move.text);
+  assert.match(move.text, /read 2026-10-13/);
   assert.ok(!/%/.test(move.text), move.text);
+});
+
+test('above Starter, a Flex move is priced at scalable storage with compute unpriced', () => {
+  // Three billion events a month leaves Starter: storage at $0.05 per million
+  // stored per month, held 30 days, and the compute line named, not counted.
+  const move = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 3000 * GB, { avgEventBytes: 1000 });
+  assert.equal(move.pricing_tier, 'scalable');
+  assert.equal(move.tier_storage_added_usd, 150);
+  assert.equal(move.tier_retention_months, 1);
+  assert.match(move.text, /Flex storage added: \$150\/mo at \$0\.05 per million events stored per month, held 30 days, on a scalable compute tier/);
+  assert.match(move.text, /Flex compute is unpriced .* excluded from both figures/);
 });
 
 test('an unmeasured event size is ASSUMED, and the move says so', () => {
@@ -76,8 +94,10 @@ test('projectAction prices Datadog tier_down by the per-event lines, not the ret
   const args = { bytes_in: 1000 * GB, avg_event_size_bytes: 1000, destination: 'datadog' as const };
   const pass = projectAction({ ...args, action: 'pass' });
   const flex = projectAction({ ...args, action: 'tier_down' });
-  // Indexing avoided less storage added. The old $1.00/GB model gave $1,500.
-  assert.equal((pass.total_dollars ?? 0) - (flex.total_dollars ?? 0), 1650);
+  // Indexing avoided ($1,700) less Flex Starter added ($1,800): at Starter the
+  // move costs more than the 15-day indexing it avoids. The old $1.00/GB model
+  // gave $1,500.
+  assert.equal((pass.total_dollars ?? 0) - (flex.total_dollars ?? 0), -100);
   assert.ok(flex.per_event_move, 'the move rides on the projection');
   assert.ok(flex.notes?.some((n) => n === flex.per_event_move!.text));
   assert.ok(!flex.notes?.some((n) => /\/GB/.test(n)), 'no per-GB Flex rate in any note');
@@ -127,7 +147,7 @@ test('a Datadog percent plan counts volume out of the Standard index and states 
   assert.equal(row.action, 'tier_down');
   assert.equal(row.movedBytesMonthly, 450 * GB);
   assert.equal(row.savedUsd, 765); // 450M events x $1.70/M
-  assert.equal(row.addedUsd, 22.5); // 450M events x $0.05/M, held 30 days
+  assert.equal(row.addedUsd, 810); // 450M events x $0.60/M at Flex Starter, held 3 months
   assert.match(pl.rateBasis, /per million events/);
   assert.ok(!/Flex Logs ingest \$[\d.]+\/GB/.test(pl.rateBasis), pl.rateBasis);
 });
@@ -159,7 +179,7 @@ test('estimate_savings on Datadog renders the Flex lines and no percentage of th
   const text = JSON.stringify(out);
   const headline = String(out.summary?.headline ?? out.data?.headline ?? '');
   assert.match(headline, /out of the Datadog Standard index/, headline);
-  assert.match(headline, /Flex compute is unpriced/, headline);
+  assert.match(headline, /Flex Starter added: .* compute included, held 3 months/, headline);
   assert.ok(!BILL_PERCENT.test(headline), headline);
   assert.ok(!/cut \d+% of the datadog bill/i.test(text), 'no "cut N% of the datadog bill" anywhere in the envelope');
 });

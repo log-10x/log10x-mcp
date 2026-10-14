@@ -101,9 +101,22 @@ test('volume action: reducible statements only, container-keyed change rows in t
   // the empty middle field being the expiry slot; the action is never in
   // this file. No per-pattern `pat:` rows, no head_only, no placeholder key.
   for (const row of tier!.change!.rows) {
-    assert.match(row, /^[^,<>]+,\d+::MCP poc_from_local$/);
+    assert.match(row, /^[^,<>]+,\d+::[^,:]+$/);
     assert.ok(!row.includes('head_only'));
     assert.ok(!row.startsWith('pat:'));
+  }
+  // the reason column is the service's sentence in user units, commas and colons removed
+  const otelRow = tier!.change!.rows.find((r) => r.startsWith('otelcol,'))!;
+  assert.match(otelRow, /::otelcol any statement above 72000 lines a day goes to Infrequent Access\. Today that is these 1 statement about \$[\d.]+ a month\.$/);
+  // THE CHANGE reads in lines a day and dollars a month: the limit is the largest
+  // statement the container keeps (otelcol: an ERROR statement at 3,000 lines an
+  // hour), then the fleet line and the always-pass sample
+  const lines = tier!.change!.commentLines;
+  assert.match(lines[0], /^cartservice: any statement above 1,200 lines a day goes to Infrequent Access\. Today that is these 1 statement, about \$[\d.]+ a month\.$/);
+  assert.match(lines[1], /^otelcol: any statement above 72,000 lines a day goes to Infrequent Access\. Today that is these 1 statement, about \$[\d.]+ a month\.$/);
+  assert.equal(lines[2], 'Any service not listed keeps every statement in Standard. The first 5 lines of every statement always reach Standard.');
+  for (const l of [...lines, tier!.change!.engineGapNote!]) {
+    assert.ok(!/240|regulator|severity floor|bytes per window/i.test(l), `engine units leaked into a user line: ${l}`);
   }
   assert.ok(tier!.change!.engineGapNote!.includes('per container'));
   // caps.csv mirrors the change rows; actions.csv names the same containers
@@ -116,7 +129,7 @@ test('volume action: reducible statements only, container-keyed change rows in t
   }
   // the cap is the largest pattern the container keeps: the reducible
   // statements exceed it, the kept ones do not
-  assert.ok(tier!.change!.commentLines.join(' ').includes('largest pattern the container keeps'));
+  assert.ok(tier!.change!.commentLines.join(' ').includes('largest statement the container keeps'));
   // verified commands resolved from the matrix cell: both files into the
   // ConfigMap the engine reads
   const cmds = tier!.apply!.commands.join('\n');
