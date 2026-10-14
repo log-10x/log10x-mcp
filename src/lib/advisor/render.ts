@@ -212,7 +212,7 @@ function renderGitopsExplainer(lines: string[], g: GitopsExplainer): void {
   lines.push('|---|---|---|---|');
   for (const e of g.envVars) {
     lines.push(
-      `| \`${e.name}\` | ${e.required ? '**yes**' : 'optional'} | \`${e.value}\` | ${e.note ? e.note.replace(/\|/g, '\\|') : '-'} |`
+      `| \`${e.name}\` | ${e.required ? '**yes**' : 'optional'} | \`${e.value}\` | ${e.note ? e.note.replace(/\\/g, '\\\\').replace(/\|/g, '\\|') : '-'} |`
     );
   }
   lines.push('');

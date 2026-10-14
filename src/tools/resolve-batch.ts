@@ -638,7 +638,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
       `call \`log10x_retriever_query({ pattern: '${p.symbolMessage}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
     );
     actions.push(
-      `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\`: filters to the dominant variable concentration directly in the SIEM.`
+      `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"' --from now-24h\`: filters to the dominant variable concentration directly in the SIEM.`
     );
   }
 
