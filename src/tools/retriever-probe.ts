@@ -204,7 +204,7 @@ export async function executeRetrieverProbe(args: {
       view: 'summary',
       summary: {
         headline:
-          'Retriever end-to-end health check could not run — the S3 buckets it reads from and writes to could not be resolved. Pass offload_bucket and input_bucket explicitly, register an env-config (log10x_env_register), or set LOG10X_STREAMER_BUCKET and make sure the retriever helm release is reachable.',
+          'Retriever end-to-end health check could not run: the S3 buckets it reads from and writes to could not be resolved. Pass offload_bucket and input_bucket explicitly, register an env-config (log10x_env_register), or set LOG10X_STREAMER_BUCKET and make sure the retriever helm release is reachable.',
       },
       data: {
         verdict: 'unknown',
@@ -277,7 +277,7 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
     : 'the highest-volume pattern';
 
   if (r.verdict === 'green') {
-    return `Retriever end-to-end health check passed — picked ${pickedPhrase}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
+    return `Retriever end-to-end health check passed: picked ${pickedPhrase}, ran query ${r.query_id ?? '?'}, all ${r.asserts.length} checks succeeded (${r.total_runtime_ms}ms).`;
   }
   if (r.verdict === 'broken') {
     // Lead with capability + impact in user terms. Distinguish "new logs
@@ -294,7 +294,7 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
     // indexed data is still queryable.
     if (failed === 'offload_bucket_has_recent_data') {
       return (
-        `Long-term log archiving has stalled — no new logs have landed in cold storage recently ` +
+        `Long-term log archiving has stalled: no new logs have landed in cold storage recently ` +
         `(${passedCount} of ${totalCount} health checks passed; the failed one was the new-arrivals check). ` +
         `What this means: searching events from BEFORE the stall still works, but events FROM NOW are not being archived for later retrieval. ` +
         (remedy ? `Likely cause: ${remedy} ` : '') +
@@ -318,7 +318,7 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
   const reasonTail = r.reason ?? 'I could not complete the check';
   return (
     `I tried to run an end-to-end health check on the retriever pipeline, ` +
-    `but I could not pick a pattern to test against on my own — ${reasonTail}. ` +
+    `but I could not pick a pattern to test against on my own: ${reasonTail}. ` +
     `To run the check, tell me which pattern to test: pass target_hash: "<hash>", ` +
     `or run log10x_top_patterns first so I can pick the top pattern and re-run this check automatically.`
   );

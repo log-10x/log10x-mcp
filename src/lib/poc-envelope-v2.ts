@@ -1486,23 +1486,23 @@ function buildActions(
       ? `severity=${sev || 'error-class'} kept for incident diagnosis.`
       : refined === 'blocked'
         ? 'dependency_check found references; cannot reduce safely.'
-        : 'low volume or non-actionable signal — pass.';
+        : 'low volume or non-actionable signal: pass.';
   } else if (refined === 'mute') {
     // Mute = lean on the destination's preferred lever.
     action = level1;
     reason = isHotLoop
-      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume) — level-1 action \`${level1}\` on ${siem}.`
+      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume): level-1 action \`${level1}\` on ${siem}.`
       : `${sev || 'info-class'} pattern routed to destination level-1 action \`${level1}\`.`;
   } else if (refined === 'sample') {
     // Sample = use cheap level-2 tier when it's better than a flat
     // sample-keep on this destination; otherwise stay on sample.
     if (isFrequent && (level2 === 'compact' || level2 === 'tier_down')) {
       action = level2;
-      reason = `moderate-volume ${sev || 'info-class'} pattern — destination level-2 \`${level2}\` is cheaper than a flat sample on ${siem}.`;
+      reason = `moderate-volume ${sev || 'info-class'} pattern: destination level-2 \`${level2}\` is cheaper than a flat sample on ${siem}.`;
     } else {
       action = 'sample';
       sampleN = Math.max(2, Math.round(p.sampleRate ?? 10));
-      reason = `moderate-volume ${sev || 'info-class'} pattern — keep 1/${sampleN} to retain signal at lower cost.`;
+      reason = `moderate-volume ${sev || 'info-class'} pattern: keep 1/${sampleN} to retain signal at lower cost.`;
     }
   } else if (
     refined === 'compact' ||

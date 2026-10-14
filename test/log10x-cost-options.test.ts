@@ -132,7 +132,7 @@ test('no manual mode exists at any tier', () => {
   }
 });
 
-test('no pass mode id exists — renamed to observe_only', () => {
+test('no pass mode id exists: renamed to observe_only', () => {
   const caps = fullCaps();
   const modes = buildModes(caps, 'splunk', {});
   assert.ok(!modes.find((m) => (m.id as string) === 'pass'), 'pass mode must not exist');
@@ -198,7 +198,7 @@ test('compact is gated when SIEM is datadog (no-op destination)', () => {
   assert.ok(compact.gated_reason && compact.gated_reason.length > 0, 'gated_reason must be set');
 });
 
-test('compact is gated when receiver not installed (dev tier — collapses to 2-item)', () => {
+test('compact is gated when receiver not installed (dev tier: collapses to 2-item)', () => {
   const caps = devCaps();
   const modes = buildModes(caps, 'splunk', {});
   // dev tier collapses — no compact mode at all

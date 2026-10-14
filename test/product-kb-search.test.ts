@@ -58,7 +58,7 @@ const deploy = mkPage('apps/receiver/deploy', deployChunks);
 
 const index = buildIndex([metricOverlay, deploy]);
 
-describe('product-kb search — ranking + topic+query', () => {
+describe('product-kb search: ranking + topic+query', () => {
   it('ranks a focused chunk on a large page above a tiny slug-matching tool page', () => {
     const results = searchIndex(index, { query: 'kustomize overlay patch containers volumes' });
     assert.ok(results.length >= 1, 'has results');

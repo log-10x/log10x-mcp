@@ -134,7 +134,7 @@ test('must_render_verbatim contains no pattern_hash references', async () => {
   }
 });
 
-test('must_render_verbatim uses plain text — no markdown syntax', async () => {
+test('must_render_verbatim uses plain text: no markdown syntax', async () => {
   for (const mode of EXPLAIN_MODES) {
     const { data } = await runMode(mode);
     const v = data.must_render_verbatim;
@@ -191,7 +191,7 @@ test('must_ask_user for non-observe modes has a question and exactly 2 options (
   }
 });
 
-test('observe_only has no apply option — must_ask_user has 1 option (Preview only)', async () => {
+test('observe_only has no apply option: must_ask_user has 1 option (Preview only)', async () => {
   const { data } = await runMode('observe_only');
   assert.equal(
     data.must_ask_user.options.length,

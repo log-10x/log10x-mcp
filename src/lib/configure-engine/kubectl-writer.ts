@@ -577,25 +577,25 @@ function classifyKubectlError(
     case 'forbidden':
       return primitiveError(
         'config_missing',
-        `kubectl Forbidden — the kubeconfig user lacks RBAC to write ConfigMaps in this namespace. ` +
+        `kubectl Forbidden: the kubeconfig user lacks RBAC to write ConfigMaps in this namespace. ` +
           `Bind a Role/RoleBinding granting configmaps create+patch, or switch contexts. kubectl said: ${tail}`,
       );
     case 'not_found':
       return primitiveError(
         'config_missing',
-        `kubectl NotFound — the target namespace does not exist. Create it first ` +
+        `kubectl NotFound: the target namespace does not exist. Create it first ` +
           `(kubectl create namespace …) or pass an existing one. kubectl said: ${tail}`,
       );
     case 'request_entity_too_large':
       return primitiveError(
         'schema_invalid',
-        `kubectl RequestEntityTooLarge — the ConfigMap exceeds the 1 MiB apiserver cap. ` +
+        `kubectl RequestEntityTooLarge: the ConfigMap exceeds the 1 MiB apiserver cap. ` +
           `Split the payload or compact rare patterns. kubectl said: ${tail}`,
       );
     case 'conflict':
       return primitiveError(
         'backend_error',
-        `kubectl Conflict — the resource changed between read and write. Retry the apply. kubectl said: ${tail}`,
+        `kubectl Conflict: the resource changed between read and write. Retry the apply. kubectl said: ${tail}`,
         1000,
         true,
       );

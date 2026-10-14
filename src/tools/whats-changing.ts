@@ -50,7 +50,7 @@ export const whatsChangingSchema = {
     .enum(['1d', '7d', '30d'])
     .default('7d')
     .describe(
-      'Current window to evaluate. Day-level only — delta math requires day-aligned baseline offsets. ' +
+      'Current window to evaluate. Day-level only: delta math requires day-aligned baseline offsets. ' +
       'For sub-day spike investigation use `log10x_pattern_trend` or `log10x_investigate`.',
     ),
   comparison_window: z
@@ -58,7 +58,7 @@ export const whatsChangingSchema = {
     .default('auto')
     .describe(
       'Baseline window to compare against. `"auto"` (default) averages three offsets (1×, 2×, 3× the timeRange) ' +
-      'for noise smoothing. A specific offset like `"7d"` compares to that single anchor — e.g. ' +
+      'for noise smoothing. A specific offset like `"7d"` compares to that single anchor: e.g. ' +
       '`{timeRange: "1d", comparison_window: "1d"}` = today vs yesterday (deploy-delta); ' +
       '`{timeRange: "7d", comparison_window: "7d"}` = this week vs last week.',
     ),
@@ -288,7 +288,7 @@ export async function executeWhatsChanging(
         excluded_new_count: 0,
         silent_in_baseline_count: 0,
       },
-      human_summary: `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection — widen the window or wait for ingestion to catch up.`,
+      human_summary: `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection: widen the window or wait for ingestion to catch up.`,
       telemetry,
     });
   }
@@ -596,7 +596,7 @@ export async function executeWhatsChanging(
   const calloutParts: string[] = [];
   if (excludedNewCount > 0) {
     calloutParts.push(
-      `${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window) — see \`log10x_whats_new\`.`
+      `${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window): see \`log10x_whats_new\`.`
     );
   }
   if (silentInBaselineCount > 0) {
@@ -608,7 +608,7 @@ export async function executeWhatsChanging(
     // meaningful for these rows.
     const verb = silentInBaselineCount === 1 ? 'was' : 'were';
     calloutParts.push(
-      `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} ${verb} silent across all baseline anchor windows (1×/2×/3× timeRange offsets) — emitting now after a quiet stretch. Percent-change is undefined (zero baseline); only dollar delta is meaningful for these rows.`
+      `${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} ${verb} silent across all baseline anchor windows (1×/2×/3× timeRange offsets): emitting now after a quiet stretch. Percent-change is undefined (zero baseline); only dollar delta is meaningful for these rows.`
     );
   }
   const callout = calloutParts.length > 0 ? calloutParts.join(' ') : undefined;
@@ -627,11 +627,11 @@ export async function executeWhatsChanging(
       : '';
   const newExclusionTag =
     excludedNewCount > 0
-      ? ` ${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window) — route to log10x_whats_new for those.`
+      ? ` ${excludedNewCount} brand-new pattern${excludedNewCount === 1 ? '' : 's'} excluded (first_seen inside the analysis window): route to log10x_whats_new for those.`
       : '';
   const silentBaselineTag =
     silentInBaselineCount > 0
-      ? ` ${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} silent across all baseline anchor windows — emitting now after a quiet stretch (these are NOT new identities; percent-change is undefined against a zero baseline, only dollar delta is meaningful).`
+      ? ` ${silentInBaselineCount} pre-existing pattern${silentInBaselineCount === 1 ? '' : 's'} silent across all baseline anchor windows: emitting now after a quiet stretch (these are NOT new identities; percent-change is undefined against a zero baseline, only dollar delta is meaningful).`
       : '';
   const humanSummary =
     status === 'no_signal'
@@ -669,7 +669,7 @@ export async function executeWhatsChanging(
               {
                 tool: 'log10x_whats_new',
                 args: { timeRange: tf.range },
-                reason: `${excludedNewCount} brand-new patterns excluded from this list — see whats_new`,
+                reason: `${excludedNewCount} brand-new patterns excluded from this list: see whats_new`,
               },
             ]
           : []),
@@ -694,7 +694,7 @@ export async function executeWhatsChanging(
 
   if (view === 'markdown') {
     const lines = [
-      `## What's changing — ${tf.label}`,
+      `## What's changing: ${tf.label}`,
       ``,
       `Comparison: current ${tf.range} vs ${cwLabel}`,
       `Gates: min_delta=$${minDeltaUsd}, min_contribution=${minDeltaContribPct}%`,

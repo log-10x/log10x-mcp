@@ -54,7 +54,7 @@ export function splunkExclusionForPattern(identity: string, template: string): s
 export function cloudwatchExclusionForPattern(identity: string, template: string): string {
   const phrase = literalPhrase(template) || identity.replace(/_/g, ' ');
   return [
-    `# CloudWatch Logs Insights — confirm volume before applying:`,
+    `# CloudWatch Logs Insights: confirm volume before applying:`,
     `fields @timestamp, @message`,
     `| filter @message like /${escapeRegex(phrase)}/`,
     `| stats count() as event_count by bin(1h)`,

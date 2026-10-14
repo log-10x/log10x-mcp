@@ -66,7 +66,7 @@ test('serverless offers tier_down, never compact: there is nowhere to install th
   // customer would be left reading `~hash,val,val`.
   const actions = getAllowedActionsForDestination('elastic-serverless');
   assert.ok(actions.includes('tier_down'), 'the Serverless cost-efficient tier is a real tier_down target');
-  assert.ok(!actions.includes('compact'), 'no plugin surface on Serverless — compact must not be offered');
+  assert.ok(!actions.includes('compact'), 'no plugin surface on Serverless: compact must not be offered');
   assert.ok(
     actions.indexOf('tier_down') < actions.indexOf('offload'),
     'the in-SIEM lever comes before offload'
@@ -129,7 +129,7 @@ test('elasticsearch offers tier_down with a genuinely cheaper target', () => {
   assert.ok(actions.includes('tier_down'), 'frozen tier is proven; tier_down must be offered');
   const m = COST_MODEL_BY_DESTINATION.elasticsearch;
   const t = m.tier_down_target_tier;
-  assert.ok(t, 'no target tier — estimate_savings would return no delta');
+  assert.ok(t, 'no target tier: estimate_savings would return no delta');
   assert.ok(
     t.ingest_rate_usd_per_gb < m.ingest_per_gb,
     'target must be cheaper than the baseline or tier_down saves nothing'

@@ -83,7 +83,7 @@ export function emitElasticsearchPlan(opts: SamplePlanOptions, flavor: Flavor = 
       `${urlVar}, plus ${apiKeyVar} or ${userVar}/${passVar} from this shell.\n` +
       `They are sent to ${urlVar} and to nowhere else.`,
     writes:
-      `${outputDir}/<index>.NN.log — one document message per line, plain text.\n` +
+      `${outputDir}/<index>.NN.log: one document message per line, plain text.\n` +
       'Nothing else is written outside that directory.',
     window: opts.window,
     bucketCount: ELASTICSEARCH_BUCKET_COUNT,
@@ -209,7 +209,7 @@ export function emitElasticsearchPlan(opts: SamplePlanOptions, flavor: Flavor = 
     '      if [ "$TOTAL" -ge "$TARGET" ]; then break; fi',
     '    done',
     '  done < "$TMPDIR_RUN/indices"',
-    '  printf "sub-window %2d/%d — %d documents so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
+    '  printf "sub-window %2d/%d: %d documents so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
     'done',
     '',
     renderFooter(outputDir),
@@ -245,9 +245,9 @@ export function emitElasticsearchPlan(opts: SamplePlanOptions, flavor: Flavor = 
     notes: [
       'Composition is per index: the report will name each index that contributed bytes.',
       'Sources share one budget per sub-window, so a chatty index can fill it before the quieter ' +
-        'ones are reached — the same behaviour the live connector has, and one more reason to check the ' +
+        'ones are reached: the same behaviour the live connector has, and one more reason to check the ' +
         'composition table in the report before trusting the projection.',
-      'Paging sorts on `@timestamp` alone, as the connector does — documents sharing a timestamp at a ' +
+      'Paging sorts on `@timestamp` alone, as the connector does: documents sharing a timestamp at a ' +
         'page boundary can repeat or be skipped. It is a rounding error at POC scale, not a correctness ' +
         'claim to lean on.',
       'A cluster that stores its log body under a different field needs that field added to the `jq` ' +

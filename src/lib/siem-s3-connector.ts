@@ -76,12 +76,12 @@ function datadogRecipe(p: SiemConnectorParams): SiemConnectorRecipe {
 
   return {
     target: 'datadog',
-    summary: `Datadog Forwarder Lambda pulls NDJSON from s3://${p.bucket}/${prefix} — event-driven, logs only.`,
+    summary: `Datadog Forwarder Lambda pulls NDJSON from s3://${p.bucket}/${prefix}: event-driven, logs only.`,
     discovery:
       'Event-driven: an S3 ObjectCreated event invokes the Datadog Forwarder Lambda, which GETs the object and ships each line as a log. The Forwarder never polls or lists the bucket.',
     steps: [
-      'Deploy (or reuse) the Datadog Forwarder Lambda in THIS account+region — cross-account/region auto-subscription is not supported. (Datadog CloudFormation stack `datadog-forwarder`.)',
-      `Fan out the bucket's ObjectCreated event to the Forwarder via SNS (see notificationNote) — do NOT add a second raw bucket notification.`,
+      'Deploy (or reuse) the Datadog Forwarder Lambda in THIS account+region: cross-account/region auto-subscription is not supported. (Datadog CloudFormation stack `datadog-forwarder`.)',
+      `Fan out the bucket's ObjectCreated event to the Forwarder via SNS (see notificationNote): do NOT add a second raw bucket notification.`,
       `Grant the Forwarder's execution role s3:GetObject on s3://${p.bucket}/${prefix}* (add the bucket to the Forwarder's DdFetchLambdaTags / S3 read policy).`,
       'Allow S3/SNS to invoke the Forwarder (lambda permission).',
       'Optional: tag the objects (or set DD_SOURCE/DD_SERVICE) so Datadog pipelines parse the NDJSON `log` field and attribute source/service.',
@@ -138,11 +138,11 @@ resource "aws_lambda_permission" "sns_invoke_forwarder" {
       },
     ],
     notificationNote:
-      `The offload bucket almost certainly already has an ObjectCreated->SQS notification (the 10x indexer). S3 permits only one notification config per overlapping prefix/suffix, so you CANNOT add a second bucket notification for the Forwarder. Route ObjectCreated to an SNS topic (or EventBridge) once, then subscribe BOTH the existing indexer SQS and the Datadog Forwarder Lambda to it. The terraform above replaces the bucket's notification with the SNS fan-out — re-subscribe the indexer SQS to the same topic.`,
+      `The offload bucket almost certainly already has an ObjectCreated->SQS notification (the 10x indexer). S3 permits only one notification config per overlapping prefix/suffix, so you CANNOT add a second bucket notification for the Forwarder. Route ObjectCreated to an SNS topic (or EventBridge) once, then subscribe BOTH the existing indexer SQS and the Datadog Forwarder Lambda to it. The terraform above replaces the bucket's notification with the SNS fan-out: re-subscribe the indexer SQS to the same topic.`,
     caveats: [
       'Logs only: the Datadog Forwarder derives NO metrics from S3 data. For per-pattern metrics use log10x_backfill_metric (S3 cohort -> Datadog metrics API).',
-      'Our output is uncompressed NDJSON (one JSON object per line) — a drop-in: the Forwarder ships each line as one log event. (A single JSON array would become one event; NDJSON avoids that.)',
-      'Same-account only for the auto-trigger — the Forwarder must live in the bucket account+region (it does here).',
+      'Our output is uncompressed NDJSON (one JSON object per line): a drop-in: the Forwarder ships each line as one log event. (A single JSON array would become one event; NDJSON avoids that.)',
+      'Same-account only for the auto-trigger: the Forwarder must live in the bucket account+region (it does here).',
     ],
   };
 }
@@ -252,7 +252,7 @@ interval = 30`,
     notificationNote:
       `The offload bucket almost certainly already notifies the 10x indexer SQS on ObjectCreated. S3 allows only one notification config per overlapping prefix, so route ObjectCreated to ONE SNS topic and subscribe BOTH the existing indexer SQS and this new Splunk SQS. The terraform above sets up that fan-out; re-subscribe the indexer SQS to the same topic.`,
     caveats: [
-      'Pre-existing objects are NOT collected — the SQS-based input only sees objects created after the notification is wired. Backfill older data with a one-shot Generic S3 input over the same prefix.',
+      'Pre-existing objects are NOT collected: the SQS-based input only sees objects created after the notification is wired. Backfill older data with a one-shot Generic S3 input over the same prefix.',
       'Throughput: the add-on is happiest at ~4 SQS-based inputs per forwarder; scale inputs, not a single input.',
       'NDJSON: set s3_file_decoder/sourcetype so Splunk treats each line as a JSON event (one event per line), matching our output.',
     ],

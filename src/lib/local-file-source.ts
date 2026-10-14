@@ -223,7 +223,7 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
     notes.push(
       `file is ${(stat.size / 1024 / 1024).toFixed(0)} MB; sampled ${lines.length.toLocaleString()} lines ` +
         `across ${8} windows spanning the whole file (not read whole). The reduction estimate assumes these ` +
-        `windows are representative of the file's pattern mix — if it has phases with very different logging, ` +
+        `windows are representative of the file's pattern mix: if it has phases with very different logging, ` +
         `split it and analyse each phase.`,
     );
   }

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Sample export for Amazon CloudWatch Logs — log10x fenced POC, step 2 of 4.
+# Sample export for Amazon CloudWatch Logs: log10x fenced POC, step 2 of 4.
 #
 # WHAT THIS READS
 #   API:         logs:DescribeLogGroups  (which log groups exist under the scope below)
 #                logs:FilterLogEvents    (the log events themselves)
 #                Both are read-only. Nothing is created, tagged or deleted.
-#   Credentials: whatever the `aws` CLI on this machine already uses — AWS_PROFILE,
+#   Credentials: whatever the `aws` CLI on this machine already uses: AWS_PROFILE,
 #                AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, SSO cache or an instance
 #                role. This script neither reads nor copies them.
 #   Window:      2026-08-26 12:00:00Z .. 2026-08-27 12:00:00Z  (24h)
@@ -13,7 +13,7 @@
 #                stopping at 50,000 events total.
 #
 # WHAT THIS WRITES
-#   ./poc/logs/<log-group>.NN.log — one log message per line, plain text.
+#   ./poc/logs/<log-group>.NN.log: one log message per line, plain text.
 #   Nothing else is written outside that directory.
 #
 # WHAT ELSE IT DOES
@@ -138,7 +138,7 @@ for i in "${!BUCKET_FROM[@]}"; do
     remaining=$((remaining - n))
     TOTAL=$((TOTAL + n))
   done < "$TMPDIR_RUN/groups"
-  printf "sub-window %2d/%d — %d lines so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
+  printf "sub-window %2d/%d: %d lines so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
 done
 
 echo "" >&2

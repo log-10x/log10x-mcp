@@ -30,7 +30,7 @@ const PROMPT_HEADER = [
   '  - Every pattern MUST get a DIFFERENT name. No repeats.',
   '  - Respond with EXACTLY one line per data row, numbered from 1, in the form:',
   '      INDEX | NAME',
-  '  - No header row, no commentary, no markdown — just one `INDEX | NAME` line per pattern.',
+  '  - No header row, no commentary, no markdown: just one `INDEX | NAME` line per pattern.',
   '',
   'Patterns:',
 ].join('\n');
@@ -77,7 +77,7 @@ export async function prettifyPatterns(
   if (!opts.server) {
     return {
       names: {},
-      errorNote: 'MCP server handle not available — sampling skipped.',
+      errorNote: 'MCP server handle not available: sampling skipped.',
     };
   }
 

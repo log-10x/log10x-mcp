@@ -138,7 +138,7 @@ export async function enrichEnvAliasesFromOnPrem(envs: Environments): Promise<Al
       if (existing && existing !== saasMatch) {
         entry.aliases_skipped_conflict += 1;
         log.warn(
-          `env-alias-bridge: skipping alias "${onPremNick}" from ${store.kind} — already maps to env "${existing.nickname}", not "${saasMatch.nickname}"`,
+          `env-alias-bridge: skipping alias "${onPremNick}" from ${store.kind}: already maps to env "${existing.nickname}", not "${saasMatch.nickname}"`,
         );
         continue;
       }

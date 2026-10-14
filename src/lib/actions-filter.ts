@@ -68,7 +68,7 @@ export function filterActionsByActiveMode<A extends { tool: string }>(
     } else {
       if (warnings) {
         warnings.push(
-          `Suggested ${action.tool} in actions[] but it is not registered in ${mode} mode — entry dropped.`,
+          `Suggested ${action.tool} in actions[] but it is not registered in ${mode} mode: entry dropped.`,
         );
       }
     }

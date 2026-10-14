@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sample export for Elasticsearch — log10x fenced POC, step 2 of 4.
+# Sample export for Elasticsearch: log10x fenced POC, step 2 of 4.
 #
 # WHAT THIS READS
 #   API:         GET  _cat/indices  (which indices the pattern below resolves to)
@@ -12,7 +12,7 @@
 #                stopping at 500,000 events total.
 #
 # WHAT THIS WRITES
-#   ./poc/logs/<index>.NN.log — one document message per line, plain text.
+#   ./poc/logs/<index>.NN.log: one document message per line, plain text.
 #   Nothing else is written outside that directory.
 #
 # WHAT ELSE IT DOES
@@ -180,7 +180,7 @@ for i in "${!BUCKET_FROM[@]}"; do
       if [ "$TOTAL" -ge "$TARGET" ]; then break; fi
     done
   done < "$TMPDIR_RUN/indices"
-  printf "sub-window %2d/%d — %d documents so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
+  printf "sub-window %2d/%d: %d documents so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
 done
 
 echo "" >&2

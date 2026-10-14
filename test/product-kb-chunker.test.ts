@@ -22,7 +22,7 @@ function yamlBlock(key: string, n: number): string {
   return out;
 }
 
-describe('product-kb chunker — size-guarded sub-splitting', () => {
+describe('product-kb chunker: size-guarded sub-splitting', () => {
   it('splits an oversized tabbed section one chunk per forwarder, with composed headings', () => {
     const body =
       '??? tenx-config "Step 3: Configure Deployment Settings"\n\n' +

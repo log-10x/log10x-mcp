@@ -133,18 +133,18 @@ export const destSetSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
+      'Env identifier: either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
   siem_vendor: z
     .enum(SIEM_VENDOR_ENUM)
     .describe(
-      'The SIEM this environment ships logs to. Drives action eligibility downstream — e.g., `tier_down` only applies to datadog / cloudwatch / azure-monitor; `offload` requires a coherent vendor for the recipe emitter.'
+      'The SIEM this environment ships logs to. Drives action eligibility downstream: e.g., `tier_down` only applies to datadog / cloudwatch / azure-monitor; `offload` requires a coherent vendor for the recipe emitter.'
     ),
   region: z
     .string()
     .optional()
     .describe(
-      'Cloud region the SIEM lives in (e.g., `us-east-1` for Datadog/CloudWatch, `westus2` for azure-monitor). Optional but recommended — `log10x_env_validate` flags an empty region for vendors that require one.'
+      'Cloud region the SIEM lives in (e.g., `us-east-1` for Datadog/CloudWatch, `westus2` for azure-monitor). Optional but recommended: `log10x_env_validate` flags an empty region for vendors that require one.'
     ),
   log_group_prefix: z
     .string()
@@ -156,7 +156,7 @@ export const destSetSchema = {
     .string()
     .optional()
     .describe(
-      'Full ingest endpoint when the SIEM is self-hosted or non-default region (e.g., `https://splunk.acme.internal:8088/services/collector`). Optional — vendor defaults apply when absent.'
+      'Full ingest endpoint when the SIEM is self-hosted or non-default region (e.g., `https://splunk.acme.internal:8088/services/collector`). Optional: vendor defaults apply when absent.'
     ),
 };
 
@@ -223,7 +223,7 @@ export async function executeDestSet(
       data: {
         ok: false,
         env_id: args.env_id,
-        error: 'updated doc fails schema validation — destination edit not persisted.',
+        error: 'updated doc fails schema validation: destination edit not persisted.',
         zod_issues: parsed.error.issues.slice(0, 10).map((i) => ({
           path: i.path.join('.'),
           message: i.message,
@@ -292,7 +292,7 @@ export const envValidateSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
+      'Env identifier: either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
 };
 
@@ -470,7 +470,7 @@ export async function executeEnvValidate(
   const ok = errorCount === 0;
   const headline = ok
     ? `Env "${doc.nickname}" passes schema + sanity checks (${warningCount} warning${warningCount === 1 ? '' : 's'}, ${infoCount} info).`
-    : `Env "${doc.nickname}" has ${errorCount} error${errorCount === 1 ? '' : 's'} — fix before proceeding.`;
+    : `Env "${doc.nickname}" has ${errorCount} error${errorCount === 1 ? '' : 's'}: fix before proceeding.`;
 
   return buildEnvelope({
     tool: 'log10x_env_validate',
@@ -509,7 +509,7 @@ export const envDiffVsEnvvarsSchema = {
     .string()
     .min(1)
     .describe(
-      'Env identifier — either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
+      'Env identifier: either the `env_id` UUID or the `nickname` from the env-config document. Resolved by walking the store chain (k8s → aws_ssm → gcp_sm → azure_ac → local).'
     ),
 };
 
@@ -538,7 +538,7 @@ function buildFieldDiffs(
   const diffs: FieldDiff[] = [];
 
   const recommendRemoveEnvVar = (envVarName: string) =>
-    `Unset ${envVarName} in the MCP host environment — the on-prem store value wins and the env var is silently ignored.`;
+    `Unset ${envVarName} in the MCP host environment: the on-prem store value wins and the env var is silently ignored.`;
   const recommendUpdateStored = (envVarName: string, field: string) =>
     `If the env var is correct, call the matching setter (e.g., log10x_dest_set for destination.*) to update the stored doc; otherwise unset ${envVarName} so future readers stop seeing the disagreement on ${field}.`;
 
@@ -782,7 +782,7 @@ export async function executeEnvDiffVsEnvvars(
   const envvarPartial = envConfigFromEnvVars(process.env);
 
   if (!envvarPartial) {
-    const headline = `No LOG10X_* env vars set — nothing to diff against stored env "${doc.nickname}".`;
+    const headline = `No LOG10X_* env vars set: nothing to diff against stored env "${doc.nickname}".`;
     return buildEnvelope({
       tool: 'log10x_env_diff_vs_envvars',
       view: 'summary',
@@ -811,7 +811,7 @@ export async function executeEnvDiffVsEnvvars(
   // Generate one overall recommendation so the agent has a single
   // sentence to surface even when individual diffs each carry their own.
   const overallRecommendation = ok
-    ? 'No action needed — stored doc and env vars agree.'
+    ? 'No action needed: stored doc and env vars agree.'
     : 'Per the resolver precedence, the on-prem store wins; each LOG10X_* env var that disagrees is silently ignored. Either unset the disagreeing env vars (recommended) or update the stored doc via log10x_dest_set / the matching setter so the two sources stop drifting.';
 
   return buildEnvelope({

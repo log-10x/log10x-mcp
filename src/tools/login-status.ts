@@ -83,7 +83,7 @@ export async function executeLoginStatus(
   };
   const data: LoginStatusSummary = { ...partial, human_summary: buildLoginStatusHumanSummary(partial) };
   const headline = data.demo_mode
-    ? `Demo mode${data.demo_fallback_reason ? ` (API key failed validation)` : ''} — all queries hit the public read-only env.`
+    ? `Demo mode${data.demo_fallback_reason ? ` (API key failed validation)` : ''}: all queries hit the public read-only env.`
     : `Signed in${data.profile?.username ? ` as ${data.profile.username}` : ''} with access to ${data.envs.length} env${data.envs.length !== 1 ? 's' : ''}.`;
   return buildEnvelope({
     tool: 'log10x_login_status',

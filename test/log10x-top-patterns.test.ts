@@ -47,7 +47,7 @@ const EXPECTED_GLYPH: Record<Badge, TrendDelta['glyph']> = {
 
 const STATES: Badge[] = ['GROWING', 'SHRINKING', 'STABLE', 'ACUTE', 'NEW'];
 
-describe('top_patterns envelope — trend_delta field', () => {
+describe('top_patterns envelope: trend_delta field', () => {
   it('every synthetic pattern row includes a trend_delta field', () => {
     const rows = STATES.map(s => buildRow(s, [100, 120, 130], 172800));
     for (const row of rows) {

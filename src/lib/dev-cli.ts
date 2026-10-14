@@ -337,7 +337,7 @@ export async function resolveEngineCredentials(): Promise<EngineCredentials> {
       'TENX_LICENSE_KEY',
       `The local engine needs a license and none could be obtained: ${(e as Error).message}. ` +
         `A cached demo license lives at ~/.log10x/demo-license.json and is minted automatically ` +
-        `on first use — that mint needs one call to the log10x gateway. If this host has no ` +
+        `on first use: that mint needs one call to the log10x gateway. If this host has no ` +
         `egress, set TENX_LICENSE_KEY (or TENX_LICENSE_FILE) to a license minted elsewhere; ` +
         `the engine verifies it offline, so it keeps working with no network. Signed-in users ` +
         `get a longer-lived license via \`log10x_signin_start\`.`

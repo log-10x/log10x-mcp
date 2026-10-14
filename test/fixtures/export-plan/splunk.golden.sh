@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sample export for Splunk — log10x fenced POC, step 2 of 4.
+# Sample export for Splunk: log10x fenced POC, step 2 of 4.
 #
 # WHAT THIS READS
 #   API:         POST /services/search/jobs/export  (one streaming search per sub-window)
@@ -12,7 +12,7 @@
 #                stopping at 1,000,000 events total.
 #
 # WHAT THIS WRITES
-#   ./poc/logs/main.NN.log — one event per line, exactly as Splunk stores it.
+#   ./poc/logs/main.NN.log: one event per line, exactly as Splunk stores it.
 #   Nothing else is written outside that directory.
 #
 # WHAT ELSE IT DOES
@@ -124,7 +124,7 @@ for i in "${!BUCKET_FROM[@]}"; do
   # file would show up in the report as a source that contributed no bytes.
   if [ "$n" -gt 0 ]; then cat "$RESP" >> "$(outfile "$STEM")"; fi
   TOTAL=$((TOTAL + n))
-  printf "sub-window %2d/%d — %d lines so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
+  printf "sub-window %2d/%d: %d lines so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
 done
 
 echo "" >&2

@@ -184,7 +184,7 @@ test('renderCsvDiff: service-name==container-name fallback (no snapshot)', () =>
   );
 });
 
-test('renderCsvDiff: engine grammar — no action token in the epoch slot, no zero caps', () => {
+test('renderCsvDiff: engine grammar, no action token in the epoch slot, no zero caps', () => {
   const rows: PerPatternRow[] = [
     makeRow({ pattern_hash: 'aaa', action: 'compact', container: 'svc-compact' }),
     makeRow({ pattern_hash: 'bbb', action: 'offload', container: 'svc-offload', cap_bytes_per_window: 0 }),

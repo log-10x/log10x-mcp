@@ -85,9 +85,9 @@ export async function validateBackend(
     if (status === 401 || status === 403) {
       hint = `Auth rejected (HTTP ${status}). Check the credentials referenced by your env config.`;
     } else if (status === 404) {
-      hint = `404 — the URL doesn't expose a Prometheus-compatible API root at this path. Verify the read endpoint (usually ends in /api/v1 or just the workspace root).`;
+      hint = `404: the URL doesn't expose a Prometheus-compatible API root at this path. Verify the read endpoint (usually ends in /api/v1 or just the workspace root).`;
     } else if (status >= 500) {
-      hint = `Backend returned ${status} — service is unhealthy or unreachable.`;
+      hint = `Backend returned ${status}: service is unhealthy or unreachable.`;
     } else if (!status) {
       hint = `Network-level error. Check DNS, firewall, and TLS settings.`;
     }
@@ -182,7 +182,7 @@ export function renderValidationResult(result: ValidationResult, env: { nickname
   lines.push('');
   for (const c of result.checks) {
     const badge = c.status === 'pass' ? '`PASS`' : '**FAIL**';
-    lines.push(`- ${badge} \`${c.name}\` — ${c.detail}`);
+    lines.push(`- ${badge} \`${c.name}\`: ${c.detail}`);
     if (c.status === 'fail' && c.hint) {
       lines.push(`  - **Hint**: ${c.hint}`);
     }

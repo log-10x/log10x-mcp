@@ -240,7 +240,7 @@ function loadPackageDefaultManifest(): Manifest {
   const file = findUpwards('default-manifest.json');
   if (!file) {
     throw new Error(
-      '[log10x-mcp] default-manifest.json not found — package is missing its tool metadata. ' +
+      '[log10x-mcp] default-manifest.json not found: package is missing its tool metadata. ' +
         'Reinstall the package or check that `files` in package.json includes default-manifest.json.'
     );
   }

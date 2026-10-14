@@ -193,7 +193,7 @@ async function executeConfigureEnvInner(args: ConfigureEnvArgs): Promise<Configu
   const validationMarkdown = renderValidationResult(validation, { nickname: args.nickname, metricsBackend: backend });
 
   if (!validation.ok) {
-    const head = `# Validation failed — env \`${args.nickname}\` NOT persisted`;
+    const head = `# Validation failed: env \`${args.nickname}\` NOT persisted`;
     const footer = `\n\nFix the first FAIL above, then re-run \`log10x_configure_env\` with the same arguments.`;
     const md = `${head}\n\n${validationMarkdown}${footer}`;
     return { ok: false, nickname: args.nickname, validation_passed: false, error: 'validation failed', markdown: md };
@@ -201,7 +201,7 @@ async function executeConfigureEnvInner(args: ConfigureEnvArgs): Promise<Configu
 
   if (args.validateOnly) {
     const md = [
-      `# Validation passed — env \`${args.nickname}\` NOT persisted (validateOnly=true)`,
+      `# Validation passed: env \`${args.nickname}\` NOT persisted (validateOnly=true)`,
       '',
       validationMarkdown,
       '',

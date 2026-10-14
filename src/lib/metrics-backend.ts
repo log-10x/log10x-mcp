@@ -161,7 +161,7 @@ export function resolveVarReference(value: string): string {
     throw new MetricsBackendConfigError(
       `Config references ${value}, but environment variable ${m[1]} is unset. ` +
         `Either export ${m[1]} or replace the reference with a literal value ` +
-        `(NOT recommended for secrets — use the env-var reference pattern).`
+        `(NOT recommended for secrets: use the env-var reference pattern).`
     );
   }
   return v;
@@ -502,7 +502,7 @@ class Log10xDemoBackend implements MetricsBackend {
     const end = Math.min(endSec, nowS);
     if (end <= minStart) {
       throw new Error(
-        `log10x_demo: the requested range ends outside the ${DEMO_WINDOW_SEC / 3600}h demo window — ` +
+        `log10x_demo: the requested range ends outside the ${DEMO_WINDOW_SEC / 3600}h demo window: ` +
           `demo data only covers the last ${DEMO_WINDOW_SEC / 3600} hours. Sign in for full history.`
       );
     }
@@ -541,10 +541,10 @@ class Log10xDemoBackend implements MetricsBackend {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('HTTP 401') || msg.includes('HTTP 403')) {
-        throw new Error(`log10x_demo: the demo license was rejected (expired or invalid) — mint a fresh one. (${msg})`);
+        throw new Error(`log10x_demo: the demo license was rejected (expired or invalid), mint a fresh one. (${msg})`);
       }
       if (msg.includes('HTTP 429')) {
-        throw new Error(`log10x_demo: demo query rate limit hit — slow down, or sign in for higher limits. (${msg})`);
+        throw new Error(`log10x_demo: demo query rate limit hit, slow down, or sign in for higher limits. (${msg})`);
       }
       throw e;
     }
@@ -768,7 +768,7 @@ class DatadogBackend implements MetricsBackend {
     } catch (e) {
       if (e instanceof PromQLTranslationError) {
         throw new Error(
-          `datadog: cannot translate PromQL — ${e.message}. Source query: ${promql.slice(0, 200)}`
+          `datadog: cannot translate PromQL, ${e.message}. Source query: ${promql.slice(0, 200)}`
         );
       }
       throw e;

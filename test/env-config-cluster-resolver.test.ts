@@ -97,7 +97,7 @@ function clearLog10xEnvVars() {
   }
 }
 
-describe('resolveClusterConfig — F1 (no silent default fallback)', () => {
+describe('resolveClusterConfig: F1 (no silent default fallback)', () => {
   beforeEach(() => {
     clearLog10xEnvVars();
   });
@@ -161,7 +161,7 @@ describe('resolveClusterConfig — F1 (no silent default fallback)', () => {
   });
 });
 
-describe('resolveClusterConfig — F8 (corrupt on-prem doc must not be silently dropped)', () => {
+describe('resolveClusterConfig: F8 (corrupt on-prem doc must not be silently dropped)', () => {
   beforeEach(() => {
     clearLog10xEnvVars();
   });

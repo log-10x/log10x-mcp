@@ -236,7 +236,7 @@ function buildConsolidatedEnrichmentPrompt(
     .filter((e) => e.steps.length > 0);
 
   return [
-    `# Engine POC findings — please contribute operational context`,
+    `# Engine POC findings: please contribute operational context`,
     ``,
     `## What the engine measured (you cannot reproduce this)`,
     ``,
@@ -257,7 +257,7 @@ function buildConsolidatedEnrichmentPrompt(
     ``,
     `For each finding the engine surfaced, follow the per-finding errand below. Each`,
     `errand specifies exactly which tool to use and what fact to extract. If a tool`,
-    `is unavailable in your environment, skip it and lower confidence — DO NOT`,
+    `is unavailable in your environment, skip it and lower confidence: DO NOT`,
     `fabricate. The audit trail (\`tools_inspected\`) is the customer's verification.`,
     ``,
     `## Findings (top ${patterns.length}, by monthly cost)`,
@@ -289,7 +289,7 @@ function buildConsolidatedEnrichmentPrompt(
     `Confidence rubric:`,
     `  - **high**: you ran the suggested tool and got an unambiguous result quoted in findings`,
     `  - **medium**: you ran the tool but the result was ambiguous, or inferred from related signal`,
-    `  - **low**: tool unavailable, you guessed, OR you didn't actually look — be honest`,
+    `  - **low**: tool unavailable, you guessed, OR you didn't actually look, be honest`,
     ``,
     `Respond now with only the JSON object, no other prose.`,
   ].join('\n');
@@ -319,7 +319,7 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
   if (p.emergence.category === 'new' || p.emergence.category === 'recent_burst') {
     const firstSeen = p.emergence.first_seen_in_sample_iso ?? '(unknown)';
     steps.push(
-      `**operational_context** — first_seen_in_sample=${firstSeen} (emergence=${p.emergence.category}). ` +
+      `**operational_context**: first_seen_in_sample=${firstSeen} (emergence=${p.emergence.category}). ` +
         `Sample is stratified across 24 random sub-windows so this is the first sample-bound observation, not necessarily the true emergence time. ` +
         `Run \`kubectl get events --field-selector involvedObject.kind=Deployment -A --sort-by='.lastTimestamp'\` ` +
         `and look for a deploy / rollout / restart of ${svc} within 30 minutes BEFORE ${firstSeen}. ` +
@@ -328,7 +328,7 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
   }
   if (p.emergence.category === 'growing' && p.emergence.acceleration_ratio && p.emergence.acceleration_ratio > 1.5) {
     steps.push(
-      `**operational_context** — acceleration=${p.emergence.acceleration_ratio.toFixed(2)}x. ` +
+      `**operational_context**: acceleration=${p.emergence.acceleration_ratio.toFixed(2)}x. ` +
         `Run \`helm history ${svc} -n <namespace>\` to find recent upgrades. Quote the chart version and revision date.`,
     );
   }
@@ -350,7 +350,7 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
       ? `moves ${Number(flexMove.gb_moved.toFixed(1))} GB/mo out of the Standard index into ${flexMove.tier}`
       : `$${p.actions.expected_savings_usd_per_month.toFixed(2)}/mo savings of ${p.metrics.cost_per_month_usd.toFixed(2)}/mo cost`;
     steps.push(
-      `**dependency_safety** — engine recommends \`${p.actions.recommended_action}\` (${what}). ` +
+      `**dependency_safety**: engine recommends \`${p.actions.recommended_action}\` (${what}). ` +
         `Before applying, grep the customer's Grafana JSON / Splunk saved searches / Datadog monitors / ` +
         `PagerDuty alert rules for the pattern identity \`${p.identity.slice(0, 60)}\` or a meaningful substring. ` +
         `If ANY reference exists, downgrade to \`pass\` or \`sample\` and flag the conflict.`,
@@ -362,7 +362,7 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
   // look for.
   if (p.top_slot && p.top_slot.unbounded && p.top_slot.distinct_count > 100) {
     steps.push(
-      `**code_fix_refinement** — slot \`${p.top_slot.name}\` is unbounded (${p.top_slot.distinct_count} distinct values across ${p.metrics.events_in_window} events). ` +
+      `**code_fix_refinement**: slot \`${p.top_slot.name}\` is unbounded (${p.top_slot.distinct_count} distinct values across ${p.metrics.events_in_window} events). ` +
         `This is a high-cardinality variable embedded in the log body. Find the source line and either ` +
         `pull the variable into a structured field, drop it, or sample it. Quote file:line.`,
     );
@@ -373,7 +373,7 @@ function errandsForFinding(p: PatternOutput, index: number): FindingErrand {
 
 function formatErrand(e: FindingErrand): string {
   return [
-    `### Finding #${e.index} — \`${e.identity.slice(0, 80)}\``,
+    `### Finding #${e.index}: \`${e.identity.slice(0, 80)}\``,
     ...e.steps.map((s) => `- ${s}`),
   ].join('\n');
 }

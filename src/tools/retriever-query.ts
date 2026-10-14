@@ -69,7 +69,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the archive re-derives its own `tenx_hash` field per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash — bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the archive re-derives its own `tenx_hash` field per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash: bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
@@ -117,13 +117,13 @@ export const retrieverQuerySchema = {
     .enum(['events', 'count', 'aggregated', 'ephemeral_series'])
     .default('events')
     .describe(
-      '`events` (default: raw events), `count` (total + severity/service rollups, no event bodies), `aggregated` (events bucketed into a time series — use with bucket_size), `ephemeral_series` (bucketed series in Prometheus range-query shape for cross-pillar correlation). All four formats are rolled up client-side from the same events stream.'
+      '`events` (default: raw events), `count` (total + severity/service rollups, no event bodies), `aggregated` (events bucketed into a time series, use with bucket_size), `ephemeral_series` (bucketed series in Prometheus range-query shape for cross-pillar correlation). All four formats are rolled up client-side from the same events stream.'
     ),
   bucket_size: z
     .string()
     .default('5m')
     .describe('Bucket size when format=aggregated or ephemeral_series. Examples: `1m`, `5m`, `1h`, `1d`.'),
-  environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+  environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
     .default('summary')
@@ -132,7 +132,7 @@ export const retrieverQuerySchema = {
   debug: z
     .boolean()
     .optional()
-    .describe('Escalate the CloudWatch log level to DEBUG for THIS query only — per-blob Bloom decisions, per-fetch S3 reads, per-event results-writer samples. Use only when normal-run diagnostics cannot explain a 0-result or truncated outcome (volume is ~100x higher). Default false.'),
+    .describe('Escalate the CloudWatch log level to DEBUG for THIS query only: per-blob Bloom decisions, per-fetch S3 reads, per-event results-writer samples. Use only when normal-run diagnostics cannot explain a 0-result or truncated outcome (volume is ~100x higher). Default false.'),
 };
 
 interface RetrieverQuerySummary {
@@ -508,13 +508,13 @@ export async function executeRetrieverQuery(
           ? `${d.events_returned} events as range-query series`
           : `${d.events_returned} returned`;
   const perfCaveat = d.wall_time_ms > 30000
-    ? `, slow scan — consider narrowing search or window`
+    ? `, slow scan: consider narrowing search or window`
     : '';
   const matchedQual = d.events_matched_basis === 'qrs_summaries_nondropped' ? ' (engine summaries, excludes dropped)' : '';
   const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched${matchedQual}, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (d.partial_results) {
-    actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults — re-run with same args to resume from cached scan progress' });
+    actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults: re-run with same args to resume from cached scan progress' });
   }
   // Prior code chained retriever_series only when `d.pattern` was set.
   // Hash-keyed callers (pattern_hash auto-built an `includes(text, "...")`
@@ -546,7 +546,7 @@ export async function executeRetrieverQuery(
       actions.push({
         tool: 'log10x_retriever_query_status',
         args: { query_id: d.query_id, target: d.target, include_pod_logs: true },
-        reason: '0 events matched — confirm chart 1.0.20 dispatcher-failure signature via pod logs and _DONE.json',
+        reason: '0 events matched: confirm chart 1.0.20 dispatcher-failure signature via pod logs and _DONE.json',
       });
     }
   }
@@ -613,9 +613,9 @@ export function buildRetrieverQueryHumanSummary(s: {
     ) {
       return (
         `Retriever returned 0 events but the coordinator submitted ${s.diagnosticsSubmittedTasks} scan task(s) ` +
-        `that scanned nothing. This is the chart 1.0.20 incomplete-streamer-rename signature — scan/stream workers ` +
+        `that scanned nothing. This is the chart 1.0.20 incomplete-streamer-rename signature: scan/stream workers ` +
         `fail to launch because the cloud/streamer/subquery include was not renamed. ` +
-        `Verify via log10x_retriever_query_status({query_id: '${s.queryId ?? '?'}', include_pod_logs: true}) — ` +
+        `Verify via log10x_retriever_query_status({query_id: '${s.queryId ?? '?'}', include_pod_logs: true}), ` +
         `if the pod logs show 'could not resolve include: cloud/streamer/subquery', upgrade to chart 1.0.21+ ` +
         `or apply the rename-residual fix in modules/feat/soft-drop.`
       );
@@ -624,7 +624,7 @@ export function buildRetrieverQueryHumanSummary(s: {
     return `Retriever returned zero events for ${scope} over ${s.from} to ${s.to} on target ${s.target} (${s.wallTimeMs}ms).${reason} Widen the window or relax the filter before declaring the pattern absent.`;
   }
   const countQual = s.countFromSummaries
-    ? ' (from engine summaries; excludes dropped events — run an uncapped query to include the dropped cohort)'
+    ? ' (from engine summaries; excludes dropped events: run an uncapped query to include the dropped cohort)'
     : '';
   const returnedQual = s.sampledPreview
     ? ` ${fmtCount(s.eventsReturned)} sampled (not earliest)`
@@ -640,13 +640,13 @@ export function buildRetrieverQueryHumanSummary(s: {
   const inferred = s.completenessBasis === 'quiet_window_inferred';
   if (inferred) {
     flags.push(
-      'completeness INFERRED from a quiet window, not confirmed by a marker count — ' +
+      'completeness INFERRED from a quiet window, not confirmed by a marker count: ' +
       'this result may be short; re-run to compare, and treat as non-authoritative for ' +
       'forensic or compliance use'
     );
   }
   const second = flags.length > 0
-    ? `Caveats: ${flags.join('; ')} — narrow the search or re-run to resume.`
+    ? `Caveats: ${flags.join('; ')}: narrow the search or re-run to resume.`
     : `Completeness confirmed: every dispatched worker marker was counted.`;
   const third = s.offloadedHashCount > 0
     ? `${s.offloadedHashCount} hash(es) in this result set are currently routed to forwarder offload; live events continue to land in the offload bucket.`
@@ -901,7 +901,7 @@ async function executeRetrieverQueryInner(
       tool: 'log10x_retriever_query_status',
       args: { query_id: resp.queryId, fetch_results: true, target: resp.target },
       reason: failedDl > 0
-        ? `${failedDl} worker file(s) failed download after retries — re-fetch from S3 without resubmitting (the full set is intact there)`
+        ? `${failedDl} worker file(s) failed download after retries: re-fetch from S3 without resubmitting (the full set is intact there)`
         : 'partialResults: recover stranded events from S3 without resubmitting',
     });
   }
@@ -912,7 +912,7 @@ async function executeRetrieverQueryInner(
       nextActions.push({
         tool: 'log10x_retriever_query_status',
         args: { query_id: resp.queryId, target: resp.target, include_pod_logs: true },
-        reason: `0 events scanned despite ${streamReqs} dispatch requests — confirm chart 1.0.20 dispatcher-failure via pod logs`,
+        reason: `0 events scanned despite ${streamReqs} dispatch requests: confirm chart 1.0.20 dispatcher-failure via pod logs`,
       });
     }
   }
@@ -927,7 +927,7 @@ async function executeRetrieverQueryInner(
     nextActions.push({
       tool: 'log10x_advise_retriever',
       args: {},
-      reason: 'pattern(s) in the receiver acted-on cohort (offload | compact | tier_down | drop | sample) — verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
+      reason: 'pattern(s) in the receiver acted-on cohort (offload | compact | tier_down | drop | sample): verify the offload bucket recipe is wired; only patterns offloaded to S3 (not hard-dropped) are fetchable here',
     });
   }
   const block = renderNextActions(nextActions);
@@ -1287,7 +1287,7 @@ export function retrieverNotConfiguredMessage(): string {
     '',
     '**Options for the agent right now**:',
     '',
-    "- (a) Deploy the Log10x Retriever — best long-term answer. Guide: https://doc.log10x.com/apps/retriever/",
+    "- (a) Deploy the Log10x Retriever: best long-term answer. Guide: https://doc.log10x.com/apps/retriever/",
     "- (b) Point the customer's own pipeline at the offload bucket and re-ingest the held-back cohort, slow, but preserves the current setup",
     "- (c) Rescope the question to what the SIEM still holds and use the SIEM MCP directly",
     '',
@@ -1315,7 +1315,7 @@ function renderDiagnostics(
   if (!diag) return;
 
   if (diag.pollingError) {
-    lines.push(`**Diagnostics**: _unavailable — ${diag.pollingError}_`);
+    lines.push(`**Diagnostics**: _unavailable, ${diag.pollingError}_`);
     return;
   }
 
@@ -1353,6 +1353,6 @@ function renderDiagnostics(
   }
 
   if (diag.errors && diag.errors.length > 0) {
-    lines.push(`**Errors**: ${diag.errors.length} logged — first: ${diag.errors[0]}`);
+    lines.push(`**Errors**: ${diag.errors.length} logged: first: ${diag.errors[0]}`);
   }
 }

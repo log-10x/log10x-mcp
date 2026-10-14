@@ -535,7 +535,7 @@ export async function executeMeasureCompaction(
     `(${(fractionOnWire * 100).toFixed(1)}% of original bytes on wire). ` +
     `Weighted-avg per-pattern ratio: ${weightedAvgRatio}x` +
     (aggregateRatio !== weightedAvgRatio
-      ? ` — diverges when small-volume patterns have outlier ratios.`
+      ? `: diverges when small-volume patterns have outlier ratios.`
       : `.`) +
     wireOnlyCaveat;
   const compactionHumanSummary =

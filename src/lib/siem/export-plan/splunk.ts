@@ -57,7 +57,7 @@ export function emitSplunkPlan(opts: SamplePlanOptions): SamplePlan {
       'SPLUNK_HOST and SPLUNK_TOKEN from this shell. The token is sent to your\n' +
       'own search head and to nowhere else.',
     writes:
-      `${outputDir}/${stem}.NN.log — one event per line, exactly as Splunk stores it.\n` +
+      `${outputDir}/${stem}.NN.log: one event per line, exactly as Splunk stores it.\n` +
       'Nothing else is written outside that directory.',
     window: opts.window,
     bucketCount: SPLUNK_BUCKET_COUNT,
@@ -130,7 +130,7 @@ export function emitSplunkPlan(opts: SamplePlanOptions): SamplePlan {
     '  # file would show up in the report as a source that contributed no bytes.',
     '  if [ "$n" -gt 0 ]; then cat "$RESP" >> "$(outfile "$STEM")"; fi',
     '  TOTAL=$((TOTAL + n))',
-    '  printf "sub-window %2d/%d — %d lines so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
+    '  printf "sub-window %2d/%d: %d lines so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
     'done',
     '',
     renderFooter(outputDir),

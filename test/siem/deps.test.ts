@@ -119,7 +119,7 @@ test('meaningfulTokens prefers tokens >= 4 chars; falls back to pattern-as-phras
 test('renderDepCheckResult: zero matches reports 0 dependencies', () => {
   const r = emptyResult('splunk', 'payment_gateway_timeout');
   const md = renderDepCheckResult(r);
-  assert.match(md, /Dependency Check — Splunk \(executed\)/);
+  assert.match(md, /Dependency Check: Splunk \(executed\)/);
   assert.match(md, /Scan complete: 0 dependencies/);
   assert.match(md, /payment_gateway_timeout/);
 });
@@ -134,7 +134,7 @@ test('renderDepCheckResult: multi-match emits a table with type/name/matchedIn/l
       { type: 'dashboard', name: 'Payments overview', url: 'https://splunk.example.com/dash/2', matchedIn: ['definition'] },
     ],
     byType: { dashboards: 1, alerts: 1, savedSearches: 0, monitors: 0, metricFilters: 0 },
-    notes: ['saved/searches partial — pagination capped'],
+    notes: ['saved/searches partial: pagination capped'],
   };
   const md = renderDepCheckResult(r);
   assert.match(md, /Found \*\*2\*\* dependencies/);
@@ -157,7 +157,7 @@ test('dependency_check: no creds + no vendor → returns "vendor required" messa
   const { cloudwatchConnector } = await import('../../src/lib/siem/cloudwatch.js');
   const cw = await cloudwatchConnector.discoverCredentials();
   if (cw.available) {
-    t.skip('ambient AWS credentials detected — "no creds" path cannot be exercised here');
+    t.skip('ambient AWS credentials detected: "no creds" path cannot be exercised here');
     return;
   }
   const out = await executeDependencyCheck({ pattern: 'Payment_Gateway_Timeout' });

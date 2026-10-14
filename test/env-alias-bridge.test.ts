@@ -115,7 +115,7 @@ describe('env-alias-bridge', () => {
       assert.strictEqual(envs.byNickname.get('prom backend'), saas1);
     });
 
-    it('is idempotent — running twice does not double-count aliases', async () => {
+    it('is idempotent: running twice does not double-count aliases', async () => {
       const saas1 = makeSaasEnv('10x Demo', '6aa99191-f827-4579-a96a-c0ebdfe73884');
       const envs = makeEnvironments([saas1]);
 
@@ -198,7 +198,7 @@ describe('env-alias-bridge', () => {
     });
   });
 
-  describe('regression — the exact arc-v9 defect', () => {
+  describe('regression: the exact arc-v9 defect', () => {
     it("resolves 'otel-demo' to the SaaS '10x Demo' env after enrichment (the 4-tool defect)", async () => {
       // The defect: doctor / pattern_trend / pattern_examples /
       // metric_overlay rejected 'otel-demo' because the SaaS envs.json

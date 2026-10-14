@@ -94,7 +94,7 @@ export const commitmentReportSchema = {
     .string()
     .optional()
     .describe(
-      'Service name to resolve a commitment by — used when commitment_id is omitted. When both are present, commitment_id wins.'
+      'Service name to resolve a commitment by: used when commitment_id is omitted. When both are present, commitment_id wins.'
     ),
   period: z
     .enum(['30d', '90d', 'ytd'])
@@ -880,7 +880,7 @@ function buildPatternNotes(
         pattern_hash: '<aggregate>',
         kind: 'anomaly_growth',
         growth_ratio: parseFloat(ratio.toFixed(2)),
-        note: `Projected savings grew ${ratio.toFixed(1)}x over the week (${first.projected_savings_pct.toFixed(1)}% → ${last.projected_savings_pct.toFixed(1)}%) — more patterns came into scope.`,
+        note: `Projected savings grew ${ratio.toFixed(1)}x over the week (${first.projected_savings_pct.toFixed(1)}% → ${last.projected_savings_pct.toFixed(1)}%): more patterns came into scope.`,
       });
     }
   }
@@ -893,7 +893,7 @@ function buildPatternNotes(
  */
 function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
   const lines: string[] = [];
-  lines.push('# Weekly Digest — Recurring Cost-Reduction Loop');
+  lines.push('# Weekly Digest: Recurring Cost-Reduction Loop');
   lines.push('');
   lines.push(
     `**Window:** ${env.window_start.slice(0, 10)} to ${env.window_end.slice(0, 10)}`
@@ -905,7 +905,7 @@ function renderWeeklyDigestMarkdown(env: WeeklyDigestEnvelope): string {
   const savingsBeat =
     env.total_projected_savings_pct != null
       ? `**Projected savings:** ${env.total_projected_savings_pct.toFixed(1)}% (latest tick${latestBasis ? `; ${latestBasis}` : ''}).`
-      : '_No tick runs in window — no projection available._';
+      : '_No tick runs in window: no projection available._';
   lines.push(savingsBeat);
   lines.push('');
   lines.push(
@@ -1038,7 +1038,7 @@ async function executeWeeklyDigest(
 
   if (!intentContent) {
     caveats.push(
-      'data/action-intent.json not found — action distribution unavailable. Set LOG10X_GITOPS_REPO_PATH or pass action_intent_path.'
+      'data/action-intent.json not found: action distribution unavailable. Set LOG10X_GITOPS_REPO_PATH or pass action_intent_path.'
     );
   }
 
@@ -1676,10 +1676,10 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
       : 'realized';
 
   const lines: string[] = [];
-  lines.push(`# Commitment Report — ${env.commitment.service}`);
+  lines.push(`# Commitment Report: ${env.commitment.service}`);
   lines.push('');
   lines.push(
-    `**Status:** ${status} — delivered **${env.delivered_pct.toFixed(1)}%** vs promised **${env.commitment.promised_pct.toFixed(1)}%** over ${env.period.days} days (${env.period.start.slice(0, 10)} to ${env.period.end.slice(0, 10)}).`
+    `**Status:** ${status}: delivered **${env.delivered_pct.toFixed(1)}%** vs promised **${env.commitment.promised_pct.toFixed(1)}%** over ${env.period.days} days (${env.period.start.slice(0, 10)} to ${env.period.end.slice(0, 10)}).`
   );
   // §C.1: per-action breakdown beat. Print only non-zero buckets and
   // suppress entirely when delivered_pct is 0 (BEHIND status carries
@@ -1701,7 +1701,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
   // is unset, suppress the dollar figures and report bytes-banked only.
   if (env.rate_source === 'unset' || env.delivered_dollars == null) {
     lines.push(
-      `**Bytes delivered:** ${env.delivered_bytes.toLocaleString()} bytes saved. _(rate_source=unset, kind=${kindLabel} — pass effective_ingest_per_gb on log10x_estimate_savings to overlay dollar values.)_`
+      `**Bytes delivered:** ${env.delivered_bytes.toLocaleString()} bytes saved. _(rate_source=unset, kind=${kindLabel}: pass effective_ingest_per_gb on log10x_estimate_savings to overlay dollar values.)_`
     );
   } else {
     // Disclosure tail carries rate_source semantics; only the contract-kind
@@ -1857,7 +1857,7 @@ function renderMarkdown(env: CommitmentReportEnvelope): string {
       // `data.at_risk_actions[].pattern_hash` still carries the hash
       // for machine consumers / downstream automation.
       const label = renderPatternLabel(r.symbol_message, r.service);
-      lines.push(`- ${label} — **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
+      lines.push(`- ${label}: **${r.issue.replace(/_/g, ' ')}**. ${r.recommended}`);
     }
   }
   if (env.caveats.length > 0) {
@@ -1949,7 +1949,7 @@ export async function executeCommitmentReport(
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     const headline =
-      'Customer metrics backend not configured — commitment_report cannot compute weekly verify.';
+      'Customer metrics backend not configured: commitment_report cannot compute weekly verify.';
     return buildChassisErrorEnvelope({
       tool: 'log10x_commitment_report',
       err: {
@@ -1975,7 +1975,7 @@ export async function executeCommitmentReport(
   // 4. Run estimate-savings verify per week, IF the runner is wired.
   if (!runEstimateVerifyImpl) {
     const headline =
-      'log10x_estimate_savings dependency not yet available — commitment_report cannot produce weekly verify.';
+      'log10x_estimate_savings dependency not yet available: commitment_report cannot produce weekly verify.';
     const remediation =
       'commitment_report depends on log10x_estimate_savings (verify mode), shipped in the same x%-MCP-cost-tooling branch. Re-run npm run build after merging estimate-savings.';
     return buildChassisErrorEnvelope({
@@ -2217,7 +2217,7 @@ export async function executeCommitmentReport(
     );
   } else if (agg.rate_source === 'unset') {
     caveats.push(
-      'No $/GB rate available from upstream verify — dollar figures omitted. Pass effective_ingest_per_gb on log10x_estimate_savings to overlay them.'
+      'No $/GB rate available from upstream verify: dollar figures omitted. Pass effective_ingest_per_gb on log10x_estimate_savings to overlay them.'
     );
   }
   if (verifyErrors.length > 0) {
@@ -2227,25 +2227,25 @@ export async function executeCommitmentReport(
   }
   if (weeklyResults.length < 2) {
     caveats.push(
-      'Fewer than 2 weeks of verify data — forward confidence band is wide.'
+      'Fewer than 2 weeks of verify data: forward confidence band is wide.'
     );
   }
   const promisedFloor = commitment.promised_pct - 5;
   if (agg.delivered_pct < promisedFloor) {
     caveats.push(
-      `Delivered ${agg.delivered_pct.toFixed(1)}% trails promised ${commitment.promised_pct.toFixed(1)}% by more than 5pp — investigate at-risk patterns.`
+      `Delivered ${agg.delivered_pct.toFixed(1)}% trails promised ${commitment.promised_pct.toFixed(1)}% by more than 5pp: investigate at-risk patterns.`
     );
   }
   // Single-bucket fallback: per-pattern breakdown unavailable from upstream verify.
   if (!agg.per_pattern_breakdown_available) {
     caveats.push(
-      'Per-pattern action breakdown unavailable — log10x_estimate_savings verify mode did not return per_pattern_breakdown for this period.'
+      'Per-pattern action breakdown unavailable: log10x_estimate_savings verify mode did not return per_pattern_breakdown for this period.'
     );
   }
   // Offload-status helper timed out.
   if (offloadHelperTimedOut) {
     caveats.push(
-      'Offload status lookup timed out — offload contribution omitted. Re-run after metrics backend stabilizes.'
+      'Offload status lookup timed out: offload contribution omitted. Re-run after metrics backend stabilizes.'
     );
   }
   // Reconciliation guard: bucket sum vs delivered_pct disagreement. The
@@ -2256,7 +2256,7 @@ export async function executeCommitmentReport(
   // action-intent.json, bytes_saved from observed-dropped TSDB).
   if (reconciliationGapPp > 1 && agg.per_pattern_breakdown_available) {
     caveats.push(
-      `Reconciliation gap: percent_reduction_by_action sums to ${bucketSumPctForGuard.toFixed(2)}% but delivered_pct is ${agg.delivered_pct.toFixed(2)}% (gap ${reconciliationGapPp.toFixed(2)}pp, >1pp tolerance). Likely cause: per-pattern action_taken sourced from configured intent (action-intent.json) while bytes_saved sourced from observed-dropped — engine has not yet propagated the new policy, or the policy diverged from observed behavior.`
+      `Reconciliation gap: percent_reduction_by_action sums to ${bucketSumPctForGuard.toFixed(2)}% but delivered_pct is ${agg.delivered_pct.toFixed(2)}% (gap ${reconciliationGapPp.toFixed(2)}pp, >1pp tolerance). Likely cause: per-pattern action_taken sourced from configured intent (action-intent.json) while bytes_saved sourced from observed-dropped, engine has not yet propagated the new policy, or the policy diverged from observed behavior.`
     );
   }
   // Intent/observation mismatch tally. Counts rows where
@@ -2297,7 +2297,7 @@ export async function executeCommitmentReport(
       Number.isFinite(ratioOfRatios)
     ) {
       caveats.push(
-        `Baseline drift: dollar achievement (${dollarPctOfPromised.toFixed(2)}% of promised $) and byte achievement (${bytePctOfPromised.toFixed(2)}% of promised %) diverge by ${ratioOfRatios < 1 ? (1 / ratioOfRatios).toFixed(1) + 'x lower' : ratioOfRatios.toFixed(1) + 'x higher'}. Cause: promised_dollars uses commitment.baseline_usd_monthly captured at apply time, while delivered_dollars uses actual observed dropped bytes; when current ingest differs from the apply-time baseline, the two ratios decouple. Compare byte percent (delivered_pct vs promised_pct) for policy performance — the dollar gap reflects ingest drift, not policy failure.`
+        `Baseline drift: dollar achievement (${dollarPctOfPromised.toFixed(2)}% of promised $) and byte achievement (${bytePctOfPromised.toFixed(2)}% of promised %) diverge by ${ratioOfRatios < 1 ? (1 / ratioOfRatios).toFixed(1) + 'x lower' : ratioOfRatios.toFixed(1) + 'x higher'}. Cause: promised_dollars uses commitment.baseline_usd_monthly captured at apply time, while delivered_dollars uses actual observed dropped bytes; when current ingest differs from the apply-time baseline, the two ratios decouple. Compare byte percent (delivered_pct vs promised_pct) for policy performance: the dollar gap reflects ingest drift, not policy failure.`
       );
     }
   }
@@ -2319,14 +2319,14 @@ export async function executeCommitmentReport(
   })();
   if (compactNoOp) {
     caveats.push(
-      `Compact action found on ${commitment.destination} but the destination cost model is no-op for compact — likely cap CSV / destination config drift.`
+      `Compact action found on ${commitment.destination} but the destination cost model is no-op for compact: likely cap CSV / destination config drift.`
     );
   }
   // §B.4: tier_down bytes are tagged for downstream tier swap, not
   // removed from ingest. Wording mirrors cost.ts:394.
   if (agg.bytes_saved_by_action.tier_down > 0) {
     caveats.push(
-      'tier_down bytes are tagged for downstream tier swap, not removed from ingest — savings realize at the cheaper tier in the destination.'
+      'tier_down bytes are tagged for downstream tier swap, not removed from ingest: savings realize at the cheaper tier in the destination.'
     );
   }
 
@@ -2412,11 +2412,11 @@ export async function executeCommitmentReport(
       );
       if (dv.verdict === 'leak') {
         caveats.push(
-          `Offload delivery OVERCLAIMED (leak) — ${dv.message} The offloaded bytes ALSO remain in the SIEM, so this offload saving did not actually happen. Fix the forwarder to route only routeState=="offload" to the sink (run log10x_doctor → offload_delivery), then re-run.`
+          `Offload delivery OVERCLAIMED (leak): ${dv.message} The offloaded bytes ALSO remain in the SIEM, so this offload saving did not actually happen. Fix the forwarder to route only routeState=="offload" to the sink (run log10x_doctor → offload_delivery), then re-run.`
         );
       } else if (dv.verdict === 'silent_loss') {
         caveats.push(
-          `Offload delivery PHANTOM (silent loss) — ${dv.message} The bytes never reached the offload sink at all, so the offload portion of these savings is NOT realized. ${
+          `Offload delivery PHANTOM (silent loss): ${dv.message} The bytes never reached the offload sink at all, so the offload portion of these savings is NOT realized. ${
             offloadStoreKind === 'azure_blob'
               ? 'Check the forwarder azure_blob output, the account and container names, and that the forwarder identity holds "Storage Blob Data Contributor".'
               : 'Check the forwarder S3 output plugin, the bucket/region, and s3:PutObject on the forwarder role.'
@@ -2424,7 +2424,7 @@ export async function executeCommitmentReport(
         );
       } else if (dv.verdict === 'unverified') {
         caveats.push(
-          `Offload delivery UNVERIFIED — ${dv.message} The offload savings here rest on the engine stamp alone, not on confirmed sink delivery.`
+          `Offload delivery UNVERIFIED: ${dv.message} The offload savings here rest on the engine stamp alone, not on confirmed sink delivery.`
         );
       }
     }
@@ -2522,7 +2522,7 @@ export async function executeCommitmentReport(
   // window, not the commitment's age). Lead with the early-reading caveat.
   const reportHeadline =
     weeklyResults.length < 2
-      ? `${commitment.service}: ${agg.delivered_pct.toFixed(1)}% delivered so far vs ${commitment.promised_pct.toFixed(1)}% promised — under 2 weeks of data, too early to judge.`
+      ? `${commitment.service}: ${agg.delivered_pct.toFixed(1)}% delivered so far vs ${commitment.promised_pct.toFixed(1)}% promised: under 2 weeks of data, too early to judge.`
       : `${commitment.service}: delivered ${agg.delivered_pct.toFixed(1)}% vs promised ${commitment.promised_pct.toFixed(1)}% over ${period.days}d.`;
   const rateSourceMapped = agg.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : agg.rate_source === 'list_price' ? 'list_price' as const
@@ -2590,7 +2590,7 @@ function buildCommitmentReportHumanSummary(args: {
   const lowData = args.weekCount < 2;
   const verdict = args.deliveredPct >= args.promisedPct ? 'met' : 'short of';
   const lead = lowData
-    ? `Service ${args.service} has under 2 weeks of verify data (${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}). Early reading: ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised — too little data to judge delivery yet.`
+    ? `Service ${args.service} has under 2 weeks of verify data (${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}). Early reading: ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised: too little data to judge delivery yet.`
     : `Service ${args.service} delivered ${args.deliveredPct.toFixed(1)}% reduction vs ${args.promisedPct.toFixed(1)}% promised over the last ${args.days} days across ${args.weekCount} weekly slice${args.weekCount === 1 ? '' : 's'}, ${verdict} the commitment.`;
   // Show sub-$1 realized savings with cents — toFixed(0) rounded $0.14 to "$0",
   // which reads as "nothing delivered" when a (tiny) amount was.

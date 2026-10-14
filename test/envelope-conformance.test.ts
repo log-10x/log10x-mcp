@@ -61,7 +61,7 @@ function unifiedFieldPresent(out: { data?: unknown; performance?: unknown }, f: 
 
 function assertUnifiedFields(out: { data?: unknown; performance?: unknown }, tool: string) {
   for (const f of UNIFIED_FIELDS) {
-    assert.ok(unifiedFieldPresent(out, f), `${tool}: missing field "${f}" — envelope conformance broken`);
+    assert.ok(unifiedFieldPresent(out, f), `${tool}: missing field "${f}": envelope conformance broken`);
   }
   const status = unifiedField(out, 'status');
   assert.ok(

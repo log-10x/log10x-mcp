@@ -353,7 +353,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     }
     if (recordCount === 0) {
       await stickyFetch(`/api/v1/search/jobs/${jobId}`, { method: 'DELETE' }, sessionCookie).catch(() => undefined);
-      return { errorNote: 'Sumo _ingest_volume returned 0 records — view may not be available on this tier' };
+      return { errorNote: 'Sumo _ingest_volume returned 0 records: view may not be available on this tier' };
     }
     const recResp = await stickyFetch(
       `/api/v1/search/jobs/${jobId}/records?offset=0&limit=${Math.min(recordCount, 100)}`,

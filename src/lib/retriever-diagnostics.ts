@@ -422,7 +422,7 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
     if (diag.scanStats.matched > 0 && (!diag.workerStats || diag.workerStats.totalResultEvents === 0)) {
       if (diag.workerStats && diag.workerStats.complete < diag.workerStats.started) {
         return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${diag.workerStats.started} workers were dispatched, ` +
-          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving — ` +
+          `but only ${diag.workerStats.complete} completed before the poll timed out. Results may still be arriving: ` +
           `retry log10x_retriever_query_status with the same queryId, or rerun the query.`;
       }
       const emptyFlushes = diag.workerStats?.totalEmptyFlushes ?? 0;
@@ -430,12 +430,12 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
       if (fetchedBytes > 0 || emptyFlushes > 0) {
         return `The Bloom filter matched ${diag.scanStats.matched} index objects and ${fetchedBytes} byte(s) of events were fetched from them, ` +
           'but the exact predicate wrote none. The Bloom is approximate; the exact filter is the source of truth and it matched ' +
-          'nothing — the search field/value most likely does not match the real events. Probe what the field actually carries. ' +
-          '(Why each event was dropped is not logged per-event — that engine signal is missing.)';
+          'nothing: the search field/value most likely does not match the real events. Probe what the field actually carries. ' +
+          '(Why each event was dropped is not logged per-event: that engine signal is missing.)';
       }
       return `The Bloom filter matched ${diag.scanStats.matched} index objects, but 0 bytes of events were fetched from them ` +
         '(fetchedBytes=0, emptyFlushes=0). The fetch (object read) or the parse produced nothing. The engine emits no separate ' +
-        'S3-GET byte count, so these two sub-stages cannot be separated from the current signals — trace the read+parse path before concluding a cause.';
+        'S3-GET byte count, so these two sub-stages cannot be separated from the current signals: trace the read+parse path before concluding a cause.';
     }
   }
 
@@ -446,11 +446,11 @@ export function explainZeroResults(diag: RetrieverQueryDiagnostics): string | nu
   if (diag.queryPlan && !diag.scanStats) {
     if (diag.partialResults) {
       return 'MCP poll timed out before the server query completed. CW scan-completion events ' +
-        'have not arrived yet — the query may still be executing. Retry log10x_retriever_query_status ' +
+        'have not arrived yet: the query may still be executing. Retry log10x_retriever_query_status ' +
         'with the same queryId in a few seconds for an updated view.';
     }
     return 'Query completed without any sub-query reporting scan completion. ' +
-      'Most likely cause: no index objects exist for the time range — try an older window, or verify ' +
+      'Most likely cause: no index objects exist for the time range, try an older window, or verify ' +
       'the indexer is running and processing new data.';
   }
 

@@ -92,7 +92,7 @@ export const pocFromLocalSchema = {
     .optional()
     .default('kubectl')
     .describe(
-      'Where to pull log lines from. `kubectl` samples pod logs; `file` samples local logs — ' +
+      'Where to pull log lines from. `kubectl` samples pod logs; `file` samples local logs: ' +
         'pass `paths` (files, directories, globs) or `path` (one file; fluentd/k8s/docker-wrapped ' +
         'JSONL is detected and normalized before the engine sees it). ' +
         '`docker` and `journald` are follow-up work.'
@@ -116,7 +116,7 @@ export const pocFromLocalSchema = {
     .optional()
     .describe(
       'Forwarder in the pipeline (fluentd, fluent-bit, filebeat, logstash, otel-collector, vector, hec). ' +
-        'Used to pick verified apply/undo commands. Not guessed when absent — the report says commands are unavailable.'
+        'Used to pick verified apply/undo commands. Not guessed when absent: the report says commands are unavailable.'
     ),
   workload: z
     .string()
@@ -265,7 +265,7 @@ export const pocFromLocalSchema = {
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
     .describe(
-      'Advanced — most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
+      'Advanced: most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
         'overrides within a pod / source. Applied AFTER pin_services.'
     ),
 };
@@ -377,7 +377,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
       hint: noCluster
         ? `No Kubernetes cluster is reachable from this host (${msg.slice(0, 160)}). ` +
           'If this estate is serverless or file-based, re-run with source:"file" and paths:[...] ' +
-          'against local log files — do not retry the kubectl path.'
+          'against local log files: do not retry the kubectl path.'
         : msg.slice(0, 400),
     };
     const human_summary = `poc_from_local failed: ${err.hint}`;
@@ -628,7 +628,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   const windowOut = source === 'file' ? (args.window ?? '-') : opts.window!;
 
   if (sample.events.length === 0) {
-    const lines: string[] = [`## Log10x POC — local source (${source})`, ''];
+    const lines: string[] = [`## Log10x POC: local source (${source})`, ''];
     lines.push('**No log lines were pulled.**');
     lines.push('');
     if (sample.notes.length > 0) {
@@ -698,7 +698,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   const droppableFraction = sample.totalBytes > 0 ? droppableBytes / sample.totalBytes : 0;
 
   const lines: string[] = [];
-  lines.push(`# Log10x POC — local source (${source})`);
+  lines.push(`# Log10x POC: local source (${source})`);
   lines.push('');
   lines.push(
     source === 'file'
@@ -712,8 +712,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('');
   lines.push(
     source === 'file'
-      ? 'These files produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection** — if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen `paths` or raise `max_pods` (the file cap) if anything looks off.'
-      : 'These pods produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection** — if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen with `namespace: "*"` or a longer `window` if anything looks off.'
+      ? 'These files produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection**: if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen `paths` or raise `max_pods` (the file cap) if anything looks off.'
+      : 'These pods produced the bytes in the sample. **Confirm this looks like your production mix before trusting the projection**: if 70% of your real-prod bytes come from a service that is NOT in this list, the savings projection is meaningless to you. Widen with `namespace: "*"` or a longer `window` if anything looks off.'
   );
   lines.push('');
   lines.push(`| ${source === 'file' ? 'File' : 'Pod'} | Bytes | Lines | % of sample |`);
@@ -726,7 +726,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       .slice(10)
       .reduce((s, c) => s + c.bytes, 0);
     const tailPct = sample.totalBytes > 0 ? (tailBytes / sample.totalBytes) * 100 : 0;
-    lines.push(`| _(${sample.composition.length - 10} more)_ | ${fmtBytes(tailBytes)} | — | ${fmtPct(tailPct)} |`);
+    lines.push(`| _(${sample.composition.length - 10} more)_ | ${fmtBytes(tailBytes)} | - | ${fmtPct(tailPct)} |`);
   }
   lines.push('');
 
@@ -736,7 +736,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('_Rates: the vendor\'s list price where it sells logs per GB, and a per-GB default, marked "default rate", where it bills in other units or publishes no per-GB price. Pass `effective_ingest_per_gb` on `log10x_estimate_savings` or `log10x_savings` once your real $/GB is known to convert these projections into a customer-specific quote._');
   lines.push('');
   lines.push(
-    `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns — candidates for compacting, tiering down or offloading, each of which keeps every line.`
+    `If your full ingest mix matches this sample, ~${fmtPct(droppableFraction * 100)} of your byte volume is non-error high-frequency patterns: candidates for compacting, tiering down or offloading, each of which keeps every line.`
   );
   lines.push('');
   lines.push(
@@ -769,7 +769,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
   lines.push('## Top patterns in the sample');
   lines.push('');
   if (patterns.length === 0) {
-    lines.push('_No patterns resolved — the pattern extractor returned zero._');
+    lines.push('_No patterns resolved: the pattern extractor returned zero._');
   } else {
     lines.push('| # | Identity | Events | % | Bytes |');
     lines.push('|---|---|---|---|---|');
@@ -819,7 +819,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     (args.budget_usd_monthly !== undefined ? 1 : 0) +
     (args.budget_gb_monthly !== undefined ? 1 : 0);
   if (budgetCount > 1) {
-    throw new Error('budget_usd_monthly and budget_gb_monthly are mutually exclusive — pick one denomination.');
+    throw new Error('budget_usd_monthly and budget_gb_monthly are mutually exclusive: pick one denomination.');
   }
   if (budgetCount > 0 && args.target_percent_reduction !== undefined) {
     throw new Error('target_percent_reduction and a budget are mutually exclusive: a percent is a one-shot cut, a budget is a standing line. Pass one.');
@@ -943,7 +943,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       exception_share_of_bytes: Math.round(exceptionShare * 1000) / 1000,
     };
     const artLines: string[] = [];
-    artLines.push(`## Projected commitment — local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
+    artLines.push(`## Projected commitment: local (${source === 'file' ? 'file sample' : 'kubectl sample'})`);
     artLines.push('');
     if (feasibility.budget_usd_monthly !== undefined && volumeBasis) {
       artLines.push(
@@ -976,7 +976,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     artLines.push('### Next step');
     artLines.push('');
     if (feasibility.feasible) {
-      artLines.push('1. Re-run `log10x_poc_from_siem_submit` once log-analyzer credentials are available — the stack path produces the per-pattern action plan + native exclusion configs.');
+      artLines.push('1. Re-run `log10x_poc_from_siem_submit` once log-analyzer credentials are available: the stack path produces the per-pattern action plan + native exclusion configs.');
       artLines.push('2. Run `log10x_advise_install` to provision the Receiver in your forwarder pipeline.');
     } else {
       artLines.push('1. Lower `target_percent_reduction` to within the achievable band, or trim `exception_services`.');

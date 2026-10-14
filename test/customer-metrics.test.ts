@@ -157,7 +157,7 @@ test('CustomerMetricsNotConfiguredError has helpful message', () => {
 });
 
 test('CustomerMetricsNotConfiguredError appends detection trace', () => {
-  const err = new CustomerMetricsNotConfiguredError('  - explicit_env: skipped — not set\n  - grafana_cloud: skipped — no key');
+  const err = new CustomerMetricsNotConfiguredError('  - explicit_env: skipped, not set\n  - grafana_cloud: skipped, no key');
   assert.match(err.message, /Detection trace/);
   assert.match(err.message, /explicit_env/);
 });

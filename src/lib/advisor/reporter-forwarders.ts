@@ -276,7 +276,7 @@ export interface ForwarderSpec {
 const DEFAULT_GIT_TOKEN = 'public-repo-no-token-needed';
 
 const MOCK_OUTPUT_NOTE =
-  '# Mock output — prints each event to the forwarder stdout with a [TENX-MOCK] prefix so `kubectl logs | grep TENX-MOCK` can deterministically verify the pipeline.';
+  '# Mock output: prints each event to the forwarder stdout with a [TENX-MOCK] prefix so `kubectl logs | grep TENX-MOCK` can deterministically verify the pipeline.';
 
 // ── Shared helpers ──
 
@@ -738,7 +738,7 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
   'fluentbit': {
     label: 'Fluent Bit',
     integrationMode:
-      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluent Bit pod via the upstream `fluent/fluent-bit` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is replaced to wire the sidecar bypass — events flow `[INPUT] tail → [OUTPUT] forward → sidecar → [INPUT] forward (Tag_Prefix tenx.) → [OUTPUT] (destination)`. Filters Match kube.* only so enrichment runs once.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluent Bit pod via the upstream `fluent/fluent-bit` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is replaced to wire the sidecar bypass: events flow `[INPUT] tail → [OUTPUT] forward → sidecar → [INPUT] forward (Tag_Prefix tenx.) → [OUTPUT] (destination)`. Filters Match kube.* only so enrichment runs once.',
     helmRepo: 'https://fluent.github.io/helm-charts',
     helmRepoAlias: 'fluent',
     chartRef: 'fluent/fluent-bit',
@@ -897,7 +897,7 @@ ${destOutput}
   fluentd: {
     label: 'Fluentd',
     integrationMode:
-      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluentd pod via the upstream `fluent/fluentd` chart + a kustomize post-renderer (the upstream chart has no extraContainers hook, so the sidecar is patched onto the rendered Deployment manifest via Strategic Merge Patch). The wizard emits five files — values.yaml + tenx-kustomize/{kustomization.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd} — and the `helm upgrade` step uses `--post-renderer ./tenx-kustomize/post-render.sh`.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Fluentd pod via the upstream `fluent/fluentd` chart + a kustomize post-renderer (the upstream chart has no extraContainers hook, so the sidecar is patched onto the rendered Deployment manifest via Strategic Merge Patch). The wizard emits five files: values.yaml + tenx-kustomize/{kustomization.yaml, sidecar-patch.yaml, post-render.sh, post-render.cmd}, and the `helm upgrade` step uses `--post-renderer ./tenx-kustomize/post-render.sh`.',
     helmRepo: 'https://fluent.github.io/helm-charts',
     helmRepoAlias: 'fluent',
     chartRef: 'fluent/fluentd',
@@ -927,7 +927,7 @@ ${destOutput}
 
   02_filters.conf: |-
     <label @INGEST>
-      # Enrichment filters go here — k8s_metadata, parsers,
+      # Enrichment filters go here: k8s_metadata, parsers,
       # record_transformer, etc. They fire exactly once per event;
       # the return path skips this label.
       <filter **>
@@ -939,7 +939,7 @@ ${destOutput}
       </filter>
 
       # Hand off to the Log10x sidecar. \`keepalive true\` matters for
-      # the sidecar topology — otherwise Fluentd opens a fresh TCP
+      # the sidecar topology: otherwise Fluentd opens a fresh TCP
       # connection per chunk on the loopback path.
       <match **>
         @type forward
@@ -973,7 +973,7 @@ ${destOutput}
     </source>
 
   04_outputs.conf: |-
-    # @OUTPUT is the terminal label — replace with your real
+    # @OUTPUT is the terminal label: replace with your real
     # destinations (out_elasticsearch, out_splunk_hec, out_kafka2,
     # out_s3, ...). Enrichment belongs in @INGEST, which runs once
     # per event.
@@ -990,7 +990,7 @@ ${indent(destOutput, 6)}
       // chart values (needed when there's no existing release to
       // inherit defaults from).
       if (installMode === 'upgrade-existing') {
-        return `# Receiver overlay for Fluentd — UPGRADE-EXISTING mode.
+        return `# Receiver overlay for Fluentd: UPGRADE-EXISTING mode.
 # Overlays JUST the keys the receiver needs on top of your existing
 # fluent/fluentd Helm release. Your existing values (image, kind,
 # replicaCount, rbac, mounts, etc.) stay as-is via --reuse-values; we
@@ -1007,12 +1007,12 @@ ${indent(destOutput, 6)}
 # @INGEST runs your enrichment filters once and forwards events to the
 # 10x sidecar on :24224. @OUTPUT receives processed events back on
 # :24225 and writes them to your destinations. This block REPLACES
-# your existing fileConfigs — adapt the source/filter rules to your
+# your existing fileConfigs: adapt the source/filter rules to your
 # inputs.
 ${fileConfigsBlock}`;
       }
       return `# Receiver overlay for Fluentd (upstream fluent/fluentd chart).
-# Layered with a kustomize post-renderer (see tenx-kustomize/ files) —
+# Layered with a kustomize post-renderer (see tenx-kustomize/ files):
 # the upstream chart has no extraContainers hook, so the sidecar is
 # injected via a Strategic Merge Patch on the rendered manifest.
 #
@@ -1164,7 +1164,7 @@ exec kubectl kustomize "$DIR"
           path: 'tenx-kustomize/post-render.cmd',
           language: 'batch',
           contents: `@echo off
-REM Windows shim — Helm.exe can't directly exec a .sh on Windows.
+REM Windows shim: Helm.exe can't directly exec a .sh on Windows.
 REM Use this path as \`--post-renderer\` on Windows; Linux/macOS use
 REM the .sh directly.
 bash "%~dp0post-render.sh"
@@ -1233,7 +1233,7 @@ bash "%~dp0post-render.sh"
   filebeat: {
     label: 'Filebeat',
     integrationMode:
-      'IMAGE SWAP (no sidecar) against the upstream `elastic/filebeat` chart. The chart\'s default `docker.elastic.co/beats/filebeat` image is replaced with the prebuilt `log10x/filebeat-10x` image, which wraps the Filebeat entrypoint in `filebeat ... 2>&1 | tenx run ...` so the 10x engine runs as a child process of Filebeat inside the same container. Wiring is a values overlay: top-level `image:` + `imageTag:` for the swap, `daemonset.extraEnvs` for TENX_LICENSE_FILE / TENX_RUN_ARGS / backend creds, `daemonset.extraVolumes` for the license Secret, and `daemonset.filebeatConfig.filebeat.yml` carrying the `tenx-receive.js` script processor on every `filebeat.input` so events flow through the engine and come back via the `unix` input loaded from the bundled `tenxNix.yml` snippet. `output.console` is forbidden — it would corrupt the stdout pipe the engine reads from.',
+      'IMAGE SWAP (no sidecar) against the upstream `elastic/filebeat` chart. The chart\'s default `docker.elastic.co/beats/filebeat` image is replaced with the prebuilt `log10x/filebeat-10x` image, which wraps the Filebeat entrypoint in `filebeat ... 2>&1 | tenx run ...` so the 10x engine runs as a child process of Filebeat inside the same container. Wiring is a values overlay: top-level `image:` + `imageTag:` for the swap, `daemonset.extraEnvs` for TENX_LICENSE_FILE / TENX_RUN_ARGS / backend creds, `daemonset.extraVolumes` for the license Secret, and `daemonset.filebeatConfig.filebeat.yml` carrying the `tenx-receive.js` script processor on every `filebeat.input` so events flow through the engine and come back via the `unix` input loaded from the bundled `tenxNix.yml` snippet. `output.console` is forbidden: it would corrupt the stdout pipe the engine reads from.',
     helmRepo: 'https://helm.elastic.co',
     helmRepoAlias: 'elastic',
     chartRef: 'elastic/filebeat',
@@ -1325,7 +1325,7 @@ bash "%~dp0post-render.sh"
 #     -f your-existing-filebeat-values.yaml \\
 #     -f my-receiver.yaml --namespace <namespace>
 #
-# IMPORTANT — the filebeatConfig.filebeat.yml block below REPLACES your
+# IMPORTANT: the filebeatConfig.filebeat.yml block below REPLACES your
 # existing filebeat.yml wholesale (helm values for that field don't deep-
 # merge YAML strings). Merge your existing filebeat.inputs into the
 # inputs[] list below before applying. Each input MUST keep the
@@ -1346,7 +1346,7 @@ ${envLines.join('\n')}${licenseVolumes}
   # processed events back from the engine; the script processor on each
   # filebeat.input tags + hands off to the engine via stdout.
   #
-  # output.console MUST NOT be used — it collides with the stdout pipe
+  # output.console MUST NOT be used: it collides with the stdout pipe
   # that carries events to the in-container engine and corrupts the
   # stream. Use any other output (elasticsearch / kafka / logstash /
   # custom HTTP). The wizard's plan adds a preflight WARN to detect
@@ -1609,7 +1609,7 @@ ${indent(destOutput, 6)}
   vector: {
     label: 'Vector',
     integrationMode:
-      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Vector pod via the upstream `vector/vector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `customConfig` is replaced to wire the sidecar bypass — Vector\'s DAG IS the bypass: sources feed an `ingest` transform → `tenx_in` socket sink → the sidecar processes → returns via the `tenx_out` fluent source → destinations sinks consume `tenx_out` only.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing Vector pod via the upstream `vector/vector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `customConfig` is replaced to wire the sidecar bypass: Vector\'s DAG IS the bypass: sources feed an `ingest` transform → `tenx_in` socket sink → the sidecar processes → returns via the `tenx_out` fluent source → destinations sinks consume `tenx_out` only.',
     helmRepo: 'https://helm.vector.dev',
     helmRepoAlias: 'vector',
     chartRef: 'vector/vector',
@@ -1650,7 +1650,7 @@ customConfig:
 
   sources:
     # Replace with your real sources (file, kubernetes_logs, journald,
-    # http_server, ...). All sources MUST feed the \`ingest\` transform —
+    # http_server, ...). All sources MUST feed the \`ingest\` transform:
     # anything wired directly to a destination skips Log10x.
     app_logs:
       type: kubernetes_logs
@@ -1903,7 +1903,7 @@ ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
 export const STANDALONE_SPEC: ForwarderSpec = {
   label: 'Standalone Reporter (reporter-10x)',
   integrationMode:
-    'Parallel DaemonSet using the log10x/reporter-10x chart — bundles fluent-bit + tenx-edge. Tails /var/log/containers/*.log alongside your existing forwarder without touching it. Report-mode only (metrics, no filtering or encoded output).',
+    'Parallel DaemonSet using the log10x/reporter-10x chart: bundles fluent-bit + tenx-edge. Tails /var/log/containers/*.log alongside your existing forwarder without touching it. Report-mode only (metrics, no filtering or encoded output).',
   helmRepo: 'https://log-10x.github.io/helm-charts',
   helmRepoAlias: 'log10x',
   chartRef: 'log10x/reporter-10x',
@@ -2084,7 +2084,7 @@ function renderFluentBitDestinationOutput(
 ): string {
   if (destination === 'mock') {
     return `    # Destination for processed tenx.* events. Replace with your real
-    # destination (es, splunk, kafka, s3, ...) — this stdout block is
+    # destination (es, splunk, kafka, s3, ...): this stdout block is
     # safe for dogfooding.
     [OUTPUT]
         Name stdout

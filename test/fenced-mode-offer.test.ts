@@ -145,7 +145,7 @@ test('an analyzer with no export emitter is not offered a mode it cannot reach',
   assert.ok(!(res.actions ?? []).some((a) => a.tool === 'log10x_emit_sample_plan'));
 });
 
-test('an in-flight POC discloses nothing — there is no result to disclose about', async () => {
+test('an in-flight POC discloses nothing: there is no result to disclose about', async () => {
   pocSiemInternals.SNAPSHOTS.set('seed-pulling', {
     id: 'seed-pulling',
     status: 'pulling',
@@ -188,7 +188,7 @@ test('docs/fenced-poc.md prints exactly the inspect command and output the code 
   const docs = readFileSync(join(REPO_ROOT, 'docs', 'fenced-poc.md'), 'utf8');
   assert.ok(
     docs.includes(FENCED_INSPECT_COMMAND),
-    'the docs no longer print the inspect command the fenced run hands back — a proof that differs ' +
+    'the docs no longer print the inspect command the fenced run hands back: a proof that differs ' +
       'from the documented proof is worse than none, because the reader cannot tell which half is wrong',
   );
   assert.ok(docs.includes(FENCED_INSPECT_EXPECTED), 'the docs no longer print the expected output');

@@ -587,12 +587,12 @@ function maybeAddDemoBannerWarning(warnings: string[]): string[] {
   if (envs.demoFallbackReason && failed) {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return [
-      `DEMO MODE — ${failed}. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
+      `DEMO MODE: ${failed}. Account-scoped tools hit the public Log10x demo env, NOT your account. Reason: ${reason}. Call log10x_login_status for fix steps.`,
       ...warnings,
     ];
   }
   return [
-    `Demo mode — account-scoped tools query the read-only Log10x demo env. Call log10x_login_status to use your own data.`,
+    `Demo mode: account-scoped tools query the read-only Log10x demo env. Call log10x_login_status to use your own data.`,
     ...warnings,
   ];
 }
@@ -627,7 +627,7 @@ function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string 
     // "unset the customer-metrics env vars" names variables they never set.
     lines.push(
       `This boot attached read-only to the public demo dataset because no API key was set.`,
-      `The POC tools ARE registered in this boot — a cost POC on the user's own logs runs`,
+      `The POC tools ARE registered in this boot: a cost POC on the user's own logs runs`,
       `via \`log10x_poc_from_local\` with nothing sent out.`,
       ``,
       `For the user's own environment: sign in (\`log10x_signin_start\`) or set \`LOG10X_API_KEY\`.`,
@@ -651,7 +651,7 @@ function applyDemoBanner(text: string): string {
   if (envs.demoFallbackReason && failed) {
     const reason = envs.demoFallbackReason.split('\n')[0].slice(0, 240);
     return (
-      `> ⚠ **DEMO MODE — ${failed}.** ` +
+      `> ⚠ **DEMO MODE: ${failed}.** ` +
       `Account-scoped tools (top_patterns, investigate, services, etc.) hit the public Log10x demo env, NOT your account. ` +
       `Local-only tools (resolve_batch, extract_templates) are unaffected. ` +
       `Reason: ${reason} ` +
@@ -660,7 +660,7 @@ function applyDemoBanner(text: string): string {
     );
   }
   // Pure demo: lighter footer; the user opted in by not setting a key.
-  return text + `\n\n_(Demo mode — account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
+  return text + `\n\n_(Demo mode: account-scoped tools query the read-only Log10x demo env. Call \`log10x_login_status\` to use your own data.)_`;
 }
 
 // ── Server ──
@@ -1773,63 +1773,63 @@ if (process.env.LOG10X_DEV_MODE === 'true') {
 // ── CLI flag handlers ──
 
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
-  { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question — returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
-  { name: 'log10x_event_lookup', intent: 'What is this single log line — resolve to stable identity + cost + AI classification' },
+  { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question: returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
+  { name: 'log10x_event_lookup', intent: 'What is this single log line: resolve to stable identity + cost + AI classification' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values, bounded to 24h. When the pattern is offloaded, retriever_query samples the held-back cohort.' },
-  { name: 'log10x_savings', intent: 'Pipeline ROI — how much receiver / retriever are saving in dollars' },
-  { name: 'log10x_pattern_trend', intent: 'Time series for a pattern — volume + cost history, spike detection, sparkline' },
+  { name: 'log10x_savings', intent: 'Pipeline ROI: how much receiver / retriever are saving in dollars' },
+  { name: 'log10x_pattern_trend', intent: 'Time series for a pattern: volume + cost history, spike detection, sparkline' },
   { name: 'log10x_dependency_check', intent: 'Scan SIEM + dashboards + alerts for refs to a pattern before muting / deleting it' },
   { name: 'log10x_top_patterns', intent: 'Top N patterns by current cost, with per-row delta vs comparison_window and newly-emerged section' },
-  { name: 'log10x_pattern_diff', intent: 'Set diff of patterns across a time boundary — new/retired/persistent/re_emerged + co_emergence_clusters (deploy fingerprint). Coherent across boundaries because pattern_hash is stable across queries.' },
+  { name: 'log10x_pattern_diff', intent: 'Set diff of patterns across a time boundary: new/retired/persistent/re_emerged + co_emergence_clusters (deploy fingerprint). Coherent across boundaries because pattern_hash is stable across queries.' },
   { name: 'log10x_whats_changing', intent: 'Patterns ranked by delta vs baseline (growth/shrinkage). Brand-new patterns excluded, see log10x_whats_new for those.' },
   { name: 'log10x_whats_new', intent: 'Patterns whose first_seen falls inside a recency window. Separate from delta-vs-baseline because new patterns have no baseline.' },
-  { name: 'log10x_investigate', intent: 'Single-call root-cause — causal chain for acute spikes or cohort for drift' },
-  { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage — per-pattern variable concentration + next actions' },
+  { name: 'log10x_investigate', intent: 'Single-call root-cause: causal chain for acute spikes or cohort for drift' },
+  { name: 'log10x_resolve_batch', intent: 'Pasted-batch triage: per-pattern variable concentration + next actions' },
   { name: 'log10x_retriever_query', intent: 'Read the offloaded cohort for a pattern (tenx_user_pattern) from the customer-owned overflow bucket with JS filter expressions: the events the Receiver held back from the SIEM' },
   { name: 'log10x_retriever_series', intent: 'Time series over the offloaded cohort in the overflow bucket: auto-selects exact aggregation vs sampled parallel sub-window queries' },
-  { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe — fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
+  { name: 'log10x_retriever_probe', intent: 'End-to-end retriever chain probe: fires a synthetic query and asserts every stage (offload bucket, indexer pipeline, SQS, pod ready, CW scan/stream, S3 jsonl, MCP events). Returns green/broken/unknown with per-stage asserts and remedies.' },
   { name: 'log10x_backfill_metric', intent: 'Deprecated, kept dark. The live routeState metric surface answers overflow-volume questions as a TSDB query.' },
-  { name: 'log10x_doctor', intent: 'Startup health check — env config, gateway, tier, freshness, Retriever, local engine, cross-pillar enrichment floor' },
-  { name: 'log10x_login_status', intent: 'Report credential / env state — identity, env list with permissions, demo-mode upgrade guide if applicable' },
+  { name: 'log10x_doctor', intent: 'Startup health check: env config, gateway, tier, freshness, Retriever, local engine, cross-pillar enrichment floor' },
+  { name: 'log10x_login_status', intent: 'Report credential / env state: identity, env list with permissions, demo-mode upgrade guide if applicable' },
   { name: 'log10x_signin_start', intent: 'Step 1 of Auth0 Device Flow signup/signin: opens browser, returns the user_code + device_code so the model can surface them and chain to log10x_signin_complete' },
   { name: 'log10x_signin_complete', intent: 'Step 2 of sign-in: pass back the device_code from log10x_signin_start to finish the browser flow, OR pass api_key directly for pasted-key sign-in (no browser). Hot-reloads envs (no MCP-host restart needed)' },
   { name: 'log10x_signout', intent: 'Wipe ~/.log10x/credentials and fall back to demo mode (or lower-priority config); does not revoke the key on the backend' },
   { name: 'log10x_update_settings', intent: 'Update user metadata (analyzer cost, AI provider, etc.) via POST /api/v1/user' },
   { name: 'log10x_create_env', intent: 'Create a new Log10x environment on the account; pairs with log10x_advise_install for end-to-end provision-and-install' },
   { name: 'log10x_update_env', intent: 'Rename an env or change the default; requires the backend PUT route' },
-  { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable) — requires confirm_name matching the env\'s name' },
+  { name: 'log10x_delete_env', intent: 'Delete an env (destructive, irrecoverable): requires confirm_name matching the env\'s name' },
   { name: 'log10x_set_gitops_repo', intent: 'Write gitops.repo to ~/.log10x/envs.json so configure_engine can author cap-CSV PRs; confirm="set-now" required' },
   { name: 'log10x_dest_set', intent: 'Update the SIEM destination block (siem_vendor / region / log_group_prefix / ingest_url) on an env-config document; idempotent, validates new doc against schema before write' },
-  { name: 'log10x_env_validate', intent: 'Schema parse + cross-field sanity check on a stored env-config document — region/vendor pairing, ingest_url shape, cluster vs offload type alignment, active-offload presence' },
-  { name: 'log10x_env_diff_vs_envvars', intent: 'Diff stored env-config doc against LOG10X_* env vars — surfaces silent-ignored env vars with per-field remediation; pure-on-prem-store configs return empty diff' },
+  { name: 'log10x_env_validate', intent: 'Schema parse + cross-field sanity check on a stored env-config document: region/vendor pairing, ingest_url shape, cluster vs offload type alignment, active-offload presence' },
+  { name: 'log10x_env_diff_vs_envvars', intent: 'Diff stored env-config doc against LOG10X_* env vars: surfaces silent-ignored env vars with per-field remediation; pure-on-prem-store configs return empty diff' },
   { name: 'log10x_retriever_register', intent: 'Attach the Retriever endpoint + queue coordinates to an existing env-config document. Requires log10x_env_register to have created the env first.' },
-  { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive) — old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
+  { name: 'log10x_rotate_api_key', intent: 'Rotate the Log10x API key (destructive): old key invalidated immediately, new one persisted to ~/.log10x/credentials' },
   { name: 'log10x_customer_metrics_query', intent: 'Direct PromQL passthrough to the customer metric backend (escape hatch for cross-pillar investigations)' },
   { name: 'log10x_discover_join', intent: 'Auto-discover the join label between Log10x pattern metrics and the customer metric backend via Jaccard similarity' },
-  { name: 'log10x_metrics_that_moved', intent: 'Deterministic phase-aware filter — given an anchor and N candidates, return only candidates whose mean during the anchor\'s incident phase differs from its quiet-phase mean by ≥15%. First step of the cross-pillar investigation; kills diurnal/seasonal confounders before any correlation runs' },
-  { name: 'log10x_rank_by_shape_similarity', intent: 'Rank candidates by Pearson + signed lag against an anchor. Returns raw arithmetic — pearson_signed, lag_seconds (negative = leads, possible cause), lag_tightness, lag_at_bound, anchor_phase_aligned. No tier, no causal framing — agent applies its own filter using the surfaced fields' },
-  { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side — the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
+  { name: 'log10x_metrics_that_moved', intent: 'Deterministic phase-aware filter: given an anchor and N candidates, return only candidates whose mean during the anchor\'s incident phase differs from its quiet-phase mean by ≥15%. First step of the cross-pillar investigation; kills diurnal/seasonal confounders before any correlation runs' },
+  { name: 'log10x_rank_by_shape_similarity', intent: 'Rank candidates by Pearson + signed lag against an anchor. Returns raw arithmetic: pearson_signed, lag_seconds (negative = leads, possible cause), lag_tightness, lag_at_bound, anchor_phase_aligned. No tier, no causal framing: agent applies its own filter using the surfaced fields' },
+  { name: 'log10x_metric_overlay', intent: 'Return two timeseries aligned to the same timestamp grid + deterministic facts (peak_at, peak_offset_seconds, n_buckets_aligned). NO Pearson, NO tier. Equivalent to opening two Grafana panels side by side: the agent reads the curves directly. Use after rank_by_shape_similarity to verify lag direction visually for top candidates' },
   { name: 'log10x_poc_from_siem_submit', intent: 'Pull a sample from the user\'s SIEM, analyze, and render a full cost-optimization POC report (async)' },
   { name: 'log10x_poc_from_siem_status', intent: 'Poll or retrieve the final report from a log10x_poc_from_siem_submit run' },
   { name: 'log10x_poc_from_local', intent: 'Run the POC from local kubectl logs or files/globs (no SIEM credentials needed; file source covers serverless estates); industry-pricing matrix instead of bill prediction' },
   { name: 'log10x_emit_sample_plan', intent: 'Render a read-only shell script that exports a log sample from the user\'s own analyzer, run by the user outside the container; step 2 of the fenced POC' },
-  { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS — returns a snapshot_id the advise_* tools consume' },
-  { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver — walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
+  { name: 'log10x_discover_env', intent: 'Read-only probe of k8s + AWS: returns a snapshot_id the advise_* tools consume' },
+  { name: 'log10x_advise_install', intent: 'Install wizard for Reporter / Receiver: walks the user through app / forwarder / backends / airgapped / license, then emits a concrete helm plan' },
   { name: 'log10x_advise_retriever', intent: 'Retriever install/verify/teardown plan: standalone reader over the customer-owned offload S3 bucket (S3 + SQS indexer + query)' },
-  { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author — resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR.' },
-  { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `routeState` label with cap-hit / drift / new-patterns / leakage attribution.' },
-  { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
-  { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
+  { name: 'log10x_configure_engine', intent: 'Unified per-pattern action-plan PR author: resolves a budget to a per-pattern plan (pass | sample | compact | drop | tier_down) under a per-destination cost model and emits a gitops PR.' },
+  { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator: forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `routeState` label with cap-hit / drift / new-patterns / leakage attribution.' },
+  { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools: verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
+  { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record: Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_datadog_change_report', intent: 'Weekly Datadog change report from the per-pattern series: statements new since a date, lines a day, estimated Standard cost a month, the rule that held each, proposed per-service rows; view=monitors renders the route-change and weekly-baseline Datadog monitors as JSON. Read-only.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
   { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket: per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query to inspect the offloaded cohort.' },
-  { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },
+  { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent: target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo, emits policy.yaml + scheduler manifest' },
   { name: 'log10x_offload_add', intent: 'Append a new offload destination (s3 / gcs / azure_blob / file) to an env-config document\'s offload_destinations[]. Multi-target offload is allowed; nickname must be unique within the list. An azure_blob destination takes the blob container in `bucket` and requires `storage_account`.' },
-  { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination — the Receiver requires at least one.' },
-  { name: 'log10x_siem_connector', intent: 'Emit the SIEM<-S3 connector config (Datadog Forwarder Lambda / Splunk Add-on SQS-based S3 input) for an offload bucket: terraform for the SNS fan-out + IAM, the SIEM-native input config, and verified caveats. The destination/ingest side — 10x lands NDJSON in the customer bucket; the SIEM pulls it.' },
+  { name: 'log10x_offload_archive', intent: 'Flip an offload destination\'s status to `archived` and stamp archived_at. Kept in the list as a historical reference. Refuses when the target is the only active destination: the Receiver requires at least one.' },
+  { name: 'log10x_siem_connector', intent: 'Emit the SIEM<-S3 connector config (Datadog Forwarder Lambda / Splunk Add-on SQS-based S3 input) for an offload bucket: terraform for the SNS fan-out + IAM, the SIEM-native input config, and verified caveats. The destination/ingest side: 10x lands NDJSON in the customer bucket; the SIEM pulls it.' },
   { name: 'log10x_compile', intent: 'Compile a symbol library from any mix of sources, waiting inline for the result when it is quick and handing back a pollable job_id when it is not (max_wait_ms, default 45s; 0 = fire-and-forget). Small compiles, and re-runs over unchanged local sources (files are skipped by checksum in the pinned output folder), return the library + diagnostics in ONE call; a long first compile returns a job_id to poll with log10x_compile_status, and calling again with the same arguments joins the running job rather than starting a second one. The output folder is keyed on the sources AND the compiler (pinned image digest, or local engine version), so a compiler change never reuses stale units. Sources combine freely: a local source folder, GitHub repos, docker/OCI images, Helm charts, and Artifactory artifacts, via the compiler-flavor Compiler app (Docker log10x/compiler-10x or a local compiler-flavor tenx), scans code/binaries, emits .10x.json units + a linked .10x.tar. GitHub pull needs a token (github_token arg or GH_TOKEN env, required even for public repos); docker-image and Helm-referenced-image pull are daemonless (bundled podman, auto --cap-add SYS_ADMIN) and public images need no creds; Helm bare repo/chart names need helm_repos (OCI/URL resolve standalone); Artifactory needs artifactory_instance + artifactory_repo + a token. Only the compiler flavor can compile; the `mode` arg states the three flavors and which are refused.' },
   { name: 'log10x_compile_status', intent: 'Poll a compile or link job by job_id (handed back by log10x_compile / log10x_compile_link when they overran their inline wait): job_status (running/completed/incomplete/failed/timed_out; incomplete = a clean exit whose log carries an engine loss marker such as the whole-scan cap or a dropped file, listed in loss_markers), units produced + linked .10x.tar, and the engine diagnostics that make the compiler not a black box at scale: per-language scan-failure counts with capped samples, and the link report (merge/exclude counts + symbol-type histogram). Captures the exit code and frees the container on first terminal poll; repeat polls stay readable.' },
-  { name: 'log10x_compile_link', intent: 'Link an existing folder of .10x.json symbol units into a single .10x.tar library, with NO source scan — the same compiler invoked with link-only args (units folder as outputSymbolFolder, no source), so it reuses on-disk units and merges them. Waits inline for the result (linking is usually fast; max_wait_ms, default 45s) and otherwise hands back a job_id to poll with log10x_compile_status. Use to re-link after editing/pruning units or to rebuild a library from a units tree (e.g. the output folder of a prior log10x_compile).' },
+  { name: 'log10x_compile_link', intent: 'Link an existing folder of .10x.json symbol units into a single .10x.tar library, with NO source scan: the same compiler invoked with link-only args (units folder as outputSymbolFolder, no source), so it reuses on-disk units and merges them. Waits inline for the result (linking is usually fast; max_wait_ms, default 45s) and otherwise hands back a job_id to poll with log10x_compile_status. Use to re-link after editing/pruning units or to rebuild a library from a units tree (e.g. the output folder of a prior log10x_compile).' },
 ];
 
 async function handleCliFlags(): Promise<boolean> {
@@ -1864,7 +1864,7 @@ async function handleCliFlags(): Promise<boolean> {
     // eslint-disable-next-line no-console
     console.log(
       [
-        'log10x-mcp — Log10x MCP server',
+        'log10x-mcp: Log10x MCP server',
         '',
         'Usage: log10x-mcp [flag]',
         '',
@@ -1882,7 +1882,7 @@ async function handleCliFlags(): Promise<boolean> {
         '  LOG10X_RETRIEVER_URL      Retriever query endpoint (optional)',
         '  LOG10X_TENX_MODE          `local` or `docker` backend for the local engine and compile tools; when unset, auto-detects and prefers `docker`, falling back to a native `tenx` install',
         '  LOG10X_TENX_PATH          Path to local tenx CLI (used when LOG10X_TENX_MODE=local). Compile and link need the `compiler` flavor; the `mode` arg of log10x_compile states the three flavors and which are refused',
-        '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker, SHARED by the run path and (as a fallback) log10x_compile (default: log10x/pipeline-10x:latest). A runtime-flavor image here is refused on the compile path — use LOG10X_RUNTIME_IMAGE instead',
+        '  LOG10X_TENX_IMAGE         Docker image when LOG10X_TENX_MODE=docker, SHARED by the run path and (as a fallback) log10x_compile (default: log10x/pipeline-10x:latest). A runtime-flavor image here is refused on the compile path: use LOG10X_RUNTIME_IMAGE instead',
         '  LOG10X_RUNTIME_IMAGE      Docker image for the run-path engine tools only, leaving log10x_compile alone. Accepts a full ref or the alias `native`, which selects the GraalVM-native log10x/edge-10x:latest (391MB vs 926MB, same @apps/mcp output). Wins over LOG10X_TENX_IMAGE',
         '  LOG10X_COMPILER_IMAGE     Docker image for log10x_compile. Default log10x/compiler-10x:1.1.136 pinned by digest, so every run goes through the same compiler (the image ref is part of the output-folder key); set it to :latest to track releases. Falls back to LOG10X_TENX_IMAGE',
         '  TENX_LICENSE_KEY          License key passed through to the compiler app (log10x_compile); omit to use the image built-in limited license',
@@ -1998,7 +1998,7 @@ function startHttpServer(
 
         if (!transport) {
           if (!isInitializeRequest(body)) {
-            sendJsonRpcError(res, 400, 'No valid session — send an initialize request first.');
+            sendJsonRpcError(res, 400, 'No valid session: send an initialize request first.');
             return;
           }
           if (transports.size >= maxSessions) {
@@ -2079,7 +2079,7 @@ function applyFencedBootDefaults(): void {
   // eslint-disable-next-line no-console
   console.error(
     `[log10x-mcp] Fenced profile (${fencedSignal()} is set): this server makes no outbound ` +
-      `connections. No licence is minted here — set TENX_LICENSE_KEY from a mint you ran ` +
+      `connections. No licence is minted here: set TENX_LICENSE_KEY from a mint you ran ` +
       `yourself. The log sample is exported by you, outside this process, with ` +
       `log10x_emit_sample_plan.`,
   );
@@ -2167,7 +2167,7 @@ async function main() {
     tools: REGISTERED_TOOLS.length,
     envs: loaded.all.length,
     // Offline boot has no envs at all, so there is no default to name.
-    default_env: loaded.default?.nickname ?? '(none — offline)',
+    default_env: loaded.default?.nickname ?? '(none: offline)',
     demo_mode: loaded.isDemoMode,
     demo_playground: demoPlaygroundEnabled(),
     read_only_mode: isReadOnlyMode(),
@@ -2190,7 +2190,7 @@ async function main() {
   // in MCP-client logs without needing to call `log10x_doctor`.
   if (bootMode) {
     // eslint-disable-next-line no-console
-    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n').slice(0, 2).join(' — ')}`);
+    console.error(`[log10x-mcp] ${formatModeResolution(bootMode).split('\n').slice(0, 2).join(': ')}`);
   }
 
   // Transport selection. LOG10X_MCP_HTTP_PORT → remote Streamable HTTP (the

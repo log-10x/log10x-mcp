@@ -62,7 +62,7 @@ export const setupRecurringSchema = {
     .string()
     .optional()
     .describe(
-      'Wizard session handle. Omit on the first call — a new session is minted and returned. Pass it back unchanged on every subsequent call.'
+      'Wizard session handle. Omit on the first call: a new session is minted and returned. Pass it back unchanged on every subsequent call.'
     ),
 
   /**
@@ -102,7 +102,7 @@ export const setupRecurringSchema = {
     .describe(
       'VOLUME BUDGET: keep monthly ingest for the targeted services at or under this many GB/mo. A ' +
         'standing line, not a one-shot cut: each tick scales the budget to its lookback window and cuts ' +
-        'only the overage — already under budget means every pattern passes. Replaces target_percent in ' +
+        'only the overage: already under budget means every pattern passes. Replaces target_percent in ' +
         'policy.yaml (mutually exclusive). Dollar budgets are a one-shot answer via ' +
         'log10x_estimate_savings (budget_usd_monthly); the recurring tick is byte-denominated.'
     ),
@@ -126,7 +126,7 @@ export const setupRecurringSchema = {
     .enum(SCHEDULER_KINDS)
     .optional()
     .describe(
-      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script, eventbridge = AWS-native (EventBridge Scheduler + CodeBuild, S3 config plane — no cluster, no GitHub; the fit for AWS serverless estates), container_apps_job = Azure-native (Container Apps scheduled Job, git config plane; the fit for Azure serverless estates).'
+      'Where the recurring tick runs. k8s_cron = Kubernetes CronJob (default when kubectl reachable), github_actions = GHA workflow, crontab = crontab + wrapper script, eventbridge = AWS-native (EventBridge Scheduler + CodeBuild, S3 config plane: no cluster, no GitHub; the fit for AWS serverless estates), container_apps_job = Azure-native (Container Apps scheduled Job, git config plane; the fit for Azure serverless estates).'
     ),
 
   /**
@@ -138,7 +138,7 @@ export const setupRecurringSchema = {
     .min(1)
     .optional()
     .describe(
-      'Where the recurring CLI reads policy.yaml and writes updated cap CSVs: a gitops repo URL (e.g. https://github.com/acme/log10x-config), a local path, or — required when scheduler=eventbridge — an S3 prefix (e.g. s3://acme-logs/log10x-config).'
+      'Where the recurring CLI reads policy.yaml and writes updated cap CSVs: a gitops repo URL (e.g. https://github.com/acme/log10x-config), a local path, or (required when scheduler=eventbridge) an S3 prefix (e.g. s3://acme-logs/log10x-config).'
     ),
 
   /**
@@ -149,7 +149,7 @@ export const setupRecurringSchema = {
     .array(z.string().min(1))
     .optional()
     .describe(
-      'Service names the policy must never touch (audit / regulatory / executive). Optional — defaults to empty. Pass [] to explicitly clear all exceptions.'
+      'Service names the policy must never touch (audit / regulatory / executive). Optional: defaults to empty. Pass [] to explicitly clear all exceptions.'
     ),
 
   /**
@@ -295,7 +295,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q1',
         'Which services should the recurring policy target?',
         [
-          'Pass `target_services: []` (empty array) to target **all** services — the right answer before anything is deployed.',
+          'Pass `target_services: []` (empty array) to target **all** services, the right answer before anything is deployed.',
           'With a deployed environment, `log10x_services` lists the monitored services by name.',
           'Example: `target_services: ["frontend", "checkout", "payments"]`',
         ],
@@ -310,12 +310,12 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       question_id: 'target_percent',
       markdown: buildQuestion(
         'Q2',
-        'What savings target (% of current log volume) — or a standing volume budget?',
+        'What savings target (% of current log volume): or a standing volume budget?',
         [
           'Integer 1-95. Default: **30** (a conservative starting point).',
           'The per-pattern planner works backward from this target using current byte volumes.',
           'Example: `target_percent: 30`',
-          'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead — each tick cuts only the overage.',
+          'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead, each tick cuts only the overage.',
         ],
         'target_percent',
         session
@@ -353,8 +353,8 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           '**k8s_cron**: Kubernetes CronJob (recommended when `kubectl` is available)',
           '**github_actions**: GitHub Actions scheduled workflow',
           '**crontab**: crontab entry + wrapper script (simple, any Linux host)',
-          '**eventbridge**: AWS-native — EventBridge Scheduler + CodeBuild against an S3 config plane (no cluster, no GitHub; the fit for AWS serverless estates)',
-          '**container_apps_job**: Azure-native — a Container Apps scheduled Job runs the tick in your subscription against the git policy repo (the fit for Azure serverless estates)',
+          '**eventbridge**: AWS-native, EventBridge Scheduler + CodeBuild against an S3 config plane (no cluster, no GitHub; the fit for AWS serverless estates)',
+          '**container_apps_job**: Azure-native, a Container Apps scheduled Job runs the tick in your subscription against the git policy repo (the fit for Azure serverless estates)',
           'Example: `scheduler: "k8s_cron"`',
         ],
         'scheduler',
@@ -372,7 +372,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Which S3 prefix is the config plane?',
           [
             'The eventbridge scheduler is git-free: the tick reads `policy.yaml` from this prefix and writes updated cap CSVs back to it.',
-            'The engine-facing mute file lands at `<prefix>/pipelines/run/receive/rate/mutes.csv` — Lambda functions poll it via `TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+).',
+            'The engine-facing mute file lands at `<prefix>/pipelines/run/receive/rate/mutes.csv`: Lambda functions poll it via `TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+).',
             'Example: `config_plane: "s3://acme-logs/log10x-config"`',
           ],
           'config_plane',
@@ -408,7 +408,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q5',
         'The container_apps_job scheduler needs a cloneable git repo URL',
         [
-          `\`${session.config_plane}\` is not a git URL. The tick runs inside your Azure subscription and clones the policy repo over HTTPS — a local path or S3 prefix is not reachable from there.`,
+          `\`${session.config_plane}\` is not a git URL. The tick runs inside your Azure subscription and clones the policy repo over HTTPS: a local path or S3 prefix is not reachable from there.`,
           'Pass a repo URL (or org/repo shorthand). The engine-facing delivery stays the gitops pull lane (GH_DEST), which is the certified path on Azure.',
           'Example: `config_plane: "https://github.com/acme/log10x-policy"`',
         ],
@@ -425,7 +425,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q5',
         'The eventbridge scheduler needs an S3 config plane',
         [
-          `\`${session.config_plane}\` is not an S3 prefix. The eventbridge tick runs with no git checkout — it reads and writes its state as S3 objects.`,
+          `\`${session.config_plane}\` is not an S3 prefix. The eventbridge tick runs with no git checkout: it reads and writes its state as S3 objects.`,
           'Pass an `s3://bucket/prefix` value, or switch `scheduler` to `github_actions` / `crontab` to keep a git config plane.',
           'Example: `config_plane: "s3://acme-logs/log10x-config"`',
         ],
@@ -440,7 +440,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       kind: 'ask',
       question_id: 'confirm',
       markdown: [
-        `## Recurring policy — ready to emit`,
+        `## Recurring policy: ready to emit`,
         ``,
         summary,
         ``,
@@ -599,7 +599,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `   bash log10x-recurring-aca.sh <resource-group> <container-apps-environment>`,
         `   \`\`\``,
         `3. The schedule fires \`${cronExpr}\` (UTC); each tick clones the repo, recomputes, and pushes.`,
-        `   The engine applies pushes through the gitops pull lane — pair \`GH_DEST=/tmp/policy\` with`,
+        `   The engine applies pushes through the gitops pull lane: pair \`GH_DEST=/tmp/policy\` with`,
         `   \`rateReceiverLookupFile=/tmp/policy/<path-in-repo>\` (engine 1.1.69+).`,
         `4. Trigger a manual test tick:`,
         `   \`\`\`bash`,
@@ -629,7 +629,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `   \`\`\``,
         `4. The schedule fires \`${cronExpr}\` (UTC); each tick writes updated dispositions to`,
         `   \`${opts.config_plane}/pipelines/run/receive/rate/mutes.csv\`. Point each function's`,
-        `   \`TENX_RECEIVE_MUTE_S3_URI\` at that key (engine 1.1.66+) — running functions pick`,
+        `   \`TENX_RECEIVE_MUTE_S3_URI\` at that key (engine 1.1.66+): running functions pick`,
         `   changes up within the refresh window (default 5 minutes), no redeploy.`,
         `5. Trigger a manual test tick:`,
         `   \`\`\`bash`,

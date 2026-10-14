@@ -123,7 +123,7 @@ export async function verifyConfigGeneration(deps: ConfigLiveDeps): Promise<Conf
       expected_generation: expected,
       running_generations: real,
       message:
-        `The running engine is executing the current cap policy — generation ${expected} is live on the wire` +
+        `The running engine is executing the current cap policy: generation ${expected} is live on the wire` +
         `${others.length ? ` (a rollover is still draining ${others.join(', ')})` : ''}.`,
     };
   }
@@ -135,6 +135,6 @@ export async function verifyConfigGeneration(deps: ConfigLiveDeps): Promise<Conf
     message:
       `The running engine advertises generation ${real.join(', ')}, but the current cap policy hashes to ` +
       `${expected}. The engine has NOT picked up the latest policy (still polling, not reloaded, or crash-looping). ` +
-      `Changes are written but not live — do not report them as realized yet.`,
+      `Changes are written but not live: do not report them as realized yet.`,
   };
 }

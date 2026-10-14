@@ -241,7 +241,7 @@ export async function verifyOffloadDelivery(
         message:
           `Engine stamped ${fmtBytes(stamped!)} as offload in the window, but ${uri} ` +
           `has no objects in the last ${recencyMin}m (newest ${ageStr(newestAgeSec)}). Offload is NOT reaching ` +
-          `the sink — the forwarder routeState routing is missing, misconfigured, or pointed at the wrong bucket. ` +
+          `the sink: the forwarder routeState routing is missing, misconfigured, or pointed at the wrong bucket. ` +
           `Any saving claimed for these bytes is phantom.`,
       });
     }
@@ -333,7 +333,7 @@ export async function verifyOffloadDelivery(
         ? `${uri} has ${recent.length} recent object(s) but they could not be read for the ` +
           `purity check (read denied or fetch error). Delivery is live but UNVERIFIED for leaks.`
         : `${uri} has ${recent.length} recent object(s) but none contained a parseable ` +
-          `routeState event (empty/binary/compressed objects). Delivery is live but UNVERIFIED — the offload ` +
+          `routeState event (empty/binary/compressed objects). Delivery is live but UNVERIFIED: the offload ` +
           `slice cannot be confirmed.`,
     });
   }
@@ -378,7 +378,7 @@ export async function verifyOffloadDelivery(
       `(newest ${ageStr(newestAgeSec)}), and ${sampled}/${sampled} sampled events are routeState=offload (no leak)` +
       `${stamped !== null
         ? `. Engine stamped ${fmtBytes(stamped)} offload in the window; the sink received ${fmtBytes(deliveredBytesRecent)} of raw objects ` +
-          `(units differ — JSON fullText vs metric summaryBytes — so this is a sanity figure, not a reconciliation)`
+          `(units differ (JSON fullText vs metric summaryBytes) so this is a sanity figure, not a reconciliation)`
         : ''}.`,
   });
 }

@@ -22,7 +22,7 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
       ? 'verify'
       : 'teardown';
 
-  lines.push(`# ${titleCase(plan.app)} advisor — ${actionLabel}`);
+  lines.push(`# ${titleCase(plan.app)} advisor: ${actionLabel}`);
   lines.push('');
 
   // ── Target ──
@@ -98,11 +98,11 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   // ── Verify ──
   if ((action === 'verify' || action === 'all') && plan.verify.length > 0) {
     lines.push('## Verify');
-    lines.push('Each probe below answers one specific question — run them in order. A probe passes when its commands exit 0 and (optionally) match the `expectOutput` regex.');
+    lines.push('Each probe below answers one specific question: run them in order. A probe passes when its commands exit 0 and (optionally) match the `expectOutput` regex.');
     lines.push('');
     for (let i = 0; i < plan.verify.length; i++) {
       const v = plan.verify[i];
-      lines.push(`### ${i + 1}. ${v.name} — ${v.question}`);
+      lines.push(`### ${i + 1}. ${v.name}: ${v.question}`);
       if (v.timeoutSec) lines.push(`_Expect to pass within ${v.timeoutSec}s._`);
       lines.push('');
       lines.push('```bash');
@@ -142,8 +142,8 @@ export function renderPlan(plan: AdvisePlan, action: 'install' | 'verify' | 'tea
   // install plan without verification.
   lines.push('');
   lines.push('**Next actions** (after running the plan above):');
-  lines.push('  - Verify the install is healthy: `log10x_doctor` — runs all freshness/auth/config checks across reporter, receiver, retriever.');
-  lines.push('  - Confirm the config snapshot picked up the change: `log10x_discover_env` — shows what the engine sees as the active config.');
+  lines.push('  - Verify the install is healthy: `log10x_doctor`, runs all freshness/auth/config checks across reporter, receiver, retriever.');
+  lines.push('  - Confirm the config snapshot picked up the change: `log10x_discover_env`, shows what the engine sees as the active config.');
 
   return lines.join('\n');
 }
@@ -176,7 +176,7 @@ function renderSteps(lines: string[], steps: AdvisePlan['install']): void {
 }
 
 function renderGitopsExplainer(lines: string[], g: GitopsExplainer): void {
-  lines.push('## GitOps — MCP-managed runtime config (optional)');
+  lines.push('## GitOps: MCP-managed runtime config (optional)');
   lines.push('');
   lines.push(g.headline);
   lines.push('');
@@ -212,7 +212,7 @@ function renderGitopsExplainer(lines: string[], g: GitopsExplainer): void {
   lines.push('|---|---|---|---|');
   for (const e of g.envVars) {
     lines.push(
-      `| \`${e.name}\` | ${e.required ? '**yes**' : 'optional'} | \`${e.value}\` | ${e.note ? e.note.replace(/\|/g, '\\|') : '—'} |`
+      `| \`${e.name}\` | ${e.required ? '**yes**' : 'optional'} | \`${e.value}\` | ${e.note ? e.note.replace(/\|/g, '\\|') : '-'} |`
     );
   }
   lines.push('');

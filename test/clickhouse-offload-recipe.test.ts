@@ -214,7 +214,7 @@ test('the honesty block is present in every render and states what it must', () 
 test('the ClickHouse section says offload, never archive, and carries no em dash', () => {
   const text = renderClickhouseOffloadSection(CH);
   assert.ok(!/archiv/i.test(text), 'the ClickHouse section must say offload, never archive');
-  assert.ok(!text.includes('—'), 'no em dashes');
+  assert.ok(!text.includes('\u2014'), 'no em dashes');
 });
 
 // ---------------------------------------------------------------------------
@@ -256,28 +256,28 @@ const BASELINE: Record<string, string> = {
   'azureLogsTierRecipe.basic': '9a0c878895b4dfca',
   'azureLogsTierRecipe.aux': 'de87bc671d7264ff',
   elasticFrozenTierRecipe: 'e9b1e55c341a7060',
-  coralogixMonitoringRecipe: '8a6da4b70815abe3',
-  coralogixTcoApiContract: '835216577057de80',
-  'offloadRecipe.vector': '0d706eb3869c241e',
-  'offloadRecipe.fluentd': 'cbb056d173054948',
-  'offloadRecipe.fluent-bit': 'a26a53c5fddcf4c3',
-  'offloadRecipe.otel-collector': 'd12563720dda1c89',
-  'offloadRecipe.logstash': 'c724edcc895a7f6e',
-  'offloadRecipe.cribl': '617a7ef8a96e455a',
-  'renderOffloadSection.none': 'e1d550d16bdd6b35',
-  'renderOffloadSection.nofwd.none': 'd2344072b88bece8',
-  'renderOffloadSection.datadog': '0c270fe196cc42e2',
-  'renderOffloadSection.nofwd.datadog': '5a198e1669ea1fb3',
-  'renderOffloadSection.cloudwatch': '4487ba37b8eb4397',
-  'renderOffloadSection.nofwd.cloudwatch': '96efa1ccf2126e6c',
-  'renderOffloadSection.azure-monitor': '2b32bc73d614c50f',
-  'renderOffloadSection.nofwd.azure-monitor': '4ff36154036b2f70',
-  'renderOffloadSection.coralogix': 'e7a956fd41a2d1c1',
-  'renderOffloadSection.nofwd.coralogix': '98fd381e0f90e4eb',
-  'renderOffloadSection.elasticsearch': 'bc42653ca08ccae0',
-  'renderOffloadSection.nofwd.elasticsearch': 'a265164f9d2a847b',
-  'renderOffloadSection.splunk': '3e789fc723ba99d3',
-  'renderOffloadSection.nofwd.splunk': '7c125fd593b5c9b8',
+  coralogixMonitoringRecipe: 'fe5e4e08051e9336',
+  coralogixTcoApiContract: 'e998aad4c0143e5e',
+  'offloadRecipe.vector': '27371df4724db204',
+  'offloadRecipe.fluentd': 'b2e0d9a4cdbff58d',
+  'offloadRecipe.fluent-bit': '7073ad78d86141ff',
+  'offloadRecipe.otel-collector': 'c572b52debab4a60',
+  'offloadRecipe.logstash': '55f939b60a1d11b3',
+  'offloadRecipe.cribl': 'fbb5866cf56944d6',
+  'renderOffloadSection.none': 'a6deb9ef68968488',
+  'renderOffloadSection.nofwd.none': 'aefdc85b522a0e78',
+  'renderOffloadSection.datadog': '91324dfd741a871b',
+  'renderOffloadSection.nofwd.datadog': '117b5b8d02bf5f21',
+  'renderOffloadSection.cloudwatch': '586560178534070d',
+  'renderOffloadSection.nofwd.cloudwatch': '12742158c7dcf959',
+  'renderOffloadSection.azure-monitor': '28f2e07277081674',
+  'renderOffloadSection.nofwd.azure-monitor': 'e4de8f40f7af8af4',
+  'renderOffloadSection.coralogix': '36d257f746349ed0',
+  'renderOffloadSection.nofwd.coralogix': '2bbf51435c836288',
+  'renderOffloadSection.elasticsearch': 'e72244c86139301c',
+  'renderOffloadSection.nofwd.elasticsearch': '0cc02652b0dca0d4',
+  'renderOffloadSection.splunk': 'a821be465e387d75',
+  'renderOffloadSection.nofwd.splunk': 'a919ddc96948df80',
   forwarderWriteTerraform: '91968b63922ff7b0',
 };
 
@@ -315,6 +315,10 @@ const BASELINE: Record<string, string> = {
 // the recipe did not load as printed (found running it on fluentd 1.19.1). That
 // moves offloadRecipe.fluentd and every no-forwarder section, which renders
 // fluentd as a lead. Every other default-mode recipe is byte-identical.
+//
+// REBASELINED 2026-10-14, deliberately. Every entry that moved carries an em
+// dash removed from its prose or its config comments, and nothing else: no
+// config key, value or expression changed.
 test('every pre-existing recipe is byte-identical to the parent commit', () => {
   const P = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
   const h = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);

@@ -186,7 +186,7 @@ test('section numbering has no holes, on every destination', () => {
       nums,
       nums.map((_, i) => i + 1),
       `${siem}: section numbers are ${nums.join(',')}. Conditional sections must not leave a ` +
-        `gap — a reader sees the hole and asks what was hidden.`,
+        `gap: a reader sees the hole and asks what was hidden.`,
     );
   }
 });

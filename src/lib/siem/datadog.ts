@@ -321,7 +321,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     };
     const usage = data.usage || [];
     if (usage.length === 0) {
-      return { errorNote: 'Datadog usage_api returned empty — account may have <24h of data' };
+      return { errorNote: 'Datadog usage_api returned empty: account may have <24h of data' };
     }
     const totalEvents = usage.reduce(
       (s, u) => s + (u.event_count ?? u.live_index_indexed ?? 0),
@@ -343,7 +343,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     const dailyGb = (dailyEvents * AVG_BYTES_PER_EVENT) / (1024 ** 3);
     return {
       dailyGb,
-      source: `Datadog /api/v1/usage/logs_by_index (events × 500 B/event avg — byte endpoint not available on this tier, ${baseHost})`,
+      source: `Datadog /api/v1/usage/logs_by_index (events × 500 B/event avg: byte endpoint not available on this tier, ${baseHost})`,
       rangeMultiplier: { low: 0.4, high: 4 },
     };
   } catch (e) {

@@ -151,7 +151,7 @@ test('every recipe carries the engine offload-mode + IAM prerequisites', () => {
   }
 });
 
-test('all forwarders are verified live — no recipe carries a SMOKE TEST REQUIRED caveat', () => {
+test('all forwarders are verified live: no recipe carries a SMOKE TEST REQUIRED caveat', () => {
   // vector/fluentd/fluent-bit/logstash verified E2E to file sinks; cribl via
   // `cribl pipe`; otel routing+strip+body-fold + the S3 object shape verified
   // against MinIO. Nothing left pending.
@@ -240,7 +240,7 @@ test('the Datadog section keeps routeState on the wire, stripping only the S3 sl
     assert.equal(
       tag,
       'tenx.offload',
-      `routeState stripped on '${tag}' — the Flex index filter has nothing to match`,
+      `routeState stripped on '${tag}': the Flex index filter has nothing to match`,
     );
   }
 });

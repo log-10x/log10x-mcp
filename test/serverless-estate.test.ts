@@ -232,7 +232,7 @@ test('lambdaEstateCdkConstruct: attach() wires per-pattern only when a mute file
   assert.ok(cdk.body.includes("addEnvironment('rateReceiverFieldNames', 'message_pattern')"));
   assert.ok(
     !cdk.body.includes("'symbolMessage'"),
-    'symbolMessage must not be emitted — the field does not exist in this composition and an empty fieldSetKey retains everything silently'
+    'symbolMessage must not be emitted: the field does not exist in this composition and an empty fieldSetKey retains everything silently'
   );
   assert.ok(cdk.body.includes("addEnvironment('rateReceiverLookupFile', this.muteFile)"));
   // read-only fs: without this the log4j appender kills pipeline launch

@@ -230,7 +230,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   }
   if (app === 'reporter' && args.optimize) {
     blockers.push(
-      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app is standalone read-only — it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
+      'optimize=true is a Receiver-app feature (it encodes events emitted back through the forwarder). The Reporter app is standalone read-only: it only publishes aggregated TenXSummary metrics. Drop `optimize` or switch to `app=receiver`.'
     );
   }
   if (app === 'reporter' && args.readOnly) {
@@ -320,7 +320,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
         status: 'unknown',
         detail:
           `Compaction needs ${compaction.requires}. Confirm it is installed before compacting anything you search on` +
-          (compaction.docsUrl ? ` — ${compaction.docsUrl}` : '') +
+          (compaction.docsUrl ? `: ${compaction.docsUrl}` : '') +
           '.',
       });
     } else if (compaction.kind === 'unsupported') {
@@ -328,7 +328,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
         name: 'destination-expander',
         status: 'fail',
         detail:
-          `${compaction.displayName} has no 10x expander, so compaction is not available on this destination — ` +
+          `${compaction.displayName} has no 10x expander, so compaction is not available on this destination: ` +
           'compacted events would arrive unreadable. Reduce spend here with tier_down or offload instead ' +
           '(`log10x_estimate_savings`).',
       });
@@ -368,7 +368,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // output (elasticsearch, splunk, logstash, kafka, etc.) is also safe.
   if (app === 'receiver' && forwarder === 'filebeat') {
     notes.push(
-      "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc. — the mock destination used by this plan is `output.file` (safe by default)."
+      "Filebeat constraint: **do not configure `output.console`** in `filebeat.yml`. Filebeat's tenx integration uses its stdout as the pipe to the 10x engine (baked into the `log10x/filebeat-10x` Dockerfile entrypoint: `filebeat 2>&1 | tenx-edge run …`). Any output that writes to stdout corrupts that pipe. Use `output.elasticsearch`, `output.file`, `output.logstash`, `output.kafka`, etc.: the mock destination used by this plan is `output.file` (safe by default)."
     );
   }
   if (app === 'reporter') {
@@ -378,7 +378,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     // when the cluster runs multiple forwarder DaemonSets.
     const fwLabel = args.forwarder ?? snapshot.recommendations.existingForwarder ?? 'no forwarder';
     notes.push(
-      `This is the **standalone Reporter** install — a dedicated fluent-bit DaemonSet (\`log10x/reporter-10x\`) running alongside your existing ${fwLabel}. Zero touch to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Read-only — metrics only. For filtering/compaction install the Receiver as a sidecar in your existing forwarder.`
+      `This is the **standalone Reporter** install: a dedicated fluent-bit DaemonSet (\`log10x/reporter-10x\`) running alongside your existing ${fwLabel}. Zero touch to your forwarder; the chart bundles its own fluent-bit to tail /var/log/containers/*.log. Read-only: metrics only. For filtering/compaction install the Receiver as a sidecar in your existing forwarder.`
     );
   }
 
@@ -525,19 +525,19 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
     headline:
       'The compactReceiver decides per-event whether to emit `encode()` (compact, smaller on a destination whose 10x expander is installed, see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
-      'You want **selective** compaction — compact specific containers/services but preserve others (audit, compliance, debug).',
+      'You want **selective** compaction: compact specific containers/services but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
       'You want the MCP to manage the cap-file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
         ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC containers OUT of compaction (audit/compliance).'
-        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly — no per-container decisions needed. Install the destination expander first (see the prerequisite below).',
+        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly: no per-container decisions needed. Install the destination expander first (see the prerequisite below).',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
-      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this — per-pattern CSV (pattern_hash key, boolean true|false value); in-place writes hot-reload (no restart)' },
-      { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic — JS change → pipeline restart (rarely needed; CSV covers most cases)' },
+      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this: per-pattern CSV (pattern_hash key, boolean true|false value); in-place writes hot-reload (no restart)' },
+      { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic: JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
       { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
@@ -556,8 +556,8 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
     caveats: [
       EXPANDER_PREREQUISITE_GENERAL,
       'The `paths` glob in `pipelines/gitops/config.yaml` is `test/*.csv`, and it is a YAML list, which does not read environment variables, so `GH_PATH` does not change it. Fork the config repo and edit `paths` to cover `pipelines/run/receive/compact/*`.',
-      'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior — kept here as a heads-up for capacity planning.',
-      'Hot-reload requires in-place writes (the gitops pattern). Do not source the cap-file via a Kubernetes ConfigMap mount — CM swaps the file via a symlink rename, which the engine\'s stat-based watcher will not see.',
+      'Customers running multiple receiver pods all watching the same GitOps repo will see fan-out: a single PR triggers reload on every pod within a poll window. That is the intended behavior: kept here as a heads-up for capacity planning.',
+      'Hot-reload requires in-place writes (the gitops pattern). Do not source the cap-file via a Kubernetes ConfigMap mount: CM swaps the file via a symlink rename, which the engine\'s stat-based watcher will not see.',
     ],
   };
 }
@@ -591,7 +591,7 @@ async function runPreflight(
     status: nsExists ? 'ok' : 'warn',
     detail: nsExists
       ? `\`${namespace}\` exists`
-      : `\`${namespace}\` does not exist — the install step will create it`,
+      : `\`${namespace}\` does not exist: the install step will create it`,
   });
 
   // 3. Existing forwarder alignment.
@@ -604,8 +604,8 @@ async function runPreflight(
       name: 'forwarder alignment',
       status: 'ok',
       detail: existing
-        ? `detected \`${existing}\` — Reporter runs in parallel, no conflict`
-        : 'no existing forwarder detected — Reporter bundles its own fluent-bit',
+        ? `detected \`${existing}\`: Reporter runs in parallel, no conflict`
+        : 'no existing forwarder detected: Reporter bundles its own fluent-bit',
     });
   } else {
     checks.push({
@@ -615,7 +615,7 @@ async function runPreflight(
       detail: existing
         ? existing === forwarder
           ? `detected \`${existing}\` matches the target`
-          : `detected \`${existing}\` in the cluster; this plan targets \`${forwarder}\` — safe to co-exist in different namespaces, but confirm that's what you want`
+          : `detected \`${existing}\` in the cluster; this plan targets \`${forwarder}\`: safe to co-exist in different namespaces, but confirm that's what you want`
         : 'no existing forwarder detected; the plan installs one from scratch',
     });
   }
@@ -635,7 +635,7 @@ async function runPreflight(
       name: 'existing release for upgrade',
       status: releaseExists ? 'ok' : 'fail',
       detail: releaseExists
-        ? `\`${releaseName}\` exists in \`${namespace}\` — this plan upgrades it in-place with --reuse-values`
+        ? `\`${releaseName}\` exists in \`${namespace}\`: this plan upgrades it in-place with --reuse-values`
         : `expected to upgrade \`${releaseName}\` in \`${namespace}\` but no such Helm release was detected; the snapshot may be stale, re-run log10x_discover_env`,
     });
   } else {
@@ -643,8 +643,8 @@ async function runPreflight(
       name: 'release collision',
       status: releaseExists ? 'fail' : 'ok',
       detail: releaseExists
-        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
-        : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
+        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\`: pick a different release_name or uninstall the existing one first`
+        : `no \`${releaseName}\` release in \`${namespace}\`: clear to install`,
     });
   }
 
@@ -660,7 +660,7 @@ async function runPreflight(
       name: 'filebeat output.console check',
       status: 'warn',
       detail:
-        '`output.console` is FORBIDDEN with the image-swap integration — it collides with the stdout pipe carrying events to the in-container engine. Before applying the plan, inspect your existing values (`helm get values <release> -n <namespace>`) and confirm `output.console` is not configured. If it is, switch to `output.elasticsearch` / `output.kafka` / `output.logstash` / etc.',
+        '`output.console` is FORBIDDEN with the image-swap integration: it collides with the stdout pipe carrying events to the in-container engine. Before applying the plan, inspect your existing values (`helm get values <release> -n <namespace>`) and confirm `output.console` is not configured. If it is, switch to `output.elasticsearch` / `output.kafka` / `output.logstash` / etc.',
     });
   }
 
@@ -793,7 +793,7 @@ function buildInstallSteps(opts: {
   if (!builtinLicense && (isDemoLicense === false || (app === 'receiver' && opts.licenseJwt))) {
     steps.push({
       title: 'Create license Secret',
-      rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret — create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
+      rationale: `Your license JWT must not live in values.yaml. The chart's \`licenseSecret\` block points the engine at this Secret: create it once, replace the JWT later by re-applying. The \`--from-literal\` approach below puts the JWT on the command line; if shell-history exposure matters, write it to a file first with \`umask 077\` and use \`--from-file=${licenseSecretKey}=<path>\`.`,
       commands: [
         `kubectl create secret generic ${licenseSecretName} \\
   -n ${namespace} \\
@@ -865,7 +865,7 @@ function buildInstallSteps(opts: {
   steps.push({
     title: extraFiles.length > 0 ? 'Write Helm values + kustomize overlay' : 'Write Helm values',
     rationale: extraFiles.length > 0
-      ? `Tenx config + ${spec.label}-specific config, plus a kustomize post-renderer overlay (the upstream chart has no extraContainers hook — sidecar injected via Strategic Merge Patch on the rendered manifest).`
+      ? `Tenx config + ${spec.label}-specific config, plus a kustomize post-renderer overlay (the upstream chart has no extraContainers hook: sidecar injected via Strategic Merge Patch on the rendered manifest).`
       : `Tenx config + ${spec.label}-specific output destination (\`${destination}\`).`,
     files: allFiles,
     commands: [],
@@ -909,7 +909,7 @@ function buildInstallSteps(opts: {
   steps.push({
     title: 'Wait for rollout',
     rationale:
-      'Blocks until the workload reports Ready. Uses the chart\'s own label selector (legacy Helm for elastic charts, k8s-recommended elsewhere) — a mismatched selector silently returns "No resources found" and exits 0.',
+      'Blocks until the workload reports Ready. Uses the chart\'s own label selector (legacy Helm for elastic charts, k8s-recommended elsewhere): a mismatched selector silently returns "No resources found" and exits 0.',
     commands: [
       `kubectl -n ${namespace} rollout status daemonset -l ${spec.selectorLabel(releaseName)} --timeout=5m || true`,
       `kubectl -n ${namespace} rollout status deployment -l ${spec.selectorLabel(releaseName)} --timeout=5m || true`,

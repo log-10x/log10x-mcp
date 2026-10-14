@@ -33,16 +33,16 @@ export const resolveBatchSchema = {
   source: z
     .enum(['file', 'events', 'text'])
     .optional()
-    .describe('Optional — auto-inferred from whichever of `events` / `text` / `path` you actually provide, so you normally do not set it. Provide explicitly only to disambiguate when more than one is present.'),
+    .describe('Optional: auto-inferred from whichever of `events` / `text` / `path` you actually provide, so you normally do not set it. Provide explicitly only to disambiguate when more than one is present.'),
   path: z.string().optional().describe('Local file path when source=file. Required for file mode.'),
   events: z
     .union([z.array(z.string()), z.string()])
     .optional()
     .describe('Inline log lines: an array of lines, or a single newline-separated string (both accepted). `source` need not be set.'),
-  text: z.string().optional().describe('Raw text blob when source=text — newline-separated log events.'),
+  text: z.string().optional().describe('Raw text blob when source=text: newline-separated log events.'),
   top_n_patterns: z.number().min(1).max(50).default(20).describe('How many patterns to return in the ranked triage.'),
   include_next_actions: z.boolean().default(true).describe('Whether to generate next_action suggestions for each top pattern.'),
-  environment: z.string().optional().describe('Environment nickname — used to build next_actions that call log10x_investigate.'),
+  environment: z.string().optional().describe('Environment nickname: used to build next_actions that call log10x_investigate.'),
 };
 
 /** Engine output file set, keyed the way cli-output-parser consumes it. */
@@ -383,7 +383,7 @@ async function executeResolveBatchInner(args: {
       `stay in the template body without repeated occurrences to mark them as ` +
       `variables. For statistically-converged templates on the same events, ` +
       `use \`log10x_top_patterns\` / \`log10x_event_lookup\` against the live ` +
-      `Reporter — the production pipeline has seen millions of samples and ` +
+      `Reporter: the production pipeline has seen millions of samples and ` +
       `generalizes cleanly. For one-shot batch triage, pasting ≥50 events tends ` +
       `to cross the engine's confidence floor.`
     );
@@ -397,7 +397,7 @@ async function executeResolveBatchInner(args: {
     `It is NOT the live Prometheus \`tenx_hash\`. The live pipeline hashes the forwarder-wrapped ` +
     `envelope; a raw paste hashes differently, so a paste hash and a live tenx_hash never match ` +
     `by construction. To check live state, correlate by PATTERN (the pattern text shown for each ` +
-    `entry) via log10x_top_patterns / log10x_event_lookup — do NOT pass any hash from this output ` +
+    `entry) via log10x_top_patterns / log10x_event_lookup: do NOT pass any hash from this output ` +
     `as a tenxHash/pattern filter; that lookup will always return no-match and must not be read as ` +
     `"signal absent".`
   ));
@@ -408,7 +408,7 @@ async function executeResolveBatchInner(args: {
     const pctOfBatch = ((p.count / totalEvents) * 100).toFixed(p.count / totalEvents < 0.1 ? 1 : 0);
     const name = p.symbolMessage || summarizeTemplate(p.template);
     lines.push(`**#${i + 1}  ${name}**  · ${fmtCount(p.count)} events (${pctOfBatch}% of batch) · interestingness ${score.toFixed(2)}`);
-    lines.push(`\`${p.templateHash}\` — ${truncate(p.template, 140)}`);
+    lines.push(`\`${p.templateHash}\`: ${truncate(p.template, 140)}`);
     if (p.dominantSeverity) {
       lines.push(`severity: ${p.dominantSeverity}`);
     }
@@ -422,8 +422,8 @@ async function executeResolveBatchInner(args: {
         const confidence = slot.namingConfidence === 'high'
           ? ''
           : slot.namingConfidence === 'medium'
-          ? ' _(name inferred — medium confidence)_'
-          : ' _(no semantic name — low confidence)_';
+          ? ' _(name inferred: medium confidence)_'
+          : ' _(no semantic name: low confidence)_';
         const label = `${slot.inferredName}${confidence}`;
         const topValsStr = slot.topValues
           .map((v) => `\`${truncate(v.value, 60)}\` ${(v.pct * 100).toFixed(0)}%`)
@@ -638,7 +638,7 @@ function buildNextActions(p: PatternConcentration, environment?: string): string
       `call \`log10x_retriever_query({ pattern: '${p.symbolMessage}', filters: [${JSON.stringify(jsFilter)}] })\` to retrieve all historical events concentrated on ${slot}=${truncate(val, 40)} (requires Retriever tier).`
     );
     actions.push(
-      `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\` — filters to the dominant variable concentration directly in the SIEM.`
+      `native Datadog follow-up: \`dog log search '@${slot}:"${val.replace(/"/g, '\\"')}"' --from now-24h\`: filters to the dominant variable concentration directly in the SIEM.`
     );
   }
 

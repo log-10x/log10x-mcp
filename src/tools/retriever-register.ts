@@ -44,13 +44,13 @@ export const retrieverRegisterSchema = {
     .string()
     .min(1)
     .describe(
-      'Stable identifier (env_id or nickname) of the environment to attach the Retriever to. Must already exist in the env-config store — call `log10x_env_register` first if it does not.'
+      'Stable identifier (env_id or nickname) of the environment to attach the Retriever to. Must already exist in the env-config store: call `log10x_env_register` first if it does not.'
     ),
   url: z
     .string()
     .min(1)
     .describe(
-      'Retriever query endpoint — the in-cluster service URL the MCP calls for `retriever_query` / `retriever_series` / `retriever_query_status`. Example: `https://retriever.acme-prod.svc.cluster.local:8443`.'
+      'Retriever query endpoint: the in-cluster service URL the MCP calls for `retriever_query` / `retriever_series` / `retriever_query_status`. Example: `https://retriever.acme-prod.svc.cluster.local:8443`.'
     ),
   input_bucket: z
     .string()
@@ -69,7 +69,7 @@ export const retrieverRegisterSchema = {
       stream: z.string().min(1).describe('SQS queue URL for streaming-result delivery.'),
       query: z.string().min(1).describe('SQS queue URL for top-level query lifecycle.'),
     })
-    .describe('The four SQS queues the Retriever coordinates on. All four are required — partial queue sets break the dispatch graph.'),
+    .describe('The four SQS queues the Retriever coordinates on. All four are required: partial queue sets break the dispatch graph.'),
   query_log_group: z
     .string()
     .optional()
@@ -81,7 +81,7 @@ export const retrieverRegisterSchema = {
       chart_version: z.string().optional().describe('Pinned chart version, e.g. `1.0.6`. Omit to leave unpinned.'),
     })
     .optional()
-    .describe('Optional Helm release identity for the deployed Retriever — used by the install advisor to suggest `helm upgrade` plans.'),
+    .describe('Optional Helm release identity for the deployed Retriever: used by the install advisor to suggest `helm upgrade` plans.'),
 };
 
 interface RetrieverRegisterArgs {
@@ -121,7 +121,7 @@ function buildHumanSummary(inner: RetrieverRegisterInner): string {
     }
     return `retriever_register failed: ${inner.error ?? 'unknown error'}.`;
   }
-  return `Retriever block ${inner.action} on env "${inner.nickname ?? inner.env_id}" — url=${inner.retriever_url}, input_bucket=${inner.input_bucket}.`;
+  return `Retriever block ${inner.action} on env "${inner.nickname ?? inner.env_id}": url=${inner.retriever_url}, input_bucket=${inner.input_bucket}.`;
 }
 
 export async function executeRetrieverRegister(

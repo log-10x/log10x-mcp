@@ -40,7 +40,7 @@ import { requireWriteAccess } from '../lib/read-only-guard.js';
 export const backfillMetricSchema = {
   pattern: z
     .string()
-    .describe('Pattern to backfill — the symbolMessage (pattern name) or its tenx_hash. Use log10x_event_lookup first to resolve a raw log line.'),
+    .describe('Pattern to backfill: the symbolMessage (pattern name) or its tenx_hash. Use log10x_event_lookup first to resolve a raw log line.'),
   metric_name: z
     .string()
     .describe('Destination metric name. Follow the destination TSDB\'s naming convention (e.g., `log10x.payment_retry_by_tenant`).'),
@@ -57,15 +57,15 @@ export const backfillMetricSchema = {
     .describe('How to aggregate events within each bucket. `count` is the default and matches the "how many events happened" question.'),
   from: z
     .string()
-    .describe('Start of the backfill window — ISO8601 (`2026-01-15T00:00:00Z`) or relative (`now-90d`).'),
+    .describe('Start of the backfill window: ISO8601 (`2026-01-15T00:00:00Z`) or relative (`now-90d`).'),
   to: z
     .string()
     .default('now')
-    .describe('End of the backfill window — ISO8601 or relative. Default `now`.'),
+    .describe('End of the backfill window: ISO8601 or relative. Default `now`.'),
   group_by: z
     .array(z.string())
     .optional()
-    .describe('Fields to group on — each unique combination becomes its own time series. Pass enriched-metric label names (`service`, `severity`, `tenant_id`, `http_code`, ...).'),
+    .describe('Fields to group on: each unique combination becomes its own time series. Pass enriched-metric label names (`service`, `severity`, `tenant_id`, `http_code`, ...).'),
   filters: z
     .array(z.string())
     .optional()
@@ -77,8 +77,8 @@ export const backfillMetricSchema = {
   emit_forward: z
     .boolean()
     .default(false)
-    .describe('When true, wire the live Reporter to continue emitting the same metric from current events going forward. Default false in this build — the forward-emission handoff path to the Reporter config file is not yet implemented. Set true only after installing the Reporter config update path.'),
-  environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+    .describe('When true, wire the live Reporter to continue emitting the same metric from current events going forward. Default false in this build: the forward-emission handoff path to the Reporter config file is not yet implemented. Set true only after installing the Reporter config update path.'),
+  environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
     .default('summary')
@@ -180,7 +180,7 @@ export async function executeBackfillMetric(
         human_summary: buildBackfillNoEventsHumanSummary(args),
         source_disclosure: { retriever_state_source: retrieverState.source },
       },
-      warnings: ['backfill_metric: Retriever returned zero events matching this pattern + filter + window — nothing was emitted to the destination TSDB.'],
+      warnings: ['backfill_metric: Retriever returned zero events matching this pattern + filter + window, nothing was emitted to the destination TSDB.'],
     });
   }
   const d = sumOut.data;
@@ -208,8 +208,8 @@ function buildBackfillHumanSummary(d: Omit<BackfillMetricSummary, 'human_summary
     d.coverage_complete === false
       ? ` CAVEAT: the backfilled metric under-represents true volume (${
           typeof d.events_matched_total === 'number' && d.events_matched_total > d.events_retrieved
-            ? `${d.events_matched_total} matched, ${d.events_retrieved} re-emitted — retriever cap; narrow the window and re-run`
-            : 'worker files failed download or the engine truncated worker uploads — narrow the window and re-run'
+            ? `${d.events_matched_total} matched, ${d.events_retrieved} re-emitted: retriever cap; narrow the window and re-run`
+            : 'worker files failed download or the engine truncated worker uploads: narrow the window and re-run'
         }).`
       : '';
   const second = `Retriever returned ${d.events_retrieved} events in ${d.retriever_wall_ms}ms; aggregator produced ${d.points_emitted} data points across ${d.series_count} series at ${d.bucket_seconds}s buckets (aggregation ${d.aggregation}).${coverageClause}`;

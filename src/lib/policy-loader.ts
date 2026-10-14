@@ -295,7 +295,7 @@ export function parsePolicyYaml(text: string): Policy {
   const repo = typeof cp?.['repo'] === 'string' ? cp['repo'].trim() : '';
   if (!repo) {
     throw new PolicyLoadError(
-      'policy.yaml is missing config_plane.repo — the tick needs a gitops repo or s3:// prefix to write CSVs'
+      'policy.yaml is missing config_plane.repo: the tick needs a gitops repo or s3:// prefix to write CSVs'
     );
   }
   const env_id =
@@ -330,7 +330,7 @@ export function parsePolicyYaml(text: string): Policy {
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
-      'reduction carries BOTH budget_gb_monthly and target_percent — they are different goals (a standing line vs a one-shot cut). Keep exactly one.'
+      'reduction carries BOTH budget_gb_monthly and target_percent: they are different goals (a standing line vs a one-shot cut). Keep exactly one.'
     );
   }
 

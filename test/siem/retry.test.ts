@@ -105,7 +105,7 @@ test('retryWithBackoff extracts Retry-After from fetch-style headers', async () 
   assert.equal(attempts, 2);
   // Retry-After was 0.1s (100ms) — we should have waited close to that, not the base of 5s.
   const elapsed = Date.now() - started;
-  assert.ok(elapsed < 2000, `elapsed ${elapsed}ms — Retry-After not respected`);
+  assert.ok(elapsed < 2000, `elapsed ${elapsed}ms: Retry-After not respected`);
 });
 
 test('sleep delays execution by approximately the requested duration', async () => {

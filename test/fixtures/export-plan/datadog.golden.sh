@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sample export for Datadog — log10x fenced POC, step 2 of 4.
+# Sample export for Datadog: log10x fenced POC, step 2 of 4.
 #
 # WHAT THIS READS
 #   API:         POST /api/v2/logs/events/search  (the log events themselves)
@@ -11,7 +11,7 @@
 #                stopping at 1,000,000 events total.
 #
 # WHAT THIS WRITES
-#   ./poc/logs/main.NN.log — one log message per line, plain text.
+#   ./poc/logs/main.NN.log: one log message per line, plain text.
 #   Nothing else is written outside that directory.
 #
 # WHAT ELSE IT DOES
@@ -153,7 +153,7 @@ for i in "${!BUCKET_FROM[@]}"; do
     if [ -z "$cursor" ]; then break; fi
     if [ "$TOTAL" -ge "$TARGET" ]; then break; fi
   done
-  printf "sub-window %2d/%d — %d events so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
+  printf "sub-window %2d/%d: %d events so far\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2
 done
 
 echo "" >&2

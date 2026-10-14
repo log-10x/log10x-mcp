@@ -55,7 +55,7 @@ export const emitSamplePlanSchema = {
       'Which log analyzer to export the sample from. One script per analyzer: ' +
         '`cloudwatch` (aws CLI: DescribeLogGroups + FilterLogEvents), `splunk` (search/jobs/export), ' +
         '`elasticsearch` and `opensearch` (_cat/indices + _search), `datadog` (v2 logs search). ' +
-        'ClickHouse, Azure Monitor, Coralogix, GCP Logging and Sumo Logic are follow-up work — ' +
+        'ClickHouse, Azure Monitor, Coralogix, GCP Logging and Sumo Logic are follow-up work: ' +
         'for those, export plain text yourself, one log message per line, and run the POC over it.',
     ),
   window: z
@@ -63,7 +63,7 @@ export const emitSamplePlanSchema = {
     .default('14d')
     .describe(
       'How far back to sample. Accepts `1h`, `24h`, `7d`, `14d`, `30d`. Default `14d`, matching ' +
-        '`log10x_poc_from_siem` — a wide window is what makes first-seen, growth and ' +
+        '`log10x_poc_from_siem`: a wide window is what makes first-seen, growth and ' +
         'stable-versus-new readable at all.',
     ),
   target_event_count: z
@@ -72,7 +72,7 @@ export const emitSamplePlanSchema = {
     .max(5_000_000)
     .default(DEFAULT_TARGET_EVENT_COUNT)
     .describe(
-      'Target event count for the export. Default 1,000,000 (~500 MB at 500 B average) — the same ' +
+      'Target event count for the export. Default 1,000,000 (~500 MB at 500 B average): the same ' +
         'default `log10x_poc_from_siem` uses, so a fenced POC and a credentialed one see samples of ' +
         'the same size. Lower it when the export has to fit a laptop or a coffee break.',
     ),
@@ -80,7 +80,7 @@ export const emitSamplePlanSchema = {
     .string()
     .optional()
     .describe(
-      'Analyzer-native scope. CloudWatch: log group name or prefix (`/aws/ecs/*` — the asterisks are ' +
+      'Analyzer-native scope. CloudWatch: log group name or prefix (`/aws/ecs/*`, the asterisks are ' +
         'stripped, CloudWatch matches on prefix). Splunk: index name. Elasticsearch / OpenSearch: index ' +
         'pattern (default `logs-*`). Datadog: index name. Omitted means everything the credentials can read.',
     ),
@@ -134,7 +134,7 @@ function reviewChecklist(plan: SamplePlan): string[] {
   // to the `aws` CLI and never touches a key, while the HTTP scripts write
   // theirs to a scratch file to keep them out of argv.
   const credentialHandling = plan.requires.includes('curl')
-    ? 'It sends them to your own analyzer and writes them nowhere lasting — they go into a file ' +
+    ? 'It sends them to your own analyzer and writes them nowhere lasting: they go into a file ' +
       'inside a 0700 scratch directory rather than onto a command line, because `ps` shows argv to ' +
       'every user on the machine, and the EXIT trap removes the directory.'
     : 'The `aws` CLI resolves them the way it always does; this script neither reads nor copies them.';
@@ -252,7 +252,7 @@ export async function executeEmitSamplePlan(
       headline:
         `${plan.displayName}: export script for up to ${plan.targetEventCount.toLocaleString('en-US')} ` +
         `events across ${plan.bucketCount} random sub-windows of the last ${plan.window}, ` +
-        `written to ${plan.outputDir} as plain text. Read it, then run it — this server does not.`,
+        `written to ${plan.outputDir} as plain text. Read it, then run it: this server does not.`,
     },
     data: {
       siem: plan.siem,

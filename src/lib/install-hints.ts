@@ -157,7 +157,7 @@ export function tenxAvailabilityHint(): string {
   return [
     'Tenx is not available. Two ways to get it:',
     '',
-    '  1. Docker (recommended — no host install, updates via `docker pull`):',
+    '  1. Docker (recommended: no host install, updates via `docker pull`):',
     '     Install Docker Desktop (https://www.docker.com/products/docker-desktop/)',
     '     and set LOG10X_TENX_MODE=docker.',
     '',

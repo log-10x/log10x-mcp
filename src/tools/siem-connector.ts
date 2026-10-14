@@ -45,11 +45,11 @@ export interface SiemConnectorArgs {
 
 function humanSummary(recipes: SiemConnectorRecipe[], bucket: string): string {
   const lines = [
-    `10x never pushes to a SIEM — it lands NDJSON in s3://${bucket}/ and the SIEM PULLS it. Apply the connector below in your own account.`,
+    `10x never pushes to a SIEM: it lands NDJSON in s3://${bucket}/ and the SIEM PULLS it. Apply the connector below in your own account.`,
   ];
   for (const r of recipes) {
     lines.push('');
-    lines.push(`## ${r.target.toUpperCase()} — ${r.summary}`);
+    lines.push(`## ${r.target.toUpperCase()}: ${r.summary}`);
     lines.push(`Discovery: ${r.discovery}`);
     lines.push('Steps:');
     r.steps.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`));
@@ -79,7 +79,7 @@ export async function executeSiemConnector(args: SiemConnectorArgs): Promise<str
     tool: 'log10x_siem_connector',
     view: 'summary',
     summary: {
-      headline: `${targets.map((t) => t.toUpperCase()).join(' + ')} connector for s3://${args.bucket}/${(args.prefix ?? 'app/').replace(/^\/+/, '')} — config + IAM + caveats (customer applies; 10x does not push).`,
+      headline: `${targets.map((t) => t.toUpperCase()).join(' + ')} connector for s3://${args.bucket}/${(args.prefix ?? 'app/').replace(/^\/+/, '')}: config + IAM + caveats (customer applies; 10x does not push).`,
     },
     data: {
       bucket: args.bucket,

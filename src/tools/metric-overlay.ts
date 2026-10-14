@@ -55,12 +55,12 @@ export const metricOverlaySchema = {
   candidate: z
     .string()
     .optional()
-    .describe('The candidate metric to overlay against the anchor. Must be a customer-side PromQL expression that returns a single series. Alias of `candidates[0]` — pass either form (sibling tools metrics_that_moved and rank_by_shape_similarity use `candidates` array; this tool accepts both for consistency).'),
+    .describe('The candidate metric to overlay against the anchor. Must be a customer-side PromQL expression that returns a single series. Alias of `candidates[0]`: pass either form (sibling tools metrics_that_moved and rank_by_shape_similarity use `candidates` array; this tool accepts both for consistency).'),
   candidates: z
     .array(z.string())
     .min(1)
     .optional()
-    .describe('Candidates array. Accepted for parity with metrics_that_moved + rank_by_shape_similarity. Only the first element is overlaid (metric_overlay is single-candidate by design — use rank_by_shape_similarity to rank N first, then overlay the winner).'),
+    .describe('Candidates array. Accepted for parity with metrics_that_moved + rank_by_shape_similarity. Only the first element is overlaid (metric_overlay is single-candidate by design: use rank_by_shape_similarity to rank N first, then overlay the winner).'),
   window: z
     .string()
     .default('1h')
@@ -458,7 +458,7 @@ export async function executeMetricOverlay(
     status === 'no_signal'
       ? `No overlapping data between anchor "${anchorExpression}" and candidate "${args.candidate}" in this window. Either widen the window, check that both metrics emitted during it, or pick a different candidate.${autoSourceSuffix}`
       : peakOffset === null
-        ? `Overlay of "${args.candidate}" against the anchor. ${nAligned} aligned buckets. One side has no peak — likely too few data points on the candidate.${autoSourceSuffix}`
+        ? `Overlay of "${args.candidate}" against the anchor. ${nAligned} aligned buckets. One side has no peak: likely too few data points on the candidate.${autoSourceSuffix}`
         : peakOffset < 0
           ? `Candidate "${args.candidate}" peaks ${Math.abs(peakOffset)}s BEFORE the anchor. Possible upstream cause. ${nAligned} aligned buckets.${autoSourceSuffix}`
           : peakOffset > 0
@@ -583,8 +583,8 @@ function overlayInputInvalidEnvelope(args: {
 }): StructuredOutput {
   const hint =
     args.anchor_type === 'log10x_pattern'
-      ? 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Auto-sourcing from the anchor\'s top services found no eligible service — pass a candidate explicitly (e.g. from rank_by_shape_similarity) or pick a different anchor.'
-      : 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Customer-metric anchors have no log10x-side service attribution to auto-source from — thread a candidate explicitly (e.g. via rank_by_shape_similarity).';
+      ? 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Auto-sourcing from the anchor\'s top services found no eligible service: pass a candidate explicitly (e.g. from rank_by_shape_similarity) or pick a different anchor.'
+      : 'metric_overlay requires `candidate` (string) or `candidates` (string[]). Customer-metric anchors have no log10x-side service attribution to auto-source from: thread a candidate explicitly (e.g. via rank_by_shape_similarity).';
   return overlayErrorEnvelope({
     anchor_type: args.anchor_type,
     anchor_expression: args.anchor_expression,
@@ -677,7 +677,7 @@ function overlayDispersionRefusal(args: {
   nAnchorBuckets: number;
   view: 'summary' | 'markdown';
 }): StructuredOutput {
-  const humanSummary = `Anchor "${args.anchor_expression}" has dispersion ${args.anchorDispersion.toFixed(3)} — below the ${ANCHOR_DISPERSION_FLOOR} floor. The overlay would have no meaningful peak comparison. Re-anchor with a clearer pattern.`;
+  const humanSummary = `Anchor "${args.anchor_expression}" has dispersion ${args.anchorDispersion.toFixed(3)}: below the ${ANCHOR_DISPERSION_FLOOR} floor. The overlay would have no meaningful peak comparison. Re-anchor with a clearer pattern.`;
   const data: MetricOverlaySummary = {
     status: 'anchor_no_phase_separation',
     threshold_basis: args.thresholdBasis,
@@ -706,7 +706,7 @@ function overlayDispersionRefusal(args: {
       candidate_value_at_anchor_peak: null,
     },
   };
-  const headline = `Anchor lacks phase separation (dispersion ${args.anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing — re-anchor.`;
+  const headline = `Anchor lacks phase separation (dispersion ${args.anchorDispersion.toFixed(3)} < ${ANCHOR_DISPERSION_FLOOR}). Refusing: re-anchor.`;
   return buildChassisEnvelope({
     tool: 'log10x_metric_overlay',
     view: 'summary',

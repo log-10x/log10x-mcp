@@ -78,7 +78,7 @@ export const servicesSchema = {
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),
-  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.services[], data.totals). Field retained for backward-compat.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary": the typed envelope (data.services[], data.totals). Field retained for backward-compat.'),
 };
 
 /**
@@ -264,11 +264,11 @@ export async function executeServices(
             { header: 'Service',       align: 'left',   get: (s) => s.name, max_width: 32 },
             { header: `Vol/${d.time_range}`, align: 'right', get: (s) => fmtBytes(s.bytes) },
             { header: '%',             align: 'right',  get: (s) => fmtPct(s.pct) },
-            { header: `$/${d.time_range}`,  align: 'right', get: (s) => s.cost == null ? '—' : fmtDollar(s.cost) },
+            { header: `$/${d.time_range}`,  align: 'right', get: (s) => s.cost == null ? '-' : fmtDollar(s.cost) },
             { header: 'Attribution',   align: 'left',   get: (s) => s.attribution },
           ],
           {
-            title: `Services — ${d.time_range}`,
+            title: `Services: ${d.time_range}`,
             footer: tailCount > 0
               ? `${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action (rank > 10 or < 0.1% share).`
               : undefined,
@@ -516,7 +516,7 @@ async function executeServicesInner(
     const vol = fmtBytes(r.bytes).padEnd(10);
     const pct = fmtPct(r.pct).padStart(5);
     const bar = shareBar(maxBytes > 0 ? r.bytes / maxBytes : 0, 16);
-    const cost = r.cost == null ? '—' : `${fmtDollar(r.cost)}${period}`;
+    const cost = r.cost == null ? '-' : `${fmtDollar(r.cost)}${period}`;
     lines.push(`  ${name} ${vol} ${pct}  ${bar}  ${cost}`);
   }
 
@@ -526,7 +526,7 @@ async function executeServicesInner(
   lines.push(
     costPerGb != null
       ? `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost ?? 0)}${period} at ${fmtDollar(costPerGb)}/GB`
-      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · (no $/GB rate configured — pass effective_ingest_per_gb)`
+      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · (no $/GB rate configured: pass effective_ingest_per_gb)`
   );
 
   // Coverage line: how concentrated is the volume at the top? Tells the agent
@@ -560,9 +560,9 @@ async function executeServicesInner(
     lines.push('');
     lines.push(agentOnly(
       `Suggested next calls: ` +
-      `Drill into the top service for current top patterns — log10x_top_patterns({ service: '${rows[0].name}' }). ` +
+      `Drill into the top service for current top patterns: log10x_top_patterns({ service: '${rows[0].name}' }). ` +
       `Full causal-chain analysis on any spike: log10x_investigate({ starting_point: '${rows[0].name}' }). ` +
-      `To reduce the cost of a specific pattern in this service, first run log10x_top_patterns({ service: '${rows[0].name}' }) and then call log10x_pattern_mitigate on a row's pattern identity — gives the user the four cost-reduction options gated on env capabilities.`
+      `To reduce the cost of a specific pattern in this service, first run log10x_top_patterns({ service: '${rows[0].name}' }) and then call log10x_pattern_mitigate on a row's pattern identity: gives the user the four cost-reduction options gated on env capabilities.`
     ));
     nextActions.push(
       { tool: 'log10x_top_patterns', args: { service: rows[0].name }, reason: 'current top patterns for the top service' },
@@ -616,7 +616,7 @@ async function executeServicesInner(
           next_action = {
             tool: 'log10x_pattern_mitigate',
             args: { service: r.name },
-            reason: `Per-pattern mitigation for exception service "${r.name}" — the customer flagged this service as pass, so each cost change is a per-pattern decision.`,
+            reason: `Per-pattern mitigation for exception service "${r.name}": the customer flagged this service as pass, so each cost change is a per-pattern decision.`,
           };
         } else if (r.pct < 0.1) {
           next_action = null;
@@ -624,13 +624,13 @@ async function executeServicesInner(
           next_action = {
             tool: 'log10x_configure_engine',
             args: { service: r.name },
-            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine — the bulk-plan path that lands a refreshed cap-CSV (gitops PR, or kubectl ConfigMap when no gitops repo is configured).`,
+            reason: `Re-tune the per-pattern action plan for "${r.name}" via configure_engine: the bulk-plan path that lands a refreshed cap-CSV (gitops PR, or kubectl ConfigMap when no gitops repo is configured).`,
           };
         } else if (rank <= NEXT_ACTION_RANK_CUTOFF) {
           next_action = {
             tool: 'log10x_top_patterns',
             args: { service: r.name },
-            reason: `Drill into top patterns for "${r.name}" before deciding on a bulk action plan — mid-rank service, pattern-level breakdown first.`,
+            reason: `Drill into top patterns for "${r.name}" before deciding on a bulk action plan: mid-rank service, pattern-level breakdown first.`,
           };
         } else {
           next_action = null;
@@ -643,7 +643,7 @@ async function executeServicesInner(
           attribution_reason = 'Action split read directly from the engine routeState metric label.';
         } else if (r.attribution === 'unattributed') {
           attribution_reason =
-            'Engine reported non-pass action bytes but no routeState breakdown is available — confirm receiver_in_path and routeState stamping.';
+            'Engine reported non-pass action bytes but no routeState breakdown is available: confirm receiver_in_path and routeState stamping.';
         } else {
           attribution_reason = 'No offloaded / compacted / dropped bytes in this window for this service.';
         }

@@ -827,8 +827,8 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     }
     parts.push(
       allowed.has('sample')
-        ? 'sample or drop them (lossy — you stop keeping some or all of these events)'
-        : 'drop them (lossy — these events stop reaching the destination)',
+        ? 'sample or drop them (lossy: you stop keeping some or all of these events)'
+        : 'drop them (lossy: these events stop reaching the destination)',
     );
     const opening =
       target.kind === 'percent' && denom === 'index_volume'

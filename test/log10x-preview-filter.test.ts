@@ -88,7 +88,7 @@ test('preview_filter: must_render_verbatim has no markdown separator line (no --
       assert.ok(!line.includes('|'), `line "${line}" looks like a markdown separator`);
     }
     // No line should start with | (markdown table cell)
-    assert.ok(!line.trimStart().startsWith('|'), `line "${line}" starts with pipe — markdown table format forbidden`);
+    assert.ok(!line.trimStart().startsWith('|'), `line "${line}" starts with pipe: markdown table format forbidden`);
   }
 });
 

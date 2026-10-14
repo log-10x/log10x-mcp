@@ -198,9 +198,9 @@ export async function executeDiscoverEnv(args: DiscoverEnvArgs, mode?: Mode | nu
   const headline = `Snapshot \`${data.snapshot_id}\`: forwarder=${data.forwarder_kind ?? 'none'}, installed=${installedHeadlineFrag}, kubectl=${data.kubectl_available ? 'ok' : 'unavailable'}, aws=${data.aws_available ? 'ok' : 'unavailable'}${estateFrag}.`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (!data.installed_components.reporter) {
-    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed — pick the right install path' });
+    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'no Reporter installed: pick the right install path' });
   } else if (!data.installed_components.receiver) {
-    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, app: 'receiver' }, reason: 'Reporter present, no Receiver — install for filter / compact / cap' });
+    actions.push({ tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, app: 'receiver' }, reason: 'Reporter present, no Receiver: install for filter / compact / cap' });
   }
   // When Receiver is installed but bypassed, surface a nudge to fix the forwarder wiring.
   if (data.installed_components.receiver && data.receiver_in_path === false) {
@@ -264,7 +264,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   // ── Kubernetes ──
   lines.push('## Kubernetes');
   if (!s.kubectl.available) {
-    lines.push(`- **status**: unavailable — ${s.kubectl.error ?? 'unknown error'}`);
+    lines.push(`- **status**: unavailable, ${s.kubectl.error ?? 'unknown error'}`);
   } else {
     lines.push(`- **context**: \`${s.kubectl.context ?? 'unknown'}\``);
     lines.push(
@@ -277,7 +277,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
       lines.push(`- **forwarders detected** (${s.kubectl.forwarders.length}):`);
       for (const f of s.kubectl.forwarders) {
         lines.push(
-          `  - \`${f.kind}\` — ${f.workloadKind}/${f.workloadName} in \`${f.namespace}\` (image: \`${f.image}\`, ready: ${f.readyReplicas})`
+          `  - \`${f.kind}\`: ${f.workloadKind}/${f.workloadName} in \`${f.namespace}\` (image: \`${f.image}\`, ready: ${f.readyReplicas})`
         );
       }
     }
@@ -288,14 +288,14 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
       lines.push(`- **log10x apps installed** (${s.kubectl.log10xApps.length}):`);
       for (const a of s.kubectl.log10xApps) {
         const hr = a.helmRelease ? ` (helm: \`${a.helmRelease}\`)` : '';
-        lines.push(`  - \`${a.kind}\` — ${a.workloadKind}/${a.workloadName} in \`${a.namespace}\`${hr}`);
+        lines.push(`  - \`${a.kind}\`: ${a.workloadKind}/${a.workloadName} in \`${a.namespace}\`${hr}`);
       }
     }
 
     if (s.kubectl.helmReleases.length > 0) {
       lines.push(`- **helm releases** (${s.kubectl.helmReleases.length}):`);
       for (const h of s.kubectl.helmReleases.slice(0, 12)) {
-        lines.push(`  - \`${h.name}\` in \`${h.namespace}\` — chart \`${h.chart}\` (${h.status})`);
+        lines.push(`  - \`${h.name}\` in \`${h.namespace}\`: chart \`${h.chart}\` (${h.status})`);
       }
       if (s.kubectl.helmReleases.length > 12) {
         lines.push(`  - … and ${s.kubectl.helmReleases.length - 12} more`);
@@ -314,7 +314,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
     } else {
       lines.push(`- **metrics-backend agents detected** (${s.kubectl.backendAgents.length}):`);
       for (const b of s.kubectl.backendAgents) {
-        lines.push(`  - **${b.kind}** (${b.confidence}) — ${b.evidence}`);
+        lines.push(`  - **${b.kind}** (${b.confidence}): ${b.evidence}`);
       }
     }
   }
@@ -323,7 +323,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   // ── AWS ──
   lines.push('## AWS');
   if (!s.aws.available) {
-    lines.push(`- **status**: unavailable — ${s.aws.error ?? 'unknown error'}`);
+    lines.push(`- **status**: unavailable, ${s.aws.error ?? 'unknown error'}`);
   } else {
     const id = s.aws.callerIdentity;
     lines.push(`- **account**: \`${id?.account ?? '?'}\` (\`${id?.arn ?? '?'}\`)`);
@@ -362,8 +362,8 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
           g.subscriptionFilters === undefined
             ? ''
             : g.subscriptionFilters.length > 0
-              ? ` — subscribed (${g.subscriptionFilters.map((f) => f.name).join(', ')})`
-              : ' — no subscription filter';
+              ? `: subscribed (${g.subscriptionFilters.map((f) => f.name).join(', ')})`
+              : ': no subscription filter';
         lines.push(`  - \`${g.name}\`${sub}`);
       }
     }
@@ -372,7 +372,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
     const lam = s.aws.lambda;
     if (lam) {
       if (!lam.available) {
-        lines.push(`- **Lambda**: probe failed — ${lam.error ?? 'unknown error'}`);
+        lines.push(`- **Lambda**: probe failed, ${lam.error ?? 'unknown error'}`);
       } else if (lam.functions.length === 0) {
         lines.push('- **Lambda functions**: none');
       } else {
@@ -381,7 +381,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
         );
         for (const f of lam.functions.slice(0, 8)) {
           const otel = f.hasOtelCollectorExtension
-            ? ` — OTel extension${f.otelExtensionLayer ? ` (\`${f.otelExtensionLayer.split(':layer:')[1] ?? f.otelExtensionLayer}\`)` : ''}`
+            ? `: OTel extension${f.otelExtensionLayer ? ` (\`${f.otelExtensionLayer.split(':layer:')[1] ?? f.otelExtensionLayer}\`)` : ''}`
             : '';
           lines.push(`  - \`${f.name}\` (${f.runtime ?? '?'}, ${f.memoryMb ?? '?'} MB, ${f.architectures.join('/')})${otel}`);
         }
@@ -397,10 +397,10 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
   lines.push(`- **suggested namespace**: \`${r.suggestedNamespace}\``);
   if (r.existingForwarder) {
     lines.push(
-      `- **existing forwarder**: \`${r.existingForwarder}\` in \`${r.existingForwarderNamespace ?? '?'}\` — advisor will target this unless you override`
+      `- **existing forwarder**: \`${r.existingForwarder}\` in \`${r.existingForwarderNamespace ?? '?'}\`: advisor will target this unless you override`
     );
   } else {
-    lines.push('- **existing forwarder**: none — advisor will ask which one you want to install');
+    lines.push('- **existing forwarder**: none, advisor will ask which one you want to install');
   }
   const installed = Object.entries(r.alreadyInstalled);
   if (installed.length > 0) {
@@ -435,7 +435,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
     {
       tool: 'log10x_advise_install',
       args: { snapshot_id: s.snapshotId },
-      reason: 'install wizard: walks through app (Reporter / Receiver), forwarder, backends, airgapped, license — emits a helm plan',
+      reason: 'install wizard: walks through app (Reporter / Receiver), forwarder, backends, airgapped, license, emits a helm plan',
     },
     {
       tool: 'log10x_advise_retriever',
@@ -454,7 +454,7 @@ export function renderDiscoverReport(s: DiscoverySnapshot): string {
     tool: 'log10x_configure_engine',
     args: { snapshot_id: s.snapshotId },
     reason: s.recommendations.receiverGitopsRepo
-      ? 'snapshot detected receiver with GitOps wired up — author a per-pattern action-plan PR'
+      ? 'snapshot detected receiver with GitOps wired up: author a per-pattern action-plan PR'
       : 'configure_engine will return a truthful negative if GitOps is not yet wired (chain handoff is still informative)',
   });
   const block = renderNextActions(nextActions);

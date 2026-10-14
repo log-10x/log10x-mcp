@@ -42,7 +42,7 @@ test('segmentLine: tabs become tab segments', () => {
   ]);
 });
 
-test('buildFace: no intra-line truncation, ever — a very long line survives whole', () => {
+test('buildFace: no intra-line truncation, ever, a very long line survives whole', () => {
   const long = 'x'.repeat(5000) + ' $ ' + 'y'.repeat(5000);
   const f = buildFace(pattern({ template: long }));
   const text = f.lines[0].segs

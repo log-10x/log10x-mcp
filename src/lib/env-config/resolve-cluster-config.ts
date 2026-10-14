@@ -210,7 +210,7 @@ export async function resolveClusterConfig(
       const warning =
         `doc exists for "${candidate}" but could not be parsed ` +
         `(reason: ${errMsg}). Resolver did not fall through to env-var fallback for ` +
-        `this candidate — fix or remove the corrupt doc.`;
+        `this candidate: fix or remove the corrupt doc.`;
       resolutionWarnings.push(warning);
       return {
         ok: false,

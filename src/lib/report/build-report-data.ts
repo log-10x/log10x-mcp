@@ -543,7 +543,7 @@ export function buildReportData(
     );
   } else {
     keptSentences.push(
-      `severity attribution covered ${Math.round((extraction.severityCoverage ?? 0) * 100)}% of statements — below the floor this tool requires, so no volume action was proposed and nothing is reduced.`,
+      `severity attribution covered ${Math.round((extraction.severityCoverage ?? 0) * 100)}% of statements: below the floor this tool requires, so no volume action was proposed and nothing is reduced.`,
     );
   }
   const tierIdx = actions.findIndex((a) => a.kind === 'tier_down');
@@ -593,7 +593,7 @@ function attachAnnotations(
   for (const [hash, text] of Object.entries(annotations)) {
     if (text.length > MAX_ANNOTATION_CHARS) {
       throw new ReportRefusal(
-        `annotation for ${hash} is ${text.length} chars; the cap is ${MAX_ANNOTATION_CHARS}. Shorten it — it will not be truncated.`,
+        `annotation for ${hash} is ${text.length} chars; the cap is ${MAX_ANNOTATION_CHARS}. Shorten it: it will not be truncated.`,
       );
     }
     const action = byHash.get(hash);

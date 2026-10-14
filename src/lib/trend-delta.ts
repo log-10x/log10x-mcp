@@ -141,12 +141,12 @@ export function computeTrendDelta(
     value: 0,
     unit: 'pct',
     scope: state === 'NEW' ? 'age' : state === 'ACUTE' ? 'h1' : 'wow',
-    label: '—',
+    label: '-',
   });
 
   if (state === 'NEW') {
     if (firstSeenAgeSeconds === null || firstSeenAgeSeconds < 0) {
-      return { glyph: '🆕', value: 0, unit: 'days', scope: 'age', label: '—' };
+      return { glyph: '🆕', value: 0, unit: 'days', scope: 'age', label: '-' };
     }
     const days = Math.floor(firstSeenAgeSeconds / 86400);
     return {

@@ -69,7 +69,7 @@ export async function detectInflection(
       confidence: 'inferred',
       peakSlope: 0,
       peakToMedianRatio: 0,
-      note: 'inflection inferred to window midpoint — insufficient rate samples from Prometheus',
+      note: 'inflection inferred to window midpoint: insufficient rate samples from Prometheus',
     };
   }
 
@@ -96,10 +96,10 @@ export async function detectInflection(
     note = `sharp inflection detected at peak/median ratio ${ratio.toFixed(1)}`;
   } else if (ratio >= 2) {
     confidence = 'soft';
-    note = `soft inflection — peak/median ratio ${ratio.toFixed(1)}, treat confidence cautiously`;
+    note = `soft inflection: peak/median ratio ${ratio.toFixed(1)}, treat confidence cautiously`;
   } else {
     confidence = 'inferred';
-    note = `no clear inflection — peak/median ratio ${ratio.toFixed(1)} — anchoring to window midpoint`;
+    note = `no clear inflection: peak/median ratio ${ratio.toFixed(1)}: anchoring to window midpoint`;
     return {
       timestamp: Math.floor((start + now) / 2),
       confidence,

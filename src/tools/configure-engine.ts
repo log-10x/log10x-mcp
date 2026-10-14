@@ -274,7 +274,7 @@ export const configureEngineSchema = {
     .string()
     .optional()
     .describe(
-      'k8s namespace for the policy ConfigMap when delivery="kubectl_configmap". Defaults to `default` — pass the namespace the receiver runs in (the engine\'s ConfigMap pull driver reads from its own pod namespace).'
+      'k8s namespace for the policy ConfigMap when delivery="kubectl_configmap". Defaults to `default`: pass the namespace the receiver runs in (the engine\'s ConfigMap pull driver reads from its own pod namespace).'
     ),
   kubectl_configmap_name: z
     .string()
@@ -356,7 +356,7 @@ export const configureEngineSchema = {
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('pass')
         .describe(
-          'Default action for error-tier patterns (severity `error`/`warn`/`warning`; `critical`/`fatal` are audit-tier and always `pass`). Defaults to `pass` — error-class lines are kept verbatim, which is what the POC report tells the customer. Set this explicitly to opt into reducing them, and prefer a lossless lever (`compact`/`tier_down`/`offload`) over `sample`/`drop`.'
+          'Default action for error-tier patterns (severity `error`/`warn`/`warning`; `critical`/`fatal` are audit-tier and always `pass`). Defaults to `pass`: error-class lines are kept verbatim, which is what the POC report tells the customer. Set this explicitly to opt into reducing them, and prefer a lossless lever (`compact`/`tier_down`/`offload`) over `sample`/`drop`.'
         ),
       standard: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
@@ -379,7 +379,7 @@ export const configureEngineSchema = {
     .boolean()
     .default(false)
     .describe(
-      'When false (default), the solver shortcuts to `pass` on error/standard/debug/synthetic rows once `target_percent` has already been met by higher-priority rows earlier in the greedy walk — minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
+      'When false (default), the solver shortcuts to `pass` on error/standard/debug/synthetic rows once `target_percent` has already been met by higher-priority rows earlier in the greedy walk: minimum work, may ignore your configured `action_defaults`. When true, the solver applies `action_defaults` to EVERY non-floor row in the matching tier, even after target is already met. Use when you want a predictable action mix (e.g., "I asked for offload, give me offload") and are OK with the policy overshooting target_percent. Surfaces in `action_default_resolution.respect_default_action` for audit.'
     ),
   reduction: z
     .enum(['soft', 'hard'])
@@ -438,7 +438,7 @@ export const configureEngineSchema = {
     .string()
     .optional()
     .describe(
-      'POC snapshot id returned by `log10x_poc_from_siem_submit` (or the from-local equivalent). When set and the snapshot carries a `cap_csv` (i.e., the POC was run with `target_percent_reduction`), the tool reads that CSV verbatim and renders it as the PR body — no Prometheus pull, no greedy re-derivation. Falls back to the live-Prometheus derivation when the snapshot has no cap_csv (or no `target_percent_reduction` was supplied to the POC).'
+      'POC snapshot id returned by `log10x_poc_from_siem_submit` (or the from-local equivalent). When set and the snapshot carries a `cap_csv` (i.e., the POC was run with `target_percent_reduction`), the tool reads that CSV verbatim and renders it as the PR body: no Prometheus pull, no greedy re-derivation. Falls back to the live-Prometheus derivation when the snapshot has no cap_csv (or no `target_percent_reduction` was supplied to the POC).'
     ),
   // ── auto-apply (industry-standard MCP write tool surface) ──
   // GitHub MCP, Linear MCP, Atlassian MCP, Notion MCP and other vendor-shipped
@@ -843,13 +843,13 @@ export async function executeConfigureEngine(
   if (args.mode !== 'refresh') {
     const missing: string[] = [];
     if (args.target_percent === undefined && args.budget_usd === undefined) {
-      missing.push('`target_percent: 30` (or `budget_usd: 1500`) — exactly one is required');
+      missing.push('`target_percent: 30` (or `budget_usd: 1500`), exactly one is required');
     }
     if (!args.destination && !args.snapshot_id) {
       missing.push('`destination: "cloudwatch"` (or splunk/datadog/elasticsearch/clickhouse/azure-monitor/gcp-logging/sumo)');
     }
     if (!args.containers || args.containers.length === 0) {
-      missing.push('`containers: ["<container_name>"]` — Phase 1 needs at least one. If you do not know the container, omit it and the tool will list candidates after this preflight clears.');
+      missing.push('`containers: ["<container_name>"]`, Phase 1 needs at least one. If you do not know the container, omit it and the tool will list candidates after this preflight clears.');
     }
     if (missing.length >= 2) {
       return notConfiguredEnvelope(
@@ -873,7 +873,7 @@ export async function executeConfigureEngine(
     if (parsed.target_percent === undefined && args.target_percent === undefined) {
       return notConfiguredEnvelope(
         'target_resolution',
-        'Refresh mode: no `# target_percent=N` preamble found in `current_csv`, and no `target_percent` arg supplied. Either pass `current_csv` from the gitops cap-CSV (preferred — it carries the originally committed target), or pass `target_percent` explicitly to seed a fresh baseline.',
+        'Refresh mode: no `# target_percent=N` preamble found in `current_csv`, and no `target_percent` arg supplied. Either pass `current_csv` from the gitops cap-CSV (preferred: it carries the originally committed target), or pass `target_percent` explicitly to seed a fresh baseline.',
         args.service
       );
     }
@@ -893,7 +893,7 @@ export async function executeConfigureEngine(
   if (args.target_percent === undefined && args.budget_usd === undefined) {
     return notConfiguredEnvelope(
       'target_resolution',
-      'Specify either `target_percent` or `budget_usd` — one is required.',
+      'Specify either `target_percent` or `budget_usd`: one is required.',
       args.service
     );
   }
@@ -1028,7 +1028,7 @@ export async function executeConfigureEngine(
       : candidateContainers.length === 1
         ? `One container found: ["${containerLabels[0]}"]. Re-call with containers: ["${containerLabels[0]}"] to derive the policy.`
         : `${candidateContainers.length} containers found. Re-call with containers: [${containerLabels.slice(0, 5).map((n) => `"${n}"`).join(', ')}${candidateContainers.length > 5 ? `, ...` : ''}] to derive the policy.`;
-    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}" — ${hint}`;
+    const resPromptHeadline = `Phase 1: pick containers for service "${args.service}": ${hint}`;
     return buildChassisEnvelope({
       tool: 'log10x_configure_engine',
       view: 'summary',
@@ -1180,7 +1180,7 @@ export async function executeConfigureEngine(
         source_disclosure: { bytes_source: 'tsdb', siem_vendor: destination },
         scope: { window: `${args.observationDays ?? 7}d`, window_basis: 'explicit' },
         payload: data,
-        human_summary: data.human_summary ?? `Refresh skipped — drift ${driftPct.toFixed(1)}% within tolerance.`,
+        human_summary: data.human_summary ?? `Refresh skipped: drift ${driftPct.toFixed(1)}% within tolerance.`,
       });
     }
   }
@@ -1650,7 +1650,7 @@ export async function executeConfigureEngine(
         `${patternsByTier[tier]} pattern${patternsByTier[tier] === 1 ? '' : 's'} ` +
         `classified as ${tier}-tier but 0 took your ${tier}='${requested}' default; ` +
         `${bypassHint}. Reading effective.${tier} as '${requested}' is a false ` +
-        `positive — the action_mix carries the truth.`;
+        `positive: the action_mix carries the truth.`;
       definedButUnusedDefaults.push({
         tier,
         requested,
@@ -2249,7 +2249,7 @@ function buildSummaryPayload(params: {
       : 'Target already met by current config; no PR command rendered (zero-change PR).';
   } else if (!target.gitops_repo) {
     prCommandSummary =
-      'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+      'gitops not configured: set `gitops.repo` in `~/.log10x/envs.json` ' +
       '(or pass `gitops_repo` on this call) to enable PR creation. ' +
       `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
       'the rendered policy is still available via `view=\'detail\'`.';
@@ -2540,7 +2540,7 @@ async function tryConsumePocSnapshot(
       prCommandSummary = 'POC snapshot reported feasibility short of target; no PR command rendered.';
     } else if (!resolved.gitops_repo) {
       prCommandSummary =
-        'gitops not configured — set `gitops.repo` in `~/.log10x/envs.json` ' +
+        'gitops not configured: set `gitops.repo` in `~/.log10x/envs.json` ' +
         '(or pass `gitops_repo` on this call) to enable PR creation. ' +
         `Delivery mode \`${args.delivery ?? 'gitops'}\` does not require it; ` +
         'the rendered policy is still available via `view=\'detail\'`.';
@@ -2758,10 +2758,10 @@ async function resolveTarget(
     return {
       error: renderError(
         'gitops repo not resolved',
-        '`configure_engine` was called with `delivery=gitops` (the default), which opens a PR against a GitHub repository — and no `gitops_repo` is resolved. Three ways forward: ' +
-        '(1) Switch delivery mode — `delivery="kubectl_configmap"` writes the policy directly to a k8s ConfigMap on the active cluster (no GitHub needed), or `delivery="stdout_only"` returns the proposed config in the response without writing anywhere. ' +
+        '`configure_engine` was called with `delivery=gitops` (the default), which opens a PR against a GitHub repository: and no `gitops_repo` is resolved. Three ways forward: ' +
+        '(1) Switch delivery mode: `delivery="kubectl_configmap"` writes the policy directly to a k8s ConfigMap on the active cluster (no GitHub needed), or `delivery="stdout_only"` returns the proposed config in the response without writing anywhere. ' +
         '(2) Stay on gitops and pass `gitops_repo` directly on this call (owner/name, e.g. `acme/log10x-config`). ' +
-        '(3) Stay on gitops and run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json` — then restart the MCP server (`log10x_dev_restart`) and retry. The `LOG10X_GH_REPO` env var on the MCP server process is also honored.'
+        '(3) Stay on gitops and run `log10x_set_gitops_repo` to write it to `~/.log10x/envs.json`: then restart the MCP server (`log10x_dev_restart`) and retry. The `LOG10X_GH_REPO` env var on the MCP server process is also honored.'
       ),
     };
   }
@@ -2828,7 +2828,7 @@ async function fetchPerPatternBytes(
   if (!envId) {
     console.warn(
       '[configure_engine] No envId resolved (envs.json `activeEnv.envId` / LOG10X_ENV_ID); ' +
-      'per-pattern bytes query will scan all tenants on shared Prom backends — ' +
+      'per-pattern bytes query will scan all tenants on shared Prom backends: ' +
       'consider setting LOG10X_ENV_ID or running log10x_discover_env first.'
     );
   }
@@ -3608,7 +3608,7 @@ export function renderPrCommand(
   out.push('gh api "${GEN_PUT_ARGS[@]}"');
   out.push('');
   if (siblings?.actionsCsv) {
-    out.push('# Commit actions.csv (sibling of caps.csv) — the engine reads the');
+    out.push('# Commit actions.csv (sibling of caps.csv): the engine reads the');
     out.push('# per-service action for the over-cap slice from THIS file; a capped');
     out.push('# container with no row here never takes its planned action.');
     out.push('ACTIONS_CUR_SHA=$(gh api "/repos/$REPO/contents/$ACTIONS_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
@@ -3622,7 +3622,7 @@ export function renderPrCommand(
     out.push('');
   }
   if (siblings?.intentJson) {
-    out.push('# Commit data/action-intent.json — per-pattern intent that');
+    out.push('# Commit data/action-intent.json: per-pattern intent that');
     out.push('# commitment_report / estimate_savings read back for attribution.');
     out.push('INTENT_CUR_SHA=$(gh api "/repos/$REPO/contents/$INTENT_PATH?ref=$BASE" --jq .sha 2>/dev/null || true)');
     out.push('INTENT_CONTENT_B64=$(base64 < "$INTENTFILE" | tr -d "\\n")');
@@ -3937,7 +3937,7 @@ function humanBytes(b: number): string {
   return `${Math.round(b)} bytes`;
 }
 function renderError(title: string, body: string): string {
-  return `# configure_engine — ${title}\n\n${body}`;
+  return `# configure_engine: ${title}\n\n${body}`;
 }
 function firstLine(s: string): string {
   return s.split('\n').find((l) => l.trim().length > 0) ?? s;

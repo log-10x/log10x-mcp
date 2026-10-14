@@ -86,7 +86,7 @@ test('the plan states how the caps\' unit was reached', () => {
   const assumed = receiverBytesStatement('assumed_overhead', 760);
   assert.ok(assumed.includes('plus 760 bytes of forwarder metadata'));
   assert.ok(receiverBytesStatement('assumed_overhead', 1200).includes('plus 1,200 bytes'));
-  for (const s of [receiverBytesStatement('records'), assumed]) assert.ok(!s.includes('—') && !/240|window/i.test(s));
+  for (const s of [receiverBytesStatement('records'), assumed]) assert.ok(!s.includes('\u2014') && !/240|window/i.test(s));
 });
 
 // ── The quiet capture ───────────────────────────────────────────────────

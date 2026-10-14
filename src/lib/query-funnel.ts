@@ -255,7 +255,7 @@ export function diagnoseFromStats(
       return {
         verdict: 'FETCH_EMPTY',
         funnel,
-        explanation: `Bloom matched ${matched} blob(s) but the object read returned 0 bytes (s3BytesRead=0) — nothing came back from storage to parse or filter.`,
+        explanation: `Bloom matched ${matched} blob(s) but the object read returned 0 bytes (s3BytesRead=0): nothing came back from storage to parse or filter.`,
         hint: 'The fetch itself returned nothing. Check the read container/bucket, the byte-range, and that the matched object still exists in storage; this is the object-read stage, not the search.',
       };
     }
@@ -263,22 +263,22 @@ export function diagnoseFromStats(
       return {
         verdict: 'PARSE_EMPTY',
         funnel,
-        explanation: `Bloom matched ${matched} blob(s) and the object read returned ${s3BytesRead} byte(s), but 0 events were parsed from them (fetchedVolume=0) — the bytes came back but the parser produced no events.`,
-        hint: 'Bytes were read but parsed into zero events — a parse/format issue, not the search. Confirm the object encoding matches the reader (e.g. NDJSON vs the expected line format) before concluding a fault.',
+        explanation: `Bloom matched ${matched} blob(s) and the object read returned ${s3BytesRead} byte(s), but 0 events were parsed from them (fetchedVolume=0): the bytes came back but the parser produced no events.`,
+        hint: 'Bytes were read but parsed into zero events: a parse/format issue, not the search. Confirm the object encoding matches the reader (e.g. NDJSON vs the expected line format) before concluding a fault.',
       };
     }
     return {
       verdict: 'FETCH_OR_PARSE_EMPTY',
       funnel,
-      explanation: `Bloom matched ${matched} blob(s) but 0 bytes of events were fetched from them (fetchedBytes=0, emptyFlushes=0, written=0) — the fetch or the parse produced nothing. This engine does not emit s3BytesRead, so fetch and parse cannot be split here; this is an observation, not a root cause.`,
-      hint: 'Not the search — candidates matched but no event bytes materialized. Splitting fetch from parse needs the engine s3BytesRead counter (added but may not be deployed here); until then trace the read+parse path. Do NOT assume an engine fault.',
+      explanation: `Bloom matched ${matched} blob(s) but 0 bytes of events were fetched from them (fetchedBytes=0, emptyFlushes=0, written=0): the fetch or the parse produced nothing. This engine does not emit s3BytesRead, so fetch and parse cannot be split here; this is an observation, not a root cause.`,
+      hint: 'Not the search: candidates matched but no event bytes materialized. Splitting fetch from parse needs the engine s3BytesRead counter (added but may not be deployed here); until then trace the read+parse path. Do NOT assume an engine fault.',
     };
   }
   // Wrote events but the caller got none → delivery/path gap.
   return {
     verdict: 'DELIVERY_INCOMPLETE',
     funnel,
-    explanation: `The results writer wrote ${resultEvents} event(s), but ${eventsReturned} reached the caller — a delivery/read-back gap (wrong prefix, or still arriving).`,
+    explanation: `The results writer wrote ${resultEvents} event(s), but ${eventsReturned} reached the caller: a delivery/read-back gap (wrong prefix, or still arriving).`,
     hint: 'Events were written but not read back. Re-fetch by queryId; if still missing, the result prefix the caller polls differs from where the writer wrote.',
   };
 }
@@ -313,7 +313,7 @@ export function diagnoseQuery(
       verdict: 'NO_MARKER',
       funnel,
       explanation:
-        'No _DONE marker found — the query is still running, or the engine never wrote a completion marker for it.',
+        'No _DONE marker found: the query is still running, or the engine never wrote a completion marker for it.',
       hint: 'Poll again with retriever_query_status. If it never appears, the query was dropped before completion (inspect the engine queue-consumer logs for a parse/handler error).',
     };
   }
@@ -325,7 +325,7 @@ export function diagnoseQuery(
       funnel,
       explanation:
         `Query returned ${eventsReturned} event(s).` +
-        (failed > 0 ? ` ${failed} worker file(s) failed to download — results are partial.` : ''),
+        (failed > 0 ? ` ${failed} worker file(s) failed to download: results are partial.` : ''),
       hint: failed > 0 ? 'Retry fetch_results to recover the failed worker files.' : 'No action needed.',
     };
   }
@@ -342,8 +342,8 @@ export function diagnoseQuery(
         ? `Matched and requested ${streamReq} stream worker(s), but ${failed} worker file(s) failed and zero events landed.`
         : `Blobs matched the bloom (${bloomHit}) but no events survived the exact predicate, so zero events came back.`,
       hint: streamFailed
-        ? 'Stream workers ran but their output is missing — check stream-worker fetch/permission errors, then retry fetch_results.'
-        : 'The bloom is approximate; the exact filter is the source of truth and it rejected everything. Probe the field\'s real values — the predicate field/value likely does not match the data.',
+        ? 'Stream workers ran but their output is missing: check stream-worker fetch/permission errors, then retry fetch_results.'
+        : 'The bloom is approximate; the exact filter is the source of truth and it rejected everything. Probe the field\'s real values: the predicate field/value likely does not match the data.',
     };
   }
 
@@ -368,7 +368,7 @@ export function diagnoseQuery(
       return {
         verdict: 'MATCHED_NO_EVENTS',
         funnel,
-        explanation: 'The scan completed but produced no events — the exact predicate matched nothing.',
+        explanation: 'The scan completed but produced no events: the exact predicate matched nothing.',
         hint: 'Probe the predicate field\'s real values against the data; the field or value likely does not match.',
       };
   }
@@ -380,8 +380,8 @@ export function diagnoseQuery(
       verdict: 'DISPATCHED_BLIND',
       funnel,
       explanation:
-        `Coordinator dispatched ${d} subquer(ies) and finished, but in remote dispatch its own scanned/matched counters stay 0 — they do NOT reflect what the subqueries found, and the subqueries do not roll their counts back into this marker. Zero events came back.`,
-      hint: 'The zero cannot be localized (resolve vs bloom vs filter) from this marker alone — this is the engine ROLLUP gap (subqueries must report scanned/matched into the coordinator _DONE). Workaround: re-run with a SMALL time range so the coordinator scans locally (non-remote) and reports precise counts.',
+        `Coordinator dispatched ${d} subquer(ies) and finished, but in remote dispatch its own scanned/matched counters stay 0: they do NOT reflect what the subqueries found, and the subqueries do not roll their counts back into this marker. Zero events came back.`,
+      hint: 'The zero cannot be localized (resolve vs bloom vs filter) from this marker alone: this is the engine ROLLUP gap (subqueries must report scanned/matched into the coordinator _DONE). Workaround: re-run with a SMALL time range so the coordinator scans locally (non-remote) and reports precise counts.',
     };
   }
 

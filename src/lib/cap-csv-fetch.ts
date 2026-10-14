@@ -84,7 +84,7 @@ export function buildCapCsvStatus(
     return {
       kind: 'not_configured',
       reason:
-        'No action source configured for this environment. Set gitops.repo in envs.json (for PR-based delivery) — or use configure_engine with delivery=kubectl_configmap to write action-intent.json directly to the cluster (no gitops repo required).',
+        'No action source configured for this environment. Set gitops.repo in envs.json (for PR-based delivery): or use configure_engine with delivery=kubectl_configmap to write action-intent.json directly to the cluster (no gitops repo required).',
       source: null,
     };
   }

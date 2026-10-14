@@ -71,7 +71,7 @@ export const offloadAddSchema = {
     .string()
     .min(1)
     .describe(
-      'Human-readable label for this destination (e.g. "primary", "regional_us", "legacy_streamer"). Must be unique within the env\'s offload_destinations list — adding a destination with a nickname already in use is refused (use log10x_offload_archive on the old one first if you want to recycle the label).'
+      'Human-readable label for this destination (e.g. "primary", "regional_us", "legacy_streamer"). Must be unique within the env\'s offload_destinations list: adding a destination with a nickname already in use is refused (use log10x_offload_archive on the old one first if you want to recycle the label).'
     ),
   type: offloadTypeSchema.describe(
     'Destination kind. `s3` / `gcs` / `azure_blob` are object stores; `file` is a local-path drop used for dev / on-prem appliances. `azure_blob` is a READ-side destination today: the Retriever indexes and queries blobs that are already in the container (Azure Monitor diagnostic exports, for example), and log10x_advise_retriever emits forwarder offload recipes for S3 and S3-compatible buckets only.'
@@ -110,7 +110,7 @@ export const offloadAddSchema = {
   status: offloadStatusSchema
     .optional()
     .describe(
-      'Initial status. Defaults to `active`. Set `draining` if you are adding a destination that is being read but no longer written to — the Retriever will still scan it but the Receiver will not target new writes there.'
+      'Initial status. Defaults to `active`. Set `draining` if you are adding a destination that is being read but no longer written to: the Retriever will still scan it but the Receiver will not target new writes there.'
     ),
 };
 
@@ -539,7 +539,7 @@ async function executeOffloadArchiveInner(
       store_kind: store.kind,
       destination: target,
       error:
-        `Cannot archive "${args.nickname}" — it is the only active offload destination on env "${config.env_id}". ` +
+        `Cannot archive "${args.nickname}": it is the only active offload destination on env "${config.env_id}". ` +
         `The Receiver requires at least one active destination to route the dropped slice to. ` +
         `Add or re-activate another destination first (current non-active: ${nonActive || 'none'}), then retry.`,
       error_code: 'last_active_destination',

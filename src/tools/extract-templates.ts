@@ -37,7 +37,7 @@ export const extractTemplatesSchema = {
       'Pairs of substrings that must NOT appear in the same template body. Use to assert the pattern extractor never merges two structurally-distinct events into one identity.'
     ),
   }).optional().describe(
-    'Optional assertions — turns extraction into validation. Each assertion reports pass/fail in the output.'
+    'Optional assertions: turns extraction into validation. Each assertion reports pass/fail in the output.'
   ),
   view: z
     .literal('summary')
@@ -313,7 +313,7 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
         const ok = !merged;
         if (ok) passed++;
         lines.push(
-          `${ok ? 'PASS' : 'FAIL'}: forbidden_merge ["${truncate(a, 40)}", "${truncate(b, 40)}"] — ${merged ? 'MERGED (templates share a body containing both)' : 'not merged (correctly separated)'}`
+          `${ok ? 'PASS' : 'FAIL'}: forbidden_merge ["${truncate(a, 40)}", "${truncate(b, 40)}"]: ${merged ? 'MERGED (templates share a body containing both)' : 'not merged (correctly separated)'}`
         );
       }
     }
@@ -356,7 +356,7 @@ async function executeExtractTemplatesInner(args: ExtractArgs, sumOut?: { data?:
           const merged = allBodies.some((body) => body.includes(a) && body.includes(b));
           const ok = !merged;
           if (ok) passed++;
-          results.push({ kind: 'forbidden_merge', ok, detail: `forbidden_merge ["${truncate(a, 40)}", "${truncate(b, 40)}"] — ${merged ? 'MERGED' : 'separated correctly'}` });
+          results.push({ kind: 'forbidden_merge', ok, detail: `forbidden_merge ["${truncate(a, 40)}", "${truncate(b, 40)}"]: ${merged ? 'MERGED' : 'separated correctly'}` });
         }
       }
       assertions = { passed, total: results.length, results };

@@ -48,7 +48,7 @@ export const savingsSchema = {
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the SAME real volumes at this destination\'s default rates instead of the connected pipeline\'s. Dollars switch to the lens destination default rate (env-configured rates never leak across destinations); the envelope stamps siem_actual vs siem_lens. Volumes/patterns are unaffected.'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary": the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
 };
 
 interface SavingsSummary {
@@ -443,7 +443,7 @@ async function executeSavingsInner(
       `Pipeline Savings (${tf.label}) · ${fmtDollar(storagePerGb)}/GB storage`
     );
   } else {
-    lines.push(`Pipeline Savings (${tf.label}) — rate unset, percent-only view`);
+    lines.push(`Pipeline Savings (${tf.label}): rate unset, percent-only view`);
   }
   lines.push('');
 
@@ -501,14 +501,14 @@ async function executeSavingsInner(
     lines.push('  menu (drop / compact / mute), are where booked savings would come');
     lines.push('  from once the pipeline is reducing volume.');
     lines.push('');
-    lines.push('  Fast first win — k8s field drops at the engine:');
+    lines.push('  Fast first win: k8s field drops at the engine:');
     lines.push('  Edit `config/modules/pipelines/run/modules/initialize/k8s/settings.yaml`');
     lines.push('  and drop these fields (high-cardinality / low-signal across CH and ES):');
     lines.push('    kubernetes.labels, kubernetes.annotations, kubernetes.pod_id,');
     lines.push('    kubernetes.docker_id, kubernetes.container_hash, kubernetes.container_image,');
     lines.push('    tenx_tag, stream, time');
     lines.push('  These are dropped engine-side (one config, all forwarders), not in each');
-    lines.push('  forwarder pipeline — keep fluent-bit / fluentd / filebeat / logstash /');
+    lines.push('  forwarder pipeline: keep fluent-bit / fluentd / filebeat / logstash /');
     lines.push('  otel-collector configs untouched.');
   } else {
     lines.push('');
@@ -518,7 +518,7 @@ async function executeSavingsInner(
       );
     } else {
       lines.push(
-        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed (rate unset — pass effective_ingest_per_gb to overlay dollars)`
+        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed (rate unset: pass effective_ingest_per_gb to overlay dollars)`
       );
     }
     // Headline reliability caveat: if any retriever chunks in the MAIN query silently
@@ -526,7 +526,7 @@ async function executeSavingsInner(
     // (Edge queries are single-shot, not chunked, so they either fully succeed or return null.)
     if (mainRetrieverCoverage < 1 && (indexedBytes > 0 || streamedBytes > 0)) {
       const pct = Math.round(mainRetrieverCoverage * 100);
-      lines.push(`  _Coverage note: only ${mainRetrieverChunksOk}/${mainRetrieverChunksTotal} retriever chunks returned (${pct}%). The Total above is a conservative underestimate — true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._`);
+      lines.push(`  _Coverage note: only ${mainRetrieverChunksOk}/${mainRetrieverChunksTotal} retriever chunks returned (${pct}%). The Total above is a conservative underestimate: true savings are equal or higher. This is caused by intermittent Prometheus server aggregation limits on the bleeding-edge day; retry in 30s for a cleaner number._`);
     }
     if (edgeInRes === null || edgeOutRes === null) {
       lines.push(`  _Coverage note: the main edge baseline query failed. The Total above may be missing the Edge savings contribution. Retry the call._`);
@@ -579,19 +579,19 @@ async function executeSavingsInner(
 
       if (!edge7dOk) {
         lines.push('');
-        lines.push(`  _Run-rate check skipped: edge 7d baseline query failed. Retry in 30s. Do NOT interpret the absence of a run-rate warning as confirmation of stable run-rate — the check could not execute._`);
+        lines.push(`  _Run-rate check skipped: edge 7d baseline query failed. Retry in 30s. Do NOT interpret the absence of a run-rate warning as confirmation of stable run-rate: the check could not execute._`);
       } else if (isRamping) {
         // Partial or full — if the partial says ramping, the full definitely says ramping.
         const coverageNote = fullCoverage
           ? ''
-          : ` _(retriever coverage: ${retriever7dChunksOk}/${retriever7dChunksTotal} chunks — this is a conservative underestimate; true rate is equal or higher)_`;
+          : ` _(retriever coverage: ${retriever7dChunksOk}/${retriever7dChunksTotal} chunks: this is a conservative underestimate; true rate is equal or higher)_`;
         const annual7dDisclosed: DisclosedDollarValue | null =
           annual7d != null
             ? buildDisclosedDollarValue(annual7d, rateSource, siemLabel, costPerGb)
             : null;
         const dollarClause =
           annual7dDisclosed != null
-            ? `${fmtDisclosedDollar(annual7dDisclosed)}/yr — `
+            ? `${fmtDisclosedDollar(annual7dDisclosed)}/yr: `
             : '';
         lines.push('');
         lines.push(`  **Run-rate note**: The last 7 days project to ${dollarClause}${Math.round(rampRatio)}× higher than the ${tf.label} trailing average. Volume has been ramping. Use the 7-day figure for forward-looking projections.${coverageNote}`);
@@ -607,7 +607,7 @@ async function executeSavingsInner(
             ? `${fmtDisclosedDollar(annual7dDisclosed)}/yr `
             : '';
         lines.push('');
-        lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${dollarClause}(${rampRatio.toFixed(1)}× trailing), which is below the 2× ramp-up threshold — but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
+        lines.push(`  _Run-rate check inconclusive: only ${retriever7dChunksOk}/${retriever7dChunksTotal} retriever chunks returned (coverage ${Math.round(retriever7dCoverage * 100)}%). Partial math projects ${dollarClause}(${rampRatio.toFixed(1)}× trailing), which is below the 2× ramp-up threshold: but the true value may be higher due to missing chunks. Retry in 30s to confirm whether the environment is stable or ramping._`);
       }
       // Full coverage AND ramp <= threshold → stable. No note needed.
     }
@@ -724,7 +724,7 @@ async function executeSavingsInner(
           method: 'linear_extrapolation',
           window_days: tf.days,
           scale_factor: 365 / tf.days,
-          note: `annual = realized * (365 / ${tf.days}) = realized * ${(365 / tf.days).toFixed(3)}. Linear extrapolation from the observed window; not seasonality-adjusted. For "/wk" expectations note that 365/7 = 52.143, not 52 — a "$X/wk × 52" cross-check will drift from this figure by ~0.275%.`,
+          note: `annual = realized * (365 / ${tf.days}) = realized * ${(365 / tf.days).toFixed(3)}. Linear extrapolation from the observed window; not seasonality-adjusted. For "/wk" expectations note that 365/7 = 52.143, not 52: a "$X/wk × 52" cross-check will drift from this figure by ~0.275%.`,
         },
         has_data: hasData,
       },

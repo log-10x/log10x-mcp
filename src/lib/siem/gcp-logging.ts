@@ -208,7 +208,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       const body = await res.text().catch(() => '');
       return {
         errorNote:
-          `GCP Monitoring HTTP ${res.status} — SA needs roles/monitoring.viewer.${body ? ' ' + body.slice(0, 120) : ''}`,
+          `GCP Monitoring HTTP ${res.status}: SA needs roles/monitoring.viewer.${body ? ' ' + body.slice(0, 120) : ''}`,
       };
     }
     const data = (await res.json()) as {
@@ -216,7 +216,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     };
     const series = data.timeSeries || [];
     if (series.length === 0) {
-      return { errorNote: 'GCP Monitoring: billing/monthly_bytes_ingested returned no data — project may have <24h of logs' };
+      return { errorNote: 'GCP Monitoring: billing/monthly_bytes_ingested returned no data, project may have <24h of logs' };
     }
     // Each series is a (resource, metric-label) combination. Sum across
     // series at the LATEST point, then divide by days-so-far in month.

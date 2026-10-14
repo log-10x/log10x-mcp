@@ -51,7 +51,7 @@ export async function checkDeps(vendor: SiemId, opts: DepCheckOptions): Promise<
 export function renderDepCheckResult(result: DepCheckResult): string {
   const lines: string[] = [];
   const vendorLabel = SIEM_DISPLAY_NAMES[result.vendor] || result.vendor;
-  lines.push(`Dependency Check — ${vendorLabel} (executed)`);
+  lines.push(`Dependency Check: ${vendorLabel} (executed)`);
   lines.push('');
   const total = result.matches.length;
   if (total === 0) {
@@ -77,7 +77,7 @@ export function renderDepCheckResult(result: DepCheckResult): string {
     lines.push('| Type | Name | Matched in | Link |');
     lines.push('|---|---|---|---|');
     for (const m of result.matches) {
-      const link = m.url ? `[open](${m.url})` : '—';
+      const link = m.url ? `[open](${m.url})` : '-';
       lines.push(`| ${m.type} | ${escapePipe(m.name)} | ${m.matchedIn.join(', ')} | ${link} |`);
     }
     lines.push('');
@@ -89,7 +89,7 @@ export function renderDepCheckResult(result: DepCheckResult): string {
     lines.push('');
   }
 
-  lines.push(`_Scanned at ${result.scannedAt}. Read-only — no SIEM state was modified._`);
+  lines.push(`_Scanned at ${result.scannedAt}. Read-only: no SIEM state was modified._`);
   return lines.join('\n');
 }
 

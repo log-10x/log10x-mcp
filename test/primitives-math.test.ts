@@ -333,7 +333,7 @@ test('inSetWithin: exact bucket-step neighbor matches', () => {
   assert.equal(inSetWithin(s, 190, 10), true);
 });
 
-test('inSetWithin: outside step distance — even by 1 — does not match', () => {
+test('inSetWithin: outside step distance (even by 1) does not match', () => {
   const s = new Set([100, 200, 300]);
   // Query 211 with step 10: check 211, 201, 221. None in set.
   assert.equal(inSetWithin(s, 211, 10), false);
@@ -507,7 +507,7 @@ test('anchorPhaseGap: NaN in either input → returns 1 (defensive max-gap)', ()
   assert.ok(Number.isNaN(gap) || gap === 1, `expected NaN or 1 (defensive), got ${gap}`);
 });
 
-test('peakOf: mixed null and zero — zero wins over null, ties pick first', () => {
+test('peakOf: mixed null and zero, zero wins over null, ties pick first', () => {
   // Zero is a valid value; null is "no data." Make sure zero is selectable
   // as a peak when everything else is null.
   const points = [
@@ -519,7 +519,7 @@ test('peakOf: mixed null and zero — zero wins over null, ties pick first', () 
   assert.deepEqual(peak, { ts: 200, v: 0 });
 });
 
-test('peakOf: negative values only — picks the LEAST negative (closest to zero)', () => {
+test('peakOf: negative values only, picks the LEAST negative (closest to zero)', () => {
   // For rate metrics this won't happen, but for gauge deltas or
   // anomaly scores it can. The peak is still "the max value."
   const points = [

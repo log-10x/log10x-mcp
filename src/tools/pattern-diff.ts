@@ -78,13 +78,13 @@ export const patternDiffSchema = {
     .min(10)
     .max(600)
     .default(60)
-    .describe('Time spread for clustering co-emergent patterns. Default 60s — tight enough to fingerprint a single deploy.'),
+    .describe('Time spread for clustering co-emergent patterns. Default 60s: tight enough to fingerprint a single deploy.'),
   min_co_emergence_cluster_size: z
     .number()
     .min(2)
     .max(20)
     .default(3)
-    .describe('Minimum cluster size to emit. Default 3 — 2 patterns sharing a timestamp is often coincidence.'),
+    .describe('Minimum cluster size to emit. Default 3: 2 patterns sharing a timestamp is often coincidence.'),
   analyzerCost: z.number().optional().describe('stack ingestion cost in $/GB. Auto-detected from profile.'),
   environment: z.string().optional().describe('Environment nickname (for multi-env setups).'),
   view: z.enum(['summary', 'markdown']).default('summary').describe('Output format.'),
@@ -245,7 +245,7 @@ export async function executePatternDiff(
         co_emergence_clusters: [],
         totals: { new: 0, retired: 0, persistent: 0, re_emerged: 0 },
       },
-      human_summary: `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection — widen the window or wait for ingestion to catch up.`,
+      human_summary: `No pattern data over ${tf.label}. Patterns surface after ~24h of metric collection: widen the window or wait for ingestion to catch up.`,
       telemetry,
     });
   }
@@ -528,12 +528,12 @@ export async function executePatternDiff(
   const callout =
     clusters.length > 0
       ? `${clusters.length} group${clusters.length === 1 ? '' : 's'} of patterns appearing together ` +
-        `(${minClusterSize}+ patterns first appearing within ~${coEmergeWindowSec}s of each other) — ` +
+        `(${minClusterSize}+ patterns first appearing within ~${coEmergeWindowSec}s of each other): ` +
         `consider checking your deploy log around the group timestamps.`
       : reEmergedHashes.length > 0
       ? highChurn
-        ? `High pattern churn this window — ${reEmergedHashes.length} patterns blinked back after silence (typical for a sparse env). Showing the top ${reEmergedRows.length} by silence-gap and current volume.`
-        : `${reEmergedHashes.length} pattern${reEmergedHashes.length === 1 ? '' : 's'} re-emerged after being silent — worth a look before assuming a regression.`
+        ? `High pattern churn this window: ${reEmergedHashes.length} patterns blinked back after silence (typical for a sparse env). Showing the top ${reEmergedRows.length} by silence-gap and current volume.`
+        : `${reEmergedHashes.length} pattern${reEmergedHashes.length === 1 ? '' : 's'} re-emerged after being silent: worth a look before assuming a regression.`
       : undefined;
 
   const totalChange =
@@ -560,14 +560,14 @@ export async function executePatternDiff(
       : '';
   const humanSummary =
     status === 'no_signal'
-      ? `No pattern changes detected across ${afterLabel} vs ${beforeLabel}. The diff is structurally empty — either the workload is steady or the window is too narrow.${calibTag}`
+      ? `No pattern changes detected across ${afterLabel} vs ${beforeLabel}. The diff is structurally empty: either the workload is steady or the window is too narrow.${calibTag}`
       : `Pattern diff over ${tf.label}: ${trueNewHashes.length} new, ${retiredHashes.length} retired, ${reEmergedHashes.length} re-emerged, ${persistentHashes.length} persistent. ` +
         (clusters.length > 0
-          ? `${clusters.length} group${clusters.length === 1 ? '' : 's'} of patterns appearing together flagged — check your deploy log around the group timestamps. `
+          ? `${clusters.length} group${clusters.length === 1 ? '' : 's'} of patterns appearing together flagged: check your deploy log around the group timestamps. `
           : reEmergedHashes.length > 0
           ? highChurn
-            ? `High churn in a sparse env — showing the top ${reEmergedRows.length} re-emerged by silence gap and volume; the rest are likely sparse-emission blinks. `
-            : `Re-emerged patterns ranked by silence gap × current volume — start at the top. `
+            ? `High churn in a sparse env: showing the top ${reEmergedRows.length} re-emerged by silence gap and volume; the rest are likely sparse-emission blinks. `
+            : `Re-emerged patterns ranked by silence gap × current volume: start at the top. `
           : `Inspect the top new pattern with log10x_pattern_examples. `) +
         calibTag;
 
@@ -586,7 +586,7 @@ export async function executePatternDiff(
           {
             tool: 'log10x_pattern_trend',
             args: { pattern: reEmergedRows[0].pattern_hash, timeRange: '30d' },
-            reason: "inspect the re-emerged pattern's full trajectory — when did it go silent, when did it come back",
+            reason: "inspect the re-emerged pattern's full trajectory: when did it go silent, when did it come back",
           },
         ]
       : []),
@@ -603,7 +603,7 @@ export async function executePatternDiff(
 
   if (view === 'markdown') {
     const lines = [
-      `## Pattern diff — ${tf.label}`,
+      `## Pattern diff: ${tf.label}`,
       ``,
       `Comparison: ${afterLabel} vs ${beforeLabel}`,
       ``,
@@ -612,7 +612,7 @@ export async function executePatternDiff(
     if (clusters.length > 0) {
       lines.push(
         ``,
-        `**Groups of patterns appearing together** (${clusters.length}) — likely tied to deploys or config changes:`,
+        `**Groups of patterns appearing together** (${clusters.length}): likely tied to deploys or config changes:`,
       );
       // Format: "Group N (appeared around HH:MM UTC, K patterns)" followed by
       // per-pattern lines `service · severity · short descriptor`.
@@ -706,7 +706,7 @@ export async function executePatternDiff(
       return `${hh}:${mm} UTC`;
     };
     const sumLines: string[] = [
-      `**Groups of patterns appearing together** (${clusters.length}) — likely tied to deploys or config changes:`,
+      `**Groups of patterns appearing together** (${clusters.length}): likely tied to deploys or config changes:`,
     ];
     clusters.forEach((c, idx) => {
       const when = fmtClusterTime(c.first_seen_window_ts[0]);

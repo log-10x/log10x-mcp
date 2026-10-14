@@ -61,7 +61,7 @@ export const productQaSchema = {
     .string()
     .optional()
     .describe(
-      'Natural-language query — prefer this for how-to / content questions. Examples: ' +
+      'Natural-language query: prefer this for how-to / content questions. Examples: ' +
       '"what does the kustomize overlay patch", "how is pattern_hash computed". ' +
       'When `topic` is also set, ranks that page\'s sections by this query.',
     ),

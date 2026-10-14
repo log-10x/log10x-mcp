@@ -82,7 +82,7 @@ export async function fetchCloudWatchInventory(): Promise<VendorInventory> {
       pages++;
     } while (nextToken && pages < 20);
     if (pages >= 20) {
-      inv.notes.push('metric-filter scan capped at 20 pages — partial coverage on very large accounts');
+      inv.notes.push('metric-filter scan capped at 20 pages: partial coverage on very large accounts');
     }
   } catch (e) {
     inv.notes.push(`describeMetricFilters failed: ${(e as Error).message.slice(0, 200)}`);
@@ -118,7 +118,7 @@ export async function fetchCloudWatchInventory(): Promise<VendorInventory> {
       pages++;
     } while (nextToken && pages < 20);
     if (pages >= 20) {
-      inv.notes.push('alarm scan capped at 20 pages — partial coverage on very large accounts');
+      inv.notes.push('alarm scan capped at 20 pages: partial coverage on very large accounts');
     }
   } catch (e) {
     inv.notes.push(`describeAlarms failed: ${(e as Error).message.slice(0, 200)}`);
@@ -149,10 +149,10 @@ export async function fetchCloudWatchInventory(): Promise<VendorInventory> {
       pages++;
     } while (nextToken && pages < 10);
     if (pages >= 10) {
-      inv.notes.push('dashboard scan capped at 10 pages — partial coverage');
+      inv.notes.push('dashboard scan capped at 10 pages: partial coverage');
     }
     inv.notes.push(
-      'dashboard scan matches name only (full-body match needs per-dashboard GetDashboard round-trips — fall back to bash for deep scan)'
+      'dashboard scan matches name only (full-body match needs per-dashboard GetDashboard round-trips: fall back to bash for deep scan)'
     );
   } catch (e) {
     inv.notes.push(`listDashboards failed: ${(e as Error).message.slice(0, 200)}`);

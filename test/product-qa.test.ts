@@ -68,7 +68,7 @@ Where log processing happens, what data leaves your network, and how AI is confi
 ??? tenx-dataprotection "What data does Log10x see"
 
     Zero log content. When you opt in to send metrics to the Log10x SaaS,
-    only aggregated counts and byte volumes leave your network — never raw
+    only aggregated counts and byte volumes leave your network: never raw
     log lines, never PII.
 `;
 

@@ -220,7 +220,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     const tables = resp.tables || [];
     const row = tables[0]?.rows?.[0];
     if (!row) {
-      return { errorNote: 'Azure Usage table empty — workspace may have <7d data or billing not enabled' };
+      return { errorNote: 'Azure Usage table empty: workspace may have <7d data or billing not enabled' };
     }
     const dailyMb = Number(row[0]);
     if (!Number.isFinite(dailyMb) || dailyMb <= 0) {

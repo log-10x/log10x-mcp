@@ -414,7 +414,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
     const data = (await resp.json()) as { results?: Array<{ bytes?: string }> };
     const results = data.results || [];
     if (results.length === 0) {
-      return { errorNote: 'Splunk _internal license_usage returned 0 rows — may lack _internal read capability' };
+      return { errorNote: 'Splunk _internal license_usage returned 0 rows: may lack _internal read capability' };
     }
     const days = results.length;
     const totalBytes = results.reduce((s, r) => s + Number(r.bytes || 0), 0);

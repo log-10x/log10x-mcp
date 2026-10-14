@@ -331,7 +331,7 @@ function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
       applicable: caps.cost_attribution_available,
       gated_reason: caps.cost_attribution_available
         ? undefined
-        : `Requires Reporter tier (cost attribution). You are at tier "${tier}". The Reporter is a zero-touch DaemonSet — install it via log10x_advise_install.`,
+        : `Requires Reporter tier (cost attribution). You are at tier "${tier}". The Reporter is a zero-touch DaemonSet: install it via log10x_advise_install.`,
       routes_to: 'log10x_cost_options',
     },
     {
@@ -381,13 +381,13 @@ function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
         }
       : {
           action: 'install_retriever',
-          label: 'Set up the overflow bucket (your own S3) — diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
+          label: 'Set up the overflow bucket (your own S3): diverts noisy patterns out of the SIEM for cost savings; events stay recoverable',
           applicable: true,
           routes_to: 'log10x_advise_retriever',
         },
     {
       action: 'orient_only',
-      label: 'Just orient me — explain what 10x does and what I should ask next',
+      label: 'Just orient me: explain what 10x does and what I should ask next',
       applicable: true,
       routes_to: 'log10x_doctor',
     },
@@ -418,7 +418,7 @@ function buildJourneyPhases(tier: Tier, caps: CapabilitySummary): JourneyPhase[]
     {
       phase: 1,
       name: 'Visibility',
-      description: 'Reporter installed — every pattern fingerprinted with cost attribution metrics flowing.',
+      description: 'Reporter installed: every pattern fingerprinted with cost attribution metrics flowing.',
       current_status: reporterComplete ? 'complete' : 'not_started',
     },
     {
@@ -436,7 +436,7 @@ function buildJourneyPhases(tier: Tier, caps: CapabilitySummary): JourneyPhase[]
     {
       phase: 4,
       name: 'Overflow',
-      description: 'Overflow bucket (your own S3) sits between the forwarder and the SIEM — engine-marked noisy patterns route here instead of paying SIEM ingest. Events stay recoverable via fetch-back on demand (incident / audit).',
+      description: 'Overflow bucket (your own S3) sits between the forwarder and the SIEM: engine-marked noisy patterns route here instead of paying SIEM ingest. Events stay recoverable via fetch-back on demand (incident / audit).',
       current_status: statusFor(retrieverComplete, reporterComplete),
     },
     {
@@ -459,16 +459,16 @@ function renderVerbatim(args: {
   lens?: SiemLensResolution;
 }): string {
   const tierLine = {
-    dev: 'Dev CLI — local binary only. No pipeline infrastructure detected.',
-    reporter: 'Reporter — cost attribution metrics flowing; in-path actions not yet wired.',
-    receiver: 'Receiver — in-path; compact / sample / drop are deployable as cap-CSV plans.',
-    retriever: 'Retriever — full stack. Overflow bucket is wired between forwarder and SIEM; fetch-back available on demand.',
+    dev: 'Dev CLI: local binary only. No pipeline infrastructure detected.',
+    reporter: 'Reporter: cost attribution metrics flowing; in-path actions not yet wired.',
+    receiver: 'Receiver: in-path; compact / sample / drop are deployable as cap-CSV plans.',
+    retriever: 'Retriever: full stack. Overflow bucket is wired between forwarder and SIEM; fetch-back available on demand.',
   }[args.tier];
 
   const phaseLines = args.phases
     .map((p) => {
       const mark = p.current_status === 'complete' ? '[x]' : p.current_status === 'in_progress' ? '[~]' : '[ ]';
-      return `  ${mark} ${p.phase}. ${p.name} — ${p.description}`;
+      return `  ${mark} ${p.phase}. ${p.name}: ${p.description}`;
     })
     .join('\n');
 
@@ -491,10 +491,10 @@ function renderVerbatim(args: {
     ? `Stack: ${args.lens.display} (selected) · pipeline destination: \`${args.siemDetected ?? 'unknown'}\`. Volumes are real; pricing follows ${describeDefaultRate(args.lens.effective)}.`
     : args.siemDetected
       ? `SIEM credentials detected: \`${args.siemDetected}\`.`
-      : 'No SIEM credentials detected — dependency_check will return paste-ready commands instead of executed scans.';
+      : 'No SIEM credentials detected: dependency_check will return paste-ready commands instead of executed scans.';
 
   const demoLine = isDemoFallbackActive()
-    ? `_Demo dataset (read-only) — the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
+    ? `_Demo dataset (read-only): the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
     : null;
 
   return [
@@ -543,7 +543,7 @@ export async function executeLog10xStart(
     const shortVerbatim = [
       `### Log10x orientation (already surfaced)`,
       ``,
-      `You already saw the orientation envelope earlier in this session — proceeding to the next step.`,
+      `You already saw the orientation envelope earlier in this session: proceeding to the next step.`,
       ``,
       `_(If you want to re-see the full menu, ask "show me the orientation again" and the agent will re-call log10x_start with session_state=fresh.)_`,
     ].join('\n');
@@ -559,7 +559,7 @@ export async function executeLog10xStart(
     const envelope = {
       must_render_verbatim: shortVerbatim,
       must_ask_user: {
-        question: 'Already oriented — proceeding to the next step the user picked earlier.',
+        question: 'Already oriented: proceeding to the next step the user picked earlier.',
         options: [],
       },
       forbidden_next_actions: [] as string[],
@@ -571,7 +571,7 @@ export async function executeLog10xStart(
       tool: 'log10x_start',
       view: 'summary',
       summary: {
-        headline: 'Already oriented this session — short envelope returned, no probes run.',
+        headline: 'Already oriented this session: short envelope returned, no probes run.',
       },
       data: envelope,
       actions: [],
@@ -651,7 +651,7 @@ export async function executeLog10xStart(
 
   const mustAskUser: MustAskUser = {
     question:
-      'Before I run any other tool, pick the path that matches what you want — answer with the number from the menu above.',
+      'Before I run any other tool, pick the path that matches what you want: answer with the number from the menu above.',
     options: menu.map((m, i) => `${i + 1}. ${m.label}${m.applicable ? '' : ` _(not available: ${m.gated_reason})_`}`),
   };
 

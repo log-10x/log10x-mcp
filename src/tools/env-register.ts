@@ -80,7 +80,7 @@ export const envRegisterSchema = {
     'SIEM the logs ultimately land in. Drives action eligibility (e.g. tier_down is Datadog/CloudWatch/Azure-only) and explainer copy.'
   ),
   streamer: streamerConfigSchema.describe(
-    'Streamer endpoint — the in-cluster service that fronts the Receiver. `url` is required; `target_path` is the optional sub-path under a shared ingress.'
+    'Streamer endpoint: the in-cluster service that fronts the Receiver. `url` is required; `target_path` is the optional sub-path under a shared ingress.'
   ),
   retriever: retrieverConfigSchema.describe(
     'Retriever endpoint + the four SQS queues (index/subquery/stream/query) it coordinates on. `input_bucket` is the customer-owned S3 offload bucket the Retriever fetches from.'
@@ -89,12 +89,12 @@ export const envRegisterSchema = {
     .array(offloadDestinationSchema)
     .optional()
     .describe(
-      'Where the Receiver may write objects when a pattern is tagged `offload`. Omit for a default single-destination placeholder (nickname "primary", type "s3", status "active") — the agent can update it later with the real bucket via a follow-up register call.'
+      'Where the Receiver may write objects when a pattern is tagged `offload`. Omit for a default single-destination placeholder (nickname "primary", type "s3", status "active"): the agent can update it later with the real bucket via a follow-up register call.'
     ),
   target_store: targetStoreEnum
     .optional()
     .describe(
-      'Pin the persistence backend. Omit to auto-pick the first available in chain (k8s → aws_ssm → gcp_sm → azure_ac → local). When set, the tool refuses if the named store is unavailable rather than silently falling back — "I asked for SSM" must mean SSM.'
+      'Pin the persistence backend. Omit to auto-pick the first available in chain (k8s → aws_ssm → gcp_sm → azure_ac → local). When set, the tool refuses if the named store is unavailable rather than silently falling back: "I asked for SSM" must mean SSM.'
     ),
 };
 
@@ -181,7 +181,7 @@ async function executeEnvRegisterInner(args: EnvRegisterArgs): Promise<EnvRegist
             nickname: 'primary',
             type: 's3',
             status: 'active',
-            note: 'placeholder — overwrite with the real bucket via a follow-up env_register call',
+            note: 'placeholder: overwrite with the real bucket via a follow-up env_register call',
           },
         ];
 
@@ -250,7 +250,7 @@ async function executeEnvRegisterInner(args: EnvRegisterArgs): Promise<EnvRegist
       nickname: args.nickname,
       availability_probe: probe,
       error:
-        'no env-config store was available — every backend in the chain reported unavailable. ' +
+        'no env-config store was available: every backend in the chain reported unavailable. ' +
         'Local file store should always be available; this likely means HOME is unwriteable or the chain was overridden.',
     };
   }

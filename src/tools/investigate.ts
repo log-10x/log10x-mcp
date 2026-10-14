@@ -128,7 +128,7 @@ export const investigateSchema = {
     .enum(['shallow', 'normal', 'deep'])
     .default('normal')
     .describe('`shallow`: anchor service only. `normal` (default): anchor service + immediate dependencies. `deep`: full environment-wide.'),
-  environment: z.string().optional().describe('Environment nickname — required in multi-env setups.'),
+  environment: z.string().optional().describe('Environment nickname: required in multi-env setups.'),
   use_bytes: z.boolean().default(false).describe('Use byte-based rate instead of event-count. Event-count is strongly preferred; use only if the Reporter does not emit the count metric.'),
 };
 
@@ -297,8 +297,8 @@ export function buildHumanSummary(
     // crossed our default match-strength floor — which may or may not
     // be the right floor for this data. Distinguish.
     const noMatchClause = thresholdBasis === 'unvalidated_default'
-      ? `Nothing crossed our default match-strength floor (not yet tuned for your data) — could be that nothing related actually moved, or the floor is set too high for this dataset.`
-      : `Nothing did — the issue may be isolated, or the window's too short.`;
+      ? `Nothing crossed our default match-strength floor (not yet tuned for your data): could be that nothing related actually moved, or the floor is set too high for this dataset.`
+      : `Nothing did: the issue may be isolated, or the window's too short.`;
     return `${lead} to see if anything else in your environment moved at the same time. ${noMatchClause} Try widening to 24h.`;
   }
   if (status === 'error') {
@@ -325,7 +325,7 @@ export function buildHumanSummary(
     maxHintChars: 60,
     fallback: parsed.leadPattern,
   });
-  return `Strongest evidence on "${sp}" over ${window}: ${leadLabel} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause — verify via traces or deploy timeline before acting.`;
+  return `Strongest evidence on "${sp}" over ${window}: ${leadLabel} ${lagFragment}.${confFragment} ${parsed.chainLength} chain step(s), ${parsed.coMoverCount} additional related metric(s). This is correlation, not proven cause: verify via traces or deploy timeline before acting.`;
 }
 
 /**
@@ -550,7 +550,7 @@ export async function executeInvestigate(
         // pattern. The offload signal is still credible (from the
         // dropped cohort) — surface the pattern, omit the percent.
         if (t.dropped_share_pct_24h === null || t.kept_timed_out) {
-          return `\`${t.pattern}\` (share n/a — kept query slow)`;
+          return `\`${t.pattern}\` (share n/a: kept query slow)`;
         }
         return `\`${t.pattern}\` (${t.dropped_share_pct_24h.toFixed(0)}%)`;
       })
@@ -592,7 +592,7 @@ export async function executeInvestigate(
     md.length > 1024 &&
     (/^### Co-drifting patterns/m.test(md) || /^### Temporal chain/m.test(md));
   const envelopeConsistencyWarning = envelopeIsLying
-    ? `Envelope reports status=no_signal but report_markdown carries a populated investigation section (${md.length} chars). Parser likely failed to recognize the renderer's output shape — trust the structured fields, treat report_markdown as suspect.`
+    ? `Envelope reports status=no_signal but report_markdown carries a populated investigation section (${md.length} chars). Parser likely failed to recognize the renderer's output shape: trust the structured fields, treat report_markdown as suspect.`
     : null;
 
   const human_summary = buildHumanSummary(
@@ -692,8 +692,8 @@ export async function executeInvestigate(
               kind: 'temporal_co_mover',
               suggestion:
                 parsed.leadLagSeconds !== null && parsed.leadLagSeconds < 0
-                  ? 'Verify with traces or deploy timeline at the inflection — temporal lead suggests possible upstream cause, NOT proven cause.'
-                  : 'Co-movement is concurrent — could be common cause; verify with another signal.',
+                  ? 'Verify with traces or deploy timeline at the inflection: temporal lead suggests possible upstream cause, NOT proven cause.'
+                  : 'Co-movement is concurrent: could be common cause; verify with another signal.',
             },
           ]
         : [],
@@ -860,7 +860,7 @@ async function executeInvestigateInner(
       );
       if (!probe || probe.status !== 'success' || probe.data.result.length === 0) {
         useBytesMetric = true;
-        metricWarning = 'event-count metric unavailable — falling back to bytes. Rate curves may be skewed by single large events (a stack-trace burst looks like a volume spike). Deploy the Reporter counter emission to upgrade.';
+        metricWarning = 'event-count metric unavailable: falling back to bytes. Rate curves may be skewed by single large events (a stack-trace burst looks like a volume spike). Deploy the Reporter counter emission to upgrade.';
       }
     } catch {
       // Non-fatal — default to event count optimistically.
@@ -943,11 +943,11 @@ async function executeInvestigateInner(
     if (historical) {
       lines.push(
         `**Result**: "${args.starting_point}" is a known pattern but is silent in the requested window (\`${args.window}\`). ` +
-        `It has fired within the last 30d — widen the window to investigate.`,
+        `It has fired within the last 30d: widen the window to investigate.`,
         '',
         '**Try next**:',
-        `- \`log10x_investigate({ starting_point: '${args.starting_point}', window: '7d' })\` — re-run with a wider window`,
-        `- \`log10x_pattern_trend({ pattern: '${args.starting_point}', timeRange: '30d' })\` — see when it last fired`,
+        `- \`log10x_investigate({ starting_point: '${args.starting_point}', window: '7d' })\`, re-run with a wider window`,
+        `- \`log10x_pattern_trend({ pattern: '${args.starting_point}', timeRange: '30d' })\`, see when it last fired`,
       );
     } else {
       // Hash-shaped input where the pattern_hash → name lookup also
@@ -964,12 +964,12 @@ async function executeInvestigateInner(
         /[a-z]/.test(args.starting_point.trim());
       if (looksLikeHashSp) {
         lines.push(
-          `**Result**: Could not resolve "${args.starting_point}" — looked up by pattern_hash, none found in the last 7d window of metrics. The hash may be from a different environment, outside retention, or mistyped.`,
+          `**Result**: Could not resolve "${args.starting_point}": looked up by pattern_hash, none found in the last 7d window of metrics. The hash may be from a different environment, outside retention, or mistyped.`,
           '',
           '**Try next**:',
-          `- \`log10x_top_patterns({ timeRange: '7d' })\` — surface active pattern hashes to copy a known-good one`,
-          `- \`log10x_event_lookup({ pattern_hash: '${args.starting_point}' })\` — same hash lookup, different cost/services view`,
-          `- \`log10x_pattern_examples({ pattern_hash: '${args.starting_point}' })\` — pull live SIEM events keyed on this hash if it's still in the analyzer`,
+          `- \`log10x_top_patterns({ timeRange: '7d' })\`, surface active pattern hashes to copy a known-good one`,
+          `- \`log10x_event_lookup({ pattern_hash: '${args.starting_point}' })\`: same hash lookup, different cost/services view`,
+          `- \`log10x_pattern_examples({ pattern_hash: '${args.starting_point}' })\`: pull live SIEM events keyed on this hash if it's still in the analyzer`,
         );
       } else {
         lines.push(
@@ -977,7 +977,7 @@ async function executeInvestigateInner(
           '',
           '**Supported inputs**:',
           '- A raw log line (will be resolved to a pattern and matched by structural identity)',
-          '- A pattern identity (symbolMessage / pattern_hash — 11-char base64url)',
+          '- A pattern identity (symbolMessage / pattern_hash: 11-char base64url)',
           '- A service name',
           '- The literal string `"environment"`, `"all"`, or `"audit"` for an env-wide sweep',
           '',
@@ -1054,7 +1054,7 @@ async function executeInvestigateInner(
               agentOnly(`To diagnose the live issue, re-run log10x_investigate with one of the currently-active patterns above as starting_point instead of the historical anchor.`);
           } else {
             recencyWarning =
-              `> **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes. No other patterns currently active in \`${resolution.service}\` either — service may be stable and the anchor is purely historical cost.`;
+              `> **Anchor may be historical**: \`${resolution.anchor}\` has not fired in the last 5 minutes. No other patterns currently active in \`${resolution.service}\` either: service may be stable and the anchor is purely historical cost.`;
           }
         } else {
           recencyWarning =
@@ -1302,7 +1302,7 @@ function buildInvestigateNextActions(
     {
       tool: 'log10x_metrics_that_moved',
       args: { anchor_type: 'log10x_pattern', anchor, ...(window ? { window } : {}) },
-      reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the anchor\'s incident phase. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay on the kept set',
+      reason: 'first step of cross-pillar investigation: filter customer metrics to those that move with the anchor\'s incident phase. Compose with log10x_rank_by_shape_similarity + log10x_metric_overlay on the kept set',
     },
     {
       tool: 'log10x_pattern_trend',
@@ -1754,7 +1754,7 @@ async function renderEnvironmentAudit(
         if (r.collapsedCount && r.collapsedCount > 1) {
           anyCollapsed = true;
           lines.push(
-            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`** — each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: ${patternDisplay(r.pattern).title}`
+            `- **${r.collapsedCount} high-cardinality variants in \`${r.service}\`**: each ${label} ${direction} vs ${effectiveBaselineOffset} ago (collapsed: same rate change within ±5%, likely variable-value rotation rather than a service incident). Example: ${patternDisplay(r.pattern).title}`
           );
         } else {
           lines.push(`- \`${r.service}\` · ${patternDisplay(r.pattern).title} · ${label} ${direction} vs ${effectiveBaselineOffset} ago`);
@@ -1771,10 +1771,10 @@ async function renderEnvironmentAudit(
       lines.push('**Next action**: investigate the top mover individually:');
       lines.push(`\`log10x_investigate({ starting_point: '${topPatternForChain}', window: '${args.window}' })\``);
       lines.push('');
-      lines.push('_Note: declines (negative %) are real signals — a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._');
+      lines.push('_Note: declines (negative %) are real signals, a pattern that stopped firing may indicate a service crashed, a monitor was muted, or a real upstream change. Treat them the same way you treat spikes._');
       if (anyCollapsed) {
         lines.push('');
-        lines.push('_**Collapsed-variant note**: rows labeled "N high-cardinality variants" represent multiple pattern identities from the same service that are moving by nearly identical magnitudes. This is typically caused by high-cardinality variable values (usernames, UUIDs, session IDs) leaking into the pattern identity — the engine fingerprinter should have tokenized these out but did not. Treat as one signal, not N. If this represents a real service-level incident, drill into any one of the collapsed patterns directly._');
+        lines.push('_**Collapsed-variant note**: rows labeled "N high-cardinality variants" represent multiple pattern identities from the same service that are moving by nearly identical magnitudes. This is typically caused by high-cardinality variable values (usernames, UUIDs, session IDs) leaking into the pattern identity: the engine fingerprinter should have tokenized these out but did not. Treat as one signal, not N. If this represents a real service-level incident, drill into any one of the collapsed patterns directly._');
       }
     } else {
       lines.push('_No significant movement detected across the environment in this window._');
@@ -1806,7 +1806,7 @@ async function renderEnvironmentAudit(
       {
         tool: 'log10x_metrics_that_moved',
         args: { anchor_type: 'log10x_pattern', anchor: topPatternForChain, window: args.window },
-        reason: 'first step of cross-pillar investigation — filter customer metrics to those that move with the top mover\'s incident phase',
+        reason: 'first step of cross-pillar investigation: filter customer metrics to those that move with the top mover\'s incident phase',
       },
     ];
     const block = renderNextActions(next);

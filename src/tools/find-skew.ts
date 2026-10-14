@@ -34,7 +34,7 @@ export const findSkewSchema = {
   events: z
     .array(z.unknown())
     .describe(
-      'Events to analyze for slot skew. Same shape as log10x_resolve_batch — raw strings or JSON objects. Each event is templated locally; skew is computed across the resulting patterns.'
+      'Events to analyze for slot skew. Same shape as log10x_resolve_batch: raw strings or JSON objects. Each event is templated locally; skew is computed across the resulting patterns.'
     ),
   min_concentration: z
     .number()
@@ -55,7 +55,7 @@ export const findSkewSchema = {
     .min(2)
     .default(DEFAULT_SAMPLE_N)
     .describe(
-      'Sampling rate N for the savings projection (1/N of the dominant case kept). Default 10. Same calibration caveat — sample_n=10 is a defensible starting point but not validated for any specific cost target.'
+      'Sampling rate N for the savings projection (1/N of the dominant case kept). Default 10. Same calibration caveat: sample_n=10 is a defensible starting point but not validated for any specific cost target.'
     ),
 };
 
@@ -315,15 +315,15 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     const top = findings[0]!;
     const topSlot = top.skewedSlots[0]!;
     headline = sanitizeUserProse(
-      `Found skew on field \`${topSlot.slotName}\` — value \`${topSlot.dominantValue}\` covers ${Math.round(topSlot.dominantPct * 100)}% of events in pattern \`${top.patternIdentity}\`.`,
+      `Found skew on field \`${topSlot.slotName}\`: value \`${topSlot.dominantValue}\` covers ${Math.round(topSlot.dominantPct * 100)}% of events in pattern \`${top.patternIdentity}\`.`,
     );
   } else if (status === 'no_signal') {
     headline = sanitizeUserProse(
-      `No skew found across ${nPatternsAboveMinEvents} pattern(s) — try \`log10x_pattern_mitigate\` to compact or sample uniformly.`,
+      `No skew found across ${nPatternsAboveMinEvents} pattern(s): try \`log10x_pattern_mitigate\` to compact or sample uniformly.`,
     );
   } else if (status === 'insufficient_data') {
     headline = sanitizeUserProse(
-      `Not enough events to check for skew — no pattern had ≥${minEvents} events after extraction.`,
+      `Not enough events to check for skew: no pattern had ≥${minEvents} events after extraction.`,
     );
   } else {
     headline = `Error: ${data.error?.error_type ?? 'unknown'}.`;
@@ -336,7 +336,7 @@ export async function executeFindSkew(args: FindSkewArgs): Promise<StructuredOut
     headline_bullets: findings.slice(0, 3).map((f) => {
       const top = f.skewedSlots[0]!;
       return sanitizeUserProse(
-        `\`${f.patternIdentity}\`: field \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events — smart sampling at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`,
+        `\`${f.patternIdentity}\`: field \`${top.slotName}\` is \`${top.dominantValue}\` ${Math.round(top.dominantPct * 100)}% of events: smart sampling at 1/${sampleN} saves ~${Math.round(f.samplingOpportunityPct * 100)}% of bytes.`,
       );
     }),
     status: status === 'success' ? 'success' : status === 'no_signal' ? 'no_signal' : status === 'insufficient_data' ? 'insufficient_data' : 'error',
@@ -453,13 +453,13 @@ function buildHumanSummary(args: {
 
   if (args.status === 'insufficient_data') {
     return sanitizeUserProse(
-      `${concept} Not enough events to check — analyzed ${args.nEvents} event(s) and no pattern had ≥${args.findings.length > 0 ? args.findings[0]!.totalEvents : 'min_events'} events after extraction. Paste more events for the same patterns, or widen the source.`,
+      `${concept} Not enough events to check: analyzed ${args.nEvents} event(s) and no pattern had ≥${args.findings.length > 0 ? args.findings[0]!.totalEvents : 'min_events'} events after extraction. Paste more events for the same patterns, or widen the source.`,
     );
   }
 
   if (args.status === 'no_signal') {
     return sanitizeUserProse(
-      `${concept} No skew found: every field in this pattern has a single value, or no value dominates clearly enough to target. Smart-targeted sampling doesn't apply here. Better fit: compact the pattern or drop a percentage — run \`log10x_pattern_mitigate\` to see the options with cost impact.`,
+      `${concept} No skew found: every field in this pattern has a single value, or no value dominates clearly enough to target. Smart-targeted sampling doesn't apply here. Better fit: compact the pattern or drop a percentage, run \`log10x_pattern_mitigate\` to see the options with cost impact.`,
     );
   }
 
@@ -470,7 +470,7 @@ function buildHumanSummary(args: {
   const slot = top.skewedSlots[0]!;
   const dominantPct = Math.round(slot.dominantPct * 100);
   return sanitizeUserProse(
-    `${concept} Found skew on field \`${slot.slotName}\` in pattern \`${top.patternIdentity}\`: \`${slot.dominantValue}\` covers ${dominantPct}% of events. Worth investigating — could be a bot, a specific client, or a real issue concentrated on one entity. Smart sampling that keeps the unusual events is a good fit here — run \`log10x_pattern_mitigate\` for the configured action.`,
+    `${concept} Found skew on field \`${slot.slotName}\` in pattern \`${top.patternIdentity}\`: \`${slot.dominantValue}\` covers ${dominantPct}% of events. Worth investigating: could be a bot, a specific client, or a real issue concentrated on one entity. Smart sampling that keeps the unusual events is a good fit here: run \`log10x_pattern_mitigate\` for the configured action.`,
   );
 }
 
