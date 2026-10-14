@@ -1023,6 +1023,9 @@ export async function runPipeline(
       // by templateHash + tenx_hash. JVM cold-start makes this a
       // loss on small inputs so the threshold is hard-coded above.
       chunkParallel,
+      // The Datadog report sets native index filters against the plan, which
+      // needs each pattern's events by service, status and parsed attribute.
+      cells: connector.id === 'datadog',
     });
   } catch (e) {
     snapshot.status = 'failed';

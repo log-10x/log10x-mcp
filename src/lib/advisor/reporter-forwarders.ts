@@ -584,6 +584,8 @@ function renderLog10xSidecar(opts: {
    * event exactly: no back-references, timestamps read in UTC, one timestamp slot.
    */
   splunkAppOptions?: boolean;
+  /** The output destination; its engine options (destinationEngineOptions) join the args. */
+  destination?: OutputDestination;
   /** When true, append `TENX_AIRGAPPED=true` to the sidecar env. */
   airgapped?: boolean;
   /** Name of the Kubernetes Secret holding the license JWT. */
@@ -611,6 +613,10 @@ function renderLog10xSidecar(opts: {
       argLines.push(`      - "${k}"`);
       argLines.push(`      - "${v}"`);
     }
+  }
+  for (const [k, v] of destinationEngineOptions(opts.destination)) {
+    argLines.push(`      - "${k}"`);
+    argLines.push(`      - "${v}"`);
   }
   const envLines: string[] = opts.builtinLicense
     ? []
@@ -696,6 +702,7 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     selectorLabel: (r) => k8sRecommendedSelector(r),
     renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        destination,
         backends,
         backendCredentials,
         forwarderKind: 'fluentbit',
@@ -1015,6 +1022,10 @@ ${fileConfigsBlock}`;
           argLines.push(`                    - "${v}"`);
         }
       }
+      for (const [k, v] of destinationEngineOptions(destination)) {
+        argLines.push(`                    - "${k}"`);
+        argLines.push(`                    - "${v}"`);
+      }
       const envLines: string[] = builtinLicense
         ? []
         : [
@@ -1182,7 +1193,7 @@ bash "%~dp0post-render.sh"
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
+    renderValues: ({ destination, optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense }) => {
       // Build TENX_RUN_ARGS. Default args wire the filebeat input and
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
@@ -1191,6 +1202,7 @@ bash "%~dp0post-render.sh"
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');
       if (readOnly) runArgs.push('receiverReadOnly', 'true');
+      for (const [k, v] of destinationEngineOptions(destination)) runArgs.push(k, v);
       for (const b of nonLog10xBackends) runArgs.push(`@run/output/metric/${b}`);
 
       // Build the daemonset.extraEnvs block. Emits TENX_RUN_ARGS, plus
@@ -1376,6 +1388,10 @@ ${envLines.join('\n')}${licenseVolumes}
         argLines.push(`      - "receiverOptimize"`);
         argLines.push(`      - "true"`);
       }
+      for (const [k, v] of destinationEngineOptions(destination)) {
+        argLines.push(`      - "${k}"`);
+        argLines.push(`      - "${v}"`);
+      }
       const envLines: string[] = builtinLicense
         ? []
         : [
@@ -1549,6 +1565,7 @@ ${indent(destOutput, 6)}
     selectorLabel: (r) => k8sRecommendedSelector(r),
     renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        destination,
         backends,
         backendCredentials,
         forwarderKind: 'vector',
@@ -1684,6 +1701,7 @@ ${indent(destSink, 4)}
     selectorLabel: (r) => k8sRecommendedSelector(r),
     renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials }) => {
       const sidecar = renderLog10xSidecar({
+        destination,
         backends,
         backendCredentials,
         forwarderKind: 'otel-collector',
@@ -1947,6 +1965,16 @@ const SPLUNK_APP_OPTIONS: Array<[string, string]> = [
   ['timestampZone', 'UTC'],
   ['timestampMaxPerObject', '1'],
 ];
+
+/**
+ * Engine options a destination needs on every Receiver install. Datadog index
+ * filters, monitors and Log Explorer queries select a pattern by `@tenx_hash`,
+ * and the Receiver stamps that field on returned events only when this option
+ * names it.
+ */
+export function destinationEngineOptions(destination?: OutputDestination): Array<[string, string]> {
+  return destination === 'datadog' ? [['symbolMessageHashField', 'tenx_hash']] : [];
+}
 
 const SPLUNK_K8S_FIELDS = [
   'stream',

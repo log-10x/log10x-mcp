@@ -107,7 +107,32 @@ export interface ExtractedPattern {
    * a 24-bucket trajectory.
    */
   eventsByHour?: Record<number, number>;
+  /**
+   * Events and bytes per envelope (service, status, split attribute) value,
+   * from the records bound to their input line. Present only when the caller
+   * asked for `cells`.
+   */
+  cells?: PatternCell[];
 }
+
+/** One envelope combination a pattern's events arrived with. */
+export interface PatternCell {
+  service?: string;
+  /** The status as the platform stored it (Datadog: `info`, `warn`, `error`, ...). */
+  status?: string;
+  /** A parsed attribute from SPLIT_ATTRIBUTES, when the event carried one. */
+  attribute?: { name: string; value: string };
+  count: number;
+  bytes: number;
+}
+
+/**
+ * Parsed attributes that name the emitting code inside a service. Datadog's
+ * Java integration pipelines (Kafka among them) parse the logger into the
+ * standard attribute `logger.name`, so a filter per value is the native split
+ * below the service.
+ */
+export const SPLIT_ATTRIBUTES = ['logger.name'] as const;
 
 export interface ExtractedPatterns {
   patterns: ExtractedPattern[];
@@ -205,6 +230,8 @@ export interface ExtractPatternsOptions {
    * `rawBytes`.
    */
   lineRawBytes?: number[];
+  /** Keep per-pattern envelope cells (`ExtractedPattern.cells`). */
+  cells?: boolean;
 }
 
 /**
@@ -407,6 +434,7 @@ export async function extractPatterns(
     firstSeenMs?: number;
     lastSeenMs?: number;
     eventsByHour: Map<number, number>;
+    cells: Map<string, PatternCell>;
     // Reporter-tier message_pattern + tenx_hash, read directly off the
     // engine's anchored encoded line (`pattern=,<symbolMessage>,patternHash=,<tenxHash>`).
     // Per-template they're constant; we just keep the first non-empty.
@@ -454,8 +482,10 @@ export async function extractPatterns(
       services: new Map<string, number>(),
       severities: new Map<string, number>(),
       eventsByHour: new Map<number, number>(),
+      cells: new Map<string, PatternCell>(),
     };
     rec.count += 1;
+    const bytesBefore = rec.bytes;
     // Measured encoded-line bytes for this event (the `~hash,val,val,...`
     // line plus newline). cli-output-parser computes this per-event;
     // we sum it into the pattern record for the real compact-byte ratio.
@@ -493,6 +523,7 @@ export async function extractPatterns(
     cursor += span;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
     if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
+    if (opts.cells && enr) addPatternCell(rec.cells, enr, rec.bytes - bytesBefore);
     if (typeof enr?.timestampMs === 'number') {
       const ts = enr.timestampMs;
       if (rec.firstSeenMs === undefined || ts < rec.firstSeenMs) rec.firstSeenMs = ts;
@@ -583,6 +614,7 @@ export async function extractPatterns(
       firstSeenMs: rec.firstSeenMs,
       lastSeenMs: rec.lastSeenMs,
       eventsByHour: rec.eventsByHour.size > 0 ? Object.fromEntries(rec.eventsByHour) : undefined,
+      ...(opts.cells ? { cells: [...rec.cells.values()] } : {}),
     });
   }
 
@@ -717,7 +749,80 @@ function mergeExtractedPatterns(group: ExtractedPattern[]): ExtractedPattern {
     firstSeenMs,
     lastSeenMs,
     eventsByHour: Object.keys(mergedEventsByHour).length > 0 ? mergedEventsByHour : undefined,
+    ...(group.some((p) => p.cells) ? { cells: mergeCells(group) } : {}),
   };
+}
+
+function cellKey(c: { service?: string; status?: string; attribute?: { name: string; value: string } }): string {
+  return [c.service ?? '', c.status ?? '', c.attribute?.name ?? '', c.attribute?.value ?? ''].join('\u0000');
+}
+
+function mergeCells(group: ExtractedPattern[]): PatternCell[] {
+  const out = new Map<string, PatternCell>();
+  for (const p of group) {
+    for (const c of p.cells ?? []) {
+      const k = cellKey(c);
+      const cur = out.get(k);
+      if (cur) {
+        cur.count += c.count;
+        cur.bytes += c.bytes;
+      } else {
+        out.set(k, { ...c });
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+/** Add one event to a pattern's cells, keyed by its envelope's service, status and split attribute. */
+export function addPatternCell(
+  cells: Map<string, PatternCell>,
+  env: { service?: string; severity?: string; attribute?: { name: string; value: string } },
+  bytes: number,
+): void {
+  const cell = { service: env.service, status: env.severity, attribute: env.attribute };
+  const k = cellKey(cell);
+  const cur = cells.get(k);
+  if (cur) {
+    cur.count += 1;
+    cur.bytes += bytes;
+  } else {
+    cells.set(k, {
+      ...(cell.service !== undefined ? { service: cell.service } : {}),
+      ...(cell.status !== undefined ? { status: cell.status } : {}),
+      ...(cell.attribute ? { attribute: cell.attribute } : {}),
+      count: 1,
+      bytes,
+    });
+  }
+}
+
+/** The envelope fields a cell is keyed by, read from one pulled event. */
+export function envelopeCellOf(event: Record<string, unknown>): {
+  service?: string;
+  severity?: string;
+  attribute?: { name: string; value: string };
+} {
+  const e = extractEnrichmentFromEnvelope(event);
+  return {
+    ...(e.service !== undefined ? { service: e.service } : {}),
+    ...(e.severity !== undefined ? { severity: e.severity } : {}),
+    ...(e.attribute ? { attribute: e.attribute } : {}),
+  };
+}
+
+/** A SPLIT_ATTRIBUTES value, nested (`logger: {name}`) or flat (`"logger.name"`). */
+function splitAttributeOf(attrs: Record<string, unknown>): { name: string; value: string } | undefined {
+  for (const name of SPLIT_ATTRIBUTES) {
+    const flat = attrs[name];
+    if (typeof flat === 'string' && flat.length > 0) return { name, value: flat };
+    let cur: unknown = attrs;
+    for (const part of name.split('.')) {
+      cur = cur && typeof cur === 'object' ? (cur as Record<string, unknown>)[part] : undefined;
+    }
+    if (typeof cur === 'string' && cur.length > 0) return { name, value: cur };
+  }
+  return undefined;
 }
 
 /**
@@ -851,6 +956,8 @@ interface EnvelopeEnrichment {
   pod?: string;
   /** Event timestamp in epoch milliseconds. Used to compute first-seen / last-seen / growth per pattern. */
   timestampMs?: number;
+  /** A parsed SPLIT_ATTRIBUTES value (Datadog `attributes`). */
+  attribute?: { name: string; value: string };
 }
 
 /**
@@ -877,6 +984,8 @@ function extractEnrichmentFromEnvelope(obj: Record<string, unknown>): EnvelopeEn
     const attrs = obj.attributes as Record<string, unknown>;
     if (!out.service && typeof attrs.service === 'string') out.service = attrs.service;
     if (!out.severity && typeof attrs.status === 'string') out.severity = attrs.status;
+    const attribute = splitAttributeOf(attrs);
+    if (attribute) out.attribute = attribute;
   }
 
   // Timestamp extraction — each SIEM puts the event time somewhere different:
