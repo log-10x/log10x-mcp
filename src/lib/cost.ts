@@ -614,7 +614,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     storage_per_gb_month: 0.1,
     billing_basis: 'uncompressed-ingest',
     compact_mode: 'envelope',
-    compact_requires: 'the 10x Splunk app installed (its tenx-search macro, tx command and dashboard hook expand compact events at search time)',
+    compact_requires: 'the 10x Splunk app installed (its tx macro and dashboard hook expand compact events at search time)',
     // Measured once, in Splunk's own licence meter (Splunk 10.4.3): 20,000
     // Kubernetes records of the OpenTelemetry demo capture through a Fluent Bit
     // Receiver, the compact message as the event and the Kubernetes metadata as
@@ -641,11 +641,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // splunk-app default/props.conf: TRUNCATE = 262144 on tenx_encoded (#33).
     // A longer compact event is cut by Splunk with no marker and rebuilds
     // shorter. The search page loads no app JavaScript, so a search-bar query
-    // reaches the full text through the app's tenx-search macro or its tx command;
+    // reaches the full text through the app's tx macro, written in front of the search;
     // classic dashboards go through its hook, alerts through Compile Alert.
     compact_readback:
       'on Splunk each event expands exactly up to 256 KB with the current 10x app (a longer one comes back cut), ' +
-      "and a search-bar query needs the app's tenx-search macro or its tx command to see the full text",
+      "and a search-bar query needs the app's tx macro in front of its search terms to see the full text",
     small_event_floor_bytes: 100,
   },
   datadog: {

@@ -371,7 +371,7 @@ test('destination text: splunk compact quotes the licence-meter figure with its 
   );
   // Read-back in Splunk's own terms, not "queryable as-is".
   assert.match(compactRow.actions.consequence.destination_description, /exactly up to 256 KB/);
-  assert.match(compactRow.actions.consequence.destination_description, /tenx-search macro or its tx command/);
+  assert.match(compactRow.actions.consequence.destination_description, /tx macro in front of its search terms/);
   // Priced on the same measured figure: 1 - 1,427,624 / 3,479,139.
   const compactSlot = splunk.output.feasibility!.achievable_by_action.find((a) => a.action === 'compact')!;
   const expectedAchievable = (compactSlot.monthly_cost_usd * (1 - 1_427_624 / 3_479_139) * 100) /
