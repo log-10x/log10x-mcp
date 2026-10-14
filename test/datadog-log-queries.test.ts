@@ -282,9 +282,14 @@ test('fetchDatadogInventory reads monitors and log-based metrics with GETs only,
   );
   const inv = await fetchDatadogInventory();
   assert.equal(inv.error, undefined);
-  assert.ok(seen.every((s) => s.startsWith('GET ')), seen.join('\n'));
-  assert.ok(seen.some((s) => s.includes('https://api.datadoghq.eu/api/v1/monitor?')));
-  assert.ok(seen.some((s) => s.includes('https://api.datadoghq.eu/api/v2/logs/config/metrics')));
+  const requests = seen.map((s) => {
+    const sp = s.indexOf(' ');
+    return { method: s.slice(0, sp), url: new URL(s.slice(sp + 1)) };
+  });
+  assert.ok(requests.every((r) => r.method === 'GET'), seen.join('\n'));
+  assert.ok(requests.every((r) => r.url.host === 'api.datadoghq.eu'), seen.join('\n'));
+  assert.ok(requests.some((r) => r.url.pathname === '/api/v1/monitor' && r.url.searchParams.get('page') === '0'));
+  assert.ok(requests.some((r) => r.url.pathname === '/api/v2/logs/config/metrics'));
   assert.equal(inv.objects.filter((o) => o.type === 'monitor').length, 3);
   assert.equal(inv.objects.filter((o) => o.type === 'dashboard').length, 1);
   const lq = inv.logQueries!;

@@ -6,6 +6,7 @@
  */
 
 import type { AdvisePlan, AdviseAction, VerifyProbe } from './types.js';
+import type { FleetDefaultStep } from './fleet-default-step.js';
 import { renderPlan } from './render.js';
 import { buildEnvelope, type StructuredOutput } from '../output-types.js';
 
@@ -96,6 +97,8 @@ export interface AdvisePlanSummary {
   blockers: string[];
   notes: string[];
   has_gitops_section: boolean;
+  /** Datadog Receiver plans: the fleet-default step after the POC, without its markdown. */
+  fleet_default?: Omit<FleetDefaultStep, 'markdown'>;
   human_summary: string;
 }
 
@@ -167,8 +170,14 @@ function summarize(plan: AdvisePlan, action: AdviseAction): AdvisePlanSummary {
     blockers: plan.blockers,
     notes: plan.notes,
     has_gitops_section: !!plan.gitopsExplainer,
+    ...(plan.fleetDefault ? { fleet_default: omitMarkdown(plan.fleetDefault) } : {}),
     human_summary: buildPlanHumanSummary(plan, action, { ok, warn, fail }, install_file_count),
   };
+}
+
+function omitMarkdown(step: FleetDefaultStep): Omit<FleetDefaultStep, 'markdown'> {
+  const { markdown: _markdown, ...rest } = step;
+  return rest;
 }
 
 // Three sentences max, plain prose, no markdown syntax. What plan was

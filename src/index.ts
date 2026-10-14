@@ -115,6 +115,7 @@ import {
   adaptVerifyResultToWeekly,
 } from './tools/commitment-report.js';
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
+import { datadogChangeReportSchema, executeDatadogChangeReport } from './tools/datadog-change-report.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
   signinStartSchema,
@@ -1720,6 +1721,26 @@ registerLog10xTool('log10x_commitment_report', commitmentReportSchema, (args) =>
   wrap('log10x_commitment_report', () => executeCommitmentReport(args))
 );
 
+// ── Tool: log10x_datadog_change_report (weekly report + spike monitors) ──
+//
+// Reads the per-pattern series the engine's Datadog metric output publishes
+// straight from Datadog's query API with the org's own keys, so it works on an
+// install whose metrics live only in Datadog. The env is optional: it only
+// locates the gitops repo holding caps.csv and actions.csv.
+
+registerLog10xTool('log10x_datadog_change_report', datadogChangeReportSchema, (args) =>
+  wrap('log10x_datadog_change_report', async () => {
+    let env;
+    try {
+      env = resolveEnv(getEnvs(), args.environment);
+    } catch (e) {
+      if (args.environment) throw e;
+      env = undefined;
+    }
+    return executeDatadogChangeReport(args, env);
+  })
+);
+
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
 
 registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
@@ -1796,6 +1817,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_estimate_savings', intent: 'Two-mode savings estimator — forecast mode projects bytes_out + $/mo for a proposed plan under the per-destination cost model; verify mode counts realized savings from the engine `routeState` label with cap-hit / drift / new-patterns / leakage attribution.' },
   { name: 'log10x_baseline', intent: 'Pre-flight readiness gate for cost-reduction tools — verifies Reporter age (default 7d), pattern-coverage stability, and absence of acute anomalies; returns structured `not_ready` with the specific gate(s) that failed.' },
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record — Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
+  { name: 'log10x_datadog_change_report', intent: 'Weekly Datadog change report from the per-pattern series: statements new since a date, lines a day, estimated Standard cost a month, the rule that held each, proposed per-service rows; view=monitors renders the route-change and weekly-baseline Datadog monitors as JSON. Read-only.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
   { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket: per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query to inspect the offloaded cohort.' },
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent — target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo — emits policy.yaml + scheduler manifest' },

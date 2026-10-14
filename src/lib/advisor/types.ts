@@ -9,6 +9,7 @@
  */
 
 import type { ForwarderKind } from '../discovery/types.js';
+import type { FleetDefaultStep } from './fleet-default-step.js';
 
 /** The action the advisor was asked to produce guidance for. */
 export type AdviseAction = 'install' | 'verify' | 'teardown' | 'all';
@@ -197,4 +198,9 @@ export interface AdvisePlan {
    * cluster. Rendered after the Verify section.
    */
   retrieverAccessMarkdown?: string;
+  /**
+   * Datadog Receiver plans: the step after the POC that sets the fleet
+   * default (the route for services with no rule), with its destination side.
+   */
+  fleetDefault?: FleetDefaultStep;
 }

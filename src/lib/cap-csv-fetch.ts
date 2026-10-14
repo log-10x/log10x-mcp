@@ -329,6 +329,14 @@ export async function fetchCapCsvFromConfigMap(
   return await kubectlGetConfigMapData(name, namespace, 'caps.csv');
 }
 
+/** Fetch actions.csv (per-service action) from a kubectl_configmap delivery target. */
+export async function fetchActionsCsvFromConfigMap(
+  name: string,
+  namespace: string
+): Promise<string | undefined> {
+  return await kubectlGetConfigMapData(name, namespace, 'actions.csv');
+}
+
 /** Fetch + parse action-intent.json from a kubectl_configmap delivery target. */
 export async function fetchActionIntentFromConfigMap(
   name: string,
