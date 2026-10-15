@@ -143,6 +143,7 @@ import {
 import {
   csvReason,
   fleetSentence,
+  keptNoun,
   linesPerDayFromCap,
   serviceLimitSentence,
   statementsUsdMonthly,
@@ -155,6 +156,7 @@ import {
   fleetDefaultEngineOptions,
 } from '../lib/fleet-default-install.js';
 import { medianInstances } from '../lib/enforcing-instances.js';
+import { placeServiceCap, marginSentence, type ServiceCapPlacement } from '../lib/service-cap.js';
 import type { FleetDefaultReport } from '../lib/report/build-report-data.js';
 
 // ─── constants ────────────────────────────────────────────────────────
@@ -2045,6 +2047,11 @@ export async function executeConfigureEngine(
       flexStatement: flexPlanMove?.text,
       userUnitLines: [
         ...userUnitLinesWithDependencies(sentenceByContainer, fleetLine, ruleDependencies),
+        ...args.containers.flatMap((c) => {
+          if ((actionByContainer.get(c) ?? effectiveStandardAction) !== 'tier_down') return [];
+          const line = marginSentence(c, tierDownPlacement(rows, c), keptNoun(destination));
+          return line ? [line] : [];
+        }),
         ...(fleetDefault ? [fleetDefault.install_note] : []),
       ],
     }),
@@ -3290,7 +3297,9 @@ export function serviceLimitsFromRows(
       const keptMax = inContainer
         .filter((r) => r.action === 'pass')
         .reduce<PerPatternRow | undefined>((m, r) => (!m || r.cap_bytes_per_window > m.cap_bytes_per_window ? r : m), undefined);
-      limit = !keptMax ? null : keptMax.events_monthly !== undefined ? keptMax.events_monthly / 30 : undefined;
+      // The limit sits `margin` above the largest kept statement (service-cap.ts).
+      const margin = tierDownPlacement(rows, c).margin ?? 1;
+      limit = !keptMax ? null : keptMax.events_monthly !== undefined ? (keptMax.events_monthly / 30) * margin : undefined;
     } else {
       const capSum = inContainer.reduce((s, r) => s + r.cap_bytes_per_window, 0);
       const bytes = inContainer.reduce((s, r) => s + r.current_bytes_30d, 0);
@@ -3307,6 +3316,21 @@ export function serviceLimitsFromRows(
     });
   }
   return out;
+}
+
+/**
+ * A container's tier_down cap, between its largest pass row and its smallest
+ * moved row, each at its own rate per window (service-cap.ts).
+ */
+export function tierDownPlacement(rows: PerPatternRow[], container: string): ServiceCapPlacement {
+  let keptMax = 0;
+  let movedMin: number | undefined;
+  for (const r of rows) {
+    if (r.container !== container) continue;
+    if (r.action === 'pass') keptMax = Math.max(keptMax, r.cap_bytes_per_window);
+    else if (r.action === 'tier_down') movedMin = Math.min(movedMin ?? Infinity, r.cap_bytes_per_window);
+  }
+  return placeServiceCap(keptMax, movedMin);
 }
 
 export function renderCsvDiff(
@@ -3354,19 +3378,15 @@ export function renderCsvDiff(
   // ~0. Build the per-container sums once.
   const capSumByContainer = new Map<string, number>();
   // tier_down is the exception: the engine caps each pattern, so a cap at the
-  // sum of the container's rates is never exceeded and moves nothing. The cap
-  // that moves the planned patterns and no other is the largest pattern the
-  // container keeps (its `pass` rows), so that is the tier_down cap.
-  const keptMaxByContainer = new Map<string, number>();
+  // sum of the container's rates is never exceeded and moves nothing. Its cap
+  // sits between the largest pattern the container keeps and the smallest it
+  // moves (tierDownPlacement).
   for (const r of rows) {
     if (!r.container) continue;
     capSumByContainer.set(
       r.container,
       (capSumByContainer.get(r.container) ?? 0) + r.cap_bytes_per_window
     );
-    if (r.action === 'pass') {
-      keptMaxByContainer.set(r.container, Math.max(keptMaxByContainer.get(r.container) ?? 0, r.cap_bytes_per_window));
-    }
   }
   const reason = `MCP configure_engine (${reduction})`;
   for (const c of containers) {
@@ -3381,7 +3401,7 @@ export function renderCsvDiff(
       action === 'offload' || action === 'drop'
         ? 1
         : action === 'tier_down'
-          ? perInstanceCap(keptMaxByContainer.get(c) ?? 0, n)
+          ? perInstanceCap(tierDownPlacement(rows, c).cap, n)
           : perInstanceCap(capSumByContainer.get(c) ?? 0, n);
     // Strip ',' (CSV delim) and ':' (field delim) from the reason so it can
     // never break the `<bytes>::<reason>` parse. The empty second field is

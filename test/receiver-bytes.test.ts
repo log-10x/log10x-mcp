@@ -151,6 +151,27 @@ test('quiet capture: every statement the plan keeps sits under its container\'s 
   assert.deepEqual(over, []);
 });
 
+test('quiet capture: each separated cap leaves the same margin to the largest kept and the smallest moved statement', () => {
+  const plan = solve('receiver');
+  const moved = new Set(plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash));
+  let separated = 0;
+  for (const [service, cap] of Object.entries(plan.containerCaps)) {
+    if (cap.action !== 'tier_down' || !cap.separated) continue;
+    separated++;
+    const capWindow = perWindow(cap.capBytesMonthly);
+    const keptPeak = Math.max(
+      ...fx.patterns.filter((p) => p.service === service && !moved.has(p.tenxHash ?? p.hash)).map((p) => p.receiverPeakWindowBytes ?? 0),
+    );
+    const movedPeak = Math.min(
+      ...fx.patterns.filter((p) => p.service === service && moved.has(p.tenxHash ?? p.hash)).map((p) => p.receiverPeakWindowBytes ?? Infinity),
+    );
+    assert.ok(Math.abs(capWindow / keptPeak - cap.margin!) < 1e-6, `${service}: kept side`);
+    assert.ok(Math.abs(movedPeak / capWindow - cap.margin!) < 1e-6, `${service}: moved side`);
+    assert.ok(cap.margin! > 1);
+  }
+  assert.ok(separated > 0);
+});
+
 test('quiet capture, the defect: caps in payload bytes leave kept statements above their caps', () => {
   const plan = solve('payload');
   const over = keptCounters(plan).filter((c) => {

@@ -29,6 +29,7 @@
  *     is a candidate, weighted by its bytes in those services.
  */
 
+import { placeServiceCap } from './service-cap.js';
 import {
   getAllowedActionsForDestination,
   getAvailableActions,
@@ -64,6 +65,17 @@ export function engineSeverityFloor(severity?: string | null): number {
 
 /** True ladder order: keep-everything (in-SIEM before out) then lossy. */
 const LADDER: Action[] = ['compact', 'tier_down', 'offload', 'sample', 'drop'];
+
+/** A container's tier_down cap and how it was placed (service-cap.ts). */
+interface TierDownCap {
+  capBytesMonthly: number;
+  keptMaxPattern?: string;
+  movedMinPattern?: string;
+  separated: boolean;
+  margin?: number;
+  keptMaxBytesMonthly: number;
+  movedMinBytesMonthly?: number;
+}
 
 /** One pattern (message type) as the solver consumes it. */
 export interface SolverPattern {
@@ -289,7 +301,23 @@ export interface Plan {
    * plan's own byte scale and span; the writer converts to bytes per
    * regulator window.
    */
-  containerCaps: Record<string, { action: Action; capBytesMonthly: number; keptMaxPattern?: string }>;
+  containerCaps: Record<
+    string,
+    {
+      action: Action;
+      capBytesMonthly: number;
+      keptMaxPattern?: string;
+      /** tier_down: true when the cap sits between the largest kept and the smallest moved statement. */
+      separated?: boolean;
+      /** tier_down, separated: the factor of margin on each side of the cap. */
+      margin?: number;
+      /** tier_down: the smallest moved statement, when the plan moves one. */
+      movedMinPattern?: string;
+      /** tier_down: the largest kept and the smallest moved statement, in the cap's unit. */
+      keptMaxBytesMonthly?: number;
+      movedMinBytesMonthly?: number;
+    }
+  >;
   planned: PlannedRow[];
   kept: PlannedRow[];
   /** Present when the keep-everything ceiling is below the target. Names the
@@ -552,19 +580,33 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   }
   const tierDownMoves = (
     chosenHashes: Set<string>,
-  ): { moved: Map<string, number>; caps: Map<string, { capBytesMonthly: number; keptMaxPattern?: string }> } => {
+  ): { moved: Map<string, number>; caps: Map<string, TierDownCap> } => {
     const moved = new Map<string, number>();
-    const caps = new Map<string, { capBytesMonthly: number; keptMaxPattern?: string }>();
+    const caps = new Map<string, TierDownCap>();
     for (const [c, members] of byContainer) {
       const total = members.reduce((s, r) => s + r.scopedBytes, 0);
-      // The cap is in the Receiver's unit: the largest kept pattern there.
-      let cap = 0;
+      // The cap is in the Receiver's unit, between the largest kept pattern
+      // and the smallest moved one, at their geometric mean.
+      let keptMax = 0;
       let keptMaxPattern: string | undefined;
+      let movedMin: number | undefined;
+      let movedMinPattern: string | undefined;
       for (const r of members) {
-        if (chosenHashes.has(r.p.hash)) continue;
-        if (r.scopedCapBytes > cap) { cap = r.scopedCapBytes; keptMaxPattern = r.p.name; }
+        if (chosenHashes.has(r.p.hash)) {
+          if (movedMin === undefined || r.scopedCapBytes < movedMin) { movedMin = r.scopedCapBytes; movedMinPattern = r.p.name; }
+        } else if (r.scopedCapBytes > keptMax) { keptMax = r.scopedCapBytes; keptMaxPattern = r.p.name; }
       }
-      caps.set(c, { capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) });
+      const placement = placeServiceCap(keptMax, movedMin);
+      const cap = placement.cap;
+      caps.set(c, {
+        capBytesMonthly: cap,
+        ...(keptMaxPattern ? { keptMaxPattern } : {}),
+        ...(movedMinPattern ? { movedMinPattern } : {}),
+        separated: placement.separated,
+        ...(placement.margin !== undefined ? { margin: placement.margin } : {}),
+        keptMaxBytesMonthly: keptMax,
+        ...(movedMin !== undefined ? { movedMinBytesMonthly: movedMin } : {}),
+      });
       for (const r of members) {
         if (!chosenHashes.has(r.p.hash)) continue;
         const share = total > 0 ? r.scopedBytes / total : 0;
@@ -757,7 +799,16 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       containerCaps[container] = {
         action: c.action,
         capBytesMonthly: c.action === 'tier_down' ? (cap?.capBytesMonthly ?? 0) : 0,
-        ...(c.action === 'tier_down' && cap?.keptMaxPattern ? { keptMaxPattern: cap.keptMaxPattern } : {}),
+        ...(c.action === 'tier_down' && cap
+          ? {
+              ...(cap.keptMaxPattern ? { keptMaxPattern: cap.keptMaxPattern } : {}),
+              ...(cap.movedMinPattern ? { movedMinPattern: cap.movedMinPattern } : {}),
+              separated: cap.separated,
+              ...(cap.margin !== undefined ? { margin: cap.margin } : {}),
+              keptMaxBytesMonthly: cap.keptMaxBytesMonthly,
+              ...(cap.movedMinBytesMonthly !== undefined ? { movedMinBytesMonthly: cap.movedMinBytesMonthly } : {}),
+            }
+          : {}),
       };
     }
   }

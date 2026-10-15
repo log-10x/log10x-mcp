@@ -66,34 +66,39 @@ function estate(): SolverPattern[] {
   ];
 }
 
-test('three targets plan three different sets, and the caps follow the kept patterns', () => {
+test('three targets plan three different sets, and the caps follow the kept and moved patterns', () => {
   const at = (pct: number) => solvePlan(estate(), { destination: 'datadog', retrieverInstalled: false, targetPct: pct });
-  const p30 = at(30);
+  const p20 = at(20);
   const p50 = at(50);
   const p70 = at(70);
   const names = (p: ReturnType<typeof at>) => p.planned.map((r) => r.name);
-  // 30%: Traces and Logs over the cap Metrics sets: (46-18 + 44-18) x 0.9 = 48.6 of 134 = 36%.
-  assert.deepEqual(names(p30), ['Traces', 'Logs']);
-  assert.equal(p30.containerCaps.collector.capBytesMonthly, 18 * GB);
-  assert.equal(p30.containerCaps.collector.keptMaxPattern, 'Metrics');
-  assert.equal(Math.round(p30.achievedPct), 36);
-  // 50%: Metrics joins and the cap drops to the ERROR line: (42+40+14) x 0.9 = 86.4 of 134 = 64%.
-  // The cart hosts no planned pattern, so it gets no row.
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-6 * Math.max(1, Math.abs(b));
+  // Each cap sits between the largest kept pattern and the smallest moved one, at their geometric mean.
+  // 20%: Traces and Logs over sqrt(18 x 44) = 28.14 GB, between Metrics (kept) and Logs (moved), a
+  // margin of 1.56 each side: (46-28.14 + 44-28.14) x 0.9 = 30.3 of 134 = 23%.
+  assert.deepEqual(names(p20), ['Traces', 'Logs']);
+  assert.ok(near(p20.containerCaps.collector.capBytesMonthly, Math.sqrt(18 * 44) * GB));
+  assert.equal(p20.containerCaps.collector.keptMaxPattern, 'Metrics');
+  assert.equal(p20.containerCaps.collector.movedMinPattern, 'Logs');
+  assert.ok(near(p20.containerCaps.collector.margin!, Math.sqrt(44 / 18)));
+  assert.equal(Math.round(p20.achievedPct), 23);
+  // 50%: Metrics joins; the cap is sqrt(4 x 18) = 8.49 GB, between the ERROR line and Metrics:
+  // (46+44+18 - 3 x 8.49) x 0.9 = 74.3 of 134 = 55%. The cart hosts no planned pattern, so it gets no row.
   assert.deepEqual(names(p50), ['Traces', 'Logs', 'Metrics']);
-  assert.equal(p50.containerCaps.collector.capBytesMonthly, 4 * GB);
+  assert.ok(near(p50.containerCaps.collector.capBytesMonthly, Math.sqrt(4 * 18) * GB));
   assert.equal(p50.containerCaps.collector.keptMaxPattern, 'failed to upload');
   assert.equal(p50.containerCaps.cart, undefined);
-  assert.equal(Math.round(p50.achievedPct), 64);
-  // 70%: GetCartAsync over AddItemAsync moves 4 x 0.9 = 3.6, still short, so AddItemAsync joins
-  // and the cart has nothing kept: its cap is 0 (1 byte on the wire) and (13+9) x 0.9 = 19.8 moves;
-  // 106 of 134 = 79%.
+  assert.equal(Math.round(p50.achievedPct), 55);
+  // 70%: both cart patterns join and the cart keeps nothing: its cap is 0 (1 byte on the wire),
+  // nothing separates, and (13+9) x 0.9 = 19.8 moves; 94.1 of 134 = 70%.
   assert.deepEqual(names(p70), ['Traces', 'Logs', 'Metrics', 'GetCartAsync', 'AddItemAsync']);
   assert.equal(p70.containerCaps.cart.capBytesMonthly, 0);
-  assert.equal(Math.round(p70.achievedPct), 79);
+  assert.equal(p70.containerCaps.cart.separated, false);
+  assert.equal(Math.round(p70.achievedPct), 70);
   // The plan states what the engine moves, the excess over the cap less the floor.
   const traces50 = p50.planned.find((r) => r.name === 'Traces')!;
-  assert.equal(traces50.movedBytesMonthly, (46 - 4) * GB * 0.9);
-  assert.equal(traces50.perEventMove!.events_moved, ((46 - 4) * GB * 0.9) / 1200);
+  assert.ok(near(traces50.movedBytesMonthly!, (46 - Math.sqrt(4 * 18)) * GB * 0.9));
+  assert.ok(near(traces50.perEventMove!.events_moved, ((46 - Math.sqrt(4 * 18)) * GB * 0.9) / 1200));
 });
 
 test('two templates under one hash merge their event size weighted by events', () => {
@@ -115,16 +120,16 @@ test('two templates under one hash merge their event size weighted by events', (
 test('the engine files carry the cap per window in the engine grammar, one row per container', () => {
   const p = solvePlan(estate(), { destination: 'datadog', retrieverInstalled: false, targetPct: 70 });
   const files = engineFilesFromContainerCaps(p.containerCaps, 36_000, 'plan datadog 70 pct: x,y');
-  // collector: 4 GB over a 36,000 s span is 26,666,667 bytes per 240 s window; the cart keeps
-  // nothing, so its cap is the 1-byte minimum.
-  assert.equal(files.capsCsv, 'container,cap\ncart,1::plan datadog 70 pct; x;y\ncollector,26666667::plan datadog 70 pct; x;y\n');
+  // collector: sqrt(4 x 18) = 8.49 GB over a 36,000 s span is 56,568,542 bytes per 240 s window;
+  // the cart keeps nothing, so its cap is the 1-byte minimum.
+  assert.equal(files.capsCsv, 'container,cap\ncart,1::plan datadog 70 pct; x;y\ncollector,56568542::plan datadog 70 pct; x;y\n');
   assert.equal(files.actionsCsv, 'container,action\ncart,tier_down::plan datadog 70 pct; x;y\ncollector,tier_down::plan datadog 70 pct; x;y\n');
   // offload acts on the whole container: the 1-byte minimum
   const off = engineFilesFromContainerCaps({ s3: { action: 'offload', capBytesMonthly: 0 } }, 36_000, 'r');
   assert.equal(off.capsCsv, 'container,cap\ns3,1::r\n');
 });
 
-test('configure_engine caps a tier_down container at its largest pass row, never at the sum', () => {
+test('configure_engine caps a tier_down container between its largest pass row and its smallest moved row, never at the sum', () => {
   const row = (over: Partial<PerPatternRow>): PerPatternRow => ({
     pattern_hash: 'h', pattern: 'p', current_bytes_30d: 0, cap_bytes_per_window: 0, action: 'pass',
     container: 'api', saved_bytes_monthly: 0, saved_dollars_monthly: 0,
@@ -141,5 +146,6 @@ test('configure_engine caps a tier_down container at its largest pass row, never
   const diff = renderCsvDiff(['api'], undefined, rows, 'tier_down', new Map([['api', 'tier_down']]), 'soft');
   const line = diff.split('\n').find((l) => l.startsWith('+api,'));
   assert.ok(line, diff);
-  assert.match(line!, /^\+api,12000::/);
+  // sqrt(12,000 x 30,000) = 18,974: the largest pass row can grow 1.6x, the smallest moved row is 1.6x above.
+  assert.match(line!, /^\+api,18974::/);
 });

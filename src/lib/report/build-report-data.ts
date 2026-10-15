@@ -38,8 +38,10 @@ import {
   type VerifyCheck,
 } from './report-data.js';
 import { perInstanceCap, instancesFor, describeInstances, medianInstances, type EnforcingInstances } from '../enforcing-instances.js';
+import { placeServiceCap, marginSentence } from '../service-cap.js';
 import {
   csvReason,
+  keptNoun,
   fleetSentence,
   flexAddedSentence,
   linesPerDayFromCap,
@@ -356,13 +358,26 @@ export function buildReportData(
       for (const c of hosts) {
         let cap = 0;
         let keptMaxPattern: string | undefined;
+        let movedMin: number | undefined;
         for (const p of enriched.patterns) {
-          if (p.service !== c || reducibleSet.has(p)) continue;
+          if (p.service !== c) continue;
           // The Receiver's unit, at the statement's busiest window's rate.
           const b = p.receiverCapBytes ?? p.bytes;
-          if (b > cap) { cap = b; keptMaxPattern = p.symbolMessage ?? p.template.split("\n")[0]; }
+          if (reducibleSet.has(p)) {
+            if (movedMin === undefined || b < movedMin) movedMin = b;
+          } else if (b > cap) { cap = b; keptMaxPattern = p.symbolMessage ?? p.template.split("\n")[0]; }
         }
-        containerCaps[c] = { action: 'tier_down', capBytesMonthly: cap, ...(keptMaxPattern ? { keptMaxPattern } : {}) };
+        // Between the largest kept and the smallest moved statement, at their geometric mean.
+        const placed = placeServiceCap(cap, movedMin);
+        containerCaps[c] = {
+          action: 'tier_down',
+          capBytesMonthly: placed.cap,
+          ...(keptMaxPattern ? { keptMaxPattern } : {}),
+          separated: placed.separated,
+          ...(placed.margin !== undefined ? { margin: placed.margin } : {}),
+          keptMaxBytesMonthly: placed.keptMax,
+          ...(placed.movedMin !== undefined ? { movedMinBytesMonthly: placed.movedMin } : {}),
+        };
       }
     }
     // The plan in user units: one sentence per container, lines a day and
@@ -376,6 +391,19 @@ export function buildReportData(
       (p) => p.symbolMessage ?? (p.template ?? '').split('\n')[0] ?? p.hash,
     );
     const serviceLines = units.limits.map((l) => serviceLimitSentence(l, opts.siem));
+    // Each tier_down limit's margin, in the reader's terms.
+    const marginLines = Object.keys(containerCaps)
+      .sort()
+      .flatMap((c) => {
+        const v = containerCaps[c];
+        if (v.action !== 'tier_down' || v.keptMaxBytesMonthly === undefined) return [];
+        const line = marginSentence(
+          c,
+          { separated: !!v.separated, margin: v.margin, keptMax: v.keptMaxBytesMonthly, movedMin: v.movedMinBytesMonthly },
+          keptNoun(opts.siem),
+        );
+        return line ? [line] : [];
+      });
     const reasonByContainer = Object.fromEntries(units.limits.map((l, i) => [l.service, serviceLines[i]]));
     // Each service's sentence, then the monitors and metrics that read its moved lines.
     const deps = opts.ruleDependencies;
@@ -437,10 +465,11 @@ export function buildReportData(
       change: {
         commentLines: [
           ...serviceBlocks,
+          ...marginLines,
           ...fleetLines,
           ...unscopedLines,
           ...(flexLine ? [flexLine] : []),
-          `A limit is the largest statement the container keeps, so the statements above exceed it and no other does.`,
+          `A limit sits between the largest statement the container keeps and the smallest it moves, at the same ratio from each.`,
           `${CAPS_FILE_NAME}: each container's limit in the engine's units, bytes per node, with its sentence as the reason; ` +
             `${ACTIONS_FILE_NAME}: where a container's excess goes.`,
           ...(opts.capUnitStatement ? [opts.capUnitStatement] : []),

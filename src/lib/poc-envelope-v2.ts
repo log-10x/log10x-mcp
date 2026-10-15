@@ -20,6 +20,7 @@ import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
 import { receiverBytesStatement } from './receiver-bytes.js';
+import { placeServiceCap } from './service-cap.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
@@ -1624,12 +1625,19 @@ function pocServiceReasons(
     }));
   // Exception services keep their sentinel reason; every other service gets
   // its sentence, with the cap buildCapCsv writes: the largest pattern kept.
-  const caps: Record<string, { action: CostAction; capBytesMonthly: number }> = {};
+  const caps: Record<string, { action: CostAction; capBytesMonthly: number; margin?: number }> = {};
+  const movedMin = new Map<string, number>();
   for (const r of rows) {
     if (exceptionSet.has(r.service)) continue;
     const c = caps[r.service] ?? { action: level1, capBytesMonthly: 0 };
     if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.capBytes);
+    else movedMin.set(r.service, Math.min(movedMin.get(r.service) ?? Infinity, r.capBytes));
     caps[r.service] = c;
+  }
+  // The same placement buildCapCsv writes: between the largest kept and the smallest moved.
+  for (const [svc, c] of Object.entries(caps)) {
+    const placed = placeServiceCap(c.capBytesMonthly, movedMin.get(svc));
+    if (placed.separated && placed.margin !== undefined) c.margin = placed.margin;
   }
   const { limits } = serviceLimitsFromPatterns(caps, rows, (r) => r.moved, Math.max(1, windowDurationSeconds), siem);
   return new Map(limits.map((l) => [l.service, csvReason(serviceLimitSentence(l, siem))]));
@@ -1643,7 +1651,7 @@ function buildCapCsv(
   reasons?: ReadonlyMap<string, string>,
 ): string {
   const level1: CostAction = getDefaultActionForDestination(siem, 1);
-  const services = new Map<string, { bytes: number; keptMax: number; isException: boolean }>();
+  const services = new Map<string, { bytes: number; keptMax: number; movedMin?: number; isException: boolean }>();
   for (const p of patterns) {
     const svc = (p.service ?? '').toLowerCase();
     if (!svc) continue;
@@ -1651,14 +1659,21 @@ function buildCapCsv(
     // largest pattern it keeps: a pattern over it takes the action, one under
     // it passes.
     // In the Receiver's unit, at the statement's busiest window's rate.
-    const kept =
-      p.actions.recommended_action === 'pass' ? (p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window) : 0;
+    const capBytes = p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window;
+    const moved = p.actions.recommended_action !== 'pass';
+    const kept = moved ? 0 : capBytes;
     const existing = services.get(svc);
     if (existing) {
       existing.bytes += p.metrics.bytes_in_window;
       existing.keptMax = Math.max(existing.keptMax, kept);
+      if (moved) existing.movedMin = Math.min(existing.movedMin ?? Infinity, capBytes);
     } else {
-      services.set(svc, { bytes: p.metrics.bytes_in_window, keptMax: kept, isException: exceptionSet.has(svc) });
+      services.set(svc, {
+        bytes: p.metrics.bytes_in_window,
+        keptMax: kept,
+        ...(moved ? { movedMin: capBytes } : {}),
+        isException: exceptionSet.has(svc),
+      });
     }
   }
 
@@ -1676,7 +1691,7 @@ function buildCapCsv(
     const monthlyBytes = agg.bytes * (24 * 30) / hours;
     const cap =
       action === 'tier_down'
-        ? Math.max(1, Math.round(scaleObservedToReceiverWindow(agg.keptMax * (24 * 30) / hours, '30d')))
+        ? Math.max(1, Math.round(scaleObservedToReceiverWindow(placeServiceCap(agg.keptMax, agg.movedMin).cap * (24 * 30) / hours, '30d')))
         : Math.max(1, Math.round(capBytesPerWindow(action, monthlyBytes, 10)));
     lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}`);
   }

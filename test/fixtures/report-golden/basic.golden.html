@@ -102,14 +102,16 @@ footer p{margin:0 0 9px} footer b{color:var(--dim);font-weight:600}
 <pre class="face"><span class="fl">Logs exported resource logs <i class="v">$</i> log records <i class="v">$</i></span></pre><p class="evm">3.0K events &middot; 1.0K bytes each &middot; identifier <code>qkI1</code></p>
 <pre class="face"><span class="fl">cart request handled user <i class="v">$</i> latency <i class="v">$</i></span></pre><p class="evm">900 events &middot; 1.0K bytes each &middot; identifier <code>qkI2</code></p>
 <div class="alabel">the change</div>
-<pre class="cmd"># cartservice: any statement above 1,200 lines a day goes to Infrequent Access. Today that is this one statement, about $0.34 a month.
+<pre class="cmd"># cartservice: any statement above 16,100 lines a day goes to Infrequent Access. Today that is this one statement, about $0.34 a month.
 # otelcol: any statement above 72,000 lines a day goes to Infrequent Access. Today that is this one statement, about $1.1 a month.
+# cartservice: the largest kept statement can grow 13.4x before it is held; the smallest moved one is 13.4x above the limit.
+# otelcol: no limit separates the statements, because the smallest one moved is no busier than the largest one kept; the limit stays at the largest kept statement, and a moved statement under it stays in Standard.
 # Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.
-# A limit is the largest statement the container keeps, so the statements above exceed it and no other does.
+# A limit sits between the largest statement the container keeps and the smallest it moves, at the same ratio from each.
 # log10x-caps.csv: each container&#39;s limit in the engine&#39;s units, bytes per node, with its sentence as the reason; log10x-actions.csv: where a container&#39;s excess goes.
 # Limits are per node: cartservice: node count unknown, written for one Receiver; otelcol: node count unknown, written for one Receiver.
 # the engine applies each limit per container: every statement above it in a listed container takes the route, less the share its severity keeps
-cartservice,333::cartservice any statement above 1200 lines a day goes to Infrequent Access. Today that is this one statement about $0.34 a month.
+cartservice,4472::cartservice any statement above 16100 lines a day goes to Infrequent Access. Today that is this one statement about $0.34 a month.
 otelcol,533333::otelcol any statement above 72000 lines a day goes to Infrequent Access. Today that is this one statement about $1.1 a month.</pre>
 <div class="alabel">apply</div>
 <pre class="cmd">kubectl -n demo create configmap log10x-action-intent --from-file=caps.csv=log10x-caps.csv \

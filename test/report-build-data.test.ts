@@ -108,13 +108,23 @@ test('volume action: reducible statements only, container-keyed change rows in t
   // the reason column is the service's sentence in user units, commas and colons removed
   const otelRow = tier!.change!.rows.find((r) => r.startsWith('otelcol,'))!;
   assert.match(otelRow, /::otelcol any statement above 72000 lines a day goes to Infrequent Access\. Today that is this one statement about \$[\d.]+ a month\.$/);
-  // THE CHANGE reads in lines a day and dollars a month: the limit is the largest
-  // statement the container keeps (otelcol: an ERROR statement at 3,000 lines an
-  // hour), then the fleet line and the always-pass sample
+  // THE CHANGE reads in lines a day and dollars a month. A limit sits between the
+  // largest statement the container keeps and the smallest it moves, at their
+  // geometric mean: cartservice keeps its heartbeat (5,000 bytes, 1,200 lines a
+  // day) and moves 900,000 bytes, a margin of sqrt(180) = 13.4 each side, so
+  // 1,200 x 13.4 = 16,100 lines a day. otelcol moves a statement smaller than
+  // the ERROR one it keeps (3,000 lines an hour), so nothing separates them and
+  // its limit stays at the kept one. Then the margins, the fleet line and the
+  // always-pass sample.
   const lines = tier!.change!.commentLines;
-  assert.match(lines[0], /^cartservice: any statement above 1,200 lines a day goes to Infrequent Access\. Today that is this one statement, about \$[\d.]+ a month\.$/);
+  assert.match(lines[0], /^cartservice: any statement above 16,100 lines a day goes to Infrequent Access\. Today that is this one statement, about \$[\d.]+ a month\.$/);
   assert.match(lines[1], /^otelcol: any statement above 72,000 lines a day goes to Infrequent Access\. Today that is this one statement, about \$[\d.]+ a month\.$/);
-  assert.equal(lines[2], 'Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.');
+  assert.equal(lines[2], 'cartservice: the largest kept statement can grow 13.4x before it is held; the smallest moved one is 13.4x above the limit.');
+  assert.equal(
+    lines[3],
+    'otelcol: no limit separates the statements, because the smallest one moved is no busier than the largest one kept; the limit stays at the largest kept statement, and a moved statement under it stays in Standard.',
+  );
+  assert.equal(lines[4], 'Any service not listed keeps every statement in Standard. Up to 1,800 lines a day of every statement always reach Standard on each node.');
   for (const l of [...lines, tier!.change!.engineGapNote!]) {
     assert.ok(!/240|regulator|severity floor|bytes per window/i.test(l), `engine units leaked into a user line: ${l}`);
   }
@@ -127,9 +137,8 @@ test('volume action: reducible statements only, container-keyed change rows in t
     const container = row.split(',')[0];
     assert.ok(actionsCsv!.includes(`${container},tier_down::`), `${container} missing from actions.csv`);
   }
-  // the cap is the largest pattern the container keeps: the reducible
-  // statements exceed it, the kept ones do not
-  assert.ok(tier!.change!.commentLines.join(' ').includes('largest statement the container keeps'));
+  // the cap sits between the largest pattern the container keeps and the smallest it moves
+  assert.ok(tier!.change!.commentLines.join(' ').includes('between the largest statement the container keeps and the smallest it moves'));
   // verified commands resolved from the matrix cell: both files into the
   // ConfigMap the engine reads
   const cmds = tier!.apply!.commands.join('\n');
