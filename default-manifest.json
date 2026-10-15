@@ -734,6 +734,17 @@
       },
       "category": "cost"
     },
+    "log10x_datadog_spike_audit": {
+      "title": "Datadog spike audit",
+      "description": "Prices an account's log spikes from Datadog's estimated usage metrics, with no 10x install. Reads `datadog.estimated_usage.logs.ingested_events` (datadog_is_excluded:false, by service and datadog_index) and `datadog.estimated_usage.logs.ingested_bytes` (by service) in hourly sums over `lookback` (default `90d`). An hour is a spike hour for a service when its indexed events exceed `spike_multiplier` (default 3) times the median of the same hour over the 7 days before; consecutive hours are one spike, and a service's first 7 days set its baseline. Each spike's excess events are priced at the Standard rate (list $1.70 per million, `standard_rate_per_million` overrides) and its excess bytes at ingestion (list $0.10 per GB, `ingestion_rate_per_gb` overrides). Estimates what a fleet default limit, `headroom` (default 2) times the service's largest hour outside its spikes, would have held, as an upper bound. Returns services by spike cost, each spike (start, hours, index, excess events, cost, held), the total a year at that rate, and the caveats. Read-only: Datadog's query API with DD_API_KEY / DD_APP_KEY / DD_SITE (GET only). Writes nothing.",
+      "annotations": {
+        "title": "Datadog spike audit",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
     "log10x_find_skew": {
       "title": "Find skew",
       "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events, sample the get case at 1/10 to cut its volume.\" Sampling is lossy: the other 9 in 10 of those events are discarded. Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch). **Calibration**: the 60% concentration floor and 1/10 sampling rate are hand-picked defaults tagged `unvalidated_default` in the output. The envelope surfaces the empirical `observed_dominant_pct_distribution` across all candidate slots so the agent can judge whether 0.6 is well above or below the noise floor for this dataset. See `docs/cross-pillar-primitives.md` for the agent behavior contract.",
