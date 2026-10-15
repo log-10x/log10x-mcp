@@ -47,8 +47,8 @@ test('native filters: a service filter, or one per parsed attribute value, large
   // its error pattern) then kafka's largest logger class (600) reach it.
   assert.equal(c.plan.events, 1660);
   assert.deepEqual(c.native.filters.map(filterQuery), [
-    'service:web -status:(error OR warn)',
-    'service:kafka @logger.name:kafka.log.LogSegment -status:(error OR warn)',
+    'service:web -status:(emergency OR alert OR critical OR error OR warn)',
+    'service:kafka @logger.name:kafka.log.LogSegment -status:(emergency OR alert OR critical OR error OR warn)',
   ]);
   assert.equal(c.native.events, 1760);
   assert.equal(c.native.errorsAndWarnings, 0);
@@ -95,7 +95,10 @@ test('the section: both arms in one table, the hash filter, the ingestion line b
   assert.match(text, /\| Per-pattern plan, as written \| [^|]+ \| [^|]+ \| \$[\d.,]+ \(list price\) \| \$[\d.,]+ \(list price\) \| none \| \$[\d.,]+ \(list price\) \|/);
   assert.match(text, /\| The plan's patterns offloaded to S3 instead \| .* \| none \| \$[\d.,]+ \(list price\) \| none \|/);
   assert.match(text, /ingestion \$0\.10 per GB \(list price\)/);
-  assert.match(text, /Flex Starter \$0\.60 per million events stored a month \(list price\), compute included, held 3 months/);
+  assert.match(
+    text,
+    /Flex Starter \$0\.60 per million events stored a month \(list price\), compute bundled for volumes below 2 billion events a month and 10 billion stored, held 3 months/,
+  );
   assert.ok(!/%[^.]*\bbill\b/i.test(text), 'no share of the bill');
   assert.ok(!/—/.test(text), 'no em dash');
 });
@@ -149,7 +152,7 @@ test('the Datadog POC report carries the section; other destinations do not', as
   });
   const dd = renderPocReport(input('datadog') as never).markdown;
   assert.match(dd, /Native Index Filters Against the Plan/);
-  assert.match(dd, /service:web -status:\(error OR warn\)/);
+  assert.match(dd, /service:web -status:\(emergency OR alert OR critical OR error OR warn\)/);
   assert.match(dd, /@tenx_hash:\(/);
   const cw = renderPocReport(input('cloudwatch') as never).markdown;
   assert.ok(!/Native Index Filters Against the Plan/.test(cw));

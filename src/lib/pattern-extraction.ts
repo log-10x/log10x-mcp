@@ -163,6 +163,32 @@ export interface PatternCell {
  */
 export const SPLIT_ATTRIBUTES = ['logger.name'] as const;
 
+/** Services whose Datadog integration log pipeline parses the log4j logger at the end of a line into `logger.name`. */
+export const LOGGER_NAME_PIPELINE_SERVICES = ['kafka'] as const;
+
+const LOG4J_LOGGER = /\(([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\)\s*$/;
+
+/**
+ * The `logger.name` Datadog's Kafka log pipeline parses from an event that
+ * reached the file before intake: the class in parentheses that ends the first
+ * of the event's lines to end that way (the head line before a stack trace,
+ * the last line of a multi-line message). Undefined for other services and for
+ * events with no such line.
+ */
+export function pipelineSplitAttribute(
+  service: string | undefined,
+  lines: readonly string[],
+): { name: string; value: string } | undefined {
+  if (!service || !(LOGGER_NAME_PIPELINE_SERVICES as readonly string[]).includes(service)) return undefined;
+  for (const line of lines) {
+    for (const part of line.split('\n')) {
+      const m = LOG4J_LOGGER.exec(part);
+      if (m) return { name: 'logger.name', value: m[1] };
+    }
+  }
+  return undefined;
+}
+
 export interface ExtractedPatterns {
   patterns: ExtractedPattern[];
   totalEvents: number;
@@ -173,6 +199,8 @@ export interface ExtractedPatterns {
   recordOverheadBytes?: number;
   /** Seconds between the first and last event time, when the events carry times. */
   receiverTimedSpanSeconds?: number;
+  /** Events whose split attribute came from `pipelineSplitAttribute`, when it was passed. */
+  pipelineParsedEvents?: number;
   /** Number of raw input lines the caller passed in. */
   inputLineCount: number;
   /** Wall time spent in the engine (CLI). */
@@ -267,6 +295,12 @@ export interface ExtractPatternsOptions {
   lineRawBytes?: number[];
   /** Keep per-pattern envelope cells (`ExtractedPattern.cells`). */
   cells?: boolean;
+  /**
+   * With `cells`: the split attribute a platform pipeline would parse from an
+   * event's lines, for events whose envelope carries none (records read before
+   * the platform's intake). Called with the event's service and lines.
+   */
+  pipelineSplitAttribute?: (service: string | undefined, lines: readonly string[]) => { name: string; value: string } | undefined;
   /**
    * The forwarder's records, aligned with `events`: each record's compact
    * JSON bytes, and its payload's bytes as a JSON string body. With both,
@@ -542,6 +576,7 @@ export async function extractPatterns(
   const binding = bindRecordsToLines(mergedEncoded, mergedTemplates, lines);
 
   let cursor = 0;
+  let pipelineParsedEvents = 0;
   for (let i = 0; i < mergedEncoded.length; i++) {
     const ev = mergedEncoded[i];
     const rec = byHash.get(ev.templateHash) || {
@@ -609,7 +644,13 @@ export async function extractPatterns(
     cursor += span;
     if (enr?.service) rec.services.set(enr.service, (rec.services.get(enr.service) || 0) + 1);
     if (enr?.severity) rec.severities.set(enr.severity, (rec.severities.get(enr.severity) || 0) + 1);
-    if (opts.cells && enr) addPatternCell(rec.cells, enr, rec.bytes - bytesBefore);
+    if (opts.cells && enr) {
+      const parsed = !enr.attribute && opts.pipelineSplitAttribute
+        ? opts.pipelineSplitAttribute(enr.service, eventLines.map((l) => l.line))
+        : undefined;
+      if (parsed) pipelineParsedEvents += 1;
+      addPatternCell(rec.cells, parsed ? { ...enr, attribute: parsed } : enr, rec.bytes - bytesBefore);
+    }
     if (typeof enr?.timestampMs === 'number') {
       const ts = enr.timestampMs;
       if (rec.firstSeenMs === undefined || ts < rec.firstSeenMs) rec.firstSeenMs = ts;
@@ -736,6 +777,7 @@ export async function extractPatterns(
     receiverBytesBasis: measuredRecords ? 'records' : 'assumed_overhead',
     ...(measuredRecords ? {} : { recordOverheadBytes: recordOverhead }),
     ...(timedSpanSeconds !== undefined ? { receiverTimedSpanSeconds: timedSpanSeconds } : {}),
+    ...(opts.pipelineSplitAttribute ? { pipelineParsedEvents } : {}),
     inputLineCount: lines.length,
     templaterWallTimeMs: totalWallTimeMs,
     executionMode,

@@ -3,10 +3,11 @@
  * filters a person writes without 10x against the per-pattern plan, counted in
  * Datadog's unit (events kept out of the Standard index).
  *
- * Native filters, the rule the public benchmarks use: one per service with
- * `-status:(error OR warn)`; inside a service whose events carry a parsed split
- * attribute (`logger.name`), one per value instead; largest first until they
- * reach the events the plan moves, the overshoot kept.
+ * Native filters: one per service with
+ * `-status:(emergency OR alert OR critical OR error OR warn)`, so none moves an
+ * event of status warn or above; inside a service whose events carry a parsed
+ * split attribute (`logger.name`), one per value instead; largest first until
+ * they reach the events the plan moves, the overshoot kept.
  */
 
 import { SPLIT_ATTRIBUTES, type PatternCell } from './pattern-extraction.js';
@@ -85,9 +86,51 @@ export interface NativeControl {
   eventsTotal: number;
 }
 
-/** What `-status:(error OR warn)` keeps in Standard. */
+/** A pattern as the POC renderers carry it, before it is set against the native filters. */
+export interface ControlSource {
+  identity: string;
+  template: string;
+  sampleEvent: string;
+  tenxHash?: string;
+  hash: string;
+  service?: string;
+  severity?: string;
+  count: number;
+  bytes: number;
+  cells?: PatternCell[];
+  recommendedAction: string;
+}
+
+/**
+ * The control arm's patterns: each pattern's action from the plan when one
+ * was solved (anything it does not move is `keep`), else its recommended
+ * action. A cell with no Datadog status (a forwarder's raw records carry
+ * none) takes the pattern's severity as the engine reads it.
+ */
+export function controlPatterns(
+  patterns: ControlSource[],
+  plannedAction?: ReadonlyMap<string, string>,
+): ControlPattern[] {
+  return patterns.map((p) => ({
+    identity: p.identity,
+    template: p.template,
+    sampleEvent: p.sampleEvent,
+    ...(p.tenxHash !== undefined ? { tenxHash: p.tenxHash } : {}),
+    ...(p.service !== undefined ? { service: p.service } : {}),
+    ...(p.severity !== undefined ? { severity: p.severity } : {}),
+    count: p.count,
+    bytes: p.bytes,
+    ...(p.cells ? { cells: p.cells.map((c) => (c.status !== undefined ? c : { ...c, status: p.severity })) } : {}),
+    action: plannedAction ? (plannedAction.get(p.tenxHash ?? p.hash) ?? 'keep') : p.recommendedAction,
+  }));
+}
+
+/**
+ * What the status clause keeps in Standard: every status at warn or above.
+ * Datadog's status remapper maps a FATAL level to emergency.
+ */
 function excludedByStatusClause(status?: string): boolean {
-  return /^(error|warn|warning)$/i.test(status ?? '');
+  return isErrorOrWarning(status);
 }
 
 /** The errors-and-warnings column: the protected severities plus Datadog's alert and emergency. */
@@ -381,7 +424,7 @@ export interface NativeControlRenderInput {
   dollarsWithheld?: boolean;
 }
 
-const STATUS_CLAUSE = '-status:(error OR warn)';
+const STATUS_CLAUSE = '-status:(emergency OR alert OR critical OR error OR warn)';
 
 function n(v: number): string {
   return Math.round(v).toLocaleString('en-US');
@@ -448,7 +491,8 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
   );
   lines.push('');
   lines.push(
-    `Errors and warnings are events with status error, warn, critical, alert or emergency; \`${STATUS_CLAUSE}\` keeps the first two in Standard. ` +
+    'Errors and warnings are events with status warn or above: warn, error, critical, alert or emergency. ' +
+      `Every native filter here carries \`${STATUS_CLAUSE}\`, so it keeps all of them in Standard. ` +
       'The plan\'s rule is one `@tenx_hash` index filter with a value per pattern, or the Receiver\'s per-pattern rows behind one `@routeState:tier_down` filter. ' +
       'A native index filter may select on service, status, a parsed attribute and message text (plain terms and quoted phrases); only the `*:` free-text syntax is barred.',
   );
@@ -472,7 +516,7 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
         ? `\`${s.splitAttribute}\` is parsed on its events, so a filter per value would be the finest native filter there`
         : 'no parsed attribute on its events, so the service is the finest filter there';
       const named = s.filters.length > 0 ? 'the filters above leave' : 'not named by the filters, which leave';
-      lines.push(`- ${label}, ${named} ${n(s.planEventsLeft)} events the plan moves in Standard: ${finest}.`);
+      lines.push(`- ${label}, ${named} ${plural(s.planEventsLeft, 'event', 'events')} the plan moves in Standard: ${finest}.`);
     }
   }
   if (c.services.length > MAX_SERVICES) {
@@ -574,7 +618,8 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
   const held = months === 1 ? '30 days' : Number.isInteger(months) ? `${months} months` : `${Math.round(months * 30)} days`;
   const flexLine =
     ref?.pricing_tier === 'starter'
-      ? `${pricing.starter.name} ${fmtListRate(flexRate)} per million events stored a month (list price), compute included, held ${held}`
+      ? `${pricing.starter.name} ${fmtListRate(flexRate)} per million events stored a month (list price), compute bundled for volumes below ` +
+        `${fmtEventCount(pricing.starter.below_events_monthly)} events a month and ${fmtEventCount(pricing.starter.recommended_below_events_stored)} stored, held ${held}`
       : `Flex storage ${fmtListRate(flexRate)} per million events stored a month (list price) on a scalable compute tier, held ${held}; ${ref?.unpriced ?? pricing.unpriced_line}`;
   lines.push(
     'Index filters and tier_down act after Datadog\'s intake, so every line they move still pays ingestion. A line offloaded to S3 ' +
