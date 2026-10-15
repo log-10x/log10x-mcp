@@ -358,7 +358,7 @@ export const configureEngineSchema = {
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('pass')
         .describe(
-          'Default action for error-tier patterns (severity `error`/`warn`/`warning`; `critical`/`fatal` are audit-tier and always `pass`). Defaults to `pass`: error-class lines are kept verbatim, which is what the POC report tells the customer. Set this explicitly to opt into reducing them, and prefer a lossless lever (`compact`/`tier_down`/`offload`) over `sample`/`drop`.'
+          'Default action for error-tier patterns (severity `error`/`warn`/`warning`; `critical`/`fatal` are audit-tier and always `pass`). Defaults to `pass`: error-class lines are kept verbatim, which is what the POC report tells the customer. Set this explicitly to opt into reducing them, and prefer a lever that keeps every line (`compact`/`tier_down`/`offload`) over `sample`/`drop`.'
         ),
       standard: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
@@ -367,11 +367,11 @@ export const configureEngineSchema = {
       debug: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
+        .describe('Default action for debug-tier patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lever that keeps every line (`compact`/`tier_down`/`offload`) to keep these lines.'),
       synthetic: z
         .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
         .default('drop')
-        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lossless lever to keep these lines.'),
+        .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lever that keeps every line (`compact`/`tier_down`/`offload`) to keep these lines.'),
     })
     .default({})
     .describe(
@@ -387,7 +387,7 @@ export const configureEngineSchema = {
     .enum(['soft', 'hard'])
     .default('hard')
     .describe(
-      '`soft` = mark for SIEM-side tier-down (lossless, recoverable). `hard` = drop at the receiver (gone). Soft is only meaningful on destinations that support a marker-driven tier (Splunk via `_raw` marker, ES via index-time routing).'
+      '`soft` = mark for SIEM-side tier-down (every line kept, recoverable). `hard` = drop at the receiver (gone). Soft is only meaningful on destinations that support a marker-driven tier (Splunk via `_raw` marker, ES via index-time routing).'
     ),
   observationDays: z
     .number()

@@ -264,20 +264,20 @@ const BASELINE: Record<string, string> = {
   'offloadRecipe.otel-collector': 'c572b52debab4a60',
   'offloadRecipe.logstash': '55f939b60a1d11b3',
   'offloadRecipe.cribl': 'fbb5866cf56944d6',
-  'renderOffloadSection.none': 'a6deb9ef68968488',
-  'renderOffloadSection.nofwd.none': 'aefdc85b522a0e78',
-  'renderOffloadSection.datadog': '91324dfd741a871b',
-  'renderOffloadSection.nofwd.datadog': '117b5b8d02bf5f21',
-  'renderOffloadSection.cloudwatch': '586560178534070d',
-  'renderOffloadSection.nofwd.cloudwatch': '12742158c7dcf959',
-  'renderOffloadSection.azure-monitor': '28f2e07277081674',
-  'renderOffloadSection.nofwd.azure-monitor': 'e4de8f40f7af8af4',
-  'renderOffloadSection.coralogix': '36d257f746349ed0',
-  'renderOffloadSection.nofwd.coralogix': '2bbf51435c836288',
-  'renderOffloadSection.elasticsearch': 'e72244c86139301c',
-  'renderOffloadSection.nofwd.elasticsearch': '0cc02652b0dca0d4',
-  'renderOffloadSection.splunk': 'a821be465e387d75',
-  'renderOffloadSection.nofwd.splunk': 'a919ddc96948df80',
+  'renderOffloadSection.none': '21741b79ce602c43',
+  'renderOffloadSection.nofwd.none': 'a7c239a60ceec5f5',
+  'renderOffloadSection.datadog': '035c80330e6f1e5f',
+  'renderOffloadSection.nofwd.datadog': '0895ea8844d1f1a0',
+  'renderOffloadSection.cloudwatch': 'f7d382b0e6751e1d',
+  'renderOffloadSection.nofwd.cloudwatch': '4d167000b4229407',
+  'renderOffloadSection.azure-monitor': '4dff62e1d2dd2492',
+  'renderOffloadSection.nofwd.azure-monitor': '29ee0e06a38c0fa0',
+  'renderOffloadSection.coralogix': 'cbd0816e3de16738',
+  'renderOffloadSection.nofwd.coralogix': '1c214bf75dad4950',
+  'renderOffloadSection.elasticsearch': 'c9cba91bf399e4c1',
+  'renderOffloadSection.nofwd.elasticsearch': '3f90ad8567c1653b',
+  'renderOffloadSection.splunk': 'b228f32520e619bf',
+  'renderOffloadSection.nofwd.splunk': '4b35bf28548f2461',
   forwarderWriteTerraform: '91968b63922ff7b0',
 };
 
@@ -319,6 +319,11 @@ const BASELINE: Record<string, string> = {
 // REBASELINED 2026-10-14, deliberately. Every entry that moved carries an em
 // dash removed from its prose or its config comments, and nothing else: no
 // config key, value or expression changed.
+//
+// REBASELINED 2026-10-15, deliberately. Only the fourteen renderOffloadSection
+// entries moved. The S3 section's opening sentence called offload "lossless
+// cost reduction"; the claim sheet keeps "lossless" for compact, so it now
+// says every line is kept. Every recipe body and the Terraform are unchanged.
 test('every pre-existing recipe is byte-identical to the parent commit', () => {
   const P = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
   const h = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);

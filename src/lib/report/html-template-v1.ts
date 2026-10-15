@@ -232,7 +232,7 @@ export function renderReportHtml(data: ReportData): string {
   const breakdown = d.achievable
     ? `
 <div class="split">
-<div class="split-row"><span class="split-pct lossless">${Math.round(d.achievable.losslessPct)}%</span><span class="split-lab">via 10x's lossless levers: offload, compact, or tier down. Nothing deleted.</span></div>
+<div class="split-row"><span class="split-pct lossless">${Math.round(d.achievable.losslessPct)}%</span><span class="split-lab">via 10x's levers that keep every line: offload, compact, or tier down. Nothing deleted.</span></div>
 <div class="split-row"><span class="split-pct source">${Math.round(d.achievable.sourceFixPct)}%</span><span class="split-lab">by ${d.achievable.sourceIsFailure ? 'fixing the failure' : 'turning down the repeated output'} at its source. The change is yours to make; 10x measures it.</span></div>
 </div>`
     : '';
