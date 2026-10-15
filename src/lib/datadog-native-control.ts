@@ -85,6 +85,45 @@ export interface NativeControl {
   eventsTotal: number;
 }
 
+/** A pattern as the POC renderers carry it, before it is set against the native filters. */
+export interface ControlSource {
+  identity: string;
+  template: string;
+  sampleEvent: string;
+  tenxHash?: string;
+  hash: string;
+  service?: string;
+  severity?: string;
+  count: number;
+  bytes: number;
+  cells?: PatternCell[];
+  recommendedAction: string;
+}
+
+/**
+ * The control arm's patterns: each pattern's action from the plan when one
+ * was solved (anything it does not move is `keep`), else its recommended
+ * action. A cell with no Datadog status (a forwarder's raw records carry
+ * none) takes the pattern's severity as the engine reads it.
+ */
+export function controlPatterns(
+  patterns: ControlSource[],
+  plannedAction?: ReadonlyMap<string, string>,
+): ControlPattern[] {
+  return patterns.map((p) => ({
+    identity: p.identity,
+    template: p.template,
+    sampleEvent: p.sampleEvent,
+    ...(p.tenxHash !== undefined ? { tenxHash: p.tenxHash } : {}),
+    ...(p.service !== undefined ? { service: p.service } : {}),
+    ...(p.severity !== undefined ? { severity: p.severity } : {}),
+    count: p.count,
+    bytes: p.bytes,
+    ...(p.cells ? { cells: p.cells.map((c) => (c.status !== undefined ? c : { ...c, status: p.severity })) } : {}),
+    action: plannedAction ? (plannedAction.get(p.tenxHash ?? p.hash) ?? 'keep') : p.recommendedAction,
+  }));
+}
+
 /** What `-status:(error OR warn)` keeps in Standard. */
 function excludedByStatusClause(status?: string): boolean {
   return /^(error|warn|warning)$/i.test(status ?? '');
@@ -472,7 +511,7 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
         ? `\`${s.splitAttribute}\` is parsed on its events, so a filter per value would be the finest native filter there`
         : 'no parsed attribute on its events, so the service is the finest filter there';
       const named = s.filters.length > 0 ? 'the filters above leave' : 'not named by the filters, which leave';
-      lines.push(`- ${label}, ${named} ${n(s.planEventsLeft)} events the plan moves in Standard: ${finest}.`);
+      lines.push(`- ${label}, ${named} ${plural(s.planEventsLeft, 'event', 'events')} the plan moves in Standard: ${finest}.`);
     }
   }
   if (c.services.length > MAX_SERVICES) {
@@ -574,7 +613,8 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
   const held = months === 1 ? '30 days' : Number.isInteger(months) ? `${months} months` : `${Math.round(months * 30)} days`;
   const flexLine =
     ref?.pricing_tier === 'starter'
-      ? `${pricing.starter.name} ${fmtListRate(flexRate)} per million events stored a month (list price), compute included, held ${held}`
+      ? `${pricing.starter.name} ${fmtListRate(flexRate)} per million events stored a month (list price), compute bundled for volumes below ` +
+        `${fmtEventCount(pricing.starter.below_events_monthly)} events a month and ${fmtEventCount(pricing.starter.recommended_below_events_stored)} stored, held ${held}`
       : `Flex storage ${fmtListRate(flexRate)} per million events stored a month (list price) on a scalable compute tier, held ${held}; ${ref?.unpriced ?? pricing.unpriced_line}`;
   lines.push(
     'Index filters and tier_down act after Datadog\'s intake, so every line they move still pays ingestion. A line offloaded to S3 ' +

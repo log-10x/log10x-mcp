@@ -137,6 +137,73 @@ function forwarderRecord(rec: unknown): { record: Record<string, unknown>; paylo
   return typeof payload === 'string' ? { record: o, payload } : undefined;
 }
 
+export type CaptureEventSource = 'forwarder' | 'archive' | 'pods' | 'lines';
+
+/**
+ * What a capture's events are, from its records: a forwarder's own output
+ * (a `log` payload, or a CloudWatch export of one), a Datadog log archive
+ * (`message` with Datadog's `status` and `service` or `attributes`), the
+ * pods' own logs (kubectl), or plain lines. The first three hold every event
+ * the services wrote, the ones a Datadog index exclusion filter drops
+ * included; a sample read back from Datadog's API holds indexed events only.
+ */
+export function captureEventSource(records: unknown[], fromKubectl = false): CaptureEventSource {
+  if (fromKubectl) return 'pods';
+  let forwarder = 0;
+  let archive = 0;
+  const sniff = records.slice(0, 200);
+  for (const r of sniff) {
+    let o: unknown = r;
+    if (typeof o === 'string') {
+      const t = o.trim();
+      if (!t.startsWith('{')) continue;
+      try {
+        o = JSON.parse(t);
+      } catch {
+        continue;
+      }
+    }
+    if (!o || typeof o !== 'object' || Array.isArray(o)) continue;
+    const rec = o as Record<string, unknown>;
+    // A forwarder record carries its payload in `log`; a CloudWatch export wraps one in `message`.
+    const unwrapped = forwarderRecord(rec);
+    if (typeof rec.log === 'string' || (unwrapped && unwrapped.record !== rec)) {
+      forwarder++;
+    } else if (
+      typeof rec.message === 'string' &&
+      typeof rec.status === 'string' &&
+      (typeof rec.service === 'string' || (rec.attributes !== null && typeof rec.attributes === 'object'))
+    ) {
+      archive++;
+    }
+  }
+  const half = Math.max(1, Math.ceil(sniff.length / 2));
+  if (forwarder >= half) return 'forwarder';
+  if (archive >= half) return 'archive';
+  return 'lines';
+}
+
+/** One sentence on which events a capture holds, for the native-filter comparison. */
+export function captureEventSourceSentence(kind: CaptureEventSource): string {
+  const all =
+    'so both arms count every event the services wrote, the ones a Datadog index exclusion filter drops as well as the ones it indexes. ' +
+    'A sample read back from Datadog holds indexed events only.';
+  const status = ' Where an event carries no Datadog status, its status here is the severity the engine reads from its text.';
+  switch (kind) {
+    case 'forwarder':
+      return `These are the forwarder's own records, read before Datadog's intake, ${all}${status}`;
+    case 'archive':
+      return `These are Datadog log archive records, every event Datadog ingested before its index filters ran, ${all}`;
+    case 'pods':
+      return `These are the pods' own logs, read with kubectl, ${all}${status}`;
+    default:
+      return (
+        'These are the file\'s lines as they are. They include the events a Datadog index exclusion filter drops when the file ' +
+        'is the forwarder\'s output or a Datadog archive, and not when it was read back from Datadog.' + status
+      );
+  }
+}
+
 /**
  * What `extractPatterns` needs to count each event in the Receiver's unit:
  * the forwarder's record bytes where a line carries one, and every line's

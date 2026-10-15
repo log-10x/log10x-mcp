@@ -39,11 +39,14 @@ import {
   describeFileSpan,
   receiverExtractionInputs,
   containerOrder,
+  captureEventSource,
+  captureEventSourceSentence,
   FileSpanRefusal,
   type FileSpan,
 } from '../lib/local-file-source.js';
 import { receiverBytesStatement } from '../lib/receiver-bytes.js';
-import { extractPatterns } from '../lib/pattern-extraction.js';
+import { renderNativeControlSection, controlPatterns } from '../lib/datadog-native-control.js';
+import { extractPatterns, pipelineSplitAttribute } from '../lib/pattern-extraction.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -677,6 +680,12 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     linePayloadJsonBytes: inOrder(receiverInputs.linePayloadJsonBytes),
     lineTimesMs: inOrder(receiverInputs.lineTimesMs),
     ...(args.record_overhead_bytes !== undefined ? { recordOverheadBytes: args.record_overhead_bytes } : {}),
+    // The Datadog report sets native index filters against the plan, which
+    // needs each pattern's events by service, status and parsed attribute.
+    cells: args.siem === 'datadog',
+    // A file read before Datadog's intake has no parsed attributes; the Kafka
+    // pipeline's logger.name is read from the event's text instead.
+    ...(args.siem === 'datadog' ? { pipelineSplitAttribute } : {}),
   });
 
   // Hours the sampled bytes stand for: a file's span shrinks by the share of
@@ -1134,6 +1143,35 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
               `\`fleet_default\` from this result` +
               (siem === 'datadog' ? ' and `log_destination: "datadog"`.' : '.')
           : `**Fleet default.** None: ${fleet_default.reason}.`,
+      );
+    }
+    // Datadog: the native index filters a person writes without 10x, set
+    // against the plan on this capture's events, the ones Datadog never
+    // indexed included when the capture is the forwarder's output.
+    if (siem === 'datadog') {
+      const plannedAction = plan
+        ? new Map(plan.planned.filter((r) => r.action !== 'pass').map((r) => [r.hash, r.action] as const))
+        : undefined;
+      lines.push('');
+      lines.push('## Native index filters against the plan');
+      lines.push('');
+      lines.push(captureEventSourceSentence(captureEventSource(extractionInput, source === 'kubectl')));
+      if (extraction.pipelineParsedEvents) {
+        lines.push(
+          "Datadog's Kafka log pipeline parses the logger class that ends a Kafka line into `logger.name` before index filters run. " +
+            `These events carry it unparsed, so it is read from each Kafka event's text, ${extraction.pipelineParsedEvents.toLocaleString('en-US')} events in all.`,
+        );
+      }
+      lines.push('');
+      lines.push(
+        ...renderNativeControlSection({
+          patterns: controlPatterns(enrichment.patterns, plannedAction),
+          totalBytes: extraction.totalBytes,
+          totalDailyGb: dailyGbProjected,
+          windowHours: windowHoursForReport,
+          window: source === 'file' ? 'file' : opts.window!,
+          volumeLabel: source === 'file' ? "the file's span" : 'the kubectl window',
+        }),
       );
     }
     const html = renderReportHtml(built.data);
