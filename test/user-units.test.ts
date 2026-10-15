@@ -108,8 +108,8 @@ test('the Flex add-on line names the tier the plan volume lands in', () => {
     flexAddedSentence('datadog', 10e9, 10e6),
     'The dollar figures are the Standard indexing line at list. Flex Starter adds about $18 a month for all of them, compute included, held 3 months.',
   );
-  // 4 billion events a month, held 3 months, is above the 10 billion stored
-  // Datadog recommends Starter below: scalable storage, compute on request.
+  // 4 billion events a month is above Starter's 2 billion a month and, held 3
+  // months, its 10 billion stored: scalable storage, compute on request.
   assert.equal(
     flexAddedSentence('datadog', 4000e9, 4e9),
     'The dollar figures are the Standard indexing line at list. Flex storage adds about $200 a month for all of them, compute priced by Datadog on request, held 30 days.',

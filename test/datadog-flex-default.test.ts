@@ -7,9 +7,9 @@
  * to Flex before offload. The plan reports the events and GB moved out of the
  * Standard index, the Standard indexing line avoided at Datadog list, and the
  * Flex line added at the tier the moved volume lands in: Flex Starter, storage
- * and compute at one rate for at least 3 months, the size Datadog recommends
- * below 10 billion events stored; above that, Flex storage on a scalable compute
- * tier, with compute unpriced and excluded. It prints no percentage of the
+ * and compute at one rate for at least 3 months, compute bundled for volumes
+ * below 2 billion events a month and 10 billion stored; above either, Flex
+ * storage on a scalable compute tier, with compute unpriced and excluded. It prints no percentage of the
  * Datadog bill and no 0.6/0.4 blend (claims charter: never a Datadog Flex
  * percentage, bare or qualified).
  *
@@ -27,6 +27,7 @@ import {
   DEFAULT_ACTION_BY_DESTINATION,
   projectAction,
   projectPerEventTierMove,
+  perEventPricingTier,
   tierDownRateDelta,
   getDestinationCostModel,
 } from '../src/lib/cost.js';
@@ -60,30 +61,54 @@ test('a 1,000 GB/mo Flex move is priced per event at Datadog list, as lines', ()
   assert.equal(move.events_moved, 1e9);
   assert.equal(move.events_basis, 'measured');
   assert.equal(move.standard_indexing_avoided_usd, 1700); // $1.70 per million, 15-day retention
-  // One billion events a month, held 3 months, is 3 billion stored, within the
-  // 10 billion Datadog recommends Starter below, so the line is $0.60 per
-  // million stored per month for 3 months.
+  // One billion events a month, held 3 months, is 3 billion stored, below both
+  // Starter limits (2 billion a month, 10 billion stored), so the line is $0.60
+  // per million stored per month for 3 months.
   assert.equal(move.pricing_tier, 'starter');
   assert.equal(move.tier_storage_added_usd, 1800);
   assert.equal(move.tier_retention_months, 3);
   assert.match(move.text, /1 billion events \(1000 GB\) a month out of the Standard index into Datadog Flex Logs/);
   assert.match(move.text, /Standard indexing avoided: \$1,700\/mo at \$1\.70 per million events \(15-day retention\)/);
-  assert.match(move.text, /Flex Starter added: \$1,800\/mo at \$0\.60 per million events stored per month, compute included, held 3 months/);
+  assert.match(
+    move.text,
+    /Flex Starter added: \$1,800\/mo at \$0\.60 per million events stored per month, compute bundled for volumes below 2 billion events a month and 10 billion stored, held 3 months \(Datadog Log Management pricing page, read 2026-10-15\)/,
+  );
   assert.ok(!/unpriced/.test(move.text), move.text);
   assert.match(move.text, /read 2026-10-13/);
   assert.ok(!/%/.test(move.text), move.text);
 });
 
 test('above Starter, a Flex move is priced at scalable storage with compute unpriced', () => {
-  // Four billion events a month, held 3 months, is 12 billion stored, above the
-  // 10 billion Datadog recommends Starter below: storage at $0.05 per million
-  // stored per month, held 30 days, and the compute line named, not counted.
+  // Four billion events a month is above Starter's 2 billion a month (and, held
+  // 3 months, its 10 billion stored): storage at $0.05 per million stored per
+  // month, held 30 days, and the compute line named, not counted.
   const move = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 4000 * GB, { avgEventBytes: 1000 });
   assert.equal(move.pricing_tier, 'scalable');
   assert.equal(move.tier_storage_added_usd, 200);
   assert.equal(move.tier_retention_months, 1);
   assert.match(move.text, /Flex storage added: \$200\/mo at \$0\.05 per million events stored per month, held 30 days, on a scalable compute tier/);
   assert.match(move.text, /Flex compute is unpriced .* excluded from both figures/);
+  assert.match(move.text, /Flex Starter compute bundled for volumes below 2 billion events a month and 10 billion stored/);
+});
+
+test('above 2 billion events a month, a Flex move lands on scalable even when its stored volume is under 10 billion', () => {
+  // 2.5 billion events a month, held 3 months, is 7.5 billion stored, under the
+  // stored limit, and above the monthly one: scalable.
+  const over = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 2500 * GB, { avgEventBytes: 1000 });
+  assert.equal(over.events_moved, 2.5e9);
+  assert.equal(over.pricing_tier, 'scalable');
+  assert.equal(over.tier_retention_months, 1);
+  assert.equal(over.tier_storage_added_usd, 125); // 2,500M events x $0.05/M, held 30 days
+  assert.match(over.text, /on a scalable compute tier/);
+  // Just under both limits: 1.9 billion a month, 5.7 billion stored over 3 months: Starter.
+  const under = projectPerEventTierMove(DATADOG_FLEX_LIST_PRICING, 1900 * GB, { avgEventBytes: 1000 });
+  assert.equal(under.pricing_tier, 'starter');
+  // Under the monthly limit but over the stored one when held 6 months: 1.9 x 6 = 11.4 billion stored.
+  assert.equal(perEventPricingTier(DATADOG_FLEX_LIST_PRICING, 1.9e9, 6).pricing_tier, 'scalable');
+  // Exactly at the monthly limit is not below it.
+  assert.equal(perEventPricingTier(DATADOG_FLEX_LIST_PRICING, 2e9).pricing_tier, 'scalable');
+  assert.equal(DATADOG_FLEX_LIST_PRICING.starter.below_events_monthly, 2e9);
+  assert.equal(DATADOG_FLEX_LIST_PRICING.starter.recommended_below_events_stored, 10e9);
 });
 
 test('an unmeasured event size is ASSUMED, and the move says so', () => {
@@ -193,7 +218,7 @@ test('estimate_savings on Datadog renders the Flex lines and no percentage of th
   const text = JSON.stringify(out);
   const headline = String(out.summary?.headline ?? out.data?.headline ?? '');
   assert.match(headline, /out of the Datadog Standard index/, headline);
-  assert.match(headline, /Flex Starter added: .* compute included, held 3 months/, headline);
+  assert.match(headline, /Flex Starter added: .* compute bundled for volumes below 2 billion events a month and 10 billion stored, held 3 months/, headline);
   assert.ok(!BILL_PERCENT.test(headline), headline);
   assert.ok(!/cut \d+% of the datadog bill/i.test(text), 'no "cut N% of the datadog bill" anywhere in the envelope');
 });
