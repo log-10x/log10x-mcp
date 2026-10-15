@@ -206,7 +206,7 @@ export const pocFromLocalSchema = {
     .describe(
       'Whether the prospect will install the S3 retriever. Gates the offload rung of the plan ladder: ' +
         'without it offloaded events would be unreachable, so the plan stops at the in-SIEM levers and ' +
-        'the gap names "install the retriever" as the lossless remedy. Set from conversation.'
+        'the gap names "install the retriever" as the keep-everything remedy. Set from conversation.'
     ),
   allow_lossy: z
     .boolean()

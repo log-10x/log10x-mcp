@@ -59,7 +59,7 @@ export const retrieverSeriesSchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload archive: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the archived bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
+      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload bucket: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the offloaded bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
     ),
   search: z
     .string()

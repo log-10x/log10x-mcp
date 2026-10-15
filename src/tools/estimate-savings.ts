@@ -109,7 +109,7 @@ const MONTH_DAYS = 30;
 // ─── schema ─────────────────────────────────────────────────────────────
 
 const proposedRow = z.object({
-  pattern_hash: z.string().describe('Stable pattern identity (tenx_hash).'),
+  pattern_hash: z.string().describe('Pattern hash (tenx_hash).'),
   action: z
     .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
     .describe('Action the receiver would take for this pattern.'),
@@ -201,7 +201,7 @@ export const estimateSavingsSchema = {
     .describe(
       'Whether the S3 retriever is installed (or the user has agreed to install it). Gates the offload ' +
         'rung of the ladder solver: without it, offloaded events would be unreachable, so the plan stops ' +
-        'at the in-SIEM levers and the gap names "install the retriever" as the lossless remedy. ' +
+        'at the in-SIEM levers and the gap names "install the retriever" as the keep-everything remedy. ' +
         'Set from conversation; log10x_advise_retriever is the install path.'
     ),
   allow_lossy: z

@@ -1,8 +1,8 @@
 # Log10x MCP Server
 
-Ask your AI assistant about log costs, log patterns, and incidents in plain English, and get structured answers backed by real per-pattern metrics. "Why did our log costs spike this week?", "what's driving payments-svc volume?", "pull the payment_retry events for acme-corp from Jan 15 to Apr 15." The server exposes the 10x platform to Claude and any MCP-compatible assistant as a set of tools.
+Ask your AI assistant about log costs, log patterns, and incidents in plain English, and get structured answers backed by per-pattern metrics. "Why did our log costs spike this week?", "what's driving payments-svc volume?", "pull the payment_retry events for acme-corp from Jan 15 to Apr 15." The server exposes the 10x platform to Claude and any MCP-compatible assistant as a set of tools.
 
-10x groups your logs by message type. The same lines repeat over and over with only the timestamp or request ID changing, so 10x collapses each flood of near-identical lines into one message type and ranks them by volume and cost. That is how the answers stay exact instead of best-effort clustering, no regex required.
+10x groups your logs by message type. The same lines repeat over and over with only the timestamp or request ID changing, so 10x collapses each flood of near-identical lines into one message type and ranks them by volume and cost. Names come from symbols compiled from code, so the same line gets the same name on every node under the same engine, library and configuration.
 
 This server is open source under MIT. A Log10x product license (API key) unlocks the account-scoped tools; without one, the server boots read-only against a public demo dataset so the tools can be explored immediately.
 
@@ -102,7 +102,7 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 
 The server runs locally as a subprocess of your AI client. Only pre-aggregated metric queries (per-pattern volume and cost) leave the machine, never raw log content. Local triage with `log10x_resolve_batch` runs entirely on your machine over stdin and stdout. Connections to your own log platform use read-only credentials. Set `LOG10X_MCP_READ_ONLY=true` to refuse every mutating tool regardless of mode.
 
-## The fenced POC — provably offline
+## The fenced POC: provably offline
 
 For an evaluation that has to be checkable rather than promised: MCP server and
 log engine in one container started with `--network none`, over a log sample
@@ -117,12 +117,12 @@ docker run -i --rm --pull=never --network none --hostname localhost \
 
 There is no `npx` variant of this line, and that is not an oversight. `npx`
 resolves and executes a package at run time, and a package's postinstall
-script is unconfined code running with whatever network the host has — the
+script is unconfined code running with whatever network the host has; the
 exact thing the fence exists to rule out. Everything in the image is baked at
 build time; nothing is installed when the container starts.
 
 The licence is minted by you, with one visible `curl`, before any log data is
-in scope — in this profile the server never mints, and a missing licence fails
+in scope: in this profile the server never mints, and a missing licence fails
 with those instructions rather than with a fetch. The log sample is exported
 by you: `log10x_emit_sample_plan` renders a read-only shell script per
 analyzer that you read once and run outside the container.

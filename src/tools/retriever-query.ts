@@ -63,13 +63,13 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload archive: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the archived bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
+      'Reporter-named pattern (Symbol Message). NOT SUPPORTED against the offload bucket: passing it returns an error naming the remedy, rather than a silent empty result. A Symbol Message is a label DERIVED from the event, so it is never a token in the offloaded bytes, and the Bloom index holds only text tokens plus template hashes. (The field this once queried, `tenx_user_pattern`, does not exist in the engine at all, which is why name-scoped queries returned BLOOM_REJECTED_ALL.) Pass `pattern_hash` instead: top_patterns returns it on the same row as the name, and event_lookup resolves a name to a hash.'
     ),
   pattern_hash: z
     .string()
     .optional()
     .describe(
-      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the archive re-derives its own `tenx_hash` field per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the chain-stable identity emitted by top_patterns.payload.patterns[].pattern_hash: bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
+      'Canonical pattern_hash from top_patterns / event_lookup. When provided, search is auto-built as `includes(text, "<hash>")` and no name resolution runs. It matches the stamped hash as a TEXT TOKEN because the offloaded events carry their own `tenx_hash` field, re-derived per multi-line group, so a field equality against a metrics-side hash matches nothing. This is the pattern hash emitted by top_patterns.payload.patterns[].pattern_hash: bypasses the name→hash resolver entirely. Precedence: `search` > `pattern_hash` > `pattern`. Example: `pattern_hash: "4Kjc7PHLWqY"`.'
     ),
   search: z
     .string()
