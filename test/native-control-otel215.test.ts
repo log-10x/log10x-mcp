@@ -64,14 +64,15 @@ test('50%: service filters pick the collector and kafka, as published; with logg
   assert.deepEqual(arm(50, true), { filters: ['opentelemetry-collector', 'cart', 'grafana'], plan: 6125, native: 6644, errorsAndWarnings: 0, keptMoved: 1096, left: 577 });
 });
 
-test('70%: service filters pick the published three and grafana; with logger.name three Kafka classes and the frontend, whose 135 CRITICAL events the status clause leaves in the filter', () => {
+test('70%: service filters pick the published three and grafana; with logger.name four Kafka classes, and the frontend\'s CRITICAL events stay in Standard', () => {
   assert.deepEqual(arm(70, false), { filters: ['opentelemetry-collector', 'kafka', 'cart', 'grafana'], plan: 8001, native: 8191, errorsAndWarnings: 0, keptMoved: 939, left: 749 });
-  const split = arm(70, true);
-  assert.deepEqual(split.filters, [
-    'opentelemetry-collector', 'cart', 'grafana', 'ad',
-    'kafka org.apache.kafka.storage.internals.log.LogSegment', 'recommendation', 'kafka kafka.log.UnifiedLog', 'frontend', 'kafka kafka.log.LocalLog',
-  ]);
-  assert.equal(split.native, 8098);
-  assert.equal(split.errorsAndWarnings, 135);
-  assert.equal(split.left, 914);
+  assert.deepEqual(arm(70, true), {
+    filters: [
+      'opentelemetry-collector', 'cart', 'grafana', 'ad',
+      'kafka org.apache.kafka.storage.internals.log.LogSegment', 'recommendation', 'kafka kafka.log.UnifiedLog', 'kafka kafka.log.LocalLog',
+      'kafka org.apache.kafka.storage.internals.log.SnapshotFile',
+    ],
+    plan: 8001, native: 8091, errorsAndWarnings: 0, keptMoved: 876, left: 786,
+  });
+  assert.ok(fx.rows.some((r) => r[0] === 'frontend' && r[1] === 'CRITICAL' && r[6] === 135));
 });

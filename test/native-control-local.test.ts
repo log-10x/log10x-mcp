@@ -76,7 +76,7 @@ test('on raw forwarder records the status clause still keeps the error lines in 
   assert.equal(c.plan.events, 1300);
   assert.deepEqual(c.native.filters.map((f) => [f.service, f.events]), [['collector', 1400]]);
   assert.equal(c.native.events, 1400);
-  assert.equal(c.native.errorsAndWarnings, 0, 'the ERROR pattern stays under -status:(error OR warn)');
+  assert.equal(c.native.errorsAndWarnings, 0, 'the ERROR pattern stays in Standard under the status clause');
   assert.equal(c.native.keptPatternEventsMoved, 400);
   assert.equal(c.native.leftThatOtherMoves, 300);
 });
@@ -108,4 +108,19 @@ test('other services and lines without a class get no logger.name', () => {
   assert.equal(pipelineSplitAttribute(undefined, ['x (a.b)']), undefined);
   assert.equal(pipelineSplitAttribute('kafka', ['===> Launching kafka ...']), undefined);
   assert.equal(pipelineSplitAttribute('kafka', ['ends in a word (notaclass)']), undefined);
+});
+
+test('no native filter moves an event of status warn or above: critical, alert, emergency and a FATAL level stay in Standard', () => {
+  const p = (hash: string, service: string, severity: string, count: number): ControlSource => ({
+    identity: hash, template: hash, sampleEvent: '', hash, service, severity, count, bytes: count * 100,
+    cells: [{ service, status: severity, count, bytes: count * 100 }], recommendedAction: 'keep',
+  });
+  const c = computeNativeControl(controlPatterns(
+    [p('c1', 'collector', 'info', 1000), p('f1', 'frontend', 'info', 100), p('f2', 'frontend', 'CRITICAL', 300),
+      p('f3', 'frontend', 'FATAL', 50), p('f4', 'frontend', 'alert', 20), p('f5', 'frontend', 'emergency', 10), p('f6', 'frontend', 'warn', 5)],
+    new Map([['c1', 'tier_down'], ['f1', 'tier_down']]),
+  ));
+  assert.deepEqual(c.native.filters.map((f) => [f.service, f.events]), [['collector', 1000], ['frontend', 100]]);
+  assert.equal(c.native.events, 1100);
+  assert.equal(c.native.errorsAndWarnings, 0);
 });

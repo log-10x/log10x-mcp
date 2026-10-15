@@ -47,8 +47,8 @@ test('native filters: a service filter, or one per parsed attribute value, large
   // its error pattern) then kafka's largest logger class (600) reach it.
   assert.equal(c.plan.events, 1660);
   assert.deepEqual(c.native.filters.map(filterQuery), [
-    'service:web -status:(error OR warn)',
-    'service:kafka @logger.name:kafka.log.LogSegment -status:(error OR warn)',
+    'service:web -status:(emergency OR alert OR critical OR error OR warn)',
+    'service:kafka @logger.name:kafka.log.LogSegment -status:(emergency OR alert OR critical OR error OR warn)',
   ]);
   assert.equal(c.native.events, 1760);
   assert.equal(c.native.errorsAndWarnings, 0);
@@ -152,7 +152,7 @@ test('the Datadog POC report carries the section; other destinations do not', as
   });
   const dd = renderPocReport(input('datadog') as never).markdown;
   assert.match(dd, /Native Index Filters Against the Plan/);
-  assert.match(dd, /service:web -status:\(error OR warn\)/);
+  assert.match(dd, /service:web -status:\(emergency OR alert OR critical OR error OR warn\)/);
   assert.match(dd, /@tenx_hash:\(/);
   const cw = renderPocReport(input('cloudwatch') as never).markdown;
   assert.ok(!/Native Index Filters Against the Plan/.test(cw));

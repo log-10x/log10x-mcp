@@ -3,10 +3,11 @@
  * filters a person writes without 10x against the per-pattern plan, counted in
  * Datadog's unit (events kept out of the Standard index).
  *
- * Native filters, the rule the public benchmarks use: one per service with
- * `-status:(error OR warn)`; inside a service whose events carry a parsed split
- * attribute (`logger.name`), one per value instead; largest first until they
- * reach the events the plan moves, the overshoot kept.
+ * Native filters: one per service with
+ * `-status:(emergency OR alert OR critical OR error OR warn)`, so none moves an
+ * event of status warn or above; inside a service whose events carry a parsed
+ * split attribute (`logger.name`), one per value instead; largest first until
+ * they reach the events the plan moves, the overshoot kept.
  */
 
 import { SPLIT_ATTRIBUTES, type PatternCell } from './pattern-extraction.js';
@@ -124,9 +125,12 @@ export function controlPatterns(
   }));
 }
 
-/** What `-status:(error OR warn)` keeps in Standard. */
+/**
+ * What the status clause keeps in Standard: every status at warn or above.
+ * Datadog's status remapper maps a FATAL level to emergency.
+ */
 function excludedByStatusClause(status?: string): boolean {
-  return /^(error|warn|warning)$/i.test(status ?? '');
+  return isErrorOrWarning(status);
 }
 
 /** The errors-and-warnings column: the protected severities plus Datadog's alert and emergency. */
@@ -420,7 +424,7 @@ export interface NativeControlRenderInput {
   dollarsWithheld?: boolean;
 }
 
-const STATUS_CLAUSE = '-status:(error OR warn)';
+const STATUS_CLAUSE = '-status:(emergency OR alert OR critical OR error OR warn)';
 
 function n(v: number): string {
   return Math.round(v).toLocaleString('en-US');
@@ -487,7 +491,8 @@ export function renderNativeControlSection(input: NativeControlRenderInput): str
   );
   lines.push('');
   lines.push(
-    `Errors and warnings are events with status error, warn, critical, alert or emergency; \`${STATUS_CLAUSE}\` keeps the first two in Standard. ` +
+    'Errors and warnings are events with status warn or above: warn, error, critical, alert or emergency. ' +
+      `Every native filter here carries \`${STATUS_CLAUSE}\`, so it keeps all of them in Standard. ` +
       'The plan\'s rule is one `@tenx_hash` index filter with a value per pattern, or the Receiver\'s per-pattern rows behind one `@routeState:tier_down` filter. ' +
       'A native index filter may select on service, status, a parsed attribute and message text (plain terms and quoted phrases); only the `*:` free-text syntax is barred.',
   );
