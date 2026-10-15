@@ -8,12 +8,28 @@
     "source": "github"
   },
   "websiteUrl": "https://doc.log10x.com/apps/mcp/",
-  "version": "1.30.55",
+  "icons": [
+    {
+      "src": "https://doc.log10x.com/assets/favicon-512x512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    },
+    {
+      "src": "https://doc.log10x.com/assets/favicon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    }
+  ],
+  "version": "1.30.56",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "log10x-mcp",
-      "version": "1.30.55",
+      "version": "1.30.56",
       "transport": {
         "type": "stdio"
       },
