@@ -419,6 +419,9 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   // keys, not the log10x metrics backend, so a Datadog install whose series
   // live only in Datadog reaches it whatever the backend probe found.
   log10x_datadog_change_report: ['poc', 'analysis', 'analysis_pending'],
+  // Reads Datadog's estimated usage metrics with the org's own keys: day one,
+  // before any install, so every customer mode.
+  log10x_datadog_spike_audit: ['poc', 'analysis', 'analysis_pending'],
 
   // ── Registered but previously unlisted ──
   // These reached the registry through the unlisted-tool fallback, which

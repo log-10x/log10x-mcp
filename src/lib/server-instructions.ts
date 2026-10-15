@@ -131,6 +131,10 @@ Cost investigation:
   (reads the engine's Datadog series with the org's own keys; \`view: "monitors"\`
    returns the two Datadog monitor definitions: a statement turning tier_down or
    offload, a statement above its weekly baseline. Writes nothing.)
+- Datadog account, no install needed: "what do our spikes cost" /
+  "price our log spikes" / "spike audit"                         → log10x_datadog_spike_audit
+  (reads Datadog's estimated usage metrics with the org's own keys, hourly over
+   \`lookback\` (default 90d); writes nothing.)
 - After a Datadog POC: "set the default for the other services" → log10x_advise_install
   with \`log_destination: "datadog"\` (the fleet-default step on a Receiver plan)
 

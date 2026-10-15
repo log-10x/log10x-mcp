@@ -173,3 +173,40 @@ export function ddScope(filters: Array<string | undefined>): string {
   const parts = filters.filter((f): f is string => !!f && f.length > 0);
   return parts.length === 0 ? '*' : parts.join(' AND ');
 }
+
+export interface DdPointSeries {
+  tags: Record<string, string>;
+  /** [unix seconds, value], null points left out. */
+  points: Array<[number, number]>;
+}
+
+/**
+ * Run one Datadog metrics query over [fromSec, toSec] (GET /api/v1/query)
+ * and return each group's points.
+ */
+export async function ddQueryPoints(
+  creds: DatadogMetricsCreds,
+  query: string,
+  fromSec: number,
+  toSec: number,
+  timeoutMs?: number,
+): Promise<DdPointSeries[]> {
+  const url = new URL('/api/v1/query', datadogApiBase(creds.site));
+  url.searchParams.set('from', String(Math.floor(fromSec)));
+  url.searchParams.set('to', String(Math.floor(toSec)));
+  url.searchParams.set('query', query);
+  const res = await backendJsonFetch<DdQueryResponse>(
+    url.toString(),
+    { method: 'GET', headers: headers(creds) },
+    { kindLabel: 'datadog', timeoutMs },
+  );
+  if (res.status === 'error') {
+    throw new Error(`datadog query error: ${res.error ?? '(no message)'}`);
+  }
+  return (res.series ?? []).map((s) => ({
+    tags: parseTagSet(s.tag_set, s.scope),
+    points: (s.pointlist ?? [])
+      .filter((p): p is [number, number] => p[1] !== null && Number.isFinite(p[1]))
+      .map(([ts, v]) => [Math.floor(ts / 1000), v] as [number, number]),
+  }));
+}
