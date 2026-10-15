@@ -658,8 +658,9 @@ test('receiver/fluentbit: a builtin plan keeps the sidecar, its env and airgappe
   assert.match(values, /image: log10x\/edge-10x:/);
   assert.match(values, /name: TENX_AIRGAPPED/);
   assert.match(values, /name: K8S_ENABLED/);
-  assert.ok(!/volumeMounts:/.test(values), 'nothing to mount without a licence');
-  assert.ok(!/extraVolumes:/.test(values), 'no extraVolumes without a licence');
+  assert.ok(!/tenx-license/.test(values), 'no licence mount or volume without a licence');
+  assert.match(values, /name: tenx-tmp/);
+  assert.match(values, /readOnlyRootFilesystem: true/);
 });
 
 // A JWT the caller supplied keeps today's path: the Secret step and the mount.
@@ -711,8 +712,9 @@ test('receiver/fluentd: the kustomize patch carries no licence volume on the bui
     .find((f) => f.path === 'tenx-kustomize/sidecar-patch.yaml');
   assert.ok(patch, 'the sidecar patch is still emitted');
   assert.match(patch!.contents, /name: log10x\b/);
-  assert.ok(!/volumes:/.test(patch!.contents), 'no pod volume without a licence');
-  assert.ok(!/volumeMounts:/.test(patch!.contents), 'no mount without a licence');
+  assert.ok(!/tenx-license/.test(patch!.contents), 'no licence mount or volume without a licence');
+  assert.match(patch!.contents, /name: tenx-tmp/);
+  assert.match(patch!.contents, /readOnlyRootFilesystem: true/);
 });
 
 test('reporter (standalone): a builtin plan sets no licence value, so chart 1.2.0+ renders no Secret', async () => {

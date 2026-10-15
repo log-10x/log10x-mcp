@@ -523,16 +523,16 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, smaller on a destination whose 10x expander is installed, see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream) or `fullText`. The decision is per-container: a CSV keyed by k8s_container name lists which containers to compact. Wire GitOps once and the MCP can author per-container PRs (`log10x_configure_engine`); the engine hot-reloads the CSV without a pod restart.',
+      'The compactReceiver decides per-event whether to emit `encode()` (compact, smaller on a destination whose 10x expander is installed, see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream) or `fullText`. The decision is per pattern: a CSV keyed by the pattern name lists the patterns to compact, or the patterns to keep as full text when compactReceiverDefault is true. Wire GitOps once and the recurring tick (`tenx-recur`) writes the rows as PRs; the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
-      'You want **selective** compaction: compact specific containers/services but preserve others (audit, compliance, debug).',
+      'You want **selective** compaction: compact specific patterns but preserve others (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
       'You want the MCP to manage the cap-file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
-        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt SPECIFIC containers OUT of compaction (audit/compliance).'
-        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly: no per-container decisions needed. Install the destination expander first (see the prerequisite below).',
+        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt specific patterns OUT of compaction (audit/compliance).'
+        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly: no per-pattern decisions needed. Install the destination expander first (see the prerequisite below).',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
