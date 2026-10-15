@@ -162,8 +162,9 @@ function actionRank(a: Action): number {
  *
  * The engine's receiver reads this file keyed by k8s container (== the
  * service) and stamps `route(<action>)` on that service's regulator-excess
- * slice. ONE row per service. A service absent from the file defaults to
-  * `drop` engine-side, so only services with entries are emitted.
+ * slice. ONE row per service. A service absent from the file takes the
+ * Receiver's `rateReceiverDefaultAction` (`pass` unless set; engines up to
+ * 1.1.139 dropped it), so only services with entries are emitted.
  *
  * File shape:
  *   container,action          ← header

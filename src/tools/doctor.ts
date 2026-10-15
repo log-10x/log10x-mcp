@@ -1175,7 +1175,8 @@ function policyCsvKeys(csv: string | null | undefined): string[] {
  * The policy ConfigMap's caps.csv against its actions.csv. A capped container
  * with no action row never takes its planned action: up to engine 1.1.139 its
  * over-cap slice is dropped (and a missing actions.csv fails the launch);
- * from 1.1.140 it passes, so the cap does nothing.
+ * on 1.1.140 it passes; from 1.1.141 it takes `rateReceiverDefaultAction`,
+ * `pass` unless set, so without that option the cap does nothing.
  */
 export function policyActionsChecks(
   capsCsv: string,
@@ -1205,7 +1206,7 @@ export function policyActionsChecks(
       status: 'warn',
       message:
         `Policy ConfigMap ${cmNs}/${cmName} caps ${missing.length} container${missing.length === 1 ? '' : 's'} with no row in actions.csv: ${missing.join(', ')}. ` +
-        `On engine 1.1.139 and earlier their over-cap events are dropped; from 1.1.140 they pass, so those caps do nothing.`,
+        `On engine 1.1.139 and earlier their over-cap events are dropped; on 1.1.140 they pass; from 1.1.141 they take the Receiver's \`rateReceiverDefaultAction\`, \`pass\` unless set, so unless that option names an action those caps do nothing.`,
       fix:
         `Re-run log10x_configure_engine for ${missing.length === 1 ? 'that container' : 'those containers'}, or add a \`<container>,<action>::<reason>\` row for each to actions.csv.`,
     }];

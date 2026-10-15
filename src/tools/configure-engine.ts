@@ -1761,8 +1761,10 @@ export async function executeConfigureEngine(
   // the over-cap slice, rateReceiverActionLookupFile). The engine reads the
   // action ONLY from actions.csv. A capped container with no row there takes
   // the engine's default: its over-cap slice is dropped on engines up to
-  // 1.1.139 (where a caps.csv without the file also fails the launch) and
-  // passes from 1.1.140, so the cap does nothing. data/action-intent.json rides along as
+  // 1.1.139 (where a caps.csv without the file also fails the launch),
+  // passes on 1.1.140, and from 1.1.141 takes `rateReceiverDefaultAction`
+  // (`pass` unless set; the fleet default sets it), so without that option
+  // the cap does nothing. data/action-intent.json rides along as
   // MCP-side per-pattern state for commitment_report / estimate_savings.
   // On the gitops channel, merge over the repo's existing actions.csv so
   // services configured in earlier runs keep their rows (the kubectl channel
@@ -3441,7 +3443,8 @@ function renderPreambleFromParsed(p: PreambleData): string[] {
  * ENGINE GRAMMAR (rate-object-cap.js):
  *   <container>,<action>[:<untilEpochSec>][:<reason>]
  * A service with no row takes the engine's default for its over-cap slice:
- * drop up to engine 1.1.139, pass from 1.1.140. Either way the planned
+ * drop up to engine 1.1.139, pass on 1.1.140, and from 1.1.141
+ * `rateReceiverDefaultAction` (`pass` unless set). Either way the planned
  * action never happens, so this file ships WITH every caps.csv delivery.
  *
  * BOOT CONTRACT: up to engine 1.1.139 a missing actions.csv fails the
@@ -4083,7 +4086,8 @@ export { COST_MODEL_BY_DESTINATION, MIN_REPORTER_DAYS, WINDOWS_PER_DAY, WINDOWS_
  *     `<container>,<action>[:<epoch>][:<reason>]` (rateReceiverActionLookupFile).
  *     The receiver stamps `route(<action>)` on that service's regulator-excess
  *     slice; a service with no row takes the engine default (drop up to
- *     1.1.139, pass from 1.1.140), and up to 1.1.139 a missing file FAILS
+ *     1.1.139, pass on 1.1.140, `rateReceiverDefaultAction` from 1.1.141,
+ *     `pass` unless set), and up to 1.1.139 a missing file FAILS
  *     the receiver launch when the cap variant is active — caps.csv must
  *     never ship without it.
  *   - `config-generation.csv` — policy-generation stamp for the closed loop.

@@ -200,7 +200,8 @@ export interface PocOutput {
    *   <container>,<action>::<reason>         ← one row per service
    * The engine reads the over-cap disposition ONLY from this file; a
    * service with no row takes the engine default (drop up to 1.1.139,
-   * pass from 1.1.140). Ships with cap_csv on every delivery.
+   * pass on 1.1.140, `rateReceiverDefaultAction` from 1.1.141, `pass`
+   * unless set). Ships with cap_csv on every delivery.
    */
   actions_csv?: string;
 }
