@@ -29,13 +29,13 @@ import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } fr
 
 export const trendSchema = {
   pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash: pattern_hash is preferred when available (skips a metrics lookup).'),
-  pattern_hash: z.string().optional().describe('The tenx_hash of the pattern (11-char stable identity from top_patterns / preview_filter). Preferred over pattern when available.'),
+  pattern_hash: z.string().optional().describe('The tenx_hash of the pattern (the 11-character pattern hash from top_patterns / preview_filter). Preferred over pattern when available.'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent (one-day window). Sub-day values show fine-grained trajectory around an incident."),
   step: z
     .enum(['auto', '1m', '5m', '15m', '1h', '6h', '1d'])
     .default('auto')
     .describe(
-      'Data point interval. Default `auto` sizes the step to give ~12–30 buckets per window ' +
+      'Data point interval. Default `auto` sizes the step to give about 12 to 30 buckets per window ' +
       '(1h→5m, 6h→15m, 1d/24h→1h, 7d→6h, 30d→1d). ' +
       'Override only when a specific resolution is required; an over-coarse step (e.g. 1h on a 1h window) ' +
       'produces a 2-point series with no usable trend shape.'

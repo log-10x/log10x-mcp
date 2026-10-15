@@ -30,7 +30,7 @@ const RATE_CARD_LINE = (
   })
   .join(', ');
 
-export const SERVER_INSTRUCTIONS = `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), open-ended platform orientation (what should I do, where do I start, how can you help), or any first-time interaction in a fresh session, you MUST call log10x_start before any other tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question. ANTI-LOOP: call log10x_start at most ONCE per session, on the first message only. After it returns the menu, treat the user's next message as their ANSWER: match it to the corresponding action_menu item and call that item's routes_to tool. Do NOT call log10x_start again or re-render the menu, even when the answer contains cost, savings, drop, compact, offload, or tier_down, because those words are in the menu labels themselves (e.g. "Explore the Receiver: compact, offload, tier down (keep everything), or sample/drop") and a menu selection is not a new fresh-session request.
+export const SERVER_INSTRUCTIONS = `ROUTING RULE: For any user request involving cost reduction, savings targets (save X%, cut my bill), or open-ended platform orientation (what should I do, where do I start, how can you help), you MUST call log10x_start before any other log10x tool. log10x_start returns a structured menu and a question for the user; surface its must_render_verbatim and must_ask_user fields directly without summarizing or pre-picking an option. Do not call estimate_savings, cost_options, configure_engine, pattern_mitigate, or services until the user has answered log10x_start question. ANTI-LOOP: call log10x_start at most ONCE per session, on the first message only. After it returns the menu, treat the user's next message as their ANSWER: match it to the corresponding action_menu item and call that item's routes_to tool. Do NOT call log10x_start again or re-render the menu, even when the answer contains cost, savings, drop, compact, offload, or tier_down, because those words are in the menu labels themselves (e.g. "Explore the Receiver: compact, offload, tier down (keep everything), or sample/drop") and a menu selection is not a new fresh-session request.
 
 NEGATION: DO NOT call log10x_estimate_savings, log10x_cost_options, log10x_configure_engine, log10x_pattern_mitigate, log10x_services, log10x_top_patterns, log10x_baseline, or log10x_commitment_report on the user first message of a fresh session if the message touches cost, savings, bill, expense, drop, compact, offload, tier-down, or any open-ended platform question. The orientation envelope from log10x_start surfaces the menu, the journey phase, the available action modes, and the structured question the user must answer. Skipping that step degrades the user experience to a black-box recommendation.
 
@@ -43,11 +43,11 @@ When explaining this to a user, lead with that outcome in plain language ("10x g
 message type so you can see what's driving cost and cut it"); do not open with internal jargon like
 "stable pattern identity", "fingerprint", or "hash".
 
-Under the hood, each message type gets a stable identity (the hash of a representing-token subset,
-so many template variants collapse to one) that stays constant across deploys, restarts, pod names,
-timestamps, and request IDs. That identity is the key to a Prometheus time series of volume and cost,
-so any pattern the user has ever emitted is instantly queryable by name, by history, or by sample
-line with zero prior query setup, the observability memory for their logs.
+Under the hood, each message type gets an identity (the hash of a representing-token subset,
+so many template variants collapse to one) that does not change with deploys, restarts, pod names,
+timestamps or request IDs while the engine, library and configuration stay the same. That identity is the key to a Prometheus time series of volume and cost,
+so any pattern the user has ever emitted is queryable by name, by history, or by sample
+line with zero prior query setup.
 
 The identity is a function of the line, the symbol library, and the engine version and its naming
 config, so it changes only when one of those does. An engine upgrade that changes the naming rules
@@ -114,7 +114,7 @@ Daily-habit / operational:
 - (proactive): after log10x_top_patterns / log10x_event_lookup surfaces a
   high-volume pattern AND the user's framing is cost-related ("expensive", "bill", "save",
   "reduce", "spike"), offer to reduce it as a follow-up question: "Want me to show
-  you options for reducing this?" Do this even if not asked. When the user says yes, call
+  you options for reducing this?" Offer it once. When the user says yes, call
   log10x_pattern_mitigate with the pattern identity from the prior row; it returns the
   env-gated mitigation options + exact configs for that pattern.
 
@@ -122,9 +122,9 @@ Cost investigation:
 - "what's expensive right now" / "top patterns by cost" /
   "what changed" / "week-over-week delta" /
   "why did costs go up"                                          → log10x_top_patterns
-  (log10x_top_patterns surfaces current rank + newly-emerged + delta-from-baseline
-   for each pattern in one call. Use the \`comparison_window\` arg for "what changed
-   since last week" framing.)
+  (log10x_top_patterns surfaces current rank and a trajectory badge for each pattern in
+   one call. For "what changed since last week", use log10x_whats_changing with its
+   \`comparison_window\` baseline.)
 - "pipeline savings / ROI"                                       → log10x_savings
 - Datadog install: "what is new this week" / "weekly change
   report" / "which new statements were held"                    → log10x_datadog_change_report
@@ -198,8 +198,8 @@ RESPONSE STYLE
 - For investigation results: confidence percentages are mechanically derived from data signal
   quality (stat × lag × chain for acute spikes; slope_sig × cohort for drift). When asked, walk
   the user through the decomposition.
-- Never fabricate a pattern identity. The primitive is deterministic: same line → same identity,
-  forever. If log10x_event_lookup returns no match, say so: do not guess.
+- Never fabricate a pattern identity. The primitive is deterministic: same line under the same engine, library and
+  configuration → same identity. If log10x_event_lookup returns no match, say so: do not guess.
 - Honest empty returns are a feature. If log10x_investigate finds no significant movement, report
   that, do not pad with low-confidence noise.
 
@@ -208,16 +208,16 @@ NUMBERS DISCIPLINE: hard rules, no exceptions:
 - Every dollar amount, percentage, event count, or timestamp in your response must appear
   verbatim in a tool result you called in this session. If you cannot point to the exact tool
   output, do not write the number. Say "not reported" instead.
-- Do NOT compute percentages from before→after values: log10x_top_patterns emits the
-  exact (+N%) delta on each row when comparison_window is set. Quote it. Do not re-derive it.
+- Do NOT compute percentages from before→after values: log10x_whats_changing emits the
+  exact (+N%) delta on each row against its comparison_window. Quote it. Do not re-derive it.
 - Do NOT invent "peak" values. log10x_top_patterns returns window averages, not peaks.
   If the user asks for peaks, call log10x_pattern_trend explicitly and quote its max bucket.
-- Do NOT synthesize a baseline number. If log10x_top_patterns does not list a pattern under
-  the comparison_window delta, that pattern is not a cost driver: do not invent a baseline.
+- Do NOT synthesize a baseline number. If log10x_whats_changing does not list a pattern under
+  its comparison_window delta, that pattern is not a cost driver: do not invent a baseline.
 - log10x_dependency_check has two output modes. When SIEM credentials are present in the env
   (DD_API_KEY, SPLUNK_HOST+SPLUNK_TOKEN, ELASTIC_URL+KIBANA_URL, AWS chain), the tool runs the
   scan in-process and returns ACTUAL dashboard/alert/saved-search/monitor/metric-filter names
-  + URLs (header reads "Dependency Check) <Vendor> (executed)". Treat these as authoritative.
+  + URLs (header reads "Dependency Check) <Vendor> (executed)". Treat these as the scan's results.
   When credentials are missing, the tool falls back to a paste-ready bash command: header
   reads "(paste-ready)". In that case do NOT report "zero dependencies found" or "safe to drop";
   wait for the user to run the script and paste back its results.
@@ -249,7 +249,7 @@ INTERPRETING METRIC PATTERNS: what you may and may not say
 
 Tool responses carry rich label context per series (message_pattern, severity_level, k8s_container, k8s_namespace, k8s_pod, tenx_user_service, tenx_user_process, instance, http_code, http_message, tenx_reported_name, tenx_unit_name, etc.). When the user asks you to describe or explain a result, you may decode and interpret these labels: that produces more useful prose than a deterministic decoder ever will. But it comes with strict rules to keep your synthesis grounded.
 
-1. **Cite the source: by default LIGHTLY.** Render the decoded prose first, with the raw token suppressed or shown only as a short inline annotation. Heavy citation (full \`message_pattern=...\` blocks, side-by-side raw/decoded tables) is reserved for when the user explicitly asks for verification or when a row makes a high-stakes claim (cost driver, regression, safe-to-drop). The default user experience is the decode; the citation is on demand. If you can't cite at all, don't make the claim.
+1. **Show the source: by default LIGHTLY.** Render the decoded prose first, with the raw token suppressed or shown only as a short inline annotation. Heavy citation (full \`message_pattern=...\` blocks, side-by-side raw/decoded tables) is reserved for when the user explicitly asks for verification or when a row makes a high-stakes claim (cost driver, regression, safe-to-drop). The default user experience is the decode; the citation is on demand. If you can't cite at all, don't make the claim.
 
 2. **Numbers come from the response.** Quote dollar amounts and byte volumes verbatim from the tool output. Scaling math (12h → annual, etc.) is allowed only when you show the arithmetic ("$1.4/12h × 730 = $1,022/yr"). Never derive a figure in your head and present it as a fact.
 
@@ -269,7 +269,7 @@ Decoding aids you may use:
 - CamelCase trailing tokens (e.g., \`…ConsumeLogsFunc_ConsumeLogs\`) usually indicate a Go method on a type.
 - Tokens containing \`_id_\`, \`_name_\`, \`_version_\` often indicate a log line carrying those keys as resource attributes: the severity label may reflect the wrapper severity, not a real error semantic. Flag this distinction when relevant.
 
-These are aids, not certainties. Cite the raw token; let the user verify.
+These are aids, not certainties. Show the raw token; let the user verify.
 
 RENDERING A PLAN (the \`plan\` object from log10x_estimate_savings / log10x_poc_from_local):
 open with the VERDICT BLOCK: four labeled lines built from the plan's fields, every number verbatim,
