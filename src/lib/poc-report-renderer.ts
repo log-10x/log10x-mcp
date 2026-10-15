@@ -531,7 +531,7 @@ function losslessClause(siem: SiemId, siemName: string): string {
   // compact clause already says "stays queryable in Elasticsearch", so
   // repeating it on the tier clause reads as boilerplate.
   const phrase: Record<LosslessLever, string> = {
-    compact: `compacted in place (stays queryable in ${siemName})`,
+    compact: `stored compact (stays queryable in ${siemName})`,
     tier_down: levers.includes('compact')
       ? 'moved to a cheaper retained tier'
       : `moved to a cheaper retained tier in ${siemName}`,
@@ -543,7 +543,7 @@ function losslessClause(siem: SiemId, siemName: string): string {
 /** Short form of the same fact, for bullet lines. */
 function losslessClauseShort(siem: SiemId): string {
   const phrase: Record<LosslessLever, string> = {
-    compact: 'compacted in place',
+    compact: 'stored compact',
     tier_down: 'moved to a cheaper retained tier',
     offload: 'recoverable from your S3',
   };
@@ -764,7 +764,7 @@ export function renderPocSummary(input: RenderInput, topN = 5): string {
     const oneHundred = scaleCostToDaily(totalCost, input.extraction.totalBytes, 100, input.windowHours);
     const oneHundredSavings = scaleCostToDaily(projectedSavings, input.extraction.totalBytes, 100, input.windowHours);
     lines.push(
-      `No volume specified. At 100 GB/day the lossless plan would save **${fmtCostDisclosed(input, oneHundredSavings)}/yr** out of **${fmtCostDisclosed(input, oneHundred)}/yr** total cost, with every line kept (${losslessClauseShort(input.siem)}). For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
+      `No volume specified. At 100 GB/day the plan would save **${fmtCostDisclosed(input, oneHundredSavings)}/yr** out of **${fmtCostDisclosed(input, oneHundred)}/yr** total cost, with every line kept (${losslessClauseShort(input.siem)}). For a precise projection, pass \`total_daily_gb\`, \`total_monthly_gb\`, or \`total_annual_gb\` on submit (or call status with \`view: "full"\` to see the full scenario table).`
     );
   }
   lines.push('');
@@ -912,7 +912,7 @@ export function renderPocYaml(input: RenderInput, topN = 5): string {
   lines.push('```yaml');
   lines.push('# receiver config, paste into your GitOps ConfigMap');
   lines.push(`# Generated from snapshot ${input.snapshotId} on ${input.finishedAt}`);
-  lines.push(`# Lossless: every entry is ${losslessClauseShort(input.siem)}. Nothing dropped.`);
+  lines.push(`# Every line kept: every entry is ${losslessClauseShort(input.siem)}. Nothing dropped.`);
   lines.push('# Run log10x_dependency_check on each identity before committing.');
   lines.push('');
   if (patterns.length === 0) {
@@ -1028,7 +1028,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
     `**Stats**: ${p.severity || '-'} severity · ${fmtCount(p.count)} events · ${fmtPct(p.pctOfTotal * 100)} of sample volume · ${p.service || 'unknown service'}`
   );
   if ((p.costPerWindow > 0 || annualSavings > 0) && (input.rateSource ?? 'list_price') !== 'unset') {
-    lines.push(`**Projected cost**: ${fmtCostDisclosed(input, p.costPerWindow)}/window · **Lossless savings**: ${fmtCostDisclosed(input, annualSavings)}/year`);
+    lines.push(`**Projected cost**: ${fmtCostDisclosed(input, p.costPerWindow)}/window · **Savings, every line kept**: ${fmtCostDisclosed(input, annualSavings)}/year`);
   }
   lines.push(`**Confidence**: ${p.confidence}`);
   lines.push('');
@@ -1071,7 +1071,7 @@ export function renderPocPattern(input: RenderInput, identity: string): string {
   if (needsReview(p)) {
     // User-facing fact: this pattern has a profile that warrants review.
     lines.push(
-      `> **Review before changing**: this pattern\'s ${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards. The lever is lossless (nothing is dropped), but confirm the dependency surface first.`
+      `> **Review before changing**: this pattern\'s ${p.severity || 'severity'}/${p.confidence} profile means it may feed live alerts or dashboards. The lever keeps every line (nothing is dropped), but confirm the dependency surface first.`
     );
     // Agent-only: the specific tool to call before any change.
     lines.push(agentOnly(`Constraint: before generating a receiver config for '${p.identity}', call log10x_dependency_check({ pattern: '${p.identity}' }) and surface its findings to the user.`));
@@ -1286,7 +1286,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // would report $0 — which reads as "nothing to save here" rather than
     // "we could not tell". Withhold the savings lines instead.
     if (severityUsable) {
-      lines.push(`- **Lossless reduction**: about ${savingsPctAnnual} of volume, with every line kept (${losslessClauseShort(input.siem)}).`);
+      lines.push(`- **Reduction with every line kept**: about ${savingsPctAnnual} of volume (${losslessClauseShort(input.siem)}).`);
       // Say WHY the number is not larger, in the same breath as the number.
       // On a real window the biggest cost drivers are routinely error-class
       // and deliberately untouched, so a bare percentage reads as a weak
@@ -1340,7 +1340,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // column is all zeros, so drop it and show cost only.
     lines.push(
       severityUsable
-        ? `**Projected annual savings by ingest volume** (lossless: ${losslessClauseShort(input.siem)}, nothing dropped):`
+        ? `**Projected annual savings by ingest volume** (every line kept: ${losslessClauseShort(input.siem)}, nothing dropped):`
         : `**Projected annual cost by ingest volume.** Savings are withheld, see the note above.`
     );
     lines.push('');
@@ -1376,7 +1376,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('_Sample-only costs (for reference)_:');
     lines.push(`- **Observed sample cost (window)**: ${fmtCostDisclosed(input, totalCost)}`);
     lines.push(
-      `- **Sample lossless savings (window)**: ${fmtCostDisclosed(input, projectedSavings)}, ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
+      `- **Sample savings, every line kept (window)**: ${fmtCostDisclosed(input, projectedSavings)}, ${fmtPct((projectedSavings / Math.max(1, totalCost)) * 100)} of analyzed cost`
     );
   }
   // The analyzer rate is now structurally attached to every $ line above via
@@ -1387,7 +1387,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   lines.push('');
   if (top3.length > 0) {
-    lines.push(`**Top ${top3.length} ${top3.length === 1 ? 'win' : 'wins'}** (lossless):`);
+    lines.push(`**Top ${top3.length} ${top3.length === 1 ? 'win' : 'wins'}** (every line kept):`);
     for (const p of top3) {
       const dn = displayName(p.identity, p.template, input.aiPrettyNames, p.symbolMessage, setDiff.get(p.identity));
       lines.push(`- ${top3WinLabel(p, dn, fmtCostDisclosed(input, p.projectedSavings))}`);
@@ -1479,7 +1479,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push(sec('Receiver Recommendations'));
   lines.push('');
   lines.push(
-    `Per-pattern lossless lever with reasoning, projected savings, and a ready-to-paste log10x receiver config. Each entry ${losslessClauseActive(input.siem, siemName)}. Nothing is sampled or dropped.`
+    `Per-pattern lever that keeps every line, with reasoning, projected savings, and a ready-to-paste log10x receiver config. Each entry ${losslessClauseActive(input.siem, siemName)}. Nothing is sampled or dropped.`
   );
   lines.push('');
   const receiverTopN = Math.min(patterns.length, 10);
@@ -1602,7 +1602,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     return errorSev || smallCount;
   });
   if (riskyChanges.length === 0) {
-    lines.push('_All patterns with a lever are high-volume, non-error patterns, and the lever is lossless (nothing dropped). Standard dependency check recommended but risk is low._');
+    lines.push('_All patterns with a lever are high-volume, non-error patterns, and the lever keeps every line (nothing dropped). Standard dependency check recommended but risk is low._');
     lines.push('');
   } else {
     lines.push('**These patterns need careful review before changing**:');
@@ -1620,7 +1620,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     lines.push('');
   }
   lines.push(
-    'Before changing any pattern, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. The lever is lossless, but changing how a pattern is stored is worth confirming first when it feeds a search-time field extraction.'
+    'Before changing any pattern, run `log10x_dependency_check(pattern: "<identity>")` which scans Datadog monitors, Splunk saved searches, Grafana dashboards, and Prometheus rules for references. The lever keeps every line, but changing how a pattern is stored is worth confirming first when it feeds a search-time field extraction.'
   );
   lines.push('');
 
@@ -1642,7 +1642,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   lines.push('### Manual: native SIEM config (no log10x runtime)');
   lines.push('');
   lines.push(
-    'Without the receiver runtime none of the lossless levers are available (those need the engine). The native path can only hard-drop a pattern, which is lossy and not the recommended plan.',
+    'Without the receiver runtime none of the levers that keep every line are available (those need the engine). The native path can only hard-drop a pattern, which is lossy and not the recommended plan.',
   );
   lines.push(
     `If you specifically want to discard a pattern at ${SIEM_DISPLAY_NAMES[input.siem]} or the forwarder, the exclusion configs are in the \`configs\` view. Run \`log10x_dependency_check\` on each pattern first, then monitor ingestion volume for 24-48h to confirm the change.`,
@@ -1709,7 +1709,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
     // used here"), which is the same mistake in the opposite key: a term the
     // reader has no context for, framed as an apology. `leverRule` renders
     // only what the destination has, and nothing about what it does not.
-    `- **Recommendation rules** (all lossless): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${leverRule(input.siem, siemName)}. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
+    `- **Recommendation rules** (every one keeps every line): for a reducible pattern (${REDUCIBLE_SEVERITY_LABELS.join('/')} or no severity AND ≥1% of total volume), ${leverRule(input.siem, siemName)}. ${PROTECTED_SEVERITY_LABELS.join('/')} and low-volume patterns are kept verbatim. Nothing is sampled or dropped.`
   );
   // What this report recommends is the default, and a reader could not tell
   // that from the sentence above: it reads as a property of the product
@@ -1727,7 +1727,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
   );
   if (optInLevers.length > 0) {
     lines.push(
-      `- **Error-class lines are kept by default, not by necessity**: \`configure_engine\`'s \`action_defaults.error\` takes a lossless lever (${optInLevers
+      `- **Error-class lines are kept by default, not by necessity**: \`configure_engine\`'s \`action_defaults.error\` takes a lever that keeps every line (${optInLevers
         .map((l) => `\`${l}\``)
         .join('/')}) for ERROR and WARN when you set it. It applies per tier, not per pattern, and CRIT/FATAL stay \`pass\` whatever it is set to. Nothing here recommends that; it is yours to choose.`
     );

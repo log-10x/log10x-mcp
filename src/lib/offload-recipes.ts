@@ -2684,8 +2684,8 @@ export function renderOffloadSection(
   lines.push(
     'Route the slice 10x marks for offload (`routeState == "offload"`) to the customer\'s ' +
       'own S3 before the SIEM bills it; the Retriever indexes that bucket and ' +
-      'fetches it back by stamped identity. Nothing is deleted, it is relocated. ' +
-      'This is lossless cost reduction, not deletion.',
+      'fetches it back by stamped identity. Nothing is deleted, it is relocated: ' +
+      'every line is kept.',
     '',
     `Target: \`s3://${params.bucket}/${prefix}/\` (region \`${params.region}\`), newline-delimited JSON.`,
     'Prerequisite on the engine side: run the receiver with `outputOffload true` ' +
