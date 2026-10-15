@@ -19,6 +19,8 @@ import type { IncidentCluster } from './detectors/incident-cluster.js';
 import type { PocEnrichment, RedundancyPair } from './poc-enrichers.js';
 import type { ExtractedPattern } from './pattern-extraction.js';
 import type { SiemId } from './siem/pricing.js';
+import { receiverBytesStatement } from './receiver-bytes.js';
+import { placeServiceCap } from './service-cap.js';
 import { dollars, ratio, bps, days as roundDays, countRatio } from './poc-round.js';
 import { getAllowedActionsForDestination, getDefaultActionForDestination, compactsInPlace, getDestinationCostModel, expectedCompactRatio, describeCompactFigure, describeCompactReadback, tierDownRateDelta, perEventTierPricing, projectPerEventTierMove, retierPerEventTierMove, type Action as CostAction, type PerEventTierMove } from './cost.js';
 import { fmtBytes as formatBytes } from './format.js';
@@ -189,6 +191,8 @@ export interface PocOutput {
    * cap is never 0 — a 0 cap is a per-container regulator opt-out.
    */
   cap_csv?: string;
+  /** The caps' unit and how it was reached, one sentence for the plan. */
+  cap_unit?: string;
   /**
    * Sibling actions.csv body — the ENGINE's per-service action file
    * (rateReceiverActionLookupFile). Grammar:
@@ -296,6 +300,12 @@ export interface PatternOutput {
     events_per_day_avg: number;
     events_last_24h: number;
     bytes_in_window: number;
+    /**
+     * The same events in the Receiver's unit (each record as the forwarder
+     * sends it, metadata included), at the busiest window's rate. Caps are
+     * set from this; `bytes_in_window` stays the billing figure.
+     */
+    receiver_cap_bytes_in_window: number;
     cost_per_month_usd: number;
     cost_per_year_usd: number;
     share_of_total: number;
@@ -741,6 +751,7 @@ export function buildPocEnvelopeV2(
       ...(feasibility ? { feasibility } : {}),
       ...(commitmentArtifact ? { commitment_artifact: commitmentArtifact } : {}),
       ...(capCsv ? { cap_csv: capCsv } : {}),
+      ...(capCsv ? { cap_unit: receiverBytesStatement(input.extraction.receiverBytesBasis, input.extraction.recordOverheadBytes) } : {}),
       ...(actionsCsv ? { actions_csv: actionsCsv } : {}),
     },
   };
@@ -1397,6 +1408,7 @@ function buildPatternOutput(
       events_per_day_avg: Math.round(eventsPerDayAvg),
       events_last_24h: eventsLast24h,
       bytes_in_window: p.bytes,
+      receiver_cap_bytes_in_window: Math.round(p.receiverCapBytes ?? p.bytes),
       cost_per_month_usd: dollars(monthlyCost),
       cost_per_year_usd: dollars(monthlyCost * 12),
       share_of_total: ratio(monthlyCost / Math.max(0.001, totalMonthlyCostUsd)),
@@ -1475,23 +1487,23 @@ function buildActions(
       ? `severity=${sev || 'error-class'} kept for incident diagnosis.`
       : refined === 'blocked'
         ? 'dependency_check found references; cannot reduce safely.'
-        : 'low volume or non-actionable signal — pass.';
+        : 'low volume or non-actionable signal: pass.';
   } else if (refined === 'mute') {
     // Mute = lean on the destination's preferred lever.
     action = level1;
     reason = isHotLoop
-      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume) — level-1 action \`${level1}\` on ${siem}.`
+      ? `high-volume ${sev || 'info-class'} pattern (${(p.pctOfTotal * 100).toFixed(1)}% of analyzed volume): level-1 action \`${level1}\` on ${siem}.`
       : `${sev || 'info-class'} pattern routed to destination level-1 action \`${level1}\`.`;
   } else if (refined === 'sample') {
     // Sample = use cheap level-2 tier when it's better than a flat
     // sample-keep on this destination; otherwise stay on sample.
     if (isFrequent && (level2 === 'compact' || level2 === 'tier_down')) {
       action = level2;
-      reason = `moderate-volume ${sev || 'info-class'} pattern — destination level-2 \`${level2}\` is cheaper than a flat sample on ${siem}.`;
+      reason = `moderate-volume ${sev || 'info-class'} pattern: destination level-2 \`${level2}\` is cheaper than a flat sample on ${siem}.`;
     } else {
       action = 'sample';
       sampleN = Math.max(2, Math.round(p.sampleRate ?? 10));
-      reason = `moderate-volume ${sev || 'info-class'} pattern — keep 1/${sampleN} to retain signal at lower cost.`;
+      reason = `moderate-volume ${sev || 'info-class'} pattern: keep 1/${sampleN} to retain signal at lower cost.`;
     }
   } else if (
     refined === 'compact' ||
@@ -1607,17 +1619,25 @@ function pocServiceReasons(
     .map((p) => ({
       service: (p.service ?? '').toLowerCase(),
       bytes: p.metrics.bytes_in_window,
+      capBytes: p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window,
       count: p.metrics.events_in_window,
       moved: p.actions.recommended_action !== 'pass',
     }));
   // Exception services keep their sentinel reason; every other service gets
   // its sentence, with the cap buildCapCsv writes: the largest pattern kept.
-  const caps: Record<string, { action: CostAction; capBytesMonthly: number }> = {};
+  const caps: Record<string, { action: CostAction; capBytesMonthly: number; margin?: number }> = {};
+  const movedMin = new Map<string, number>();
   for (const r of rows) {
     if (exceptionSet.has(r.service)) continue;
     const c = caps[r.service] ?? { action: level1, capBytesMonthly: 0 };
-    if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.bytes);
+    if (!r.moved) c.capBytesMonthly = Math.max(c.capBytesMonthly, r.capBytes);
+    else movedMin.set(r.service, Math.min(movedMin.get(r.service) ?? Infinity, r.capBytes));
     caps[r.service] = c;
+  }
+  // The same placement buildCapCsv writes: between the largest kept and the smallest moved.
+  for (const [svc, c] of Object.entries(caps)) {
+    const placed = placeServiceCap(c.capBytesMonthly, movedMin.get(svc));
+    if (placed.separated && placed.margin !== undefined) c.margin = placed.margin;
   }
   const { limits } = serviceLimitsFromPatterns(caps, rows, (r) => r.moved, Math.max(1, windowDurationSeconds), siem);
   return new Map(limits.map((l) => [l.service, csvReason(serviceLimitSentence(l, siem))]));
@@ -1631,20 +1651,29 @@ function buildCapCsv(
   reasons?: ReadonlyMap<string, string>,
 ): string {
   const level1: CostAction = getDefaultActionForDestination(siem, 1);
-  const services = new Map<string, { bytes: number; keptMax: number; isException: boolean }>();
+  const services = new Map<string, { bytes: number; keptMax: number; movedMin?: number; isException: boolean }>();
   for (const p of patterns) {
     const svc = (p.service ?? '').toLowerCase();
     if (!svc) continue;
     // The cap that moves the service's planned patterns and no other is the
     // largest pattern it keeps: a pattern over it takes the action, one under
     // it passes.
-    const kept = p.actions.recommended_action === 'pass' ? p.metrics.bytes_in_window : 0;
+    // In the Receiver's unit, at the statement's busiest window's rate.
+    const capBytes = p.metrics.receiver_cap_bytes_in_window ?? p.metrics.bytes_in_window;
+    const moved = p.actions.recommended_action !== 'pass';
+    const kept = moved ? 0 : capBytes;
     const existing = services.get(svc);
     if (existing) {
       existing.bytes += p.metrics.bytes_in_window;
       existing.keptMax = Math.max(existing.keptMax, kept);
+      if (moved) existing.movedMin = Math.min(existing.movedMin ?? Infinity, capBytes);
     } else {
-      services.set(svc, { bytes: p.metrics.bytes_in_window, keptMax: kept, isException: exceptionSet.has(svc) });
+      services.set(svc, {
+        bytes: p.metrics.bytes_in_window,
+        keptMax: kept,
+        ...(moved ? { movedMin: capBytes } : {}),
+        isException: exceptionSet.has(svc),
+      });
     }
   }
 
@@ -1662,7 +1691,7 @@ function buildCapCsv(
     const monthlyBytes = agg.bytes * (24 * 30) / hours;
     const cap =
       action === 'tier_down'
-        ? Math.max(1, Math.round(scaleObservedToReceiverWindow(agg.keptMax * (24 * 30) / hours, '30d')))
+        ? Math.max(1, Math.round(scaleObservedToReceiverWindow(placeServiceCap(agg.keptMax, agg.movedMin).cap * (24 * 30) / hours, '30d')))
         : Math.max(1, Math.round(capBytesPerWindow(action, monthlyBytes, 10)));
     lines.push(`${svc},${cap}::${reason.replace(/,/g, ';')}`);
   }

@@ -115,7 +115,7 @@ export function renderAnchorSuggestionsBlock(suggestions: AnchorSuggestion[]): s
   if (suggestions.length === 0) return '';
   const lines: string[] = [];
   lines.push('');
-  lines.push('Try one of these patterns instead — they have more variation in the same window:');
+  lines.push('Try one of these patterns instead: they have more variation in the same window:');
   lines.push('');
   lines.push('| Rank | Pattern | Service | Variation |');
   lines.push('| --- | --- | --- | --- |');

@@ -306,7 +306,7 @@ export function renderTopPatterns(
     });
     out.push('---');
     out.push('');
-    out.push(`**${apply.heading} — same 3 steps apply for every snippet above**`);
+    out.push(`**${apply.heading}: same 3 steps apply for every snippet above**`);
     out.push('');
     if (apply.steps.startsWith('_')) {
       const [note, ...rest] = apply.steps.split('\n\n');
@@ -354,7 +354,7 @@ function renderSnippetTemplate(
   const snip = dropRuleSnippet(forwarder, '<HASH>', hashField);
 
   lines.push(
-    `**To act on any pattern below** — each card shows its \`${hashField}\`; swap it in for \`<HASH>\`.`
+    `**To act on any pattern below**: each card shows its \`${hashField}\`; swap it in for \`<HASH>\`.`
   );
   lines.push('');
 
@@ -382,7 +382,7 @@ function renderSnippetTemplate(
   lines.push(`- **apply** with the \`kubectl\` steps at the bottom of this output.`);
   if (ana === 'cloudwatch') {
     lines.push(
-      '- **cloudwatch can\'t drop at ingest** — no content-match filter exists analyzer-side, so this forwarder snippet is the only point that stops cost.'
+      '- **cloudwatch can\'t drop at ingest**: no content-match filter exists analyzer-side, so this forwarder snippet is the only point that stops cost.'
     );
   }
   lines.push(
@@ -430,7 +430,7 @@ function renderCostByService(opts: TopPatternsRenderOpts): string[] {
   // Concentration callout when the top service is a clear majority.
   const headline =
     top.pct >= 0.5
-      ? `**Where the cost is** — \`${top.service}\` alone is **${Math.round(top.pct * 100)}%** of spend`
+      ? `**Where the cost is**: \`${top.service}\` alone is **${Math.round(top.pct * 100)}%** of spend`
       : '**Where the cost is**';
   lines.push(headline);
   lines.push('');
@@ -485,7 +485,7 @@ function renderList(rows: TopPatternRow[], descs: string[]): string {
     // signal is available.
     if (descCount.get(desc.toLowerCase())! > 1) {
       const disc = collisionDiscriminator(r);
-      if (disc) desc = `${desc} — ${disc}`;
+      if (disc) desc = `${desc}: ${disc}`;
     }
     const sev = r.severity || 'no severity';
     const svc = r.service || 'unattributed';
@@ -572,7 +572,7 @@ function detectIncidents(rows: TopPatternRow[], descs: string[]): Incident[] {
 function renderIncidentCallout(inc: Incident): string[] {
   const ranks = inc.ranks.map(r => `#${r}`).join(', ');
   return [
-    `**These look like one incident:** ${ranks} share a failure — \`${inc.label}\` (${inc.service}), ~${fmtDollarMo(inc.combinedMonthly)}/mo combined. Fix the source once instead of dropping each.`,
+    `**These look like one incident:** ${ranks} share a failure: \`${inc.label}\` (${inc.service}), ~${fmtDollarMo(inc.combinedMonthly)}/mo combined. Fix the source once instead of dropping each.`,
     '',
   ];
 }
@@ -700,14 +700,14 @@ function renderCard(
       // keeps one event per combination" was a fabrication.
       const nVary = r.fieldVar.varying.length;
       lines.push(
-        `→ **${nVary} field${nVary > 1 ? 's' : ''} vary** — drop loses those cases; compact or sample keeps them.`
+        `→ **${nVary} field${nVary > 1 ? 's' : ''} vary**: drop loses those cases; compact or sample keeps them.`
       );
     } else {
       lines.push(
         'every field identical across all sampled events, except per-event timestamps, durations, and IDs.'
       );
       lines.push('');
-      lines.push('→ **no variants** — dropping loses no distinct cases.');
+      lines.push('→ **no variants**: dropping loses no distinct cases.');
     }
     lines.push('');
   }
@@ -779,7 +779,7 @@ function renderCard(
       );
       if (analyzerName === 'cloudwatch') {
         lines.push(
-          '- **cloudwatch-side drop:** unavailable — cloudwatch has no drop-at-ingest filter for content matches. The forwarder snippet above is the only point that stops cost.'
+          '- **cloudwatch-side drop:** unavailable: cloudwatch has no drop-at-ingest filter for content matches. The forwarder snippet above is the only point that stops cost.'
         );
       }
       lines.push('');
@@ -815,7 +815,7 @@ function renderCard(
   } else if (analyzerName === 'splunk') {
     lines.push(
       `> **also drop at splunk (post-license)?** ask: \`show me the splunk drop rule for hash ${r.hash}\` ` +
-      `— ⚠ splunk's \`transforms.conf\` nullQueue drops at the indexer AFTER license consumption, so this saves storage, not ingest cost.`
+      `⚠ splunk's \`transforms.conf\` nullQueue drops at the indexer AFTER license consumption, so this saves storage, not ingest cost.`
     );
     lines.push('');
   }

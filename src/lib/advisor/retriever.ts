@@ -520,7 +520,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   } else if (!args.skipInstall) {
     if (!inputBucket) {
       blockers.push(
-        'No input S3 bucket detected in the discovery snapshot and none supplied via `input_bucket`. The Retriever reads source logs from S3 — provide a bucket.'
+        'No input S3 bucket detected in the discovery snapshot and none supplied via `input_bucket`. The Retriever reads source logs from S3: provide a bucket.'
       );
     }
     if (!irsaRoleArn) {
@@ -793,11 +793,11 @@ function buildRetrieverExternalAccessMarkdown(
     '',
     'The Retriever Service defaults to **ClusterIP** (cluster-internal only). ' +
     '`log10x_retriever_query` and `log10x_retriever_series` send HTTP requests to the ' +
-    'Retriever — from your laptop the cluster-internal URL will fail with ENOTFOUND or ECONNREFUSED.',
+    'Retriever: from your laptop the cluster-internal URL will fail with ENOTFOUND or ECONNREFUSED.',
     '',
     'Pick one option:',
     '',
-    '### Option A — kubectl port-forward (dev/test, ephemeral)',
+    '### Option A: kubectl port-forward (dev/test, ephemeral)',
     '',
     '```bash',
     `kubectl port-forward -n ${namespace} svc/${svcName} 18080:80`,
@@ -809,10 +809,10 @@ function buildRetrieverExternalAccessMarkdown(
     'export __SAVE_LOG10X_RETRIEVER_URL__=http://localhost:18080',
     '```',
     '',
-    'The port-forward is ephemeral — it stops when the terminal session ends. ' +
+    'The port-forward is ephemeral: it stops when the terminal session ends. ' +
     'Restart it whenever you need to run retriever queries.',
     '',
-    '### Option B — Migrate the Service to LoadBalancer (persistent)',
+    '### Option B: Migrate the Service to LoadBalancer (persistent)',
     '',
     loadBalancerIntro,
     '',
@@ -834,7 +834,7 @@ function buildRetrieverExternalAccessMarkdown(
     'export __SAVE_LOG10X_RETRIEVER_URL__=http://<external-hostname>',
     '```',
     '',
-    '### Option C — Deploy the MCP server inside the cluster',
+    '### Option C: Deploy the MCP server inside the cluster',
     '',
     'When the MCP server runs as a pod in the same cluster, the chart-default ' +
     'ClusterIP URL (`http://' + svcName + '.' + namespace + '.svc.cluster.local:80`) ' +
@@ -887,7 +887,7 @@ async function runPreflight(
     status: nsExists ? 'ok' : 'warn',
     detail: nsExists
       ? `\`${namespace}\` exists`
-      : `\`${namespace}\` does not exist — the install step will create it`,
+      : `\`${namespace}\` does not exist: the install step will create it`,
   });
 
   const releaseCollision = snapshot.kubectl.helmReleases.some(
@@ -903,16 +903,16 @@ async function runPreflight(
       name: 'release exists',
       status: releaseCollision ? 'ok' : 'fail',
       detail: releaseCollision
-        ? `release \`${releaseName}\` found in \`${namespace}\` — verify targets it`
-        : `no \`${releaseName}\` release found in \`${namespace}\` — install first before running verify or teardown`,
+        ? `release \`${releaseName}\` found in \`${namespace}\`: verify targets it`
+        : `no \`${releaseName}\` release found in \`${namespace}\`: install first before running verify or teardown`,
     });
   } else {
     checks.push({
       name: 'release collision',
       status: releaseCollision ? 'fail' : 'ok',
       detail: releaseCollision
-        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\` — pick a different release_name or uninstall the existing one first`
-        : `no \`${releaseName}\` release in \`${namespace}\` — clear to install`,
+        ? `a Helm release named \`${releaseName}\` already exists in \`${namespace}\`: pick a different release_name or uninstall the existing one first`
+        : `no \`${releaseName}\` release in \`${namespace}\`: clear to install`,
     });
   }
 
@@ -980,13 +980,13 @@ async function runPreflight(
       status: infra.inputBucket ? 'ok' : 'fail',
       detail: infra.inputBucket
         ? `\`${infra.inputBucket}\``
-        : 'no input bucket detected — pass `input_bucket` explicitly',
+        : 'no input bucket detected: pass `input_bucket` explicitly',
     });
 
     checks.push({
       name: 'index S3 prefix',
       status: infra.indexBucket ? 'ok' : 'warn',
-      detail: infra.indexBucket ?? 'no index prefix — defaults to `<inputBucket>/indexing-results/`',
+      detail: infra.indexBucket ?? 'no index prefix: defaults to `<inputBucket>/indexing-results/`',
     });
 
     checks.push({
@@ -994,14 +994,14 @@ async function runPreflight(
       status: infra.irsaRoleArn ? 'ok' : 'fail',
       detail: infra.irsaRoleArn
         ? `\`${infra.irsaRoleArn}\``
-        : 'no retriever IRSA role detected — pass `irsa_role_arn` explicitly',
+        : 'no retriever IRSA role detected: pass `irsa_role_arn` explicitly',
     });
 
     for (const key of ['index', 'query', 'subquery', 'stream'] as const) {
       checks.push({
         name: `SQS ${key} queue`,
         status: infra.sqsUrls[key] ? 'ok' : 'fail',
-        detail: infra.sqsUrls[key] ? `\`${infra.sqsUrls[key]}\`` : `missing — pass \`sqs_urls.${key}\` explicitly`,
+        detail: infra.sqsUrls[key] ? `\`${infra.sqsUrls[key]}\`` : `missing: pass \`sqs_urls.${key}\` explicitly`,
       });
     }
   }
@@ -1679,14 +1679,14 @@ function buildVerifyProbes(opts: {
       name: 's3-offload-input',
       question: 'Is the forwarder offloading the dropped slice into the source bucket?',
       commands: [
-        `aws s3 ls s3://${inputBucket}/app/ --recursive --summarize 2>/dev/null | tail -5 || echo "no objects under app/ yet — if this stays empty the forwarder offload is NOT wired. See the 'Forwarder offload' section: the receiver needs outputOffload=true, the per-forwarder recipe applied, and the forwarder-write IRSA (s3:PutObject to this bucket/app/)."`,
+        `aws s3 ls s3://${inputBucket}/app/ --recursive --summarize 2>/dev/null | tail -5 || echo "no objects under app/ yet: if this stays empty the forwarder offload is NOT wired. See the 'Forwarder offload' section: the receiver needs outputOffload=true, the per-forwarder recipe applied, and the forwarder-write IRSA (s3:PutObject to this bucket/app/)."`,
       ],
     });
     probes.push({
       name: 's3-indexing-results',
       question: 'Is the indexer writing to the index bucket?',
       commands: [
-        `aws s3 ls s3://${inputBucket}/indexing-results/ --summarize 2>/dev/null | tail -5 || echo "no index results yet (may take a few minutes after first index run). If s3-offload-input is also empty, fix the forwarder offload first — the indexer has nothing to index."`,
+        `aws s3 ls s3://${inputBucket}/indexing-results/ --summarize 2>/dev/null | tail -5 || echo "no index results yet (may take a few minutes after first index run). If s3-offload-input is also empty, fix the forwarder offload first: the indexer has nothing to index."`,
       ],
     });
   }
@@ -1716,7 +1716,7 @@ function buildVerifyProbes(opts: {
       question:
         'Is the Receiver configured for outputOffload mode (required to route bytes to S3)?',
       commands: [
-        `kubectl -n ${receiverNamespace} get configmap -o yaml 2>/dev/null | grep -A5 "outputOffload\\|offload\\|run/modules/receive/offload" || echo "outputOffload config not found — the Receiver may be running rate-only (soft-drop). To route bytes to S3, the Receiver config must include the offload module. See: https://doc.log10x.com/run/regulate"`,
+        `kubectl -n ${receiverNamespace} get configmap -o yaml 2>/dev/null | grep -A5 "outputOffload\\|offload\\|run/modules/receive/offload" || echo "outputOffload config not found: the Receiver may be running rate-only (soft-drop). To route bytes to S3, the Receiver config must include the offload module. See: https://doc.log10x.com/run/regulate"`,
       ],
     });
   }
@@ -1744,7 +1744,7 @@ function buildTeardownSteps(
         ? 'Removes the Deployment, the Service, the ConfigMaps and the chart-created ServiceAccount. The ' +
           'storage account, the containers, the queues, the managed identity and the AKS cluster stay: the ' +
           'last step below is what deletes those.'
-        : 'Removes indexer, query-handler, stream-worker deployments, filter CronJobs, ConfigMaps, and the chart-created ServiceAccount. LEAVES AWS infra (S3, SQS, IAM role) intact — that lifecycle belongs to Terraform.',
+        : 'Removes indexer, query-handler, stream-worker deployments, filter CronJobs, ConfigMaps, and the chart-created ServiceAccount. LEAVES AWS infra (S3, SQS, IAM role) intact: that lifecycle belongs to Terraform.',
       commands: [`helm -n ${namespace} uninstall ${releaseName}`],
     },
     {

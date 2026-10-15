@@ -436,7 +436,7 @@ export async function executeWhatsNew(
     // in favor of Events (count) and Trajectory. Pattern column shows
     // symbol_message (descriptor), hash stays in machine fields only.
     const lines = [
-      `## What's new — ${tf.label}`,
+      `## What's new: ${tf.label}`,
       ``,
       `Patterns first seen within ${firstSeenWithin}, ranked by recency.`,
       ``,

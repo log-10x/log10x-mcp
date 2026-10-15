@@ -59,7 +59,7 @@ test('rule: agent annotation is HTML-escaped', () => {
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quotes&quot;'));
 });
 
-test('rule: self-contained page — no external URLs fetched', () => {
+test('rule: self-contained page, no external URLs fetched', () => {
   const html = renderReportHtml(loadFixture());
   assert.ok(!/src\s*=\s*["']https?:/.test(html));
   assert.ok(!/link[^>]+href\s*=\s*["']https?:/.test(html));

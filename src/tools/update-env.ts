@@ -30,12 +30,12 @@ export const updateEnvSchema = {
     .string()
     .min(1)
     .optional()
-    .describe('New display name for the env. Optional — omit to keep the current name.'),
+    .describe('New display name for the env. Optional: omit to keep the current name.'),
   is_default: z
     .boolean()
     .optional()
     .describe(
-      'When true, this env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Optional — omit to leave the default flag unchanged.'
+      'When true, this env becomes the user\'s default: every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Optional: omit to leave the default flag unchanged.'
     ),
 };
 
@@ -78,7 +78,7 @@ async function executeUpdateEnvInner(args: { env_id: string; name?: string; is_d
     const md = '## No changes\n\n' +
       'Pass at least one of `name` or `is_default`. Example: `{"env_id": "...", "is_default": true}` ' +
       'to make an env the new default, or `{"env_id": "...", "name": "production-2"}` to rename.';
-    return { ok: false, env_id: args.env_id, changes: [], error: 'no changes — pass at least one of name or is_default', markdown: md };
+    return { ok: false, env_id: args.env_id, changes: [], error: 'no changes: pass at least one of name or is_default', markdown: md };
   }
 
   const before = envs.all.find((e) => e.envId === args.env_id);
@@ -101,7 +101,7 @@ async function executeUpdateEnvInner(args: { env_id: string; name?: string; is_d
   } catch (e) {
     const msg = (e as Error).message;
     if (/HTTP 40[45]/.test(msg)) {
-      const md = '## Update env failed — backend route not yet deployed\n\n' +
+      const md = '## Update env failed: backend route not yet deployed\n\n' +
         `${msg}\n\n` +
         'The \`PUT /api/v1/user/env\` route is not yet in the API Gateway. ' +
         'This is fixed once the backend PUT route ships. ' +
@@ -130,10 +130,10 @@ async function executeUpdateEnvInner(args: { env_id: string; name?: string; is_d
       lines.push(`- **Name**: \`${before.nickname}\` → \`${after.name}\``);
     }
     if (args.is_default !== undefined && args.is_default !== before.isDefault) {
-      lines.push(`- **Default**: ${before.isDefault ? '★' : '—'} → ${after.isDefault ? '★' : '—'}`);
+      lines.push(`- **Default**: ${before.isDefault ? '★' : '-'} → ${after.isDefault ? '★' : '-'}`);
     }
   } else {
-    lines.push(`Update succeeded but the env wasn't returned in the user profile — try \`log10x_login_status\` to verify.`);
+    lines.push(`Update succeeded but the env wasn't returned in the user profile: try \`log10x_login_status\` to verify.`);
   }
   lines.push('');
   lines.push(`### Environments now on this account (${profile.environments.length})`);

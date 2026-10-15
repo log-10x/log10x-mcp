@@ -169,7 +169,7 @@ test('service limits from a window: the largest kept statement sets the limit; m
   assert.deepEqual([whole.limits[0].limitLinesPerDay, whole.limits[0].movedStatements], [null, 3]);
 });
 
-test('configure_engine: a tier_down limit is the largest pass row in lines a day, and its sentence is the CSV reason', () => {
+test('configure_engine: a tier_down limit sits between the largest pass row and the smallest moved one, in lines a day, and its sentence is the CSV reason', () => {
   const row = (o: Partial<PerPatternRow>): PerPatternRow => ({
     pattern_hash: 'h', pattern: 'p', container: 'api', current_bytes_30d: 0, cap_bytes_per_window: 0, action: 'pass',
     saved_bytes_monthly: 0, saved_dollars_monthly: 0, projected_monthly_usd_low: 0, projected_monthly_usd_expected: 0,
@@ -181,14 +181,19 @@ test('configure_engine: a tier_down limit is the largest pass row in lines a day
   ];
   const actions = new Map([['api', 'tier_down' as const]]);
   const limits = serviceLimitsFromRows(['api'], rows, actions, 'tier_down', 'datadog');
-  assert.deepEqual(limits, [{ service: 'api', action: 'tier_down', limitLinesPerDay: 10_000, movedStatements: 1, movedUsdMonthly: 17 }]);
+  // The cap is sqrt(9,000 x 50,000) = 21,213 bytes a window, a margin of 2.36 over the kept row's
+  // 10,000 lines a day: 23,570 lines a day.
+  const margin = Math.sqrt(50_000 / 9000);
+  assert.equal(limits.length, 1);
+  assert.ok(Math.abs(limits[0].limitLinesPerDay! - 10_000 * margin) < 1e-6);
+  assert.deepEqual({ ...limits[0], limitLinesPerDay: 0 }, { service: 'api', action: 'tier_down', limitLinesPerDay: 0, movedStatements: 1, movedUsdMonthly: 17 });
   const sentence = serviceLimitSentence(limits[0], 'datadog');
-  assert.equal(sentence, 'api: any statement above 10,000 lines a day goes to Flex. Today that is this one statement, about $17 a month.');
+  assert.equal(sentence, 'api: any statement above 23,570 lines a day goes to Flex. Today that is this one statement, about $17 a month.');
   const reasons = new Map([['api', csvReason(sentence)]]);
   const diff = renderCsvDiff(['api'], undefined, rows, 'tier_down', actions, 'hard', undefined, undefined, reasons);
-  assert.match(diff, /^\+api,9000::api any statement above 10000 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
+  assert.match(diff, /^\+api,21213::api any statement above 23570 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
   const actionsCsv = renderActionsCsv(['api'], actions, 'tier_down', undefined, 'hard', reasons);
-  assert.match(actionsCsv, /^api,tier_down::api any statement above 10000 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
+  assert.match(actionsCsv, /^api,tier_down::api any statement above 23570 lines a day goes to Flex\. Today that is this one statement about \$17 a month\.$/m);
 
   // compact: the container's cap is a sum, stated at its average line size.
   // 150 bytes per window, 100-byte lines: 150 x 360 / 100 = 540 lines a day.

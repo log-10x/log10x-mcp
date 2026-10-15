@@ -1318,7 +1318,7 @@ export function renderPocReport(input: RenderInput): RenderResult {
       );
     } else {
       lines.push(
-        `- **Potential annual savings**: withheld — no levers were recommended, see the note above.`
+        `- **Potential annual savings**: withheld, no levers were recommended, see the note above.`
       );
     }
     if (m) {

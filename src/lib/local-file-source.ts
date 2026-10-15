@@ -26,6 +26,7 @@
 import { promises as fs } from 'fs';
 import { readStridedFileLines } from './local-source.js';
 import { envelopeTimestampMs } from './pattern-extraction.js';
+import { compactRecordBytes, jsonStringBodyBytes } from './receiver-bytes.js';
 
 import type { LocalSourceResult } from './local-source.js';
 
@@ -99,6 +100,104 @@ function payloadOf(rec: Record<string, unknown>): string {
   return typeof p === 'string' ? p : '';
 }
 
+/**
+ * The forwarder's record a captured line stands for, when the line is one: a
+ * JSON object whose payload is a string `log` or `message`. A CloudWatch
+ * export wraps the forwarder's JSON record in `message`; that inner record is
+ * the one the Receiver received.
+ */
+function forwarderRecord(rec: unknown): { record: Record<string, unknown>; payload: string } | undefined {
+  let obj: unknown = rec;
+  if (typeof obj === 'string') {
+    const t = obj.trim();
+    if (!t.startsWith('{') || !t.endsWith('}')) return undefined;
+    try {
+      obj = JSON.parse(t);
+    } catch {
+      return undefined;
+    }
+  }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  const o = obj as Record<string, unknown>;
+  if (typeof o.message === 'string' && typeof o.log !== 'string') {
+    const m = o.message.trim();
+    if (m.startsWith('{') && m.endsWith('}')) {
+      try {
+        const inner = JSON.parse(m) as unknown;
+        if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+          const i = inner as Record<string, unknown>;
+          if (typeof i.log === 'string' && (i.kubernetes || i.stream || i.docker)) return { record: i, payload: i.log };
+        }
+      } catch {
+        // not JSON: the outer record is the one
+      }
+    }
+  }
+  const payload = o.log ?? o.message;
+  return typeof payload === 'string' ? { record: o, payload } : undefined;
+}
+
+/**
+ * What `extractPatterns` needs to count each event in the Receiver's unit:
+ * the forwarder's record bytes where a line carries one, and every line's
+ * time. Lines without a record are counted as payload plus the assumed
+ * metadata (see receiver-bytes.ts).
+ */
+export function receiverExtractionInputs(records: unknown[]): {
+  lineRecordBytes: Array<number | undefined>;
+  linePayloadJsonBytes: Array<number | undefined>;
+  lineTimesMs: Array<number | undefined>;
+} {
+  // A record with no time of its own takes the previous record's, in the
+  // capture's arrival order, before any reordering.
+  const lineTimesMs: Array<number | undefined> = [];
+  let last: number | undefined;
+  for (const r of records) {
+    const t = recordTimestampMs(r);
+    if (t !== undefined) last = t;
+    lineTimesMs.push(t ?? last);
+  }
+  return { ...receiverRecordBytes(records), lineTimesMs };
+}
+
+/**
+ * The order to hand a capture's records to the templater: grouped by
+ * container, file order kept within each. A capture interleaves containers,
+ * and the templater joins a continuation line to the line before it, which
+ * in file order can be another container's; the Receiver joins only within
+ * a container's stream.
+ */
+export function containerOrder(records: unknown[]): number[] {
+  const keyOf = (r: unknown): string => {
+    const f = forwarderRecord(r);
+    return f ? containerOf(f.record) : '';
+  };
+  const firstSeen = new Map<string, number>();
+  const keys = records.map((r, i) => {
+    const k = keyOf(r);
+    if (!firstSeen.has(k)) firstSeen.set(k, i);
+    return k;
+  });
+  return records
+    .map((_, i) => i)
+    .sort((a, b) => firstSeen.get(keys[a])! - firstSeen.get(keys[b])! || a - b);
+}
+
+/** Each record's compact bytes and its payload's JSON bytes, where the record is a forwarder's. */
+export function receiverRecordBytes(records: unknown[]): {
+  lineRecordBytes: Array<number | undefined>;
+  linePayloadJsonBytes: Array<number | undefined>;
+} {
+  const lineRecordBytes: Array<number | undefined> = [];
+  const linePayloadJsonBytes: Array<number | undefined> = [];
+  for (const r of records) {
+    const f = forwarderRecord(r);
+    lineRecordBytes.push(f ? compactRecordBytes(f.record) : undefined);
+    linePayloadJsonBytes.push(f ? jsonStringBodyBytes(f.payload) : undefined);
+  }
+  return { lineRecordBytes, linePayloadJsonBytes };
+}
+
 export async function sampleFromFile(path: string): Promise<FileSourceResult> {
   const notes: string[] = [];
   const stat = await fs.stat(path);
@@ -124,7 +223,7 @@ export async function sampleFromFile(path: string): Promise<FileSourceResult> {
     notes.push(
       `file is ${(stat.size / 1024 / 1024).toFixed(0)} MB; sampled ${lines.length.toLocaleString()} lines ` +
         `across ${8} windows spanning the whole file (not read whole). The reduction estimate assumes these ` +
-        `windows are representative of the file's pattern mix — if it has phases with very different logging, ` +
+        `windows are representative of the file's pattern mix: if it has phases with very different logging, ` +
         `split it and analyse each phase.`,
     );
   }
@@ -256,7 +355,8 @@ const LINE_TIMESTAMP =
   /^\s*\[?(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d{1,9}))?\s*(Z|[+-]\d{2}:?\d{2})?/;
 
 function lineTimestampMs(line: string): number | undefined {
-  const m = LINE_TIMESTAMP.exec(line);
+  // Coloured output (Rust tracing, for one) wraps the time in ANSI escapes.
+  const m = LINE_TIMESTAMP.exec(line.includes('\x1b[') ? line.replace(/\x1b\[[0-9;]*m/g, '') : line);
   if (!m) return undefined;
   const [, y, mo, d, h, mi, s, frac, zone] = m;
   const ms = frac ? Number(frac.slice(0, 3).padEnd(3, '0')) : 0;
@@ -285,8 +385,33 @@ function objectTimestampMs(obj: Record<string, unknown>): number | undefined {
   for (const key of ['log', 'message', 'msg']) {
     const payload = obj[key];
     if (typeof payload !== 'string') continue;
-    const t = lineTimestampMs(payload);
+    const t = lineTimestampMs(payload) ?? jsonPayloadTimestampMs(payload);
     if (t !== undefined) return t;
+  }
+  return undefined;
+}
+
+/** A JSON log line's own time field (pino `time` in epoch ms, `timestamp`, `ts`), epoch or ISO. */
+function jsonPayloadTimestampMs(payload: string): number | undefined {
+  const t = payload.trim();
+  if (!t.startsWith('{') || !t.endsWith('}')) return undefined;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(t);
+  } catch {
+    return undefined;
+  }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  for (const key of ['time', 'timestamp', 'ts', '@timestamp']) {
+    const v = (obj as Record<string, unknown>)[key];
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      if (v > 1e12) return v;
+      if (v > 1e9) return v * 1000;
+    }
+    if (typeof v === 'string') {
+      const ms = Date.parse(v);
+      if (Number.isFinite(ms)) return ms;
+    }
   }
   return undefined;
 }

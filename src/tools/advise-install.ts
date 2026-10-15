@@ -155,7 +155,7 @@ export const adviseInstallSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, the Log10x agents send nothing to log10x.com — engine metrics, license re-validation, and update checks all go silent. Use to reduce CISO friction. Conflicts with `"log10x"` in `backends` (the wizard surfaces the conflict). **Demo licenses cannot actually run airgapped** — the engine downgrades to online mode with a warning. The wizard surfaces this softly when both are picked.'
+      'When true, the Log10x agents send nothing to log10x.com: engine metrics, license re-validation, and update checks all go silent. Use to reduce CISO friction. Conflicts with `"log10x"` in `backends` (the wizard surfaces the conflict). **Demo licenses cannot actually run airgapped**: the engine downgrades to online mode with a warning. The wizard surfaces this softly when both are picked.'
     ),
   backend_credentials: z
     .record(
@@ -330,11 +330,11 @@ const TOOL_NAME = 'log10x_advise_install';
  */
 const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string }> = {
   'app': {
-    headline: 'Wizard Q1: pick the install path — `reporter` (parallel DaemonSet, zero-touch) or `receiver` (sidecar in your forwarder).',
+    headline: 'Wizard Q1: pick the install path, `reporter` (parallel DaemonSet, zero-touch) or `receiver` (sidecar in your forwarder).',
     answer_field: 'app',
   },
   'forwarder': {
-    headline: 'Wizard Q2: multiple supported forwarders detected — pick which one the Receiver should sidecar into.',
+    headline: 'Wizard Q2: multiple supported forwarders detected, pick which one the Receiver should sidecar into.',
     answer_field: 'forwarder',
   },
   'no-forwarder': {
@@ -342,15 +342,15 @@ const QUESTION_META: Record<QuestionId, { headline: string; answer_field: string
     answer_field: 'app',
   },
   'backends': {
-    headline: 'Wizard Q3: pick one or more metrics backends (TSDBs) — where the engine publishes event statistics and Log10x enrichments.',
+    headline: 'Wizard Q3: pick one or more metrics backends (TSDBs), where the engine publishes event statistics and Log10x enrichments.',
     answer_field: 'backends',
   },
   'airgapped-log10x-conflict': {
-    headline: 'Wizard conflict: `airgapped: true` + `"log10x"` in backends is impossible — drop one.',
+    headline: 'Wizard conflict: `airgapped: true` + `"log10x"` in backends is impossible, drop one.',
     answer_field: 'backends',
   },
   'backend-credentials': {
-    headline: 'Wizard Q4: each non-`log10x` backend needs a Kubernetes Secret name + plain-value overrides — the engine reads credentials from there at runtime.',
+    headline: 'Wizard Q4: each non-`log10x` backend needs a Kubernetes Secret name + plain-value overrides, the engine reads credentials from there at runtime.',
     answer_field: 'backend_credentials',
   },
   'airgapped': {
@@ -516,11 +516,11 @@ function buildWizardHumanSummary(data: WizardData, headline: string): string {
     case 'cancelled':
       return `Install wizard was cancelled before the user finished answering. Re-invoke with the same snapshot_id to pick up where you left off; prior answers are remembered.`;
     case 'license_error':
-      return `Install wizard could not acquire a license JWT: ${data.error_message.slice(0, 200)}. Sign in via log10x_signin_start, paste a JWT via license_source=paste, or retry — the gateway may be transiently unavailable.`;
+      return `Install wizard could not acquire a license JWT: ${data.error_message.slice(0, 200)}. Sign in via log10x_signin_start, paste a JWT via license_source=paste, or retry: the gateway may be transiently unavailable.`;
     case 'signin_required':
       return `Install wizard requires a signed-in Log10x license before it can emit a non-demo plan. Run the device flow via log10x_signin_start, then re-invoke with the same snapshot_id.`;
     case 'demo_airgapped_warning':
-      return `Install wizard refused to emit an airgapped plan against a demo license — the engine downgrades to online mode silently in this combination. ${data.is_signed_in ? 'Switch to a user-scoped license' : 'Sign in via log10x_signin_start'} or drop the airgapped flag before re-invoking.`;
+      return `Install wizard refused to emit an airgapped plan against a demo license: the engine downgrades to online mode silently in this combination. ${data.is_signed_in ? 'Switch to a user-scoped license' : 'Sign in via log10x_signin_start'} or drop the airgapped flag before re-invoking.`;
     case 'serverless_plan':
       return `The snapshot shows a serverless estate (${data.function_count} Lambda functions, ${data.functions_with_otel_extension} with an OTel collector extension), so the wizard emitted the OTel-extension pairing plan instead of a Kubernetes helm plan. The plan covers the collector config splice, the engine's extension environment, and the CDK declarations; the tenx-receive layer is published publicly per region for x86_64 and arm64.`;
     case 'azure_serverless_plan':
@@ -561,15 +561,15 @@ function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
   const cdk = lambdaEstateCdkConstruct({ region });
 
   const lines: string[] = [];
-  lines.push('# Install plan — serverless estate (Lambda + OTel collector extension)');
+  lines.push('# Install plan: serverless estate (Lambda + OTel collector extension)');
   lines.push('');
   lines.push(
     `Discovery found **${sv.functionCount} Lambda function${sv.functionCount === 1 ? '' : 's'}** and no reachable ` +
       `Kubernetes cluster. ${sv.functionsWithOtelExtension} function${sv.functionsWithOtelExtension === 1 ? '' : 's'} ` +
-      `already run an OTel collector extension — that collector is the forwarder the engine pairs with, over ` +
+      `already run an OTel collector extension: that collector is the forwarder the engine pairs with, over ` +
       `loopback inside each execution environment. ` +
       (sv.logGroupsUnsubscribed > 0
-        ? `${sv.logGroupsUnsubscribed} probed log group${sv.logGroupsUnsubscribed === 1 ? '' : 's'} have no subscription filter — the CloudWatch remainder below covers them.`
+        ? `${sv.logGroupsUnsubscribed} probed log group${sv.logGroupsUnsubscribed === 1 ? '' : 's'} have no subscription filter: the CloudWatch remainder below covers them.`
         : `Probed log groups all carry subscription filters.`)
   );
   lines.push('');
@@ -606,7 +606,7 @@ function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
   lines.push(
     '`log10x_setup_recurring` with `scheduler: "eventbridge"` emits an EventBridge Scheduler + ' +
       'CodeBuild tick that recomputes per-pattern dispositions and writes them to an S3 config ' +
-      'plane — no cluster and no GitHub. Functions poll the mute file through ' +
+      'plane: no cluster and no GitHub. Functions poll the mute file through ' +
       '`TENX_RECEIVE_MUTE_S3_URI` (engine 1.1.66+) and converge within the refresh window ' +
       '(default 5 minutes), no redeploy.'
   );
@@ -623,7 +623,7 @@ function serverlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutput {
   }
   lines.push('');
   lines.push(
-    '_The Coralogix destination side (TCO policy on `$d.routeState`) is unchanged from the proven path — ' +
+    '_The Coralogix destination side (TCO policy on `$d.routeState`) is unchanged from the proven path: ' +
       'Terraform via `coralogixMonitoringRecipe`, or the `CoralogixTcoPolicies` construct above._'
   );
 
@@ -657,7 +657,7 @@ function azureServerlessPlanReturn(snapshot: DiscoverySnapshot): StructuredOutpu
   });
 
   const lines: string[] = [];
-  lines.push('# Install plan — Azure serverless estate (stream topology)');
+  lines.push('# Install plan: Azure serverless estate (stream topology)');
   lines.push('');
   lines.push(
     `Discovery found **${az.functionAppCount} Function App${az.functionAppCount === 1 ? '' : 's'}**` +
@@ -768,17 +768,17 @@ function wizardEnvelopeMeta(data: WizardData): {
       };
     case 'session_error':
       return {
-        headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\` — re-discover and retry.`,
+        headline: `Wizard session failed to initialize for snapshot \`${data.snapshot_id}\`: re-discover and retry.`,
         actions: [
-          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot — internal session-store state is unexpected', role: 'required-next' },
+          { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot: internal session-store state is unexpected', role: 'required-next' },
         ],
-        warnings: ['unexpected internal error — the snapshot store is in a bad state for this snapshot_id'],
+        warnings: ['unexpected internal error: the snapshot store is in a bad state for this snapshot_id'],
       };
     case 'cancelled':
       return {
-        headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume — every prior answer is preserved.`,
+        headline: `Wizard cancelled mid-flow. Re-invoke log10x_advise_install with snapshot_id="${data.snapshot_id}" to resume: every prior answer is preserved.`,
         actions: [
-          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — the session remembers every prior answer for 30 min', role: 'recommended-next' },
+          { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard: the session remembers every prior answer for 30 min', role: 'recommended-next' },
         ],
         warnings: [],
       };
@@ -803,7 +803,7 @@ function wizardEnvelopeMeta(data: WizardData): {
     }
     case 'azure_serverless_plan':
       return {
-        headline: `Azure serverless estate (${data.function_app_count} Function Apps): emitted the certified stream-topology plan — Event Hub in, one central engine, routeState routing out.`,
+        headline: `Azure serverless estate (${data.function_app_count} Function Apps): emitted the certified stream-topology plan, Event Hub in, one central engine, routeState routing out.`,
         actions: [
           { tool: 'log10x_configure_engine', args: {}, reason: 'once events flow, derive the per-pattern policy for the central receiver', role: 'optional-followup' },
         ],
@@ -816,7 +816,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       return {
         headline:
           `Serverless estate (${data.function_count} Lambda function${data.function_count === 1 ? '' : 's'}, ` +
-          `${data.functions_with_otel_extension} with an OTel collector extension) — emitted the OTel-extension ` +
+          `${data.functions_with_otel_extension} with an OTel collector extension): emitted the OTel-extension ` +
           `pairing plan instead of the Kubernetes wizard.`,
         actions: [],
         warnings: [
@@ -846,7 +846,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       // `required-next` + array-order = chain. Agents that respect the
       // role enum will not parallelize or skip.
       return {
-        headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install — every prior answer is preserved.`,
+        headline: `Wizard cannot mint a real license without sign-in. CHAIN: call log10x_signin_start NEXT, then re-invoke log10x_advise_install, every prior answer is preserved.`,
         actions: [
           { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x (gets Auth0 tokens needed to mint a user-scoped license). Must complete before the next action.', role: 'required-next' },
           { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, license_source: 'signin' }, reason: 'after signin_start completes, re-invoke the wizard with the same snapshot_id; the wizard will auto-mint a real user-scoped license now that Auth0 tokens exist', role: 'required-next' },
@@ -867,7 +867,7 @@ function wizardEnvelopeMeta(data: WizardData): {
             : `Wizard rejected unknown arg${data.unknown_keys.length === 1 ? '' : 's'} (${data.unknown_keys.join(', ')}). Valid args: ${data.valid_keys.join(', ')}. Re-invoke without the unknown key${data.unknown_keys.length === 1 ? '' : 's'}.`,
         actions: [],
         warnings: [
-          `unknown_args rejected: ${data.unknown_keys.join(', ')} — wizard will not parse partial / typo'd input; re-invoke with the canonical names`,
+          `unknown_args rejected: ${data.unknown_keys.join(', ')}: wizard will not parse partial / typo'd input; re-invoke with the canonical names`,
         ],
       };
     }
@@ -877,18 +877,18 @@ function wizardEnvelopeMeta(data: WizardData): {
       // `alternative` so agent surfaces both, user picks.
       return {
         headline: data.is_signed_in
-          ? `Demo license + airgapped doesn't enforce — your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
+          ? `Demo license + airgapped doesn't enforce: your pasted-API-key sign-in lacks Auth0 tokens to mint a user license. Switch to device-flow sign-in, or drop airgapped.`
           : `Demo license + airgapped doesn't enforce: engine downgrades to online mode silently. Sign in for a real license, or drop airgapped.`,
         actions: [
           { tool: 'log10x_signin_start', args: {}, reason: 'sign in to mint a real license that actually enforces airgapped (the engine refuses to run airgapped on demo licenses)', role: 'alternative' },
           { tool: 'log10x_advise_install', args: { snapshot_id: data.snapshot_id, airgapped: false }, reason: 'or keep the demo license and proceed without airgapped', role: 'alternative' },
         ],
-        warnings: ['demo licenses cannot run airgapped — engine downgrades to online mode at startup with a warning log'],
+        warnings: ['demo licenses cannot run airgapped: engine downgrades to online mode at startup with a warning log'],
       };
     case 'plan': {
       const warnings: string[] = [];
       if (data.blockers.length > 0) {
-        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
+        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''}: see data.blockers`);
       }
       // Use the typed `license_kind` field instead of grepping notes
       // (back-compat: also fall back to the legacy notes-grep if
@@ -924,7 +924,7 @@ function wizardEnvelopeMeta(data: WizardData): {
         args: {},
         reason: data.license_kind === 'builtin'
           ? 'verify the install once the helm release rolls out: checks engine pods Ready and metrics flowing'
-          : 'verify the install once the helm release rolls out — checks engine pods Ready, metrics flowing, license-Secret mounted',
+          : 'verify the install once the helm release rolls out: checks engine pods Ready, metrics flowing, license-Secret mounted',
         role: 'optional-followup',
       });
       // Receiver path: post-install pattern-mitigation is the natural follow-up.
@@ -940,7 +940,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       // `helm upgrade`. The plan markdown explains it; surface as warning too.
       const needsSecret = data.notes.some((n) => /licenseSecret|log10x-license/i.test(n));
       if (needsSecret) {
-        warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license) — create it with kubectl before running the helm upgrade step');
+        warnings.push('the plan references an out-of-band Kubernetes Secret (log10x-license): create it with kubectl before running the helm upgrade step');
       }
       // Install-mode awareness: when upgrade-existing, reassure the
       // agent (and through it, the user) that this is NOT a second
@@ -949,7 +949,7 @@ function wizardEnvelopeMeta(data: WizardData): {
       // agent can ask the user whether they really want a brand-new
       // forwarder alongside whatever they have.
       if (data.install_mode === 'upgrade-existing' && data.existing_helm_release) {
-        warnings.push(`this plan UPGRADES the existing Helm release \`${data.existing_helm_release.name}\` in \`${data.existing_helm_release.namespace}\` (sidecar goes INTO it) — no second ${data.forwarder ?? 'forwarder'} is deployed`);
+        warnings.push(`this plan UPGRADES the existing Helm release \`${data.existing_helm_release.name}\` in \`${data.existing_helm_release.namespace}\` (sidecar goes INTO it): no second ${data.forwarder ?? 'forwarder'} is deployed`);
       } else if (data.install_mode === 'fresh-release' && data.app === 'receiver') {
         warnings.push(`this plan deploys a FRESH ${data.forwarder ?? 'forwarder'} Helm release (no existing helm-managed forwarder was detected). If the user has a non-helm-managed forwarder running, this WILL create a second one alongside it. Confirm with the user before running the plan.`);
       }
@@ -972,7 +972,7 @@ function planHeadlineForWizard(data: { app: string; forwarder?: string; action: 
   if (data.blockers.length > 0) {
     return `${data.app} ${data.action} plan${fwd}: BLOCKED (${data.blockers.length} issue${data.blockers.length !== 1 ? 's' : ''}). Release "${data.release_name}" in "${data.namespace}".`;
   }
-  return `${data.app} ${data.action} plan${fwd}: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown — release "${data.release_name}" in namespace "${data.namespace}".`;
+  return `${data.app} ${data.action} plan${fwd}: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown: release "${data.release_name}" in namespace "${data.namespace}".`;
 }
 
 export async function executeAdviseInstall(
@@ -993,7 +993,7 @@ export async function executeAdviseInstall(
       did_you_mean: findClosestKnownArg(k),
     }));
     const validKeys = [...KNOWN_ARG_NAMES].sort();
-    const lines: string[] = [`# Install wizard — unknown arg${unknownKeys.length === 1 ? '' : 's'}`, ''];
+    const lines: string[] = [`# Install wizard: unknown arg${unknownKeys.length === 1 ? '' : 's'}`, ''];
     for (const s of suggestions) {
       lines.push(
         s.did_you_mean
@@ -1050,7 +1050,7 @@ export async function executeAdviseInstall(
   const snapshot = getSnapshot(snapshotId);
   if (!snapshot) {
     const md = [
-      `# Install wizard — snapshot not found`,
+      `# Install wizard: snapshot not found`,
       ``,
       `Snapshot \`${snapshotId}\` is missing or expired (snapshots live 30 min).`,
       ``,
@@ -1133,7 +1133,7 @@ export async function executeAdviseInstall(
       mode: 'session_error',
       ok: false,
       snapshot_id: snapshotId,
-      markdown: '# Install wizard — internal error\n\nWizard session could not be created.',
+      markdown: '# Install wizard: internal error\n\nWizard session could not be created.',
     });
   }
 
@@ -1221,11 +1221,11 @@ export async function executeAdviseInstall(
         // bug where "you signed in via pasted API key" was shown for
         // expired-refresh / refresh-failed / fetch-failed cases too.
         const md = [
-          `# Install wizard — sign in to Log10x first`,
+          `# Install wizard: sign in to Log10x first`,
           ``,
           signinRequiredReasonMessage(lic.reason),
           ``,
-          `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered — you won't have to redo any step.`,
+          `Once you're signed in, re-invoke \`log10x_advise_install\` with the same \`snapshot_id\`. Every answer you gave above is remembered: you won't have to redo any step.`,
         ].join('\n');
         // Persist the reason so the demo+airgapped warning (if reached
         // on a future turn through 'demo' or 'paste') can branch on the
@@ -1249,7 +1249,7 @@ export async function executeAdviseInstall(
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
       const md = [
-        `# Install wizard — couldn't acquire a license JWT`,
+        `# Install wizard: couldn't acquire a license JWT`,
         ``,
         `The wizard tried to mint a license via the gateway and failed:`,
         ``,
@@ -1259,7 +1259,7 @@ export async function executeAdviseInstall(
         `- Re-invoke with \`license_source: "builtin"\` to install with no licence: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped)`,
         `- Sign in via \`log10x_signin_start\` if you haven't already`,
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\` if you have one`,
-        `- Retry — the gateway may have been transiently unavailable`,
+        `- Retry: the gateway may have been transiently unavailable`,
       ].join('\n');
       return wizardReturn({
         mode: 'license_error',
@@ -1381,7 +1381,7 @@ async function elicitMissingAnswers(
               enum: supportedDetected.length === 0 ? ['reporter'] : ['reporter', 'receiver'],
               enumNames: supportedDetected.length === 0
                 ? ['Dedicated DaemonSet (Reporter)']
-                : ['Dedicated DaemonSet (Reporter) — zero touch', 'Plug into existing forwarder (Receiver) — sidecar in your forwarder'],
+                : ['Dedicated DaemonSet (Reporter): zero touch', 'Plug into existing forwarder (Receiver): sidecar in your forwarder'],
             },
           },
           required: ['app'],
@@ -1471,7 +1471,7 @@ async function elicitMissingAnswers(
         secretName: {
           type: 'string',
           title: `Secret the engine reads ${BACKEND_LABEL[backend]} credentials from`,
-          description: `The engine needs to authenticate to ${BACKEND_LABEL[backend]} when it pushes metrics, and we won't put credentials in your values.yaml — instead, the engine reads them from a Kubernetes Secret at runtime via secretKeyRef. Tell us which Secret to read (use whatever your team already manages — Sealed Secrets, External Secrets, Vault, kubectl). Sensitive env vars the engine mounts from this Secret: ${spec.secret.map((s) => s.envVar).join(', ')}. Keys the engine reads inside the Secret: ${spec.secret.map((s) => `\`${s.secretKey}\``).join(', ')}.`,
+          description: `The engine needs to authenticate to ${BACKEND_LABEL[backend]} when it pushes metrics, and we won't put credentials in your values.yaml: instead, the engine reads them from a Kubernetes Secret at runtime via secretKeyRef. Tell us which Secret to read (use whatever your team already manages: Sealed Secrets, External Secrets, Vault, kubectl). Sensitive env vars the engine mounts from this Secret: ${spec.secret.map((s) => s.envVar).join(', ')}. Keys the engine reads inside the Secret: ${spec.secret.map((s) => `\`${s.secretKey}\``).join(', ')}.`,
           default: defaultSecretNameFor(backend),
         },
       };
@@ -1489,7 +1489,7 @@ async function elicitMissingAnswers(
         if (p.default === undefined) required.push(p.envVar);
       }
       const result = await (server as any).server.elicitInput({
-        message: `The engine pushes metrics to ${BACKEND_LABEL[backend]} and needs to authenticate. To avoid putting credentials in values.yaml, it reads them from a Kubernetes Secret at runtime — point us at the Secret to read (and any non-sensitive env overrides if you need them).`,
+        message: `The engine pushes metrics to ${BACKEND_LABEL[backend]} and needs to authenticate. To avoid putting credentials in values.yaml, it reads them from a Kubernetes Secret at runtime: point us at the Secret to read (and any non-sensitive env overrides if you need them).`,
         requestedSchema: {
           type: 'object',
           properties,
@@ -1516,7 +1516,7 @@ async function elicitMissingAnswers(
     // Q5: airgapped — only when backends doesn't include log10x
     if (!session.backends.includes('log10x') && session.airgapped === undefined) {
       const result = await (server as any).server.elicitInput({
-        message: `Run the engine airgapped? (Engine sends NOTHING to log10x.com — only emits to ${session.backends.map((b) => BACKEND_LABEL[b]).join(' + ')}.)`,
+        message: `Run the engine airgapped? (Engine sends NOTHING to log10x.com: only emits to ${session.backends.map((b) => BACKEND_LABEL[b]).join(' + ')}.)`,
         requestedSchema: {
           type: 'object',
           properties: {
@@ -1562,7 +1562,7 @@ async function elicitMissingAnswers(
     // Q7: paste path — ask for the JWT itself.
     if (session.licenseSource === 'paste' && !session.licenseJwt) {
       const result = await (server as any).server.elicitInput({
-        message: 'Paste the Log10x license JWT. The chart mounts this via a Kubernetes Secret at /etc/tenx/license/license.jwt — it never lives in values.yaml.',
+        message: 'Paste the Log10x license JWT. The chart mounts this via a Kubernetes Secret at /etc/tenx/license/license.jwt: it never lives in values.yaml.',
         requestedSchema: {
           type: 'object',
           properties: {
@@ -1649,7 +1649,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
         value: 'reporter',
         label: 'Reporter (standalone DaemonSet, zero-touch)',
         recommended: supportedDetected.length === 0,
-        details: 'A dedicated DaemonSet running alongside your existing forwarder. Tails container logs in parallel — does not touch your forwarder. Read-only.',
+        details: 'A dedicated DaemonSet running alongside your existing forwarder. Tails container logs in parallel: does not touch your forwarder. Read-only.',
       },
     ];
     if (supportedDetected.length > 0) {
@@ -1681,7 +1681,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       // "only unsupported (filebeat) detected" so the user gets the
       // right next-step guidance.
       const baseResolutions: Array<{ args: Record<string, unknown>; description: string }> = [
-        { args: { snapshot_id: session.snapshotId, app: 'reporter' }, description: 'Switch to the standalone Reporter DaemonSet — runs alongside whatever forwarder you have today, zero-touch.' },
+        { args: { snapshot_id: session.snapshotId, app: 'reporter' }, description: 'Switch to the standalone Reporter DaemonSet: runs alongside whatever forwarder you have today, zero-touch.' },
       ];
       if (unsupported.length > 0) {
         return {
@@ -1776,7 +1776,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
         resolutions: [
           {
             args: { snapshot_id: session.snapshotId, backends: session.backends.filter((b) => b !== 'log10x') },
-            description: 'Keep airgapped, drop "log10x" from backends — engine emits only to your own backend(s).',
+            description: 'Keep airgapped, drop "log10x" from backends: engine emits only to your own backend(s).',
           },
           {
             args: { snapshot_id: session.snapshotId, airgapped: false },
@@ -1822,7 +1822,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       questionId: 'backend-credentials',
       shape: {
         type: 'form',
-        description: `For each non-log10x backend (${backendsNeedingCreds.join(', ')}), provide a Kubernetes Secret name + optional plain-value overrides. The engine reads sensitive values from the Secret at runtime — they never enter values.yaml.`,
+        description: `For each non-log10x backend (${backendsNeedingCreds.join(', ')}), provide a Kubernetes Secret name + optional plain-value overrides. The engine reads sensitive values from the Secret at runtime: they never enter values.yaml.`,
         fields,
       },
     };
@@ -1863,7 +1863,7 @@ function nextQuestion(snapshot: DiscoverySnapshot, session: WizardSession): Next
       shape: {
         type: 'string',
         answer_field: 'license_jwt_paste',
-        description: 'The JWT string the engine will use to authenticate. Mounted via a Kubernetes Secret at /etc/tenx/license/license.jwt — never written to values.yaml.',
+        description: 'The JWT string the engine will use to authenticate. Mounted via a Kubernetes Secret at /etc/tenx/license/license.jwt: never written to values.yaml.',
         example: 'eyJhbGciOiJSUzI1NiIs...',
       },
     };
@@ -1886,18 +1886,18 @@ function askApp(snapshot: DiscoverySnapshot): string {
   const onlyDedicated = detected.length === 0;
 
   return [
-    '# Install wizard — pick a path',
+    '# Install wizard: pick a path',
     '',
     fwSummary,
     '',
     `Two ways to install:`,
     '',
     onlyDedicated
-      ? `- **(A) Dedicated DaemonSet** — installs a separate fluent-bit DaemonSet (Reporter) that tails container logs and emits cost-attribution metrics. Zero touch to your existing setup.`
-      : `- **(A) Dedicated DaemonSet** — installs a separate fluent-bit DaemonSet (Reporter) that tails container logs alongside your existing forwarder. Zero touch to your existing setup. Read-only (metrics + pattern fingerprinting).`,
+      ? `- **(A) Dedicated DaemonSet**: installs a separate fluent-bit DaemonSet (Reporter) that tails container logs and emits cost-attribution metrics. Zero touch to your existing setup.`
+      : `- **(A) Dedicated DaemonSet**: installs a separate fluent-bit DaemonSet (Reporter) that tails container logs alongside your existing forwarder. Zero touch to your existing setup. Read-only (metrics + pattern fingerprinting).`,
     onlyDedicated
-      ? `- **(B) Plug into existing forwarder** — not available (no forwarder detected).`
-      : `- **(B) Plug into existing forwarder** — installs a sidecar (Receiver) inside your existing forwarder. Filters / samples / compacts events in-flight to cut volume.`,
+      ? `- **(B) Plug into existing forwarder**: not available (no forwarder detected).`
+      : `- **(B) Plug into existing forwarder**: installs a sidecar (Receiver) inside your existing forwarder. Filters / samples / compacts events in-flight to cut volume.`,
     '',
     `Re-invoke \`log10x_advise_install\` with \`app: "reporter"\` for (A) or \`app: "receiver"\` for (B).`,
   ].join('\n');
@@ -1905,7 +1905,7 @@ function askApp(snapshot: DiscoverySnapshot): string {
 
 function noForwarderForReceiver(): string {
   return [
-    '# Install wizard — Receiver needs an existing forwarder',
+    '# Install wizard: Receiver needs an existing forwarder',
     '',
     'You picked **plug into existing forwarder** (Receiver), but discovery found no forwarder in the cluster.',
     '',
@@ -1918,7 +1918,7 @@ function noForwarderForReceiver(): string {
 function unsupportedForwarderForReceiver(unsupported: DetectedForwarder[]): string {
   const kinds = Array.from(new Set(unsupported.map((d) => d.kind))).join(', ');
   return [
-    '# Install wizard — Receiver path not supported for your forwarder yet',
+    '# Install wizard: Receiver path not supported for your forwarder yet',
     '',
     `Discovery found these forwarders in the cluster: **${kinds}**. The Receiver wizard can install into ${SUPPORTED_FORWARDERS.join(' / ')}, but not into ${kinds}.`,
     '',
@@ -1930,13 +1930,13 @@ function unsupportedForwarderForReceiver(unsupported: DetectedForwarder[]): stri
 
 function askForwarder(detected: DetectedForwarder[]): string {
   return [
-    '# Install wizard — pick which forwarder to plug into',
+    '# Install wizard: pick which forwarder to plug into',
     '',
     `${detected.length} forwarders are running in the cluster. Receiver sidecars into one of them:`,
     '',
     ...detected.map(
       (d) =>
-        `- **${d.kind}** — workload \`${d.workloadKind}/${d.workloadName}\` in \`${d.namespace}\` (image \`${d.image}\`, ready ${d.readyReplicas})`
+        `- **${d.kind}**: workload \`${d.workloadKind}/${d.workloadName}\` in \`${d.namespace}\` (image \`${d.image}\`, ready ${d.readyReplicas})`
     ),
     '',
     `Re-invoke with \`forwarder: "<kind>"\` to pick one.`,
@@ -1959,10 +1959,10 @@ const BACKEND_LABEL: Record<MetricsBackendKind, string> = {
 
 function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
   const lines: string[] = [];
-  lines.push('# Install wizard — where do metrics go?');
+  lines.push('# Install wizard: where do metrics go?');
   lines.push('');
   lines.push(
-    'The Log10x engine publishes event statistics (volumes, cost attribution, pattern fingerprints) and per-pattern enrichments as time-series metrics. We need to know **which TSDB(s) to push them to** — that\'s where the MCP and your dashboards will read them back from.'
+    'The Log10x engine publishes event statistics (volumes, cost attribution, pattern fingerprints) and per-pattern enrichments as time-series metrics. We need to know **which TSDB(s) to push them to**: that\'s where the MCP and your dashboards will read them back from.'
   );
   lines.push('');
   lines.push(
@@ -1982,7 +1982,7 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
     const label = BACKEND_LABEL[kind];
     const annotations: string[] = [];
     if (detectedSet.has(kind)) annotations.push('detected in your cluster');
-    const suffix = annotations.length > 0 ? ` — ${annotations.join(', ')}` : '';
+    const suffix = annotations.length > 0 ? `: ${annotations.join(', ')}` : '';
     lines.push(`- **${label}** (\`${kind}\`)${suffix}`);
   }
 
@@ -1996,16 +1996,16 @@ function askBackends(detectedAgents: DetectedMetricsBackend[]): string {
 
 function askBackendCredentials(backends: MetricsBackendKind[]): string {
   const lines: string[] = [];
-  lines.push('# Install wizard — credentials for your metrics backends');
+  lines.push('# Install wizard: credentials for your metrics backends');
   lines.push('');
   lines.push(
-    'For each backend, the engine needs credentials to authenticate when it pushes metrics. To do that securely **without putting secrets in `values.yaml`**, we wire sensitive env vars via Kubernetes Secrets (`valueFrom.secretKeyRef`) — you point us at a Secret name and we mount the keys at runtime.'
+    'For each backend, the engine needs credentials to authenticate when it pushes metrics. To do that securely **without putting secrets in `values.yaml`**, we wire sensitive env vars via Kubernetes Secrets (`valueFrom.secretKeyRef`): you point us at a Secret name and we mount the keys at runtime.'
   );
   lines.push('');
-  lines.push('That way you keep using **whatever Secret-management you already have** (Sealed Secrets, External Secrets, Vault, manual `kubectl create secret`, etc.) — we just consume the result. Create or reuse the Secret out-of-band before `helm upgrade`. Per backend, tell the wizard:');
+  lines.push('That way you keep using **whatever Secret-management you already have** (Sealed Secrets, External Secrets, Vault, manual `kubectl create secret`, etc.): we just consume the result. Create or reuse the Secret out-of-band before `helm upgrade`. Per backend, tell the wizard:');
   lines.push('');
-  lines.push('- **Secret name** — what to look up in the cluster. Default if you skip: `<backend>-credentials`.');
-  lines.push('- **Plain-value overrides** — non-sensitive config like region/URL/namespace. Each has a sensible default; override when needed.');
+  lines.push('- **Secret name**: what to look up in the cluster. Default if you skip: `<backend>-credentials`.');
+  lines.push('- **Plain-value overrides**: non-sensitive config like region/URL/namespace. Each has a sensible default; override when needed.');
   lines.push('');
 
   for (const b of backends) {
@@ -2024,7 +2024,7 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
         if (p.default !== undefined) {
           lines.push(`  - \`${p.envVar}\` (default: \`${p.default}\`)`);
         } else {
-          lines.push(`  - \`${p.envVar}\` (no default — must supply; placeholder: \`${p.placeholder ?? ''}\`)`);
+          lines.push(`  - \`${p.envVar}\` (no default: must supply; placeholder: \`${p.placeholder ?? ''}\`)`);
         }
       }
     }
@@ -2054,7 +2054,7 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
   lines.push(JSON.stringify({ backend_credentials: example }, null, 2));
   lines.push('```');
   lines.push('');
-  lines.push('You can answer all backends in one call, or one at a time — the wizard remembers what\'s been answered.');
+  lines.push('You can answer all backends in one call, or one at a time: the wizard remembers what\'s been answered.');
   return lines.join('\n');
 }
 
@@ -2066,20 +2066,20 @@ function askBackendCredentials(backends: MetricsBackendKind[]): string {
 
 function askLicensePaste(): string {
   return [
-    '# Install wizard — paste the license JWT',
+    '# Install wizard: paste the license JWT',
     '',
-    'You picked `license_source: "paste"`. Re-invoke `log10x_advise_install` with `license_jwt_paste: "<your JWT>"` to supply the license JWT. The JWT is what authorizes the engine and what the chart mounts via the license Secret — keep it out of shell history (the wizard\'s pre-install step uses `--from-literal` but you can switch to `--from-file=<path>` after the fact if needed).',
+    'You picked `license_source: "paste"`. Re-invoke `log10x_advise_install` with `license_jwt_paste: "<your JWT>"` to supply the license JWT. The JWT is what authorizes the engine and what the chart mounts via the license Secret: keep it out of shell history (the wizard\'s pre-install step uses `--from-literal` but you can switch to `--from-file=<path>` after the fact if needed).',
   ].join('\n');
 }
 
 function askAirgapped(backends: MetricsBackendKind[]): string {
   const backendList = backends.map((b) => `\`${b}\``).join(' + ');
   return [
-    '# Install wizard — airgapped mode?',
+    '# Install wizard: airgapped mode?',
     '',
-    `You picked ${backendList} for metrics — all user-owned. The Log10x agents can run **fully airgapped**: nothing sent to log10x.com (no engine telemetry, no online license check, no update probes). Agents emit only to your chosen backends and whatever event destinations you wire.`,
+    `You picked ${backendList} for metrics: all user-owned. The Log10x agents can run **fully airgapped**: nothing sent to log10x.com (no engine telemetry, no online license check, no update probes). Agents emit only to your chosen backends and whatever event destinations you wire.`,
     '',
-    'Common request from security teams — clean network-policy story, smoother CISO sign-off.',
+    'Common request from security teams: clean network-policy story, smoother CISO sign-off.',
     '',
     'Otherwise (default): the agents still emit only to your authorized destinations, but send anonymous engine telemetry to log10x for support diagnostics. Helm chart and docker images still pull from public log10x repos regardless of this choice.',
     '',
@@ -2089,7 +2089,7 @@ function askAirgapped(backends: MetricsBackendKind[]): string {
 
 function airgappedLog10xConflict(backends: MetricsBackendKind[]): string {
   return [
-    '# Install wizard — airgapped + log10x is impossible',
+    '# Install wizard: airgapped + log10x is impossible',
     '',
     `You picked \`airgapped: true\` AND included \`"log10x"\` in \`backends\` (\`${backends.map((b) => `"${b}"`).join(', ')}\`). These conflict: airgapped means the engine sends NOTHING to log10x.com, and \`"log10x"\` is the Log10x-hosted TSDB at log10x.com, which serves the public demo.`,
     '',
@@ -2135,15 +2135,15 @@ function signinRequiredReasonMessage(
 ): string {
   switch (reason) {
     case 'pasted-key-fallback':
-      return `You picked **Sign in** for the license. The wizard saw an existing Log10x API key but no Auth0 tokens (you signed in via pasted API key, which doesn't include the OAuth credentials needed to mint a user-scoped license). Run \`log10x_signin_start\` in your next turn — it opens the device-code browser flow and stores the Auth0 tokens.`;
+      return `You picked **Sign in** for the license. The wizard saw an existing Log10x API key but no Auth0 tokens (you signed in via pasted API key, which doesn't include the OAuth credentials needed to mint a user-scoped license). Run \`log10x_signin_start\` in your next turn: it opens the device-code browser flow and stores the Auth0 tokens.`;
     case 'not-signed-in':
-      return `You picked **Sign in** for the license. The wizard found no Log10x account session — run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key + Auth0 tokens).`;
+      return `You picked **Sign in** for the license. The wizard found no Log10x account session: run \`log10x_signin_start\` in your next turn (it opens a browser to auth.log10x.com and exchanges the device-code for an API key + Auth0 tokens).`;
     case 'access-token-expired-no-refresh':
-      return `You picked **Sign in** for the license. Your Auth0 access token has expired and there's no refresh token on file to recover with — most likely the prior sign-in was done a while ago and the refresh-token window has lapsed. Run \`log10x_signin_start\` to redo the device flow.`;
+      return `You picked **Sign in** for the license. Your Auth0 access token has expired and there's no refresh token on file to recover with: most likely the prior sign-in was done a while ago and the refresh-token window has lapsed. Run \`log10x_signin_start\` to redo the device flow.`;
     case 'refresh-failed':
       return `You picked **Sign in** for the license. The wizard tried to refresh your Auth0 access token and the refresh call failed (network error, or Auth0 rejected the refresh token). Run \`log10x_signin_start\` to redo the device flow from scratch; if the refresh call keeps failing, that's a sign Auth0 has revoked the session.`;
     case 'user-license-fetch-failed':
-      return `You picked **Sign in** for the license. Auth0 sign-in is fine, but the call to \`/api/v1/license\` (the endpoint that mints the user-scoped JWT) errored — typically a transient gateway problem. Re-invoke \`log10x_advise_install\` to retry; if it keeps failing, surface the error to the Log10x team. \`log10x_signin_start\` won't help in this case.`;
+      return `You picked **Sign in** for the license. Auth0 sign-in is fine, but the call to \`/api/v1/license\` (the endpoint that mints the user-scoped JWT) errored: typically a transient gateway problem. Re-invoke \`log10x_advise_install\` to retry; if it keeps failing, surface the error to the Log10x team. \`log10x_signin_start\` won't help in this case.`;
     case 'signed-in-user':
     case 'refreshed-then-user':
       // Unreachable: signin_required only fires when isRealUserLicense
@@ -2165,20 +2165,20 @@ function renderDemoAirgappedWarning(session: WizardSession, isSignedIn: boolean)
   const intro = introForReason(session.licenseReason, isSignedIn);
 
   const signinSuggestion = isSignedIn
-    ? `1. **Sign in via the device flow** to upgrade to a user-scoped license (\`log10x_signin_start\` — it'll go through a browser OAuth that gives us the Auth0 tokens we need). Re-invoke this tool afterward. Your \`airgapped: true\` choice is remembered.`
+    ? `1. **Sign in via the device flow** to upgrade to a user-scoped license (\`log10x_signin_start\`: it'll go through a browser OAuth that gives us the Auth0 tokens we need). Re-invoke this tool afterward. Your \`airgapped: true\` choice is remembered.`
     : `1. **Sign in** for a real license. Call \`log10x_signin_start\`, then re-invoke this tool. Your \`airgapped: true\` choice is remembered.`;
 
   return [
-    '# Install wizard — airgapped + demo license heads-up',
+    '# Install wizard: airgapped + demo license heads-up',
     '',
-    `${intro} **The engine refuses to run airgapped on demo / limited licenses** — it logs a warning and downgrades to online mode silently. Manually editing the values file later won't override this; the gate is in the engine.`,
+    `${intro} **The engine refuses to run airgapped on demo / limited licenses**: it logs a warning and downgrades to online mode silently. Manually editing the values file later won't override this; the gate is in the engine.`,
     '',
     '**Two paths forward**:',
     '',
     signinSuggestion,
-    `2. **Proceed without airgapped** for now — the agents will still emit only to ${backendList}, just with anonymous engine telemetry going to log10x. Re-invoke with \`airgapped: false\` to confirm.`,
+    `2. **Proceed without airgapped** for now: the agents will still emit only to ${backendList}, just with anonymous engine telemetry going to log10x. Re-invoke with \`airgapped: false\` to confirm.`,
     '',
-    "_Your other answers (app, forwarder, backends) are remembered — you don't need to re-pass them._",
+    "_Your other answers (app, forwarder, backends) are remembered: you don't need to re-pass them._",
   ].join('\n');
 }
 
@@ -2188,7 +2188,7 @@ function introForReason(
 ): string {
   switch (reason) {
     case 'pasted-key-fallback':
-      return `You're signed in via pasted API key, but the wizard fell back to an anonymous demo license — pasted-key sign-in doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`;
+      return `You're signed in via pasted API key, but the wizard fell back to an anonymous demo license: pasted-key sign-in doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`;
     case 'not-signed-in':
       return `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
     case 'access-token-expired-no-refresh':
@@ -2204,7 +2204,7 @@ function introForReason(
       // that shouldn't appear in this branch). Use the boolean to pick
       // the phrasing.
       return isSignedInFallback
-        ? `You're signed in, but the wizard fell back to an anonymous demo license — usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
+        ? `You're signed in, but the wizard fell back to an anonymous demo license: usually because the sign-in was done via pasted API key, which doesn't give us the Auth0 access token needed to mint a user-scoped JWT.`
         : `You're not signed in, so the wizard minted a 14-day anonymous demo JWT.`;
   }
 }
@@ -2226,7 +2226,7 @@ async function renderInstallPlan(
   const lines: string[] = [];
 
   // Header: summarize the answered choices.
-  lines.push(`# Install plan — ${session.app === 'receiver' ? 'Receiver sidecar' : 'Standalone Reporter'}`);
+  lines.push(`# Install plan: ${session.app === 'receiver' ? 'Receiver sidecar' : 'Standalone Reporter'}`);
   lines.push('');
   lines.push(renderChoiceSummary(session));
   lines.push('');

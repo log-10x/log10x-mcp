@@ -49,7 +49,7 @@ export const DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR = 0.15;
 
 export const rankByShapeSimilaritySchema = {
   anchor_type: z.enum(['log10x_pattern', 'customer_metric']),
-  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`), the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z.array(z.string()).min(1).max(100).describe('Customer-side PromQL expressions to rank (max 100). An AI caller reasoning over results can\'t meaningfully digest more than a few dozen; the cap reflects that, not a backend constraint.'),
   window: z.string().default('1h'),
   timeRange: z.string().optional(),
@@ -58,13 +58,13 @@ export const rankByShapeSimilaritySchema = {
     .number()
     .min(0)
     .default(DEFAULT_LAG_SEARCH_MAX_ABS)
-    .describe('Maximum absolute lag in seconds to scan. Default 1800s — uncalibrated. Output is tagged `unvalidated_default` when used as-is. Narrow it when the use case has a known tighter upper bound on cascade latency (e.g. 300 for sub-5-min cascades). See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
+    .describe('Maximum absolute lag in seconds to scan. Default 1800s: uncalibrated. Output is tagged `unvalidated_default` when used as-is. Narrow it when the use case has a known tighter upper bound on cascade latency (e.g. 300 for sub-5-min cascades). See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   anchor_phase_aligned_floor: z
     .number()
     .min(0.0)
     .max(1.0)
     .default(DEFAULT_ANCHOR_PHASE_ALIGNED_FLOOR)
-    .describe('Relative phase-gap floor for the `anchor_phase_aligned` flag. Default 0.15 — uncalibrated, same provenance caveat as lag_search_max_abs.'),
+    .describe('Relative phase-gap floor for the `anchor_phase_aligned` flag. Default 0.15: uncalibrated, same provenance caveat as lag_search_max_abs.'),
   environment: z.string().optional(),
   customer_metrics_url: z
     .string()
@@ -320,7 +320,7 @@ export async function executeRankByShapeSimilarity(
         error_type: 'anchor_not_found',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `Anchor returned ${anchorSeries.length} buckets — need ≥3 to rank. Widen the window or pick a different anchor.`,
+        hint: `Anchor returned ${anchorSeries.length} buckets: need ≥3 to rank. Widen the window or pick a different anchor.`,
       },
     });
   }
@@ -540,7 +540,7 @@ export async function executeRankByShapeSimilarity(
           top
             ? ` Top match: ${top.candidate} (shape match ${top.pearson_magnitude.toFixed(2)}${top.lag_seconds !== 0 ? `, ${top.lag_seconds > 0 ? `lags by ${top.lag_seconds}s` : `leads by ${Math.abs(top.lag_seconds)}s`}` : ''}${top.lag_at_bound ? ', real offset may be wider' : ''}).`
             : ''
-        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${unknownNote ? `${unknownNote}.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable — treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
+        }${failed.length > 0 ? ` ${failed.length} couldn't be checked.` : ''}${unknownNote ? `${unknownNote}.` : ''}${lowCandidateCount === 'severe' ? ' Very few metrics were usable: treat as weak evidence.' : ''}${thresholdBasis === 'unvalidated_default' ? ' Match threshold is a default (not yet tuned for your data).' : ''}`;
 
 
   const phaseGapDist = distribute(ranked.map((r) => r.anchor_phase_gap));

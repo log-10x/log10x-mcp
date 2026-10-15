@@ -528,8 +528,8 @@ export async function executePreviewFilter(args: {
       `or "Mode" to pick a different approach.`,
     options: [
       '1-N. Drill into pattern #N (calls log10x_pattern_detail)',
-      'Apply — proceed with applying this mode',
-      'Mode — go back and pick a different mode',
+      'Apply: proceed with applying this mode',
+      'Mode: go back and pick a different mode',
     ],
   };
 

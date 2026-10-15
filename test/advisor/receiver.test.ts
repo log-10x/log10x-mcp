@@ -183,7 +183,7 @@ for (const fw of wizardSupportedReceivers) {
       // type-narrowing branch + future-proofing if a new forwarder
       // lands in wizardSupportedReceivers before being added to either
       // migrated set.
-      assert.fail(`${fw} is wizard-supported but not in MIGRATED_TO_SIDECAR or MIGRATED_TO_IMAGESWAP — update the set`);
+      assert.fail(`${fw} is wizard-supported but not in MIGRATED_TO_SIDECAR or MIGRATED_TO_IMAGESWAP: update the set`);
     }
   });
 }

@@ -37,13 +37,13 @@ test('parseReport: extracts lead pattern, service, confidence, lag from acute-sp
 
 ### Temporal chain (lead-time order, not proven cause)
 
-1. \`dns_lookup_failures\` (\`opensearch-client\`) — peaked T-90s, magnitude 4.2× — confidence 85%
-2. \`retry_storm\` (\`payments-svc\`) — peaked T-30s, magnitude 2.8× — confidence 70%
+1. \`dns_lookup_failures\` (\`opensearch-client\`): peaked T-90s, magnitude 4.2×, confidence 85%
+2. \`retry_storm\` (\`payments-svc\`): peaked T-30s, magnitude 2.8×, confidence 70%
 
 ### Co-movers (lower confidence)
 
-- \`gc_pause\` (\`payments-svc\`) — +15% vs baseline
-- \`heap_pressure\` (\`payments-svc\`) — +12% vs baseline
+- \`gc_pause\` (\`payments-svc\`): +15% vs baseline
+- \`heap_pressure\` (\`payments-svc\`): +12% vs baseline
 `;
   const p = parseReport(md);
   assert.equal(p.shape, 'acute');

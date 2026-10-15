@@ -33,7 +33,7 @@ export const customerMetricsQuerySchema = {
   start: z
     .string()
     .optional()
-    .describe('Start of the range window — ISO8601 or UNIX seconds. Required when mode=range.'),
+    .describe('Start of the range window: ISO8601 or UNIX seconds. Required when mode=range.'),
   end: z
     .string()
     .optional()

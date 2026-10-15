@@ -102,7 +102,7 @@ export async function resolveSiemSelection(opts: ResolveOptions): Promise<Resolv
     const one = available[0];
     const note =
       one.detection.source === 'ambient'
-        ? `Detected ambient credentials for ${one.displayName} — assuming ${one.id}. Override with \`vendor=<other>\` if wrong.`
+        ? `Detected ambient credentials for ${one.displayName}: assuming ${one.id}. Override with \`vendor=<other>\` if wrong.`
         : `Auto-detected ${one.displayName}.`;
     return {
       kind: 'resolved',

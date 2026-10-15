@@ -231,7 +231,7 @@ export function computeBucketInterpretation(
       `Per-event detail is present. Recommended: sample-down to control volume while keeping coverage.`;
   } else {
     humanSummary =
-      `${eventCount} events (${shareOfPattern}% of pattern): mixed content — keep as-is for now.`;
+      `${eventCount} events (${shareOfPattern}% of pattern): mixed content, keep as-is for now.`;
   }
 
   return {

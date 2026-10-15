@@ -52,7 +52,7 @@ export const discoverJoinSchema = {
     .string()
     .optional()
     .describe(
-      'Time window for label value enumeration (e.g., "10m", "1h", "30m"). When set, both the Log10x and customer backends are queried with [now - window, now] filtering, excluding stale label values from series that stopped emitting samples. CRITICAL for environments with historical replay data, decommissioned pods, or otherwise orphan label values — stale values drag Jaccard down and cause false `no_join_available` refusals. Recommended: "10m" for steady-state clusters, "1h" for bursty traffic. Omit to include all-time values (default Prometheus behavior). Alias: `timeRange`.'
+      'Time window for label value enumeration (e.g., "10m", "1h", "30m"). When set, both the Log10x and customer backends are queried with [now - window, now] filtering, excluding stale label values from series that stopped emitting samples. CRITICAL for environments with historical replay data, decommissioned pods, or otherwise orphan label values: stale values drag Jaccard down and cause false `no_join_available` refusals. Recommended: "10m" for steady-state clusters, "1h" for bursty traffic. Omit to include all-time values (default Prometheus behavior). Alias: `timeRange`.'
     ),
   timeRange: z
     .string()
@@ -121,7 +121,7 @@ export async function executeDiscoverJoin(
     return buildChassisEnvelope({
       tool: 'log10x_discover_join',
       view: 'summary',
-      headline: 'Customer metrics backend not configured — discover_join cannot run.',
+      headline: 'Customer metrics backend not configured: discover_join cannot run.',
       status: 'error',
       decisions: { threshold_used: null, threshold_basis: 'default' },
       source_disclosure: { label_source: 'customer_prom' },
@@ -139,7 +139,7 @@ export async function executeDiscoverJoin(
         runner_ups: [],
         top_below_threshold: [],
       } satisfies DiscoverJoinPayload,
-      human_summary: 'Customer metrics backend not configured — discover_join cannot run.',
+      human_summary: 'Customer metrics backend not configured: discover_join cannot run.',
       error: {
         error_type: 'config_missing',
         retryable: false,
@@ -215,7 +215,7 @@ export async function executeDiscoverJoin(
     };
     const emptyHeadline = customerEmpty
       ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining.`
-      : `Log10x-side metrics backend returned 0 labels — cross-pillar join cannot be computed. Verify the Log10x reporter is emitting metrics.`;
+      : `Log10x-side metrics backend returned 0 labels: cross-pillar join cannot be computed. Verify the Log10x reporter is emitting metrics.`;
     const emptyHumanSummary = customerEmpty
       ? `The Prometheus endpoint at ${backend.endpoint} is reachable but doesn't have any metrics relevant to log-cost joining. ` +
         `Common causes: your monitoring stack doesn't expose Prometheus on that endpoint; the endpoint is wrong; or the Prometheus is mostly empty. ` +

@@ -80,7 +80,7 @@ test('Elasticsearch + optimize names the l1es plugin AND its version pin', async
 // nothing to install, the events land permanently unreadable, and the cost
 // model pins compact_ratio at 1.0 so there is no saving to trade against it.
 for (const destination of ['datadog', 'cloudwatch'] as const) {
-  test(`optimize on ${destination} blocks — no expander exists to install`, async () => {
+  test(`optimize on ${destination} blocks: no expander exists to install`, async () => {
     const plan = await buildReporterPlan({
       snapshot: baseSnapshot(),
       app: 'receiver',
@@ -128,7 +128,7 @@ test('the wizard-shaped plan states the dependency even without a destination', 
 });
 
 // The mirror-image bug: a plan that cannot compact must not demand a plugin.
-test('a Reporter plan never mentions the expander — it cannot compact', async () => {
+test('a Reporter plan never mentions the expander: it cannot compact', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'reporter',
@@ -141,7 +141,7 @@ test('a Reporter plan never mentions the expander — it cannot compact', async 
   assert.doesNotMatch(md, /l1es/, 'Reporter has no write-back path; nothing to expand');
 });
 
-test('a read-only Receiver never mentions the expander — it writes no events back', async () => {
+test('a read-only Receiver never mentions the expander: it writes no events back', async () => {
   const plan = await buildReporterPlan({
     snapshot: baseSnapshot(),
     app: 'receiver',

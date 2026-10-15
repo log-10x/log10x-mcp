@@ -28,7 +28,7 @@ test('lever derivation: compact destinations, tier_down destinations, retriever 
   assert.equal(keepEverythingLever('sumo', false), null);
 });
 
-test('errors are pinned at pass — never planned', () => {
+test('errors are pinned at pass: never planned', () => {
   const pl = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: true, targetPct: 50 });
   assert.ok(pl.planned.every((r) => r.severity.toUpperCase() !== 'ERROR'));
   assert.ok(pl.kept.some((r) => r.hash === 'e1' && r.action === 'pass'));
@@ -183,7 +183,7 @@ test('usd_budget: unreachable line names the gap in budget terms', () => {
   assert.ok(pl.gap!.remedies.includes('install_retriever'));
 });
 
-test('gb_budget: tier_down is excluded — bytes only move via offload/compact', () => {
+test('gb_budget: tier_down is excluded, bytes only move via offload/compact', () => {
   // 400 GB of non-error bytes; budget 150 GB/mo forces real byte removal.
   const pl = solvePlan(estate(), {
     destination: 'cloudwatch', retrieverInstalled: true,
@@ -308,7 +308,7 @@ test('unprotectPatterns: a named WARN type becomes plannable; everything else st
     unprotectPatterns: ['w1'],
   });
   assert.ok(unpinned.planned.some((r) => r.hash === 'w1'), 'explicitly unpinned WARN is plannable');
-  assert.ok(!unpinned.planned.some((r) => r.hash === 'e1'), 'the ERROR stays protected — unpin is per-hash, never estate-wide');
+  assert.ok(!unpinned.planned.some((r) => r.hash === 'e1'), 'the ERROR stays protected: unpin is per-hash, never estate-wide');
 });
 
 test('an explicit pin beats an unpin of the same hash', () => {
@@ -360,7 +360,7 @@ test('a CONFIRMED self-managed cluster unlocks compact, and says what it needs',
     'the plugin prerequisite must carry its version constraint: ' + pl.prerequisites.join(' | '));
 });
 
-test('managed, or unstated, never unlocks compact — silence is not consent', () => {
+test('managed, or unstated, never unlocks compact: silence is not consent', () => {
   for (const opts of [{}, { selfManaged: false }]) {
     const pl = solvePlan(estate(), {
       destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40, ...opts,
@@ -370,7 +370,7 @@ test('managed, or unstated, never unlocks compact — silence is not consent', (
   }
 });
 
-test('self-managed does NOT resurrect compact on serverless — there is no plugin surface', () => {
+test('self-managed does NOT resurrect compact on serverless: there is no plugin surface', () => {
   const pl = solvePlan(estate(), {
     destination: 'elastic-serverless', retrieverInstalled: true, targetPct: 40, selfManaged: true,
   });

@@ -312,7 +312,7 @@ function softAssert(cond: boolean, key: string, msg: string, diag: Diag): void {
   const known = KNOWN_VIOLATIONS[key];
   if (known) {
     firedViolations.add(key);
-    diag(`KNOWN VIOLATION ${key} — ${known.reason} [${known.ticket}]`);
+    diag(`KNOWN VIOLATION ${key}: ${known.reason} [${known.ticket}]`);
     return;
   }
   assert.fail(`INVARIANT VIOLATION ${key}: ${msg}`);
@@ -402,7 +402,7 @@ function assertChassis(out: Out, tool: string, diag: Diag): void {
     softAssert(
       !(leak in (d as object)),
       `${tool}:chassis_conformance`,
-      `tool-row "${leak}" leaked flat onto data — it must live under data.payload`,
+      `tool-row "${leak}" leaked flat onto data: it must live under data.payload`,
       diag,
     );
   }
@@ -534,7 +534,7 @@ function assertRealTelemetry(out: Out, tool: string, stub: StubBackend | undefin
     // against the stub we handed it (fabricated work). Not allowlistable.
     assert.ok(
       perf.query_count <= realCalls,
-      `${tool}:real_telemetry — query_count=${perf.query_count} EXCEEDS real backend calls=${realCalls} (fabricated work)`,
+      `${tool}:real_telemetry: query_count=${perf.query_count} EXCEEDS real backend calls=${realCalls} (fabricated work)`,
     );
     // IDEAL: exact equality. Under-reporting is allowlisted per-tool.
     softAssert(
@@ -625,7 +625,7 @@ function assertDecimalGbRows(rows: Array<Record<string, unknown>>, tool: string,
     softAssert(
       Math.abs(gb - binary) > gb * 0.01,
       `${tool}:decimal_gb`,
-      `gb=${gb} matches binary bytes/2^30=${binary} — must be decimal`,
+      `gb=${gb} matches binary bytes/2^30=${binary}: must be decimal`,
       diag,
     );
   }
@@ -914,7 +914,7 @@ test('invariants §2 top_patterns (backend down → structured error, no throw)'
   runInvariants({ tool: 'log10x_top_patterns', out: asEnvelope(out, 'top_patterns'), stub }, (m) => t.diagnostic(m));
 });
 
-test('invariants §2 estimate_savings (forecast target% — success + money)', async (t) => {
+test('invariants §2 estimate_savings (forecast target%: success + money)', async (t) => {
   const stub = savingsStub();
   const out = await executeEstimateSavings(
     { mode: 'forecast', target_percent: 40, default_action: 'drop', destination: 'splunk', effective_ingest_per_gb: 2 } as never,
@@ -923,7 +923,7 @@ test('invariants §2 estimate_savings (forecast target% — success + money)', a
   runInvariants({ tool: 'log10x_estimate_savings', out: asEnvelope(out, 'estimate_savings'), stub }, (m) => t.diagnostic(m));
 });
 
-test('invariants §2 estimate_savings (proposed pass+drop — pass contributes 0)', async (t) => {
+test('invariants §2 estimate_savings (proposed pass+drop: pass contributes 0)', async (t) => {
   const stub = savingsStub();
   const out = await executeEstimateSavings(
     {
@@ -997,7 +997,7 @@ test('invariants §3 cost_options (chassis + rich routing chain)', async (t) => 
   runInvariants({ tool: 'log10x_cost_options', out: env }, (m) => t.diagnostic(m));
   // Embedded tool refs in the menu payload must all be registered tools.
   for (const ref of scanEmbeddedToolRefs(chassis(env).payload)) {
-    assert.ok(ref in TOOL_SCHEMAS, `cost_options:no_dead_end_actions — payload references unregistered tool "${ref}"`);
+    assert.ok(ref in TOOL_SCHEMAS, `cost_options:no_dead_end_actions: payload references unregistered tool "${ref}"`);
   }
 });
 
@@ -1007,7 +1007,7 @@ test('invariants §3 log10x_start (dead-end sweep over its routing menu)', async
   // log10x_start is a non-chassis envelope — sweep actions + embedded refs only.
   runInvariants({ tool: 'log10x_start', out: env, chassisShape: false }, (m) => t.diagnostic(m));
   for (const ref of scanEmbeddedToolRefs(env.data)) {
-    assert.ok(ref in TOOL_SCHEMAS, `log10x_start:no_dead_end_actions — menu references unregistered tool "${ref}"`);
+    assert.ok(ref in TOOL_SCHEMAS, `log10x_start:no_dead_end_actions: menu references unregistered tool "${ref}"`);
   }
 });
 
@@ -1050,6 +1050,6 @@ test('invariants §4 ZZ allowlist has no stale entries', () => {
   assert.equal(
     stale.length,
     0,
-    `Stale KNOWN_VIOLATIONS entries (the violation no longer reproduces — remove them): ${JSON.stringify(stale)}`,
+    `Stale KNOWN_VIOLATIONS entries (the violation no longer reproduces: remove them): ${JSON.stringify(stale)}`,
   );
 });

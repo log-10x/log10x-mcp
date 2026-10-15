@@ -68,13 +68,13 @@ async function signoutImpl(envs: Environments): Promise<StructuredOutput> {
   if (wasPresent) {
     lines.push(`- Removed credentials at \`${path}\`.`);
   } else {
-    lines.push(`- No credentials file at \`${path}\` — nothing to remove.`);
+    lines.push(`- No credentials file at \`${path}\`: nothing to remove.`);
   }
   if (envVarWasSet) {
     lines.push(`- Cleared \`LOG10X_API_KEY\` for this session.`);
   }
   if (!wasPresent && !envVarWasSet) {
-    lines.push(`- No active credential of either kind — already signed out.`);
+    lines.push(`- No active credential of either kind: already signed out.`);
   }
   lines.push('');
 
@@ -112,13 +112,13 @@ async function signoutImpl(envs: Environments): Promise<StructuredOutput> {
   }
   lines.push(
     `**Note**: this only logs you out on this machine. Your account and API ` +
-      `key still exist on log10x.com — visit https://console.log10x.com → Profile ` +
+      `key still exist on log10x.com: visit https://console.log10x.com → Profile ` +
       `→ API Settings to rotate or revoke.`
   );
   void lines;
   const human_summary = (() => {
     if (!wasPresent && !envVarWasSet) {
-      return 'Already signed out — no active credential of either kind on this machine.';
+      return 'Already signed out: no active credential of either kind on this machine.';
     }
     const fileFrag = wasPresent ? `credentials file at ${path} removed` : 'credentials file already absent';
     const envFrag = envVarWasSet ? 'LOG10X_API_KEY cleared from this session' : 'no env-var override was set';
@@ -133,7 +133,7 @@ async function signoutImpl(envs: Environments): Promise<StructuredOutput> {
     summary: {
       headline: wasPresent || envVarWasSet
         ? `Signed out: credentials file ${wasPresent ? 'removed' : 'absent'}, env var ${envVarWasSet ? 'cleared' : 'absent'}${envs.isDemoMode ? '; now in demo mode' : ''}.`
-        : 'Already signed out — no active credential of either kind.',
+        : 'Already signed out: no active credential of either kind.',
     },
     data: {
       credentials_file_removed: wasPresent,

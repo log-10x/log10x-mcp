@@ -320,12 +320,12 @@ test('yamlString: already-quoted string is returned as-is', () => {
 
 // ─── AWS cron conversion ──────────────────────────────────────────────────────
 
-test('toAwsCronExpression: wildcard day fields — day-of-week becomes ?', () => {
+test('toAwsCronExpression: wildcard day fields, day-of-week becomes ?', () => {
   assert.equal(toAwsCronExpression('0 3 * * *'), 'cron(0 3 * * ? *)');
   assert.equal(toAwsCronExpression('0 */6 * * *'), 'cron(0 */6 * * ? *)');
 });
 
-test('toAwsCronExpression: explicit day-of-week — day-of-month becomes ?', () => {
+test('toAwsCronExpression: explicit day-of-week, day-of-month becomes ?', () => {
   assert.equal(toAwsCronExpression('0 5 * * 1'), 'cron(0 5 ? * 1 *)');
 });
 

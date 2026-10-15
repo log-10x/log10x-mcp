@@ -374,7 +374,7 @@ function renderVerbatim(args: {
         ? `  No cheaper ${destination} tier is priced in the cost model, so there is no figure to show.`
         : `  How much tier_down saves depends on the destination's cheaper tier, and none is set.`;
     } else {
-      savingsLine = `  observe_only makes no change to cost — it is an observation-only mode.`;
+      savingsLine = `  observe_only makes no change to cost: it is an observation-only mode.`;
     }
   }
 
@@ -483,21 +483,21 @@ export async function executeExplainMode(args: {
     ? {
         question: `${args.mode} is NOT compatible with destination "${destination ?? 'unknown'}". Choose an alternative mode.`,
         options: getSuggestedModes(args.mode, destination).map(
-          (m, i) => `${i + 1}. ${m} — call log10x_explain_mode({ service: '${args.service}', mode: '${m}' })`,
+          (m, i) => `${i + 1}. ${m}: call log10x_explain_mode({ service: '${args.service}', mode: '${m}' })`,
         ),
       }
     : applyRoute
     ? {
         question: `Do you want to apply ${args.mode} to ${args.service}, or first preview which patterns would be affected?`,
         options: [
-          `1. Apply — route to ${meta.apply_tool}`,
-          `2. Preview — show me the pattern list first (log10x_preview_filter)`,
+          `1. Apply: route to ${meta.apply_tool}`,
+          `2. Preview: show me the pattern list first (log10x_preview_filter)`,
         ],
       }
     : {
-        question: `${args.mode} is an observe-only mode — no enforcement applied. Do you want to see which patterns would be affected?`,
+        question: `${args.mode} is an observe-only mode: no enforcement applied. Do you want to see which patterns would be affected?`,
         options: [
-          `1. Preview — show me the pattern list (log10x_preview_filter)`,
+          `1. Preview: show me the pattern list (log10x_preview_filter)`,
         ],
       };
 
@@ -543,23 +543,23 @@ export async function executeExplainMode(args: {
         : '') +
       (applyRoute
         ? `Awaiting user choice (Apply or Preview) before routing.`
-        : `observe_only mode — no apply step. Awaiting user choice.`);
+        : `observe_only mode: no apply step. Awaiting user choice.`);
   }
 
   const actions = !compatible
     ? getSuggestedModes(args.mode, destination).map((m) => ({
         tool: 'log10x_explain_mode',
         args: { service: args.service, mode: m },
-        reason: `${m} is compatible with ${destination ?? 'this destination'} — use instead of ${args.mode}`,
+        reason: `${m} is compatible with ${destination ?? 'this destination'}: use instead of ${args.mode}`,
         role: 'alternative' as const,
       }))
     : applyRoute
     ? [
-        { tool: applyRoute.tool, args: applyRoute.args, reason: 'Apply path — call after user picks Apply', role: 'alternative' as const },
-        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const }] : []),
+        { tool: applyRoute.tool, args: applyRoute.args, reason: 'Apply path: call after user picks Apply', role: 'alternative' as const },
+        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path: call after user picks Preview', role: 'alternative' as const }] : []),
       ]
     : [
-        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path — call after user picks Preview', role: 'alternative' as const }] : []),
+        ...(routesTo.preview ? [{ tool: 'log10x_preview_filter', args: routesTo.preview.args, reason: 'Preview path: call after user picks Preview', role: 'alternative' as const }] : []),
       ];
 
   // Build source_label from env hints + resolved cluster identity so the

@@ -87,7 +87,7 @@ for (const r of MIGRATED) {
     const out = r.fn(r.fixture('list_price'));
     assert.ok(
       out.includes('$'),
-      `${r.name} produced no '$' on a list_price envelope — fixture or renderer wired wrong`,
+      `${r.name} produced no '$' on a list_price envelope: fixture or renderer wired wrong`,
     );
     let m: RegExpExecArray | null;
     const reg = new RegExp(DOLLAR_AMOUNT_GLOBAL.source, 'g');

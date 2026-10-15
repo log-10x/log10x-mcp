@@ -49,7 +49,7 @@ export function lambdaEstateCdkConstruct(p: LambdaEstateCdkParams): CdkRecipe {
   const lgPrefix = p.logGroupPrefix ?? '/aws/lambda/';
   const route = p.tierDownRoute ?? 'tier_down';
 
-  const body = `// tenx-serverless.ts — Log10x support for a Lambda + OTel-extension estate.
+  const body = `// tenx-serverless.ts: Log10x support for a Lambda + OTel-extension estate.
 // Owned by YOUR repo: review it, fork it, pin it. Generated as a starting
 // point by log10x-mcp; nothing phones home and nothing here is managed
 // remotely.
@@ -93,7 +93,7 @@ export interface TenxServerlessProps {
   /**
    * Path to the per-pattern mute file INSIDE the layer, e.g.
    * '/opt/tenx/mutes.csv'. Set it only if the layer was built with
-   * build-receive-layer.sh's mute argument — that build also raises the
+   * build-receive-layer.sh's mute argument: that build also raises the
    * lookup retain, without which the receiver silently ignores the file.
    * Leave unset for estate-wide levers only.
    */
@@ -195,19 +195,19 @@ export class TenxServerless extends Construct {
     // Per-pattern dispositions, on only when the layer carries a mute file.
     // Measured on a real function with the discriminating design (two
     // interleaved patterns, one muted at rate 0, one with no entry): the
-    // muted pattern was drop-marked 132/150 — the other 18 are the 0.1
-    // rateReceiverMinRetentionThreshold floor — while its sibling passed
+    // muted pattern was drop-marked 132/150: the other 18 are the 0.1
+    // rateReceiverMinRetentionThreshold floor: while its sibling passed
     // 150/150 untouched. Without this the estate has only estate-wide
     // levers (outputOffload, routeState), so a plan promising per-pattern
     // rows here would be promising something the function cannot do.
     //
     // The key field is message_pattern. symbolMessage does NOT exist in this
-    // composition — it yields an empty fieldSetKey, which retains everything,
+    // composition: it yields an empty fieldSetKey, which retains everything,
     // silently (the measured failure that forced the retest above).
     //
     // The layer must be built with build-receive-layer.sh's mute argument,
-    // which also raises the lookup retain — a baked file is never rewritten,
-    // and past the retain window the receiver silently ignores it — and
+    // which also raises the lookup retain: a baked file is never rewritten,
+    // and past the retain window the receiver silently ignores it: and
     // prepends the pattern,disposition header row the lookup consumes as
     // line 1 (a headerless file silently loses its first disposition).
     if (this.muteFile) {
@@ -235,7 +235,7 @@ export interface CoralogixTcoPoliciesProps {
  *   PUT https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/log-policies/v1
  * on the REGIONAL host, and it replaces the ENTIRE ordered policy list in
  * one shot. There is no create-one API worth using (the documented POST is
- * wrong in five reproducible ways — see coralogixTcoApiContract() in
+ * wrong in five reproducible ways: see coralogixTcoApiContract() in
  * log10x-mcp). A naive AwsCustomResource doing a blind PUT would silently
  * delete every policy the customer's team created by hand.
  *
@@ -243,7 +243,7 @@ export interface CoralogixTcoPoliciesProps {
  * policy name, and PUTs the merged list back. Ownership boundary: this
  * resource owns exactly one entry, identified by name
  * ("10x ${route} -> Monitoring"); everything else round-trips untouched.
- * Policy changes take ~6 minutes to take effect (measured live) — do not
+ * Policy changes take ~6 minutes to take effect (measured live): do not
  * treat an immediate non-effect as failure.
  */
 export class CoralogixTcoPolicies extends Construct {
@@ -333,13 +333,13 @@ export class CoralogixTcoPolicies extends Construct {
     note:
       'Drop the file into the customer-owned CDK repo. TenxServerless.attach(fn) wires each ' +
       'function (layer + env); CoralogixTcoPolicies manages exactly one policy entry by name ' +
-      `via read-modify-write on the regional host (api.${cxRegion}.coralogix.com) — never a ` +
+      `via read-modify-write on the regional host (api.${cxRegion}.coralogix.com): never a ` +
       'blind PUT, because the endpoint is an atomic whole-list overwrite. The CloudWatch ' +
       `remainder subscribes named groups now and covers new \`${lgPrefix}*\` groups via a ` +
       'CreateLogGroup rule. The Terraform path (coralogixMonitoringRecipe) remains available.',
     prerequisites: [
       `The construct references ${layerArn}: fill in the region and version from https://doc.log10x.com/engine/launcher/extension/ (use \`tenx-receive-arm64\` for arm64 functions).`,
-      'CreateLogGroup only reaches EventBridge when a CloudTrail trail records management events in the region — most accounts have this; verify before relying on auto-subscription.',
+      'CreateLogGroup only reaches EventBridge when a CloudTrail trail records management events in the region: most accounts have this; verify before relying on auto-subscription.',
       'The Coralogix upsert merges the 10x entry FIRST in the list (first match wins); reorder in the handler if the customer needs their own catch-alls evaluated first.',
       'The Coralogix API key needs LOGS.TCO:UPDATEPOLICIES and lives in Secrets Manager, never in code.',
       'The read endpoint returns both logs and spans policies; the handler filters to logs before the overwrite PUT (spans policies live on a different endpoint and must not be fed back into the logs list).',

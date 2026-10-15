@@ -106,7 +106,7 @@ test('buildDockerArgs adds --user only when a linuxUser mapping is supplied', ()
   assert.ok(!withoutUser.includes('--user'));
 });
 
-test('buildDockerArgs passes the license as a bare -e (name only — value never in argv)', () => {
+test('buildDockerArgs passes the license as a bare -e (name only: value never in argv)', () => {
   const withLicense = buildDockerArgs(fixtureConfig({ license: 'jwt-123' }), 'img');
   const i = withLicense.indexOf('TENX_LICENSE_KEY');
   assert.ok(i > 0 && withLicense[i - 1] === '-e', 'bare -e TENX_LICENSE_KEY expected');

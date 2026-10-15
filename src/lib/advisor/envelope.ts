@@ -124,7 +124,7 @@ export function buildAdvisePlanEnvelope(args: {
     view: 'summary',
     summary: { headline: planHeadline(args.plan, args.action) },
     data,
-    warnings: args.plan.blockers.length > 0 ? [`plan has ${args.plan.blockers.length} blocker${args.plan.blockers.length !== 1 ? 's' : ''} — see data.blockers`] : [],
+    warnings: args.plan.blockers.length > 0 ? [`plan has ${args.plan.blockers.length} blocker${args.plan.blockers.length !== 1 ? 's' : ''}: see data.blockers`] : [],
   });
 }
 
@@ -204,5 +204,5 @@ function planHeadline(plan: AdvisePlan, action: AdviseAction): string {
   if (plan.blockers.length > 0) {
     return `${plan.app} ${action} plan${fwd}: blocked (${plan.blockers.length} item${plan.blockers.length !== 1 ? 's' : ''}).`;
   }
-  return `${plan.app} ${action} plan${fwd}: ${plan.install.length} install step${plan.install.length !== 1 ? 's' : ''}, ${plan.verify.length} verify probe${plan.verify.length !== 1 ? 's' : ''}, ${plan.teardown.length} teardown step${plan.teardown.length !== 1 ? 's' : ''} — release "${plan.releaseName}" in namespace "${plan.namespace}".`;
+  return `${plan.app} ${action} plan${fwd}: ${plan.install.length} install step${plan.install.length !== 1 ? 's' : ''}, ${plan.verify.length} verify probe${plan.verify.length !== 1 ? 's' : ''}, ${plan.teardown.length} teardown step${plan.teardown.length !== 1 ? 's' : ''}: release "${plan.releaseName}" in namespace "${plan.namespace}".`;
 }

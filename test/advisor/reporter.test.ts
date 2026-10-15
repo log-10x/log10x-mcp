@@ -253,7 +253,7 @@ test('values.yaml has no duplicate top-level keys (fluentd regression)', async (
     const counts = new Map<string, number>();
     for (const k of topLevelKeys) counts.set(k, (counts.get(k) ?? 0) + 1);
     for (const [k, n] of counts) {
-      assert.ok(n === 1, `${fw}: top-level key '${k}' appears ${n} times — duplicates silently drop earlier keys`);
+      assert.ok(n === 1, `${fw}: top-level key '${k}' appears ${n} times: duplicates silently drop earlier keys`);
     }
   }
 });
@@ -418,7 +418,7 @@ test('Receiver: values + overlay files have the expected shape per forwarder', a
       assert.ok(allEmitted.includes('extraVolumes:'), `${fw} should mount the license Secret via daemonset.extraVolumes`);
       assert.ok(!/name:\s*log10x\b/.test(allEmitted), `${fw} should NOT declare a log10x sidecar container`);
     } else {
-      assert.fail(`${fw} is wizard-supported but unmigrated — add it to migratedSidecar or migratedImageSwap`);
+      assert.fail(`${fw} is wizard-supported but unmigrated: add it to migratedSidecar or migratedImageSwap`);
     }
   }
 });

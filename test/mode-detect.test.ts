@@ -206,7 +206,7 @@ test('TENX_SERIES_PROBE queries the metric the analysis tools actually read', as
   // And it must NOT resurrect the phantom metric that caused F1.
   assert.ok(
     !TENX_SERIES_PROBE.includes('tenx_pattern_bytes_total'),
-    'boot probe must not query tenx_pattern_bytes_total — no engine emits it (F1).'
+    'boot probe must not query tenx_pattern_bytes_total: no engine emits it (F1).'
   );
 });
 

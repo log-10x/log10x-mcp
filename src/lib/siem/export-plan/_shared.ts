@@ -249,7 +249,7 @@ const LABEL_WIDTH = 13;
 
 export function renderHeader(h: HeaderInput): string {
   const lines: string[] = [];
-  lines.push(`# Sample export for ${h.displayName} — log10x fenced POC, step 2 of 4.`);
+  lines.push(`# Sample export for ${h.displayName}: log10x fenced POC, step 2 of 4.`);
   lines.push('#');
   lines.push('# WHAT THIS READS');
   pushLabelled(lines, 'API', h.apiSummary);

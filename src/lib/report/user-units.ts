@@ -201,7 +201,7 @@ export function linesPerDayFromCap(capBytesPerWindowPerNode: number, nodes: numb
  * whole container, moves every statement, and the count says so.
  */
 export function serviceLimitsFromPatterns<P extends { service?: string; bytes: number; count: number }>(
-  caps: Record<string, { action: Action; capBytesMonthly?: number; keptMaxPattern?: string }>,
+  caps: Record<string, { action: Action; capBytesMonthly?: number; keptMaxPattern?: string; margin?: number }>,
   patterns: P[],
   isMoved: (p: P) => boolean,
   windowSeconds: number,
@@ -224,7 +224,10 @@ export function serviceLimitsFromPatterns<P extends { service?: string; bytes: n
       (cap.capBytesMonthly !== undefined && !(cap.capBytesMonthly > 0)) ||
       !keptMax;
     const moved = wholeContainer ? inService : inService.filter(isMoved);
-    const limitLinesPerDay = wholeContainer ? null : (keptMax!.count * SECONDS_PER_DAY) / Math.max(1, windowSeconds);
+    // The limit sits `margin` above the largest kept statement (service-cap.ts).
+    const limitLinesPerDay = wholeContainer
+      ? null
+      : ((keptMax!.count * SECONDS_PER_DAY) / Math.max(1, windowSeconds)) * (cap.margin ?? 1);
     const bytes = moved.reduce((s, p) => s + p.bytes, 0) * scale;
     const events = moved.reduce((s, p) => s + p.count, 0) * scale;
     movedBytes += bytes;

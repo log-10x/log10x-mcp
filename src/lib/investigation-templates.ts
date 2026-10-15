@@ -85,7 +85,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   lines.push(`**Inflection**: ${infIso} UTC, ${infMinsAgo} min ago`);
   lines.push(`**Shape**: acute spike`);
   lines.push(`**Reporter tier**: ${input.reporterTier}`);
-  lines.push(`**Metric primitive**: ${input.metricPrimitive}${input.metricPrimitive === 'bytes' ? ' ⚠ _bytes-based rate can be skewed by single large events — event-count metric preferred once available_' : ''}`);
+  lines.push(`**Metric primitive**: ${input.metricPrimitive}${input.metricPrimitive === 'bytes' ? ' ⚠ _bytes-based rate can be skewed by single large events: event-count metric preferred once available_' : ''}`);
   lines.push(`**Noise floor**: ${input.noiseFloor}`);
   lines.push(`**Mode detection**: ${input.modeDetection}`);
   if (input.metricWarning) {
@@ -125,7 +125,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
   lines.push('');
   if (chain.length === 0) {
     if (allExtras.length > 0) {
-      lines.push(`_No co-movers exceeded the primary confidence threshold. ${allExtras.length} lower-confidence co-mover${allExtras.length !== 1 ? 's' : ''} are listed below — they moved with the anchor but without enough lead time or magnitude to rank as a likely lead._`);
+      lines.push(`_No co-movers exceeded the primary confidence threshold. ${allExtras.length} lower-confidence co-mover${allExtras.length !== 1 ? 's' : ''} are listed below: they moved with the anchor but without enough lead time or magnitude to rank as a likely lead._`);
       lines.push("_Try `depth: \"deep\"` to expand the candidate universe, or paste a specific log line instead of a service name._");
     } else {
       lines.push('_No co-movers crossed the noise floor. The anchor moved but the correlation engine found no above-threshold candidates in the window and depth scope you specified._');
@@ -165,7 +165,7 @@ export function renderAcuteSpikeReport(input: AcuteSpikeReportInput): string {
     lines.push('');
     for (const m of extras.slice(0, 6)) {
       const direction = m.direction === 'up' ? `+${(m.rateChange * 100).toFixed(0)}%` : `${(m.rateChange * 100).toFixed(0)}%`;
-      lines.push(`- \`${m.pattern}\` (\`${m.service || 'unknown'}\`) — ${direction} vs baseline`);
+      lines.push(`- \`${m.pattern}\` (\`${m.service || 'unknown'}\`): ${direction} vs baseline`);
     }
     lines.push('');
   }
@@ -235,7 +235,7 @@ function formatChainLink(link: ChainLink, idx: number): string {
   const lag = link.mover.lagSeconds ?? 0;
   const peakLabel = lag < 0 ? `peaked T${lag}s` : lag > 0 ? `peaked T+${lag}s` : `concurrent`;
   const mag = (1 + Math.abs(link.mover.rateChange)).toFixed(1);
-  return `${idx}. \`${link.mover.pattern}\` (\`${link.mover.service || 'unknown'}\`) — ${peakLabel}, magnitude ${mag}× — confidence ${conf}% (stat:${link.stat.toFixed(2)} lag:${link.lag.toFixed(2)} chain:${link.chain.toFixed(2)})`;
+  return `${idx}. \`${link.mover.pattern}\` (\`${link.mover.service || 'unknown'}\`): ${peakLabel}, magnitude ${mag}×: confidence ${conf}% (stat:${link.stat.toFixed(2)} lag:${link.lag.toFixed(2)} chain:${link.chain.toFixed(2)})`;
 }
 
 export function renderDriftReport(input: DriftReportInput): string {
@@ -259,7 +259,7 @@ export function renderDriftReport(input: DriftReportInput): string {
   lines.push('');
   lines.push(
     `\`${input.anchor}\` has been growing at **${slope >= 0 ? '+' : ''}${slopePct}%/week** across the last ${input.windowLabel}, ` +
-      `with no discrete inflection point. The growth is monotonic and sustained — this is a slow regression that has been compounding.`
+      `with no discrete inflection point. The growth is monotonic and sustained: this is a slow regression that has been compounding.`
   );
   lines.push('');
 
@@ -273,10 +273,10 @@ export function renderDriftReport(input: DriftReportInput): string {
     lines.push('| Pattern | Service | Slope/week | Similarity |');
     lines.push('|---|---|---|---|');
     for (const c of cohort) {
-      lines.push(`| \`${c.pattern}\` | ${c.service || '—'} | ${c.slopePerWeek >= 0 ? '+' : ''}${(c.slopePerWeek * 100).toFixed(1)}% | ${(c.slopeSimilarity * 100).toFixed(0)}% |`);
+      lines.push(`| \`${c.pattern}\` | ${c.service || '-'} | ${c.slopePerWeek >= 0 ? '+' : ''}${(c.slopePerWeek * 100).toFixed(1)}% | ${(c.slopeSimilarity * 100).toFixed(0)}% |`);
     }
     lines.push('');
-    lines.push('These patterns likely share an upstream cause — typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don\'t have one); it\'s a search-space narrowing.');
+    lines.push('These patterns likely share an upstream cause: typically a change that shipped weeks ago and has been gradually scaling. **The cohort is not a causal chain** (drift cases don\'t have one); it\'s a search-space narrowing.');
   } else {
     lines.push('_No co-drifters crossed the threshold. This anchor is drifting alone, which may mean the cause is local to this pattern or that other affected patterns are below the drift sensitivity floor._');
   }
@@ -312,7 +312,7 @@ export function renderDriftReport(input: DriftReportInput): string {
   lines.push('1. Pull commit and release history for the affected services in the drift window.');
   lines.push('2. Cross-reference with feature flag and config changes.');
   lines.push('3. Ask the team that owns these services what shipped in the window.');
-  lines.push('4. If the cause is identified, the action is usually a code fix, not a mute — the events are real, just growing too fast.');
+  lines.push('4. If the cause is identified, the action is usually a code fix, not a mute: the events are real, just growing too fast.');
   lines.push('');
 
   const referenced = collectDriftPatternsReferenced(input.anchor, input.drift);
@@ -363,7 +363,7 @@ export function renderEmpty(
     `**Noise floor applied**: ${noiseFloor}`,
     '',
     '**Try next**:',
-    `- Widen the window: \`log10x_investigate({ starting_point: '${startingPoint}', window: '24h' })\`${isShortWindow ? ' — most incident inflections appear within 24h' : ''}`,
+    `- Widen the window: \`log10x_investigate({ starting_point: '${startingPoint}', window: '24h' })\`${isShortWindow ? ': most incident inflections appear within 24h' : ''}`,
     `- Or for gradual drift: \`log10x_investigate({ starting_point: '${startingPoint}', window: '30d' })\``,
     `- Check the trend directly: \`log10x_pattern_trend({ pattern: '${startingPoint}' })\``,
     '- Confirm the anchor exists: use a specific log line or pattern hash rather than a service name',

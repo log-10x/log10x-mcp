@@ -103,7 +103,7 @@ export const metricsThatMovedSchema = {
   anchor_type: z
     .enum(['log10x_pattern', 'customer_metric'])
     .describe('Anchor side. `log10x_pattern` = anchor is a 10x pattern. `customer_metric` = anchor is a customer PromQL.'),
-  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`) — the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
+  anchor: z.string().describe('Anchor identity. For `anchor_type=log10x_pattern`: the pattern Symbol Message NAME or its 11-char `pattern_hash` (= `tenx_hash`), the tool detects shape and queries the correct PromQL label (`message_pattern` vs `tenx_hash`). For `anchor_type=customer_metric`: a customer PromQL expression.'),
   candidates: z
     .array(z.string())
     .min(1)
@@ -117,7 +117,7 @@ export const metricsThatMovedSchema = {
     .min(0.0)
     .max(1.0)
     .default(DEFAULT_PHASE_GAP_FLOOR)
-    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default — output is tagged `unvalidated_default` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
+    .describe('Relative gap floor between anchor-high and anchor-low phase means. Candidate is "moved" iff its gap ≥ this. Default 0.15 (=15%) is an uncalibrated default: output is tagged `unvalidated_default` until a caller-side calibration overrides it. See `docs/cross-pillar-primitives.md` for the calibration playbook.'),
   environment: z.string().optional(),
   customer_metrics_url: z
     .string()
@@ -317,7 +317,7 @@ export async function executeMetricsThatMoved(
   if (metaRejected.length > 0 && filteredCandidates.length === 0) {
     const guidance =
       `All ${metaRejected.length} candidate(s) were Prometheus scraper-health metrics (e.g. up, scrape_*, prometheus_*). These describe the scraper, not the workload, so they cannot move with a pattern. ` +
-      `Curate candidates from the anchor's services attribution instead — call log10x_services with this anchor, then pass the customer metrics emitted by its top services as candidates.`;
+      `Curate candidates from the anchor's services attribution instead: call log10x_services with this anchor, then pass the customer metrics emitted by its top services as candidates.`;
     const data: MetricsThatMovedSummary = {
       status: 'no_signal',
       threshold_used: floor,
@@ -345,7 +345,7 @@ export async function executeMetricsThatMoved(
     return buildChassisEnvelope({
       tool: 'log10x_metrics_that_moved',
       view: 'summary',
-      headline: `No workload metrics submitted — every candidate was a Prometheus scraper-health series.`,
+      headline: `No workload metrics submitted: every candidate was a Prometheus scraper-health series.`,
       status: 'no_signal',
       decisions: {
         threshold_used: floor,
@@ -440,7 +440,7 @@ export async function executeMetricsThatMoved(
         error_type: 'anchor_not_found',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `Anchor returned only ${anchorSeries.length} buckets — need ≥6 to partition into high/low phases. Widen the window or pick a different anchor.`,
+        hint: `Anchor returned only ${anchorSeries.length} buckets: need ≥6 to partition into high/low phases. Widen the window or pick a different anchor.`,
       },
     });
   }

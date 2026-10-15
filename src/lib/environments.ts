@@ -313,7 +313,7 @@ async function loadEnvironmentsRaw(): Promise<Environments> {
   if (fromMetricsEnvVars && fromEnvsFile) {
     throw new EnvironmentValidationError(
       `Both LOG10X_METRICS_* env vars AND ${envsJsonPath()} are set. ` +
-        `Pick one — env vars are for single-env setups; the file is for multi-env. ` +
+        `Pick one: env vars are for single-env setups; the file is for multi-env. ` +
         `Either unset the env vars (\`unset LOG10X_METRICS_BACKEND_KIND ...\`) or ` +
         `move/remove the file.`
     );
@@ -714,7 +714,7 @@ async function consumeDevRestartMarker(): Promise<string | undefined> {
     if (typeof parsed.envId === 'string') process.env.LOG10X_ENV_ID = parsed.envId;
     // eslint-disable-next-line no-console
     console.error(
-      `[log10x-mcp] dev-restart marker found — restored LOG10X_API_KEY from ~/.log10x/dev-restart-pending.json`
+      `[log10x-mcp] dev-restart marker found: restored LOG10X_API_KEY from ~/.log10x/dev-restart-pending.json`
     );
     return parsed.apiKey;
   } catch {
@@ -745,7 +745,7 @@ async function loadLegacyLog10x(): Promise<Environments> {
       demoEnvs.demoFallbackReason = reason;
       // eslint-disable-next-line no-console
       console.warn(
-        `\n[log10x-mcp] WARNING: your LOG10X_API_KEY failed validation — ` +
+        `\n[log10x-mcp] WARNING: your LOG10X_API_KEY failed validation, ` +
           `falling back to read-only demo mode.\n` +
           `  Reason: ${reason.slice(0, 400)}\n` +
           `  All tools will return data from the public Log10x demo env, NOT your account. ` +

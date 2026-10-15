@@ -49,7 +49,7 @@ export const rotateApiKeySchema = {
   confirm: z
     .literal('rotate-now')
     .describe(
-      'Pass the literal string `rotate-now` to confirm rotation. This is a typo-prevention guard. Rotation invalidates the previous key immediately on every machine and tool that uses it — only proceed when the user has explicitly asked for rotation, not as a chained side effect of another flow. **Always ask the user to confirm before calling this tool.**'
+      'Pass the literal string `rotate-now` to confirm rotation. This is a typo-prevention guard. Rotation invalidates the previous key immediately on every machine and tool that uses it: only proceed when the user has explicitly asked for rotation, not as a chained side effect of another flow. **Always ask the user to confirm before calling this tool.**'
     ),
 };
 
@@ -72,7 +72,7 @@ export async function executeRotateApiKey(
   return buildEnvelope({
     tool: 'log10x_rotate_api_key',
     view: 'summary',
-    summary: { headline: result.ok ? `API key rotated for ${result.username ?? 'user'} — previous key invalidated, new key persisted to ${result.credentials_path}.` : `Rotation refused: ${result.error ?? 'unknown reason'}.` },
+    summary: { headline: result.ok ? `API key rotated for ${result.username ?? 'user'}: previous key invalidated, new key persisted to ${result.credentials_path}.` : `Rotation refused: ${result.error ?? 'unknown reason'}.` },
     data: {
       ok: result.ok,
       username: result.username,
@@ -103,14 +103,14 @@ async function executeRotateApiKeyInner(
   envs: Environments
 ): Promise<RotateResult> {
   if (args.confirm !== 'rotate-now') {
-    const md = '## Refused — confirm string did not match\n\n' +
+    const md = '## Refused: confirm string did not match\n\n' +
       'Pass `confirm: "rotate-now"` to proceed. Rotation invalidates the previous ' +
       'key everywhere immediately; the confirm guard prevents accidental triggers.';
     return { ok: false, error: 'confirm string did not match', markdown: md };
   }
 
   if (envs.isDemoMode) {
-    const md = '## Cannot rotate — running in demo mode\n\n' +
+    const md = '## Cannot rotate: running in demo mode\n\n' +
       'You\'re currently authenticated against the public Log10x demo account, which ' +
       'cannot rotate API keys (the backend returns 403 for demo users). Sign in to ' +
       'your own account first: call `log10x_signin_start` for the Auth0 Device Flow with ' +
@@ -118,7 +118,7 @@ async function executeRotateApiKeyInner(
       'confirm in the browser), or call `log10x_signin_complete` directly with ' +
       '`{ api_key: "<key>" }` to paste a key from console.log10x.com → Profile → API ' +
       'Settings. Then retry rotation. See `log10x_login_status` for the full sign-in breakdown.';
-    return { ok: false, error: 'demo mode — backend will refuse', markdown: md };
+    return { ok: false, error: 'demo mode: backend will refuse', markdown: md };
   }
 
   const apiKey = envs.default.apiKey;
@@ -129,7 +129,7 @@ async function executeRotateApiKeyInner(
   } catch (e) {
     const msg = (e as Error).message;
     if (/HTTP 403/.test(msg)) {
-      const md = '## Cannot rotate — backend returned 403 Forbidden\n\n' +
+      const md = '## Cannot rotate: backend returned 403 Forbidden\n\n' +
         `${msg}\n\n` +
         'This is the response demo accounts get. If you\'re NOT signed in as a demo ' +
         'user and still see this, run `log10x_doctor` to diagnose.';
@@ -150,7 +150,7 @@ async function executeRotateApiKeyInner(
     const md = '## Key rotated at the backend, but local save failed\n\n' +
       `Path: ${getCredentialsPath()}\n` +
       `Error: ${(e as Error).message}\n\n` +
-      `**Save this new key manually** — the previous one is already invalidated:\n\n` +
+      `**Save this new key manually**: the previous one is already invalidated:\n\n` +
       `\`${result.apiKey}\`\n\n` +
       'Update your MCP host config (`LOG10X_API_KEY`) and any scripts / CI secrets ' +
       'using the old value, then restart the host.';
@@ -189,7 +189,7 @@ async function executeRotateApiKeyInner(
   if (envVarWasSet) {
     lines.push(`- Cleared the old \`LOG10X_API_KEY\` from this session so the new key takes effect immediately for follow-up tool calls.`);
   }
-  lines.push(`- This MCP server is already running on the new key — no restart needed for this host.`);
+  lines.push(`- This MCP server is already running on the new key: no restart needed for this host.`);
   lines.push('');
   lines.push('### New API key');
   lines.push('');

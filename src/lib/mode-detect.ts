@@ -160,7 +160,7 @@ export async function detectMode(opts?: {
           trace: resolution.trace,
           reason:
             `No CUSTOMER_METRICS_* backend, but a configured account backend${where} is present ` +
-            `(${loadedProbe.seriesCount === 0 ? 'no series yet — fresh deploy' : `${loadedProbe.seriesCount} pattern series live`}). ` +
+            `(${loadedProbe.seriesCount === 0 ? 'no series yet: fresh deploy' : `${loadedProbe.seriesCount} pattern series live`}). ` +
             `Registered analysis tools against it.`,
           probeDurationMs: Date.now() - startedAt,
         };

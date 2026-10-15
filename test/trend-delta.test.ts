@@ -120,47 +120,47 @@ describe('computeTrendDelta', () => {
     assert.equal(d.label, '0d');
   });
 
-  it('NEW: firstSeenAgeSeconds=null → label "—"', () => {
+  it('NEW: firstSeenAgeSeconds=null → label "-"', () => {
     const d = computeTrendDelta('NEW', [], null);
     assert.equal(d.glyph, '🆕');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 
   // ── EDGE CASES ───────────────────────────────────────────────────────────
-  it('empty trend array → fallback label "—" for GROWING', () => {
+  it('empty trend array → fallback label "-" for GROWING', () => {
     const d = computeTrendDelta('GROWING', [], null);
     assert.equal(d.glyph, '↗');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
     assert.equal(d.value, 0);
   });
 
-  it('empty trend array → fallback label "—" for SHRINKING', () => {
+  it('empty trend array → fallback label "-" for SHRINKING', () => {
     const d = computeTrendDelta('SHRINKING', [], null);
     assert.equal(d.glyph, '↘');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 
-  it('empty trend array → fallback label "—" for STABLE', () => {
+  it('empty trend array → fallback label "-" for STABLE', () => {
     const d = computeTrendDelta('STABLE', [], null);
     assert.equal(d.glyph, '─');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 
-  it('empty trend array → fallback label "—" for ACUTE', () => {
+  it('empty trend array → fallback label "-" for ACUTE', () => {
     const d = computeTrendDelta('ACUTE', [], null);
     assert.equal(d.glyph, '🔥');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 
-  it('single-point trend array → fallback label "—" for GROWING', () => {
+  it('single-point trend array → fallback label "-" for GROWING', () => {
     const d = computeTrendDelta('GROWING', [42], null);
     assert.equal(d.glyph, '↗');
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 
-  it('all-zero trend array → fallback label "—" (division by zero guard)', () => {
+  it('all-zero trend array → fallback label "-" (division by zero guard)', () => {
     const arr = Array.from({ length: 20 }, () => 0);
     const d = computeTrendDelta('GROWING', arr, null);
-    assert.equal(d.label, '—');
+    assert.equal(d.label, '-');
   });
 });

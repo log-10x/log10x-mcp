@@ -398,13 +398,13 @@ export interface HealthSignals {
 export function healthBanner(s: HealthSignals): string | null {
   if (s.totalBytes <= 0) {
     return (
-      '> ⚠ engine metric reports zero bytes in scope — events may not be reaching the engine, ' +
+      '> ⚠ engine metric reports zero bytes in scope: events may not be reaching the engine, ' +
       'or the window is too narrow. Run `log10x_doctor` for the full health verdict.'
     );
   }
   if (!s.eventsAvailable) {
     return (
-      '> ⚠ event-count metric unavailable — bytes are flowing but per-pattern event totals could not be ' +
+      '> ⚠ event-count metric unavailable: bytes are flowing but per-pattern event totals could not be ' +
       'retrieved. The cards below show byte totals only. Run `log10x_doctor` for diagnostics.'
     );
   }

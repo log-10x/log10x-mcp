@@ -29,7 +29,7 @@ export const createEnvSchema = {
     .boolean()
     .optional()
     .describe(
-      'When true, the new env becomes the user\'s default — every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Defaults to false (new env is created but the existing default stays the default).'
+      'When true, the new env becomes the user\'s default: every tool call without an explicit `environment` arg routes here. The previous default is automatically un-defaulted by the backend. Defaults to false (new env is created but the existing default stays the default).'
     ),
 };
 
@@ -75,7 +75,7 @@ async function executeCreateEnvInner(args: { name: string; is_default?: boolean 
     (e) => e.nickname.toLowerCase() === args.name.toLowerCase()
   );
   if (collision) {
-    const md = '## Cannot create env — name already in use\n\n' +
+    const md = '## Cannot create env: name already in use\n\n' +
       `An environment named **${collision.nickname}** is already on your account ` +
       `(env_id \`${collision.envId}\`, permissions \`${collision.permissions ?? 'unknown'}\`). ` +
       `Either pick a different name, or use \`log10x_update_env\` to rename / re-flag the ` +

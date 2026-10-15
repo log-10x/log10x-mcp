@@ -59,7 +59,7 @@ export class RetrieverNotConfiguredError extends Error {
         'https://doc.log10x.com/apps/retriever/\n\n' +
         'Workaround for the current request: if the events you need are inside SIEM hot retention ' +
         '(typically <7 days for Datadog/Splunk/Elastic), tell the user to query the SIEM directly ' +
-        'with the relevant service + time filter — that is the fastest path. For events outside ' +
+        'with the relevant service + time filter: that is the fastest path. For events outside ' +
         'SIEM retention, the only path is enabling the retriever.'
     );
     this.name = 'RetrieverNotConfiguredError';
@@ -579,7 +579,7 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
     trace.push({
       path: 'explicit_env',
       status: 'skipped',
-      reason: 'only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set — need both',
+      reason: 'only one of __SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ set: need both',
     });
   } else {
     trace.push({ path: 'explicit_env', status: 'skipped', reason: '__SAVE_LOG10X_RETRIEVER_URL__ / __SAVE_LOG10X_RETRIEVER_BUCKET__ not set' });
@@ -618,7 +618,7 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
     trace.push({
       path: 'aws_s3_bucket_pattern',
       status: 'skipped',
-      reason: `${awsRes.reason}; no query-handler URL — kubectl probe: ${svc.reason}`,
+      reason: `${awsRes.reason}; no query-handler URL: kubectl probe: ${svc.reason}`,
     });
   } else {
     trace.push({ path: 'aws_s3_bucket_pattern', status: awsRes.failed ? 'failed' : 'skipped', reason: awsRes.reason });
@@ -630,7 +630,7 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
     trace.push({
       path: 'kubectl_service',
       status: 'skipped',
-      reason: `${kRes.reason} — but no matching bucket found; set __SAVE_LOG10X_RETRIEVER_BUCKET__`,
+      reason: `${kRes.reason}: but no matching bucket found; set __SAVE_LOG10X_RETRIEVER_BUCKET__`,
     });
   } else {
     trace.push({ path: 'kubectl_service', status: kRes.failed ? 'failed' : 'skipped', reason: kRes.reason });
@@ -664,7 +664,7 @@ export async function resolveRetriever(): Promise<RetrieverResolution> {
     trace.push({
       path: 'helm_release_probe',
       status: 'skipped',
-      reason: `helm probe resolved url=${helmState.url} but no bucket — set __SAVE_LOG10X_RETRIEVER_BUCKET__ or add tenx.bucket to helm values`,
+      reason: `helm probe resolved url=${helmState.url} but no bucket: set __SAVE_LOG10X_RETRIEVER_BUCKET__ or add tenx.bucket to helm values`,
     });
   } else {
     trace.push({
@@ -711,7 +711,7 @@ export async function isRetrieverConfigured(): Promise<boolean> {
 
 export function formatRetrieverTrace(trace: RetrieverResolution['trace']): string {
   if (!trace.length) return '(no detection attempts logged)';
-  return trace.map((t) => `  - ${t.path}: ${t.status} — ${t.reason}`).join('\n');
+  return trace.map((t) => `  - ${t.path}: ${t.status}: ${t.reason}`).join('\n');
 }
 
 /** Cached resolution so call-sites inside a single tool invocation don't re-spawn aws/kubectl. */
@@ -760,7 +760,7 @@ async function tryDetectRetrieverBucketFromAws(): Promise<{ bucket?: string; rea
     }
     if (matches.length > 1) {
       return {
-        reason: `${matches.length} candidate buckets match log10x-retriever patterns — set __SAVE_LOG10X_RETRIEVER_BUCKET__ to disambiguate (candidates: ${matches.join(', ')})`,
+        reason: `${matches.length} candidate buckets match log10x-retriever patterns: set __SAVE_LOG10X_RETRIEVER_BUCKET__ to disambiguate (candidates: ${matches.join(', ')})`,
       };
     }
     return { bucket: matches[0], reason: `aws s3api list-buckets → single log10x-retriever bucket ${matches[0]}` };
@@ -790,7 +790,7 @@ async function tryDetectRetrieverUrlFromKubectl(): Promise<{ url?: string; reaso
     const qh = items.find((i) => i.metadata.name.includes('query-handler') || i.metadata.name.endsWith('query'));
     const chosen = qh || (items.length === 1 ? items[0] : undefined);
     if (!chosen) {
-      return { reason: `kubectl found ${items.length} log10x-retriever services — none clearly a query-handler` };
+      return { reason: `kubectl found ${items.length} log10x-retriever services: none clearly a query-handler` };
     }
     const port = chosen.spec?.ports?.[0]?.port ?? 8080;
     const url = `http://${chosen.metadata.name}.${chosen.metadata.namespace}.svc.cluster.local:${port}`;

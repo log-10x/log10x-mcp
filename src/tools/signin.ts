@@ -100,7 +100,7 @@ export async function executeSigninStart(_args: Record<string, never> = {}): Pro
   return buildEnvelope({
     tool: 'log10x_signin_start',
     view: 'summary',
-    summary: { headline: `Sign-in started — confirm code ${device.user_code} in browser, then call signin_complete with the device_code below.` },
+    summary: { headline: `Sign-in started: confirm code ${device.user_code} in browser, then call signin_complete with the device_code below.` },
     data: {
       ok: true,
       user_code: device.user_code,
@@ -168,7 +168,7 @@ export async function executeSigninComplete(
   return buildEnvelope({
     tool: 'log10x_signin_complete',
     view: 'summary',
-    summary: { headline: okMatch ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''}; credentials saved to ${pathMatch?.[1] ?? '~/.log10x/credentials'}.` : 'Sign-in did not complete — see data.error_message for the reason.' },
+    summary: { headline: okMatch ? `Signed in${usernameMatch ? ` as ${usernameMatch[1]}` : ''}; credentials saved to ${pathMatch?.[1] ?? '~/.log10x/credentials'}.` : 'Sign-in did not complete: see data.error_message for the reason.' },
     data: {
       ok: okMatch,
       signed_in_as: usernameMatch?.[1],

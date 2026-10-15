@@ -37,7 +37,7 @@ const MALFORMED_STDERR = [
   '',
   'details:',
   'error initializating engine environment',
-  'license verification failed: MALFORMED — license token is not a parseable JWT',
+  'license verification failed: MALFORMED, license token is not a parseable JWT',
   'LicenseException: license token is not a parseable JWT',
   'ParseException: Invalid serialized unsecured/JWS/JWE object: Missing part delimiters',
 ].join('\n');

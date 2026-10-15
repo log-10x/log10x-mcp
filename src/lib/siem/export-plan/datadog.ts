@@ -51,7 +51,7 @@ export function emitDatadogPlan(opts: SamplePlanOptions): SamplePlan {
       'DD_API_KEY and DD_APP_KEY from this shell, sent to the Datadog site in\n' +
       'DD_SITE and to nowhere else.',
     writes:
-      `${outputDir}/${stem}.NN.log — one log message per line, plain text.\n` +
+      `${outputDir}/${stem}.NN.log: one log message per line, plain text.\n` +
       'Nothing else is written outside that directory.',
     window: opts.window,
     bucketCount: DATADOG_BUCKET_COUNT,
@@ -144,7 +144,7 @@ export function emitDatadogPlan(opts: SamplePlanOptions): SamplePlan {
     '    if [ -z "$cursor" ]; then break; fi',
     '    if [ "$TOTAL" -ge "$TARGET" ]; then break; fi',
     '  done',
-    '  printf "sub-window %2d/%d — %d events so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
+    '  printf "sub-window %2d/%d: %d events so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
     'done',
     '',
     renderFooter(outputDir),
@@ -178,7 +178,7 @@ export function emitDatadogPlan(opts: SamplePlanOptions): SamplePlan {
       'Composition is per index, not per service: the export lands one set of part files for the ' +
         'index in `scope`. Run the script once per index when the mix across indexes matters.',
       'Events with no resolvable message body are skipped rather than written as the string ' +
-        '"undefined" — the same choice the live connector makes, so the two samples agree.',
+        '"undefined": the same choice the live connector makes, so the two samples agree.',
     ],
   };
 }

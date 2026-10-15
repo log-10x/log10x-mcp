@@ -42,7 +42,7 @@ test('exact width: head + ellipsis + tail === width', () => {
   }
 });
 
-test('keeps BOTH ends — head and tail survive, middle elided', () => {
+test('keeps BOTH ends: head and tail survive, middle elided', () => {
   const s = 'HEAD_marker' + '_'.repeat(0) + 'm'.repeat(80) + 'TAIL_marker';
   const out = midEllipsis(s.replace(/_/g, ' '), 30);
   assert.ok(out.startsWith('HEAD'), `head kept: ${out}`);

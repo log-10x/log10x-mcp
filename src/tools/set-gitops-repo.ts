@@ -40,7 +40,7 @@ export const setGitopsRepoSchema = {
       'Must be in owner/repo format (e.g. acme-corp/platform-config). No spaces, no leading slash.'
     )
     .describe(
-      'GitHub repo where configure_engine will open cap-CSV PRs. Format: `owner/repo` (e.g. `acme-corp/platform-config`). Must match the repo your team uses for gitops — configure_engine will create a branch and PR here.'
+      'GitHub repo where configure_engine will open cap-CSV PRs. Format: `owner/repo` (e.g. `acme-corp/platform-config`). Must match the repo your team uses for gitops: configure_engine will create a branch and PR here.'
     ),
   environment: z
     .string()
@@ -57,7 +57,7 @@ export const setGitopsRepoSchema = {
   confirm: z
     .literal('set-now')
     .describe(
-      'Safety gate — must be the literal string `"set-now"` to write. This prevents accidental invocations from an agent chain that threads the args wrong.'
+      'Safety gate: must be the literal string `"set-now"` to write. This prevents accidental invocations from an agent chain that threads the args wrong.'
     ),
 };
 
@@ -135,7 +135,7 @@ export async function executeSetGitopsRepo(
           tool: 'log10x_configure_env',
           args: {},
           role: 'required-next',
-          reason: 'No envs.json yet — create the first env entry. set_gitops_repo can then update its gitops.repo field.',
+          reason: 'No envs.json yet: create the first env entry. set_gitops_repo can then update its gitops.repo field.',
         },
       ],
     });
@@ -143,7 +143,7 @@ export async function executeSetGitopsRepo(
 
   if (entries.length === 0) {
     const msg =
-      'envs.json is empty — run log10x_configure_env first to register an env, then set gitops_repo on it.';
+      'envs.json is empty: run log10x_configure_env first to register an env, then set gitops_repo on it.';
     return buildEnvelope({
       tool: 'log10x_set_gitops_repo',
       view: 'summary',
@@ -237,7 +237,7 @@ export async function executeSetGitopsRepo(
         `envs.json written at ${envsJsonPath()}.`,
         'The MCP server must restart to pick up the change.',
         'Run log10x_dev_restart, or restart the MCP server process manually.',
-        'After restart, retry log10x_configure_engine — it will resolve gitops_repo from the updated env.',
+        'After restart, retry log10x_configure_engine: it will resolve gitops_repo from the updated env.',
       ].join('\n'),
     },
   });

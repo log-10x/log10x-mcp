@@ -404,31 +404,31 @@ type RetrieverNextStep =
 
 const QUESTION_META: Record<RetrieverQuestionId, { headline: string; answer_field: string }> = {
   'oidc-check': {
-    headline: 'Step 1 — Verify EKS OIDC provider is enabled for your cluster.',
+    headline: 'Step 1: Verify EKS OIDC provider is enabled for your cluster.',
     answer_field: 'infra_mode',
   },
   'infra-review': {
-    headline: 'Step 2 — Review detected AWS resources (S3 / SQS / IRSA) vs what needs creating.',
+    headline: 'Step 2: Review detected AWS resources (S3 / SQS / IRSA) vs what needs creating.',
     answer_field: 'infra_mode',
   },
   'infra-mode': {
-    headline: 'Step 3 — Pick how to provision the Retriever AWS infra: Terraform, aws-cli, or it already exists.',
+    headline: 'Step 3: Pick how to provision the Retriever AWS infra: Terraform, aws-cli, or it already exists.',
     answer_field: 'infra_mode',
   },
   'input-bucket': {
-    headline: 'Step 4a — Confirm the S3 source bucket for Retriever input.',
+    headline: 'Step 4a: Confirm the S3 source bucket for Retriever input.',
     answer_field: 'index_source_bucket',
   },
   'sqs-urls': {
-    headline: 'Step 4b — Provide the four SQS queue URLs (index / query / subquery / stream).',
+    headline: 'Step 4b: Provide the four SQS queue URLs (index / query / subquery / stream).',
     answer_field: 'index_queue_url',
   },
   'irsa-role': {
-    headline: 'Step 5 — Provide the IRSA role ARN for the Retriever ServiceAccount.',
+    headline: 'Step 5: Provide the IRSA role ARN for the Retriever ServiceAccount.',
     answer_field: 'iam_role_arn',
   },
   'license-paste': {
-    headline: 'Step 6 — Paste the license JWT you already have.',
+    headline: 'Step 6: Paste the license JWT you already have.',
     answer_field: 'license_jwt_paste',
   },
   'azure-placement': {
@@ -562,7 +562,7 @@ function buildRetrieverWizardHumanSummary(data: RetrieverWizardData, headline: s
     case 'session_error':
       return `Retriever wizard could not initialize the session for snapshot ${data.snapshot_id}. Re-run log10x_discover_env and retry.`;
     case 'cancelled':
-      return `Retriever wizard was cancelled. Re-invoke with the same snapshot_id to resume — prior answers are remembered.`;
+      return `Retriever wizard was cancelled. Re-invoke with the same snapshot_id to resume: prior answers are remembered.`;
     case 'license_error':
       return `Retriever wizard could not acquire a license JWT: ${data.error_message.slice(0, 200)}. Sign in via log10x_signin_start, paste a JWT, or retry.`;
     case 'signin_required':
@@ -596,13 +596,13 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
         actions: [
           { tool: 'log10x_discover_env', args: {}, reason: 'mint a fresh snapshot', role: 'required-next' },
         ],
-        warnings: ['unexpected internal error — session-store state is unexpected'],
+        warnings: ['unexpected internal error: session-store state is unexpected'],
       };
     case 'cancelled':
       return {
         headline: `Retriever wizard cancelled. Re-invoke with snapshot_id="${data.snapshot_id}" to resume.`,
         actions: [
-          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard — every prior answer is preserved for 30 min', role: 'recommended-next' },
+          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id }, reason: 'resume the wizard: every prior answer is preserved for 30 min', role: 'recommended-next' },
         ],
         warnings: [],
       };
@@ -644,9 +644,9 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
         headline: `Retriever wizard cannot mint a real license without sign-in. CHAIN: log10x_signin_start THEN re-invoke.`,
         actions: [
           { tool: 'log10x_signin_start', args: {}, reason: 'opens the device-code browser flow to sign in to Log10x', role: 'required-next' },
-          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id, license_source: 'signin' }, reason: 'after signin_start completes, re-invoke the wizard — every prior answer is preserved', role: 'required-next' },
+          { tool: TOOL_NAME, args: { snapshot_id: data.snapshot_id, license_source: 'signin' }, reason: 'after signin_start completes, re-invoke the wizard: every prior answer is preserved', role: 'required-next' },
         ],
-        warnings: ['plan NOT emitted yet — complete log10x_signin_start before re-invoking'],
+        warnings: ['plan NOT emitted yet: complete log10x_signin_start before re-invoking'],
       };
     case 'unknown_args': {
       const suggestions = data.suggestions
@@ -665,7 +665,7 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
     case 'plan': {
       const warnings: string[] = [];
       if (data.blockers.length > 0) {
-        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''} — see data.blockers`);
+        warnings.push(`plan has ${data.blockers.length} blocker${data.blockers.length !== 1 ? 's' : ''}: see data.blockers`);
       }
       const isDemoLicense = data.license_kind === 'demo';
       if (isDemoLicense) {
@@ -705,7 +705,7 @@ function planHeadlineForWizard(data: {
   if (data.blockers.length > 0) {
     return `retriever ${data.action} plan: BLOCKED (${data.blockers.length} issue${data.blockers.length !== 1 ? 's' : ''}). Release "${data.release_name}" in "${data.namespace}".`;
   }
-  return `retriever ${data.action} plan: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown — release "${data.release_name}" in namespace "${data.namespace}".`;
+  return `retriever ${data.action} plan: ${data.install_step_count} install / ${data.verify_probe_count} verify / ${data.teardown_step_count} teardown: release "${data.release_name}" in namespace "${data.namespace}".`;
 }
 
 // ── nextQuestion routing ─────────────────────────────────────────────────────
@@ -1055,7 +1055,7 @@ async function nextQuestion(
         questionId: 'oidc-check',
         shape: {
           type: 'info',
-          headline: 'EKS OIDC provider not detected — required for IRSA.',
+          headline: 'EKS OIDC provider not detected: required for IRSA.',
           resolutions: [
             {
               args: { snapshot_id: session.snapshotId, infra_mode: 'terraform' },
@@ -1109,10 +1109,10 @@ async function nextQuestion(
           },
           {
             value: 'existing',
-            label: 'Already provisioned — I\'ll supply ARNs / URLs',
+            label: 'Already provisioned: I\'ll supply ARNs / URLs',
             recommended: allDetected,
             details: allDetected
-              ? 'All infra detected in snapshot — this is the recommended path.'
+              ? 'All infra detected in snapshot: this is the recommended path.'
               : 'Skip infra creation and jump to helm values (requires supplying all ARNs + URLs).',
           },
         ],
@@ -1253,9 +1253,9 @@ async function nextQuestion(
     return {
       kind: 'ask',
       markdown: [
-        '# Retriever wizard — paste your license JWT',
+        '# Retriever wizard: paste your license JWT',
         '',
-        'Pass `license_jwt_paste: "<jwt>"` on the next invocation. The JWT is mounted in the Retriever pods via a Kubernetes Secret — it never enters `values.yaml` in plain text.',
+        'Pass `license_jwt_paste: "<jwt>"` on the next invocation. The JWT is mounted in the Retriever pods via a Kubernetes Secret: it never enters `values.yaml` in plain text.',
       ].join('\n'),
       questionId: 'license-paste',
       shape: {
@@ -1367,7 +1367,7 @@ function buildInfraMissingShape(
 function renderOidcCheck(clusterName: string, region?: string): string {
   const regionStr = region ? ` --region ${region}` : '';
   return [
-    '# Retriever wizard — Step 1: EKS OIDC provider',
+    '# Retriever wizard: Step 1: EKS OIDC provider',
     '',
     `The OIDC provider is required for IRSA (IAM Roles for Service Accounts). It enables the Retriever pod to assume an IAM role without static credentials.`,
     '',
@@ -1378,12 +1378,12 @@ function renderOidcCheck(clusterName: string, region?: string): string {
     '',
     '## Enable (if not present)',
     '',
-    '**Option A — eksctl (recommended):**',
+    '**Option A: eksctl (recommended):**',
     '```bash',
     `eksctl utils associate-iam-oidc-provider --cluster ${clusterName}${regionStr} --approve`,
     '```',
     '',
-    '**Option B — aws CLI:**',
+    '**Option B: aws CLI:**',
     '```bash',
     `# Get the OIDC issuer URL`,
     `OIDC_URL=$(aws eks describe-cluster --name ${clusterName}${regionStr} --query "cluster.identity.oidc.issuer" --output text)`,
@@ -1424,31 +1424,31 @@ function renderInfraReview(
   const rows: string[] = [];
   rows.push('| Resource | Status | Detected value |');
   rows.push('|---|---|---|');
-  rows.push(`| S3 input bucket | ${snapshot.recommendations.retrieverS3Bucket ? '✓ found' : '✗ missing'} | ${snapshot.recommendations.retrieverS3Bucket ?? '—'} |`);
-  rows.push(`| SQS index queue | ${q.index ? '✓ found' : '✗ missing'} | ${q.index ?? '—'} |`);
-  rows.push(`| SQS query queue | ${q.query ? '✓ found' : '✗ missing'} | ${q.query ?? '—'} |`);
-  rows.push(`| SQS subquery queue | ${q.subquery ? '✓ found' : '✗ missing'} | ${q.subquery ?? '—'} |`);
-  rows.push(`| SQS stream queue | ${q.stream ? '✓ found' : '✗ missing'} | ${q.stream ?? '—'} |`);
-  rows.push(`| IRSA role | ${detectedIrsa ? '✓ found' : '✗ missing'} | ${detectedIrsa?.roleArn ?? '—'} |`);
+  rows.push(`| S3 input bucket | ${snapshot.recommendations.retrieverS3Bucket ? '✓ found' : '✗ missing'} | ${snapshot.recommendations.retrieverS3Bucket ?? '-'} |`);
+  rows.push(`| SQS index queue | ${q.index ? '✓ found' : '✗ missing'} | ${q.index ?? '-'} |`);
+  rows.push(`| SQS query queue | ${q.query ? '✓ found' : '✗ missing'} | ${q.query ?? '-'} |`);
+  rows.push(`| SQS subquery queue | ${q.subquery ? '✓ found' : '✗ missing'} | ${q.subquery ?? '-'} |`);
+  rows.push(`| SQS stream queue | ${q.stream ? '✓ found' : '✗ missing'} | ${q.stream ?? '-'} |`);
+  rows.push(`| IRSA role | ${detectedIrsa ? '✓ found' : '✗ missing'} | ${detectedIrsa?.roleArn ?? '-'} |`);
 
   const allFound = allInfraDetected(snapshot);
   return [
-    '# Retriever wizard — Step 2: AWS resource review',
+    '# Retriever wizard: Step 2: AWS resource review',
     '',
     '## Detected resources',
     '',
     ...rows,
     '',
     allFound
-      ? '**All infra detected.** The recommended path is `existing` — the wizard will skip provisioning and jump directly to Helm values.'
+      ? '**All infra detected.** The recommended path is `existing`: the wizard will skip provisioning and jump directly to Helm values.'
       : '**Some resources are missing.** Choose how to provision them.',
     '',
     '## How to provision',
     '',
     'Re-invoke with `infra_mode: "terraform"`, `"cli"`, or `"existing"`:',
-    '- **`terraform`** — wizard emits a `log-10x/tenx-retriever/aws` module block with pinned version.',
-    '- **`cli`** — wizard emits `aws iam`, `aws s3api`, `aws sqs` commands.',
-    '- **`existing`** — all infra already exists; wizard jumps to helm values (supply ARNs/URLs in next step).',
+    '- **`terraform`**: wizard emits a `log-10x/tenx-retriever/aws` module block with pinned version.',
+    '- **`cli`**: wizard emits `aws iam`, `aws s3api`, `aws sqs` commands.',
+    '- **`existing`**: all infra already exists; wizard jumps to helm values (supply ARNs/URLs in next step).',
   ].join('\n');
 }
 
@@ -1548,7 +1548,7 @@ function renderTerraformInstructions(
   ];
 
   return [
-    '# Retriever wizard — Step 3: Terraform provisioning',
+    '# Retriever wizard: Step 3: Terraform provisioning',
     '',
     'Add the following to your Terraform workspace. The module creates the S3 bucket, four SQS queues, IAM role with IRSA binding, and CloudWatch log groups.',
     ...accountWarning,
@@ -1604,7 +1604,7 @@ function renderTerraformInstructions(
     '```',
     '',
     '```bash',
-    '# Set your Log10x API key (do not inline in HCL — use -var or a .tfvars file):',
+    '# Set your Log10x API key (do not inline in HCL: use -var or a .tfvars file):',
     'export TENX_API_KEY="<your-log10x-api-key>"',
     '',
     'terraform init',
@@ -1640,7 +1640,7 @@ function renderCliInstructions(
   const sqsPrefix = 'tenx';
 
   return [
-    '# Retriever wizard — Step 3: aws CLI provisioning',
+    '# Retriever wizard: Step 3: aws CLI provisioning',
     '',
     '## 1. Create S3 bucket',
     '```bash',
@@ -1722,7 +1722,7 @@ function renderInputBucketQuestion(snapshot: DiscoverySnapshot): string {
     .slice(0, 3)
     .map((b) => `- \`${b.name}\` (${b.matchReason})`);
   const lines = [
-    '# Retriever wizard — Step 4a: S3 input bucket',
+    '# Retriever wizard: Step 4a: S3 input bucket',
     '',
     'The Retriever reads source logs from an S3 bucket. This is the same bucket where your forwarder offloads the `routeState="offload"` slice.',
   ];
@@ -1739,16 +1739,16 @@ function renderSqsQuestion(
   missing: readonly string[]
 ): string {
   const lines = [
-    '# Retriever wizard — Step 4b: SQS queue URLs',
+    '# Retriever wizard: Step 4b: SQS queue URLs',
     '',
     `The Retriever uses four SQS queues. Missing: **${missing.join(', ')}**.`,
     '',
     '| Queue | Status | URL |',
     '|---|---|---|',
-    `| index | ${resolved.index ? '✓' : '✗'} | ${resolved.index ?? '—'} |`,
-    `| query | ${resolved.query ? '✓' : '✗'} | ${resolved.query ?? '—'} |`,
-    `| subquery | ${resolved.subquery ? '✓' : '✗'} | ${resolved.subquery ?? '—'} |`,
-    `| stream | ${resolved.stream ? '✓' : '✗'} | ${resolved.stream ?? '—'} |`,
+    `| index | ${resolved.index ? '✓' : '✗'} | ${resolved.index ?? '-'} |`,
+    `| query | ${resolved.query ? '✓' : '✗'} | ${resolved.query ?? '-'} |`,
+    `| subquery | ${resolved.subquery ? '✓' : '✗'} | ${resolved.subquery ?? '-'} |`,
+    `| stream | ${resolved.stream ? '✓' : '✗'} | ${resolved.stream ?? '-'} |`,
     '',
   ];
   const suggestedQueues = snapshot.aws.sqsQueues.filter((q) => q.role !== 'unknown' && q.role !== 'dlq');
@@ -1773,7 +1773,7 @@ function renderIrsaQuestion(
 
   const allIrsa = snapshot.kubectl.serviceAccountIrsa;
   const lines = [
-    '# Retriever wizard — Step 5: IRSA role ARN',
+    '# Retriever wizard: Step 5: IRSA role ARN',
     '',
     'The Retriever ServiceAccount needs an IAM role with:',
     `- \`s3:GetObject\`, \`s3:ListBucket\` on \`${inputBucket}\``,
@@ -1802,7 +1802,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
       did_you_mean: findClosestKnownArg(k),
     }));
     const validKeys = [...KNOWN_ARG_NAMES].sort();
-    const lines: string[] = [`# Retriever wizard — unknown arg${unknownKeys.length === 1 ? '' : 's'}`, ''];
+    const lines: string[] = [`# Retriever wizard: unknown arg${unknownKeys.length === 1 ? '' : 's'}`, ''];
     for (const s of suggestions) {
       lines.push(
         s.did_you_mean
@@ -1829,7 +1829,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   const snapshot = getSnapshot(args.snapshot_id);
   if (!snapshot) {
     const md = [
-      `# Retriever wizard — snapshot not found`,
+      `# Retriever wizard: snapshot not found`,
       '',
       `Snapshot \`${args.snapshot_id}\` is missing or expired (snapshots live 30 min).`,
       '',
@@ -1982,7 +1982,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         lic.reason === 'signed-in-user' || lic.reason === 'refreshed-then-user';
       if (session.licenseSource === 'signin' && !isRealUserLicense) {
         const md = [
-          '# Retriever wizard — sign in to Log10x first',
+          '# Retriever wizard: sign in to Log10x first',
           '',
           signinRequiredReasonMessage(lic.reason),
           '',
@@ -2005,7 +2005,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
     } catch (e) {
       const msg = e instanceof LicenseFetchError ? e.message : String(e);
       const md = [
-        `# Retriever wizard — couldn't acquire a license JWT`,
+        `# Retriever wizard: couldn't acquire a license JWT`,
         '',
         `The wizard tried to mint a license via the gateway and failed:`,
         '',
@@ -2015,7 +2015,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         `- Re-invoke with \`license_source: "builtin"\` to install with no key: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped)`,
         `- Sign in via \`log10x_signin_start\``,
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\``,
-        `- Retry — the gateway may have been transiently unavailable`,
+        `- Retry: the gateway may have been transiently unavailable`,
       ].join('\n');
       return wizardReturn({ mode: 'license_error', ok: false, snapshot_id: args.snapshot_id, error_message: msg, markdown: md });
     }
@@ -2142,7 +2142,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
   // Terraform-owned" at the top of its notes.
   if (session.infraMode && session.infraMode !== 'existing' && !isAzurePlan) {
     plan.notes.unshift(
-      `Infra provisioned via ${session.infraMode === 'terraform' ? 'Terraform module (terraform-aws-tenx-retriever-lambda)' : 'aws CLI commands'}. AWS infra lifecycle is Terraform-owned — the wizard does not manage it.`
+      `Infra provisioned via ${session.infraMode === 'terraform' ? 'Terraform module (terraform-aws-tenx-retriever-lambda)' : 'aws CLI commands'}. AWS infra lifecycle is Terraform-owned: the wizard does not manage it.`
     );
   }
 
@@ -2169,7 +2169,7 @@ function signinRequiredReasonMessage(reason: string): string {
     case 'refresh-failed':
       return 'The Auth0 token refresh failed (network or Auth0 rejection). Sign in again via `log10x_signin_start` and retry.';
     case 'user-license-fetch-failed':
-      return 'Auth0 succeeded but the license gateway returned an error. Retry — if it persists, contact support or use `license_source: "paste"` with an existing JWT.';
+      return 'Auth0 succeeded but the license gateway returned an error. Retry: if it persists, contact support or use `license_source: "paste"` with an existing JWT.';
     default:
       return 'Sign in via `log10x_signin_start` to mint a user-scoped license, then re-invoke.';
   }

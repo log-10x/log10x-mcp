@@ -283,7 +283,7 @@ export async function executePatternExamples(
       .filter((l) => l.trim().length > 0 && !l.trim().startsWith('-'))
       .join(' ')
       .slice(0, 600);
-    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'pattern_examples — no result';
+    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'pattern_examples: no result';
     return buildChassisErrorEnvelope({
       tool: 'log10x_pattern_examples',
       err: {
@@ -338,7 +338,7 @@ export async function executePatternExamples(
       tool: 'log10x_pattern_mitigate',
       args: { pattern: d.pattern },
       role: 'recommended-next',
-      reason: `Bucket analysis recommends ${topAction} — pattern_mitigate applies the regulator rule.`,
+      reason: `Bucket analysis recommends ${topAction}: pattern_mitigate applies the regulator rule.`,
     });
   }
 
@@ -423,7 +423,7 @@ export async function executePatternExamples(
         probe_notes: d.probe_notes,
         ...(truncated
           ? {
-              truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events — widen limit or narrow timeRange`,
+              truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events: widen limit or narrow timeRange`,
             }
           : {}),
       };
@@ -568,7 +568,7 @@ function buildSummaryPayload(
     probe_notes: d.probe_notes,
     ...(truncated
       ? {
-          truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events — widen limit or narrow timeRange`,
+          truncation_detail: `events_pulled (${d.events_pulled}) reached the probe batch target (${probeBatchTarget}); there may be more matching events: widen limit or narrow timeRange`,
         }
       : {}),
   };
@@ -588,7 +588,7 @@ async function executePatternExamplesInner(
   // type here so the rest of this function can treat args.pattern as
   // string without `!` assertions.
   if (!rawArgs.pattern) {
-    return graceful('Pattern Examples — missing identifier', [
+    return graceful('Pattern Examples: missing identifier', [
       'pattern_examples requires either `pattern` (Symbol Message name / pasted log line) or `pattern_hash` (canonical 11-char hash).',
     ]);
   }
@@ -606,7 +606,7 @@ async function executePatternExamplesInner(
   });
   if (resolution.kind === 'none') {
     return [
-      '## Pattern Examples — vendor required',
+      '## Pattern Examples: vendor required',
       '',
       `No SIEM credentials detected and no \`vendor\` arg supplied. Pass \`vendor=<name>\` (one of: ${EXAMPLES_VENDORS.join(', ')}) and corresponding env vars.`,
       '',
@@ -615,7 +615,7 @@ async function executePatternExamplesInner(
   }
   if (resolution.kind === 'ambiguous') {
     return [
-      '## Pattern Examples — vendor ambiguous',
+      '## Pattern Examples: vendor ambiguous',
       '',
       `Multiple log analyzers detected: ${resolution.candidates.join(', ')}. Pass \`vendor=<name>\` to disambiguate.`,
     ].join('\n');
@@ -648,12 +648,12 @@ async function executePatternExamplesInner(
         inputTemplateBody = p.sampleEvent || args.pattern;
         inputTemplateHash = p.hash;
       } else {
-        return graceful('Pattern Examples — could not resolve pasted log line', [
+        return graceful('Pattern Examples: could not resolve pasted log line', [
           'The pattern extractor returned no patterns for the pasted line. Verify the line is well-formed and contains at least one recurring symbol.',
         ]);
       }
     } catch (e) {
-      return graceful('Pattern Examples — pasted-line resolution failed', [
+      return graceful('Pattern Examples: pasted-line resolution failed', [
         `tenx CLI invocation failed: ${(e as Error).message.slice(0, 200)}`,
         '',
         'Either install tenx locally or pass the Symbol Message form (snake_case identity) instead of a raw log line.',
@@ -683,7 +683,7 @@ async function executePatternExamplesInner(
     tokens = Array.from(new Set(rawTokens));
   }
   if (tokens.length === 0) {
-    return graceful('Pattern Examples — pattern has no usable tokens', [
+    return graceful('Pattern Examples: pattern has no usable tokens', [
       `The pattern \`${canonicalPattern}\` produced no tokens after normalization. Pass a real Symbol Message or pasted log line.`,
     ]);
   }
@@ -755,7 +755,7 @@ async function executePatternExamplesInner(
     }
     lines.push('');
     lines.push('Try a longer `timeRange` (max 24h). If this pattern is offloaded, use `log10x_retriever_query` to inspect its events in the overflow bucket. Only offloaded events land there, not everything the analyzer aged out.');
-    return graceful(`Pattern Examples — no events in ${args.timeRange} window`, lines);
+    return graceful(`Pattern Examples: no events in ${args.timeRange} window`, lines);
   }
 
   // ── 5. Run the probe batch through the engine ──────────────────────
@@ -764,7 +764,7 @@ async function executePatternExamplesInner(
   try {
     extracted = await extractPatterns(probe.events, { useFileOutput: true, preserveEnvelope: true, bucketHashHint: hashKey });
   } catch (e) {
-    return graceful('Pattern Examples — pattern extractor invocation failed', [
+    return graceful('Pattern Examples: pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
       '',
       'Verify tenx is installed (`brew install log-10x/tap/log10x`) or set `LOG10X_TENX_MODE=docker`.',
@@ -777,7 +777,7 @@ async function executePatternExamplesInner(
   const isMultiLine = encodedEventCount < inputLineCount && inputLineCount > 1;
 
   if (extracted.patterns.length === 0) {
-    return graceful('Pattern Examples — no templates resolved', [
+    return graceful('Pattern Examples: no templates resolved', [
       `Pulled ${probe.events.length} events but the pattern extractor produced no patterns. The events may be malformed or the tenx version may not support this format.`,
     ]);
   }
@@ -809,7 +809,7 @@ async function executePatternExamplesInner(
   const dropped = buckets.filter((b) => !b.kept);
 
   if (retained.length === 0) {
-    return graceful('Pattern Examples — no matching templates', [
+    return graceful('Pattern Examples: no matching templates', [
       `Probe returned ${probe.events.length} events spanning ${extracted.patterns.length} templates, but none matched the reference template at content-token Jaccard ≥ 0.85.`,
       '',
       'The pattern may not be active in this window, or the input pattern doesn\'t correspond to events in the requested timeRange.',
@@ -842,7 +842,7 @@ async function executePatternExamplesInner(
       return false;
     });
     if (filteredRetained.length === 0) {
-      return graceful('Pattern Examples — no buckets match slot_filter', [
+      return graceful('Pattern Examples: no buckets match slot_filter', [
         `slot_filter \`${slotName}\` = \`${slotValue}\` excluded all ${retained.length} retained bucket(s) in the ${args.timeRange} window on ${vendor}.`,
         '',
         'Either the slot value is not present in any current bucket, or the slot name does not appear in this pattern\'s slot_distribution. Drop the slot_filter to see the un-narrowed buckets and verify the slot name + value before re-applying.',
@@ -963,11 +963,11 @@ async function executePatternExamplesInner(
         const ctaTail = ' Run log10x_pattern_mitigate to apply this, or log10x_cost_options to see alternatives.';
         let recommendation: string;
         if (action === 'compact') {
-          recommendation = `Recommended: compact this pattern. It would cut ${sharePhrase} of your bill while preserving the signal — you'd still see the failure pattern and rate, just without the redundant copies.${ctaTail}`;
+          recommendation = `Recommended: compact this pattern. It would cut ${sharePhrase} of your bill while preserving the signal: you'd still see the failure pattern and rate, just without the redundant copies.${ctaTail}`;
         } else if (action === 'drop') {
           recommendation = `Recommended: drop this pattern. It would remove ${sharePhrase} from your bill. The events carry no per-event signal (uniform stream from ${interpretation.active_emitters} ${interpretation.emitter_type}${interpretation.active_emitters !== 1 ? 's' : ''}).${ctaTail}`;
         } else if (action === 'sample') {
-          recommendation = `Recommended: sample this pattern. It would cut ${sharePhrase} of your bill while keeping coverage — the events vary, so sampling preserves distribution shape without keeping every copy.${ctaTail}`;
+          recommendation = `Recommended: sample this pattern. It would cut ${sharePhrase} of your bill while keeping coverage: the events vary, so sampling preserves distribution shape without keeping every copy.${ctaTail}`;
         } else {
           recommendation = `Recommended: keep this pattern as-is. ${sharePhrase} of this pattern's volume; mixed content with per-event signal, so no safe reduction at this time.`;
         }
@@ -1005,7 +1005,7 @@ async function executePatternExamplesInner(
 
   // ── 7. Render output ───────────────────────────────────────────────
   const lines: string[] = [];
-  lines.push(`## Pattern Examples — ${vendor}`);
+  lines.push(`## Pattern Examples: ${vendor}`);
   lines.push('');
   lines.push(`**Pattern**: \`${canonicalPattern}\``);
   lines.push(`**Window**: last ${args.timeRange}${args.service ? ` · service=${args.service}` : ''}${args.severity ? ` · severity=${args.severity}` : ''}`);
@@ -1013,10 +1013,10 @@ async function executePatternExamplesInner(
   lines.push(
     probePath === 'tenx_hash-exact'
       ? agentOnly(
-          `Probe path: tenx_hash-exact (filter ${hashQuery}). These events were pinned by the engine's portable pattern hash, so this env's SIEM carries tenx_hash — exact cross-pillar joins and forwarder-native drops by tenx_hash are available here. Prefer tenx_hash over message regex for any follow-up SIEM filter on this env.`,
+          `Probe path: tenx_hash-exact (filter ${hashQuery}). These events were pinned by the engine's portable pattern hash, so this env's SIEM carries tenx_hash: exact cross-pillar joins and forwarder-native drops by tenx_hash are available here. Prefer tenx_hash over message regex for any follow-up SIEM filter on this env.`,
         )
       : agentOnly(
-          `Probe path: content-token (tenx_hash not present in this env's SIEM events, or pasted-line input). Results are phrase-match approximate; exact-hash correlation is unavailable on this env's data plane — do not claim hash-based precision.`,
+          `Probe path: content-token (tenx_hash not present in this env's SIEM events, or pasted-line input). Results are phrase-match approximate; exact-hash correlation is unavailable on this env's data plane: do not claim hash-based precision.`,
         ),
   );
   lines.push(`**Retained**: ${fmtCount(filteredRetained.reduce((s, b) => s + b.p.count, 0))} events across ${filteredRetained.length} matching templates (Jaccard ≥ threshold)`);
@@ -1109,7 +1109,7 @@ async function executePatternExamplesInner(
     nextActions.push({
       tool: 'log10x_retriever_query',
       args: { pattern: canonicalPattern, from: 'now-7d', to: 'now', limit: 50 },
-      reason: 'multi-line composites — retriever has the complete grouped events',
+      reason: 'multi-line composites: retriever has the complete grouped events',
     });
   }
   const block = renderNextActions(nextActions);

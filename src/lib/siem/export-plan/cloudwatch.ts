@@ -56,11 +56,11 @@ export function emitCloudwatchPlan(opts: SamplePlanOptions): SamplePlan {
       'logs:FilterLogEvents    (the log events themselves)\n' +
       'Both are read-only. Nothing is created, tagged or deleted.',
     credentialSummary:
-      'whatever the `aws` CLI on this machine already uses — AWS_PROFILE,\n' +
+      'whatever the `aws` CLI on this machine already uses: AWS_PROFILE,\n' +
       'AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, SSO cache or an instance\n' +
       'role. This script neither reads nor copies them.',
     writes:
-      `${outputDir}/<log-group>.NN.log — one log message per line, plain text.\n` +
+      `${outputDir}/<log-group>.NN.log: one log message per line, plain text.\n` +
       'Nothing else is written outside that directory.',
     window: opts.window,
     bucketCount: CLOUDWATCH_BUCKET_COUNT,
@@ -140,7 +140,7 @@ export function emitCloudwatchPlan(opts: SamplePlanOptions): SamplePlan {
     '    remaining=$((remaining - n))',
     '    TOTAL=$((TOTAL + n))',
     '  done < "$TMPDIR_RUN/groups"',
-    '  printf "sub-window %2d/%d — %d lines so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
+    '  printf "sub-window %2d/%d: %d lines so far\\n" "$((i + 1))" "${#BUCKET_FROM[@]}" "$TOTAL" >&2',
     'done',
     '',
     renderFooter(outputDir),
@@ -174,7 +174,7 @@ export function emitCloudwatchPlan(opts: SamplePlanOptions): SamplePlan {
       'Composition is per log group: the report will name each log group that contributed bytes.',
       'A log group the credentials cannot read is skipped with a warning; the rest still export.',
       'Sources share one budget per sub-window, so a chatty log group can fill it before the quieter ' +
-        'ones are reached — the same behaviour the live connector has, and one more reason to check the ' +
+        'ones are reached: the same behaviour the live connector has, and one more reason to check the ' +
         'composition table in the report before trusting the projection.',
     ],
   };

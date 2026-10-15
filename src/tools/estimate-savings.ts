@@ -168,7 +168,7 @@ export const estimateSavingsSchema = {
     .positive()
     .optional()
     .describe(
-      'forecast mode: DOLLAR BUDGET — keep the (service-scoped or whole) destination bill at or under ' +
+      'forecast mode: DOLLAR BUDGET, keep the (service-scoped or whole) destination bill at or under ' +
         'this $/mo. The ladder solver derives the reduction: max(0, bill - budget). Idempotent: already ' +
         'under budget returns an empty plan with the headroom stated. Mutually exclusive with ' +
         'target_percent, budget_gb_monthly, default_action, and proposed_config.'
@@ -178,7 +178,7 @@ export const estimateSavingsSchema = {
     .positive()
     .optional()
     .describe(
-      'forecast mode: VOLUME BUDGET — keep monthly ingest toward the destination at or under this many ' +
+      'forecast mode: VOLUME BUDGET, keep monthly ingest toward the destination at or under this many ' +
         'GB/mo. BYTE accounting: tier_down keeps every byte in the destination, so it cannot serve this ' +
         'target and is excluded from the ladder (compact only where it lands on the billed wire, then ' +
         'offload with the retriever, then lossy on allow_lossy). Mutually exclusive with target_percent, ' +
@@ -188,7 +188,7 @@ export const estimateSavingsSchema = {
     .enum(['pass', 'sample', 'compact', 'tier_down', 'offload', 'drop'])
     .optional()
     .describe(
-      'forecast mode, OPTIONAL: force one action onto every solver-selected pattern (a mode choice — ' +
+      'forecast mode, OPTIONAL: force one action onto every solver-selected pattern (a mode choice, ' +
         '"cut 50% via drop"). Hard constraint when present, subject to destination compatibility ' +
         '(compact is replaced by the destination canonical action when compact_mode=no-op). ' +
         'OMIT for the product default: the ladder solver picks the destination\'s keep-everything ' +
@@ -220,7 +220,7 @@ export const estimateSavingsSchema = {
       'How the customer RUNS the destination, which decides whether compaction is available at all: '
         + 'the expander is software they install (the l1es Elasticsearch/OpenSearch plugin, the 10x '
         + 'Splunk app), so a managed or serverless platform can carry compacted bytes but has nowhere '
-        + 'to expand them. Set only from what the user actually said — absent means unknown, and an '
+        + 'to expand them. Set only from what the user actually said: absent means unknown, and an '
         + 'unknown deployment prices only the levers that hold either way. Irrelevant on destinations '
         + 'whose levers do not depend on it (Datadog, CloudWatch, Azure, Coralogix).'
     ),
@@ -228,7 +228,7 @@ export const estimateSavingsSchema = {
     .array(z.string())
     .optional()
     .describe(
-      'Ladder-plan path only: services pinned at pass — their patterns stay in the bill but are '
+      'Ladder-plan path only: services pinned at pass, their patterns stay in the bill but are '
         + 'never planned, exactly like protected severities. The SOC-owned or compliance-bound '
         + 'slice of the estate, stated as a hard exclusion. Case-insensitive.'
     ),
@@ -239,7 +239,7 @@ export const estimateSavingsSchema = {
       'Ladder-plan path only: pattern hashes the user EXPLICITLY unpinned from the severity floor '
         + '(a warn-level retry storm they chose to act on). Bypasses severity protection for the '
         + 'listed hashes only; hard exclusions still win. Set only after the user names the type '
-        + 'and chooses this — never inferred. The render flags these rows with their severity.'
+        + 'and chooses this: never inferred. The render flags these rows with their severity.'
     ),
   check_dependencies: z
     .boolean()
@@ -258,7 +258,7 @@ export const estimateSavingsSchema = {
     .default(false)
     .describe(
       'Ladder-plan path only: message types LITERALLY referenced by a monitor, alert, saved search, '
-        + 'or dashboard (found by the dependency scan) are EXCLUDED from the plan by default — they '
+        + 'or dashboard (found by the dependency scan) are EXCLUDED from the plan by default: they '
         + 'stay exactly as they are, and the plan re-solves around them. Pass true only after the user '
         + 'explicitly chooses to include them (the render shows what including them adds).'
     ),
@@ -283,7 +283,7 @@ export const estimateSavingsSchema = {
     .boolean()
     .optional()
     .describe(
-      'Elasticsearch only: are compactable fields excluded from _source? Default false — the unpruned ratio band is used.'
+      'Elasticsearch only: are compactable fields excluded from _source? Default false: the unpruned ratio band is used.'
     ),
   tier_down_plan: z
     .string()
@@ -1010,7 +1010,7 @@ export async function runEstimateForecast(
   }
   if (budgetCount > 1) {
     throw new Error(
-      'budget_usd_monthly and budget_gb_monthly are mutually exclusive — pick the denomination the user actually asked in.'
+      'budget_usd_monthly and budget_gb_monthly are mutually exclusive: pick the denomination the user actually asked in.'
     );
   }
   if (budgetCount > 0 && args.target_percent !== undefined) {
@@ -1020,7 +1020,7 @@ export async function runEstimateForecast(
   }
   if (budgetCount > 0 && (args.default_action !== undefined || args.proposed_config)) {
     throw new Error(
-      'budgets run the ladder solver only — default_action and proposed_config do not combine with budget_usd_monthly/budget_gb_monthly.'
+      'budgets run the ladder solver only: default_action and proposed_config do not combine with budget_usd_monthly/budget_gb_monthly.'
     );
   }
 
@@ -1763,7 +1763,7 @@ export async function runEstimateForecast(
   ) {
     const dropped = patternUniverseCount - per_pattern.length;
     caveats.push(
-      `pattern_count_source.count=${patternUniverseCount} but per_pattern_total_count=${per_pattern.length} — ${dropped} pattern${dropped !== 1 ? 's' : ''} exist in the count query but were filtered out of the forecast (bytes rolled up to zero in the resolved scope, or filtered by the destination action model).`
+      `pattern_count_source.count=${patternUniverseCount} but per_pattern_total_count=${per_pattern.length}: ${dropped} pattern${dropped !== 1 ? 's' : ''} exist in the count query but were filtered out of the forecast (bytes rolled up to zero in the resolved scope, or filtered by the destination action model).`
     );
   }
   if (forecast_rate_source === 'list_price') {
@@ -2207,7 +2207,7 @@ export async function runEstimateVerify(
   }
   if (delivered_pct < 0) {
     caveats.push(
-      `Delivered % is negative (${(delivered_pct * 100).toFixed(1)}%) — post-window passed bytes EXCEED scaled baseline. Likely drift/new_patterns swamped the cap.`
+      `Delivered % is negative (${(delivered_pct * 100).toFixed(1)}%): post-window passed bytes EXCEED scaled baseline. Likely drift/new_patterns swamped the cap.`
     );
   }
   // Degenerate-window detection. When baseline_bytes_scaled equals
@@ -2228,7 +2228,7 @@ export async function runEstimateVerify(
   if (degenerateBaselinePassedMatch && postDroppedBytes > 0) {
     confidence = Math.min(confidence, 0.5);
     caveats.push(
-      `Degenerate windowing: baseline_bytes_scaled (${baselineScaled.toFixed(0)}) equals post_passed_bytes (${postPassedBytes.toFixed(0)}) to ${(Math.abs(baselineScaled - postPassedBytes) / baselineScaled < 1e-12 ? 'full precision' : '8+ significant digits')}, forcing delivered_pct to 0 algebraically. Either baseline_window and post_window anchor to the same time range, OR the env grew by exactly the cap-fired byte count. The $ view (${(postDroppedBytes / GB).toFixed(2)} GB dropped) is unaffected — trust delivered_dollars_now. To get a meaningful % view, anchor baseline_window before the policy went live (use pre-policy data).`
+      `Degenerate windowing: baseline_bytes_scaled (${baselineScaled.toFixed(0)}) equals post_passed_bytes (${postPassedBytes.toFixed(0)}) to ${(Math.abs(baselineScaled - postPassedBytes) / baselineScaled < 1e-12 ? 'full precision' : '8+ significant digits')}, forcing delivered_pct to 0 algebraically. Either baseline_window and post_window anchor to the same time range, OR the env grew by exactly the cap-fired byte count. The $ view (${(postDroppedBytes / GB).toFixed(2)} GB dropped) is unaffected: trust delivered_dollars_now. To get a meaningful % view, anchor baseline_window before the policy went live (use pre-policy data).`
     );
   }
 
@@ -2406,7 +2406,7 @@ export async function executeEstimateSavings(
       return buildChassisEnvelope({
         tool: 'log10x_estimate_savings',
         view: 'summary',
-        headline: 'estimate_savings refused: multiple stacks detected — pass destination explicitly.',
+        headline: 'estimate_savings refused: multiple stacks detected, pass destination explicitly.',
         status: 'error',
         decisions: { threshold_used: null, threshold_basis: 'default' },
         // siem_vendor is intentionally absent: multiple vendors were found and
@@ -2469,7 +2469,7 @@ export async function executeEstimateSavings(
         return buildChassisEnvelope({
           tool: 'log10x_estimate_savings',
           view: 'summary',
-          headline: 'estimate_savings needs target_percent, a budget (budget_usd_monthly / budget_gb_monthly), or proposed_config — none was passed.',
+          headline: 'estimate_savings needs target_percent, a budget (budget_usd_monthly / budget_gb_monthly), or proposed_config: none was passed.',
           status: 'error',
           decisions: { threshold_used: null, threshold_basis: 'default' },
           source_disclosure: { ...lensDisclosure(lensRes), bytes_source: 'tsdb', ...(await labelForVendor(destination)) },
@@ -2481,12 +2481,12 @@ export async function executeEstimateSavings(
             required_inputs: {
               option_1: {
                 arg: 'target_percent',
-                description: 'a % reduction goal — the greedy solver picks which patterns to act on to hit it.',
+                description: 'a % reduction goal: the greedy solver picks which patterns to act on to hit it.',
                 example_call: 'log10x_estimate_savings({ target_percent: 30 })',
               },
               option_2: {
                 arg: 'proposed_config',
-                description: 'an explicit list of per-pattern rows (pattern_hash + action) — the forecast scores exactly that plan.',
+                description: 'an explicit list of per-pattern rows (pattern_hash + action): the forecast scores exactly that plan.',
                 example_call: 'log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }, ...] })',
               },
               option_3: {
@@ -2500,12 +2500,12 @@ export async function executeEstimateSavings(
           },
           human_summary:
             'estimate_savings needs one of three inputs and none was passed.\n\n' +
-            'Option 1 — a savings target. Tell me how much you want to save.\n' +
-            '  Example: log10x_estimate_savings({ target_percent: 30 }) — estimates what it would take to cut your bill by 30%.\n\n' +
-            'Option 2 — a standing budget. Tell me the line to stay under, in dollars or GB per month.\n' +
-            '  Example: log10x_estimate_savings({ service: "payment", budget_usd_monthly: 100 }) — plans whatever it takes to keep payment under $100/mo.\n\n' +
-            'Option 3 — specific patterns to target. Tell me which patterns you would mitigate.\n' +
-            '  Example: log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }] }) — estimates savings if you mitigate those patterns.\n\n' +
+            'Option 1: a savings target. Tell me how much you want to save.\n' +
+            '  Example: log10x_estimate_savings({ target_percent: 30 }), estimates what it would take to cut your bill by 30%.\n\n' +
+            'Option 2: a standing budget. Tell me the line to stay under, in dollars or GB per month.\n' +
+            '  Example: log10x_estimate_savings({ service: "payment", budget_usd_monthly: 100 }), plans whatever it takes to keep payment under $100/mo.\n\n' +
+            'Option 3: specific patterns to target. Tell me which patterns you would mitigate.\n' +
+            '  Example: log10x_estimate_savings({ proposed_config: [{ pattern_hash: "<hash>", action: "compact" }] }), estimates savings if you mitigate those patterns.\n\n' +
             'Most starting points: run log10x_top_patterns first, pick the heavy ones, then call this with their hashes.',
           error: {
             error_type: 'missing_input',

@@ -199,12 +199,12 @@ function detectStaleEnvVars(
 
   if (envVarPartial.env_id && envVarPartial.env_id !== storeConfig.env_id) {
     warnings.push(
-      `env-var env_id "${envVarPartial.env_id}" disagrees with on-prem store "${storeConfig.env_id}" — env var is being ignored.`,
+      `env-var env_id "${envVarPartial.env_id}" disagrees with on-prem store "${storeConfig.env_id}": env var is being ignored.`,
     );
   }
   if (envVarPartial.nickname && envVarPartial.nickname !== storeConfig.nickname) {
     warnings.push(
-      `env-var nickname "${envVarPartial.nickname}" disagrees with on-prem store "${storeConfig.nickname}" — env var is being ignored.`,
+      `env-var nickname "${envVarPartial.nickname}" disagrees with on-prem store "${storeConfig.nickname}": env var is being ignored.`,
     );
   }
   // Catalog rename: the in-cluster "streamer" endpoint was folded into the
@@ -215,7 +215,7 @@ function detectStaleEnvVars(
   // model.
   if (envVarPartial.retriever?.url && envVarPartial.retriever.url !== storeConfig.retriever.url) {
     warnings.push(
-      `env-var retriever.url "${envVarPartial.retriever.url}" disagrees with on-prem store "${storeConfig.retriever.url}" — env var is being ignored.`,
+      `env-var retriever.url "${envVarPartial.retriever.url}" disagrees with on-prem store "${storeConfig.retriever.url}": env var is being ignored.`,
     );
   }
   if (
@@ -223,12 +223,12 @@ function detectStaleEnvVars(
     envVarPartial.retriever.input_bucket !== storeConfig.retriever.input_bucket
   ) {
     warnings.push(
-      `env-var retriever.input_bucket "${envVarPartial.retriever.input_bucket}" disagrees with on-prem store "${storeConfig.retriever.input_bucket}" — env var is being ignored.`,
+      `env-var retriever.input_bucket "${envVarPartial.retriever.input_bucket}" disagrees with on-prem store "${storeConfig.retriever.input_bucket}": env var is being ignored.`,
     );
   }
   if (envVarPartial.destination?.siem_vendor && envVarPartial.destination.siem_vendor !== storeConfig.destination.siem_vendor) {
     warnings.push(
-      `env-var destination.siem_vendor "${envVarPartial.destination.siem_vendor}" disagrees with on-prem store "${storeConfig.destination.siem_vendor}" — env var is being ignored.`,
+      `env-var destination.siem_vendor "${envVarPartial.destination.siem_vendor}" disagrees with on-prem store "${storeConfig.destination.siem_vendor}": env var is being ignored.`,
     );
   }
 

@@ -131,7 +131,7 @@ test('buildDisclosedDollarValue disclosure-by-source contract', () => {
 
   const u = buildDisclosedDollarValue(0, 'unset', null, null);
   assert.equal(u.source, 'unset');
-  assert.equal(u.disclosure, '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)');
+  assert.equal(u.disclosure, '(no $/GB rate configured: set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)');
 });
 
 test('buildDisclosedDollarValue names an unknown destination\'s rate as a default when label/rate are null', () => {
@@ -141,12 +141,12 @@ test('buildDisclosedDollarValue names an unknown destination\'s rate as a defaul
 });
 
 test('fmtDisclosedDollar refuses to print a number without disclosure metadata', () => {
-  assert.equal(fmtDisclosedDollar(null), '—');
-  assert.equal(fmtDisclosedDollar(undefined), '—');
+  assert.equal(fmtDisclosedDollar(null), '-');
+  assert.equal(fmtDisclosedDollar(undefined), '-');
 
   const unset = buildDisclosedDollarValue(0, 'unset', null, null);
   const u = fmtDisclosedDollar(unset);
-  assert.match(u, /^—/);
+  assert.match(u, /^\(no \$\/GB rate configured/);
   assert.match(u, /no \$\/GB rate configured/);
 
   const list = buildDisclosedDollarValue(1800, 'list_price', 'Splunk', 5);

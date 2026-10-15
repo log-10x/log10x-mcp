@@ -464,7 +464,7 @@ async function detectCapabilities(snapshotId?: string): Promise<Capabilities> {
 
   if (!out.canMute && !out.canCompact) {
     out.setupHint =
-      'To enable mute/compact at the 10x engine, set `gitops.repo` (owner/name) in your `~/.log10x/envs.json` entry — or export `LOG10X_GH_REPO=<owner/name>` — or pass a `snapshot_id` from `log10x_discover_env` against a cluster with a receiver pod that has `GH_ENABLED=true` + `GH_REPO=<owner/name>` set.';
+      'To enable mute/compact at the 10x engine, set `gitops.repo` (owner/name) in your `~/.log10x/envs.json` entry: or export `LOG10X_GH_REPO=<owner/name>`, or pass a `snapshot_id` from `log10x_discover_env` against a cluster with a receiver pod that has `GH_ENABLED=true` + `GH_REPO=<owner/name>` set.';
   }
 
   return out;
@@ -597,7 +597,7 @@ export async function executePatternMitigate(args: PatternMitigateArgs): Promise
   });
   const headline =
     d.status === 'no_signal'
-      ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available — ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
+      ? `${patternNotFoundWarning}${patternLabel}: NO mitigation options available, ${dimmedCount} dimmed. Setup hint surfaces what's missing.`
       : `${patternNotFoundWarning}${patternLabel}: ${enabledCount} of ${d.options.length} mitigation options enabled (${d.options.filter((o) => o.enabled).map((o) => o.id).join(', ')}).`;
 
   // Populate actions[] with structured follow-up nudges so agent
@@ -772,7 +772,7 @@ async function executePatternMitigateInner(
     );
   } else if (analyzerName && analyzerSupported) {
     lines.push(
-      `**1. Drop it at ${analyzerName}.** Fastest. We generate a ready-to-apply ${analyzerName} exclusion config; you paste it (or apply via API) and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName} — they just don't get indexed or stored. Easy to undo in the same UI.`
+      `**1. Drop it at ${analyzerName}.** Fastest. We generate a ready-to-apply ${analyzerName} exclusion config; you paste it (or apply via API) and the cost stops within minutes. Events still flow through your pipeline up to ${analyzerName}: they just don't get indexed or stored. Easy to undo in the same UI.`
     );
   } else if (analyzerName) {
     lines.push(
@@ -806,7 +806,7 @@ async function executePatternMitigateInner(
     );
   } else {
     lines.push(
-      '**2. Drop it at your forwarder.** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. We could not auto-detect which forwarder you run (no snapshot or no recognized image) — supported: Fluent Bit, Fluentd, Filebeat, Logstash, OpenTelemetry Collector. If you pick option 2 the agent should ask which one and then generate the right config.'
+      '**2. Drop it at your forwarder.** Same idea as option 1 but one step earlier. The events never even leave your environment, so on top of analyzer savings you also save the bandwidth between your forwarder and your analyzer. We could not auto-detect which forwarder you run (no snapshot or no recognized image): supported: Fluent Bit, Fluentd, Filebeat, Logstash, OpenTelemetry Collector. If you pick option 2 the agent should ask which one and then generate the right config.'
     );
   }
   lines.push('');
@@ -828,7 +828,7 @@ async function executePatternMitigateInner(
     const sourceTag = caps.gitopsSource ? ` (PR target resolved from ${caps.gitopsSource})` : '';
     lines.push(`**4. Shrink it instead of dropping it.** Same PR + merge flow as option 3, against \`${caps.gitopsRepo}\`${sourceTag}, but the events keep flowing. The 10x engine minifies each one so it lands at your analyzer smaller; ${describeCompactReadback(caps.analyzerVendor)}. Pick this when you actually need the data (compliance, dashboards rely on the raw fields, etc.).`);
   } else {
-    lines.push('**4. Shrink it instead of dropping it.** _Not available in this env — same setup as option 3._');
+    lines.push('**4. Shrink it instead of dropping it.** _Not available in this env: same setup as option 3._');
   }
   lines.push('');
 
@@ -837,7 +837,7 @@ async function executePatternMitigateInner(
     lines.push('');
   }
 
-  lines.push('Before any drop is applied, your dependency check has to pass — it\'s the safety gate that confirms no dashboards or alerts depend on this pattern.');
+  lines.push('Before any drop is applied, your dependency check has to pass: it\'s the safety gate that confirms no dashboards or alerts depend on this pattern.');
   lines.push('');
   lines.push('Which option do you want?');
 
@@ -856,14 +856,14 @@ async function executePatternMitigateInner(
     nextActions.push({
       tool: 'log10x_advise_install',
       args: { pattern, ...(caps.gitopsRepo ? { gitops_repo: caps.gitopsRepo } : {}) },
-      reason: 'option 3 — generate the GitOps PR diff for muting at the 10x receiver',
+      reason: 'option 3: generate the GitOps PR diff for muting at the 10x receiver',
     });
   }
   if (caps.canCompact) {
     nextActions.push({
       tool: 'log10x_configure_engine',
       args: { service: pattern, ...(caps.gitopsRepo ? { gitops_repo: caps.gitopsRepo } : {}) },
-      reason: 'option 4 — author the per-pattern action-plan PR (compact / sample / drop / tier_down) against the gitops repo',
+      reason: 'option 4: author the per-pattern action-plan PR (compact / sample / drop / tier_down) against the gitops repo',
     });
   }
 
@@ -1010,9 +1010,9 @@ function buildHumanSummary(args: {
       case 'env_config_plus_snapshot':
         return `Capability detection used envs.json + a discovery snapshot${args.snapshotAgeSeconds !== null ? ` (snapshot is ${args.snapshotAgeSeconds}s old)` : ''}.`;
       case 'snapshot':
-        return `Capability detection used a discovery snapshot only${args.snapshotAgeSeconds !== null ? ` (${args.snapshotAgeSeconds}s old)` : ''} — confirm the env hasn't drifted since.`;
+        return `Capability detection used a discovery snapshot only${args.snapshotAgeSeconds !== null ? ` (${args.snapshotAgeSeconds}s old)` : ''}: confirm the env hasn't drifted since.`;
       case 'env_vars_only':
-        return 'Capability detection used $LOG10X_* env vars only — no envs.json or snapshot. Verify the env vars match the live environment.';
+        return 'Capability detection used $LOG10X_* env vars only: no envs.json or snapshot. Verify the env vars match the live environment.';
       case 'cached_snapshot':
         return 'Basis: cached_snapshot (capabilities from a prior discover_env call this session, no live re-probe).';
       case 'unknown':

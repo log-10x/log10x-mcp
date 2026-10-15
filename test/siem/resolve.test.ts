@@ -139,7 +139,7 @@ test('no creds detected returns kind=none', async () => {
   }
 });
 
-test('restrictTo narrows the candidate pool — non-listed SIEMs do not cause ambiguity', async () => {
+test('restrictTo narrows the candidate pool: non-listed SIEMs do not cause ambiguity', async () => {
   snap = snapshotEnv();
   clearEnv();
   process.env.SPLUNK_HOST = 'https://splunk.example.com:8089';

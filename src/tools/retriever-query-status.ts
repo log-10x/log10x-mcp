@@ -52,7 +52,7 @@ export const retrieverQueryStatusSchema = {
     .boolean()
     .default(false)
     .describe(
-      'When true and the query has completed, ALSO recover the results from S3: a 10-event preview, counts, and the results_location pointer — same core fields as a completed log10x_retriever_query. Use after a partial/timed-out query to recover stranded events without resubmitting.'
+      'When true and the query has completed, ALSO recover the results from S3: a 10-event preview, counts, and the results_location pointer, same core fields as a completed log10x_retriever_query. Use after a partial/timed-out query to recover stranded events without resubmitting.'
     ),
   include_pod_logs: z
     .boolean()
@@ -310,7 +310,7 @@ async function runDiagnosticsEngine(params: {
   // when a _DONE.json is present. The dispatcher-failure fingerprint from _DONE.json
   // is a stronger signal and should win over the CW-disabled advisory.
   const cwDisabledAdvisory = !queryLogGroup
-    ? 'queryLogGroup is not set; per-query CloudWatch logging is disabled — pod stdout is the only observability path. Call log10x_advise_retriever for the remediation snippet.'
+    ? 'queryLogGroup is not set; per-query CloudWatch logging is disabled: pod stdout is the only observability path. Call log10x_advise_retriever for the remediation snippet.'
     : undefined;
 
   if (!done) {
@@ -488,7 +488,7 @@ export async function executeRetrieverQueryStatus(
         hint:
           `The query_id you passed is the form log10x_retriever_query uses when its pattern lookup ` +
           `fails before dispatch. So either you're seeing this because the previous retriever_query ` +
-          `call hit that case, or you passed this id manually — there's no real query to check status ` +
+          `call hit that case, or you passed this id manually: there's no real query to check status ` +
           `on either way. To recover: run log10x_top_patterns to see which patterns are actually being ` +
           `tracked, then call log10x_retriever_query again with one of those.`,
       },
@@ -639,7 +639,7 @@ export async function executeRetrieverQueryStatus(
         tool: 'log10x_advise_retriever',
         args: {},
         reason:
-          'queryLogGroup is empty — call advise_retriever to get the helm + IAM snippet that enables per-query CloudWatch logging',
+          'queryLogGroup is empty: call advise_retriever to get the helm + IAM snippet that enables per-query CloudWatch logging',
       });
     }
     if (diagnostics.category === 'dispatcher_failure') {
@@ -759,7 +759,7 @@ export async function executeRetrieverQueryStatus(
             log_group: null,
             event_count: 0,
             events: [],
-            advisory: 'queryLogGroup not set — CW per-query logging disabled',
+            advisory: 'queryLogGroup not set: CW per-query logging disabled',
           },
       diagnostics,
       // Partial-failure provenance surfaces structured s3List errors so an
@@ -771,7 +771,7 @@ export async function executeRetrieverQueryStatus(
 
     const warnings: string[] = [];
     for (const e of s3ListErrors) {
-      warnings.push(`s3 list-objects-v2 failed for prefix ${e.prefix}: ${e.error.error_type} — ${e.error.hint.slice(0, 160)}`);
+      warnings.push(`s3 list-objects-v2 failed for prefix ${e.prefix}: ${e.error.error_type}: ${e.error.hint.slice(0, 160)}`);
     }
 
     return buildChassisEnvelope({
@@ -853,7 +853,7 @@ function buildHumanSummary(params: {
   } else {
     parts.push(
       `Query ${queryId} on target ${target} completed (reason=${stats.reason ?? '?'}, elapsed=${stats.elapsedMs ?? '?'}ms). ` +
-        `Scanned ${stats.scanned ?? '?'} objects, matched ${stats.matched ?? '?'} (coordinator-local counter — structurally 0 in remote-dispatch/Lambda mode; the status verdict uses qr/ file presence instead), ` +
+        `Scanned ${stats.scanned ?? '?'} objects, matched ${stats.matched ?? '?'} (coordinator-local counter: structurally 0 in remote-dispatch/Lambda mode; the status verdict uses qr/ file presence instead), ` +
         `submitted ${stats.submittedTasks ?? '?'} scan tasks, stream requests: ${stats.streamRequests ?? '?'}.`
     );
   }
@@ -876,7 +876,7 @@ function buildHumanSummary(params: {
     }
   } else {
     parts.push(
-      'queryLogGroup not set in helm values — CW per-query logging disabled. Call log10x_advise_retriever for the remediation snippet.'
+      'queryLogGroup not set in helm values: CW per-query logging disabled. Call log10x_advise_retriever for the remediation snippet.'
     );
   }
 
@@ -884,23 +884,23 @@ function buildHumanSummary(params: {
   if (diagnostics.category === 'dispatcher_failure') {
     const confidence = diagnostics.confidence === 'confirmed' ? 'CONFIRMED' : 'SUSPECTED';
     parts.push(
-      `DIAGNOSTIC [${confidence}]: dispatcher_failure — the coordinator submitted ${stats?.submittedTasks ?? '?'} scan tasks ` +
+      `DIAGNOSTIC [${confidence}]: dispatcher_failure, the coordinator submitted ${stats?.submittedTasks ?? '?'} scan tasks ` +
         `that scanned nothing. This is the chart 1.0.20 incomplete-streamer-rename signature. ` +
         `Upgrade to chart 1.0.21+ or apply the rename-residual fix in modules/feat/soft-drop. ` +
         `Evidence: ${diagnostics.evidence.slice(0, 2).join(' | ')}`
     );
   } else if (diagnostics.category === 'results_not_uploaded') {
     parts.push(
-      `DIAGNOSTIC [suspected]: results_not_uploaded — Bloom filter matched ${stats?.matched ?? '?'} objects but 0 events were written. ` +
+      `DIAGNOSTIC [suspected]: results_not_uploaded, Bloom filter matched ${stats?.matched ?? '?'} objects but 0 events were written. ` +
         `Workers may have matched but writeResults was not triggered.`
     );
   } else if (diagnostics.category === 'dispatch_failure') {
     parts.push(
-      `DIAGNOSTIC [suspected]: dispatch_failure — query completed before dispatch (reason=${stats?.reason ?? '?'}, elapsedMs=0).`
+      `DIAGNOSTIC [suspected]: dispatch_failure, query completed before dispatch (reason=${stats?.reason ?? '?'}, elapsedMs=0).`
     );
   } else if (diagnostics.category === 'observability_disabled') {
     parts.push(
-      'ADVISORY: queryLogGroup not set — per-query CW observability disabled. Set queryLogGroup in helm values and ensure IRSA has logs:CreateLogStream + logs:PutLogEvents.'
+      'ADVISORY: queryLogGroup not set, per-query CW observability disabled. Set queryLogGroup in helm values and ensure IRSA has logs:CreateLogStream + logs:PutLogEvents.'
     );
   }
 

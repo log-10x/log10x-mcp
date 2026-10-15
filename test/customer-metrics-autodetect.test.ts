@@ -121,7 +121,7 @@ test('resolveBackend: PROMETHEUS_URL is the final fallback', async () => {
   assert.equal(res.backend!.backendType, 'generic_prom');
 });
 
-test('resolveBackend: detection order — Grafana wins over Datadog + PROMETHEUS_URL', async () => {
+test('resolveBackend: detection order, Grafana wins over Datadog + PROMETHEUS_URL', async () => {
   process.env.GRAFANA_CLOUD_API_KEY = 'glc';
   process.env.GRAFANA_CLOUD_URL = 'https://grafana.example';
   process.env.DD_API_KEY = 'dd-api';
@@ -131,7 +131,7 @@ test('resolveBackend: detection order — Grafana wins over Datadog + PROMETHEUS
   assert.equal(res.detectionPath, 'grafana_cloud');
 });
 
-test('resolveBackend: detection order — Datadog wins over PROMETHEUS_URL', async () => {
+test('resolveBackend: detection order, Datadog wins over PROMETHEUS_URL', async () => {
   process.env.DD_API_KEY = 'dd-api';
   process.env.DD_APP_KEY = 'dd-app';
   process.env.PROMETHEUS_URL = 'https://prom.internal';

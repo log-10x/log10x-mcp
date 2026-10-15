@@ -76,7 +76,7 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
     : `# Metrics backend not configured`;
   const opening = configureEnvClosed
     ? `This session is attached READ-ONLY to the public 10x demo dataset (same data as the website console). \`${callingTool}\` is held back here so it runs against the user's OWN environment, not the shared demo account.`
-    : `The MCP has no metrics backend configured for this session — \`${callingTool}\` cannot query metrics until one is set up.`;
+    : `The MCP has no metrics backend configured for this session: \`${callingTool}\` cannot query metrics until one is set up.`;
   return [
     header,
     '',
@@ -85,14 +85,14 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
     ...demoPreamble,
     `**To set up**: ask the user where their 10x engine ships metrics, then call \`log10x_configure_env\` with the corresponding \`metricsBackend\` config. Supported backend kinds:`,
     '',
-    `- \`log10x\` — the hosted Log10x metrics backend at \`prometheus.log10x.com\`. Needs: \`apiKey\`, \`envId\`. Use when the customer is comfortable with their telemetry going to the Log10x SaaS endpoint.`,
-    `- \`prometheus\` — any self-hosted Prometheus instance. Needs: \`url\`, \`auth\` (\`{ type: 'none' | 'bearer' | 'basic' | 'header', ... }\`). The most common choice for enterprise customers with strict data-residency requirements.`,
-    `- \`mimir\` — Grafana Mimir. Needs: \`url\`, \`auth\`, optional \`orgId\` (sent as \`X-Scope-OrgID\`).`,
-    `- \`cortex\` — Cortex (multi-tenant Prometheus). Needs: \`url\`, \`auth\`, required \`orgId\`.`,
-    `- \`amp\` — AWS Managed Prometheus. Needs: \`url\` (workspace URL), \`region\`. Auth resolves from the ambient AWS credential chain (\`AWS_PROFILE\` / IAM role / SSO / env vars).`,
-    `- \`datadog\` — Datadog (via its Prometheus-compatible API). Needs: \`site\` (e.g., \`us5.datadoghq.com\`), \`apiKey\`, \`appKey\`.`,
-    `- \`grafana_cloud_prom\` — Grafana Cloud Prometheus. Needs: \`url\`, \`user\` (instance ID), \`apiKey\`.`,
-    `- \`gcp_managed_prom\` — GCP Managed Prometheus. Needs: \`url\`, \`projectId\`. Auth resolves from the ambient Google SDK chain (\`GOOGLE_APPLICATION_CREDENTIALS\`).`,
+    `- \`log10x\`: the hosted Log10x metrics backend at \`prometheus.log10x.com\`. Needs: \`apiKey\`, \`envId\`. Use when the customer is comfortable with their telemetry going to the Log10x SaaS endpoint.`,
+    `- \`prometheus\`: any self-hosted Prometheus instance. Needs: \`url\`, \`auth\` (\`{ type: 'none' | 'bearer' | 'basic' | 'header', ... }\`). The most common choice for enterprise customers with strict data-residency requirements.`,
+    `- \`mimir\`: Grafana Mimir. Needs: \`url\`, \`auth\`, optional \`orgId\` (sent as \`X-Scope-OrgID\`).`,
+    `- \`cortex\`: Cortex (multi-tenant Prometheus). Needs: \`url\`, \`auth\`, required \`orgId\`.`,
+    `- \`amp\`: AWS Managed Prometheus. Needs: \`url\` (workspace URL), \`region\`. Auth resolves from the ambient AWS credential chain (\`AWS_PROFILE\` / IAM role / SSO / env vars).`,
+    `- \`datadog\`: Datadog (via its Prometheus-compatible API). Needs: \`site\` (e.g., \`us5.datadoghq.com\`), \`apiKey\`, \`appKey\`.`,
+    `- \`grafana_cloud_prom\`: Grafana Cloud Prometheus. Needs: \`url\`, \`user\` (instance ID), \`apiKey\`.`,
+    `- \`gcp_managed_prom\`: GCP Managed Prometheus. Needs: \`url\`, \`projectId\`. Auth resolves from the ambient Google SDK chain (\`GOOGLE_APPLICATION_CREDENTIALS\`).`,
     '',
     `**Required follow-up by the agent**:`,
     '',
@@ -123,22 +123,22 @@ export function renderNotConfigured(opts: NotConfiguredOptions): string {
  */
 function renderDemoNotConfigured(callingTool: string): string {
   return [
-    `# Attached to the public demo dataset — \`${callingTool}\` needs your own environment`,
+    `# Attached to the public demo dataset: \`${callingTool}\` needs your own environment`,
     '',
     `This MCP booted without an API key, so it attached READ-ONLY to the public 10x demo dataset. ` +
       `\`${callingTool}\` is gated in that state: returning demo numbers as if they were the user's own ` +
       `is worse than saying nothing.`,
     '',
-    `**To connect the user's own environment** — two paths, both available right now:`,
+    `**To connect the user's own environment**: two paths, both available right now:`,
     '',
-    `1. \`log10x_signin_start\` — the Log10x device flow. Returns a verification URL and a code for the ` +
+    `1. \`log10x_signin_start\`: the Log10x device flow. Returns a verification URL and a code for the ` +
       `user to enter; then call \`log10x_signin_complete\`. On success the MCP reloads against their ` +
       `account and \`${callingTool}\` works.`,
     `2. Set \`LOG10X_API_KEY\` in the MCP server's environment (from https://console.log10x.com) and ` +
       `restart the MCP. Use this when the user already has a key.`,
     '',
     `**Do not call \`log10x_configure_env\` here.** It configures a metrics backend on the account, so it ` +
-      `is denylisted against the shared demo account and is not in this session's tool list — the call ` +
+      `is denylisted against the shared demo account and is not in this session's tool list: the call ` +
       `returns "no such tool". It becomes available once signed in.`,
     '',
     `**What still works on the demo dataset**: \`log10x_baseline\`, \`log10x_start\`, \`log10x_doctor\`, ` +

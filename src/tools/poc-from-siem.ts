@@ -9,6 +9,7 @@
  * callers can track a long-running pull without blocking the MCP loop.
  */
 
+import { receiverRecordBytes } from '../lib/local-file-source.js';
 import { randomUUID } from 'crypto';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -74,7 +75,7 @@ export const pocFromSiemSubmitSchema = {
     .string()
     .default('14d')
     .describe(
-      'Window to pull over. Accepts "1h", "24h", "7d", "14d", "30d". Default "14d" — wide windows ' +
+      'Window to pull over. Accepts "1h", "24h", "7d", "14d", "30d". Default "14d": wide windows ' +
         'unlock the differentiated longitudinal signals (first-seen, growth, stable-vs-new) that the ' +
         'agent cannot compute from a small sample. Pull pacing is automatic; long windows take ' +
         'minutes but the snapshot continues in the background.'
@@ -98,7 +99,7 @@ export const pocFromSiemSubmitSchema = {
     .default(1_000_000)
     .describe(
       'Target event count for the pull. Default 1,000,000 (~500 MB at 500B avg, tokenizes in 5-10 min). ' +
-        'The pull self-terminates earlier on saturation — when new patterns per 100k events drops below ' +
+        'The pull self-terminates earlier on saturation: when new patterns per 100k events drops below ' +
         '2%, the long tail has been covered and the report is generated. This default is intentionally ' +
         'two orders of magnitude beyond what an unaided agent can fit in context.'
     ),
@@ -123,11 +124,11 @@ export const pocFromSiemSubmitSchema = {
     .optional()
     .describe(
       'Customer\'s total daily log volume in GB/day. Pick any one of total_daily_gb / total_monthly_gb / ' +
-        'total_annual_gb — whichever unit the user naturally thinks in. The tool normalizes to daily ' +
+        'total_annual_gb: whichever unit the user naturally thinks in. The tool normalizes to daily ' +
         'internally. When any is provided (or auto_detect_volume succeeds), per-pattern costs are ' +
         'extrapolated from the pulled sample to the full volume, producing meaningful annual-savings ' +
         'figures instead of sub-cent numbers. Priority: daily > monthly > annual. If the pull was ' +
-        'narrowed via `query` to one service, this overstates cost — only a fraction of daily volume ' +
+        'narrowed via `query` to one service, this overstates cost: only a fraction of daily volume ' +
         'matches the filter.'
     ),
   total_monthly_gb: z
@@ -157,8 +158,8 @@ export const pocFromSiemSubmitSchema = {
     .default(true)
     .describe(
       'Default true: use MCP sampling to ask the host LLM (the same model the user is already ' +
-        'chatting with — Claude Desktop, Claude Code, Cursor, etc.) to batch-generate 3-5-word ' +
-        'human-readable names for the top patterns. No Log10x-side endpoint, no extra API key — ' +
+        'chatting with: Claude Desktop, Claude Code, Cursor, etc.) to batch-generate 3-5-word ' +
+        'human-readable names for the top patterns. No Log10x-side endpoint, no extra API key: ' +
         'the host uses whatever model + credentials the user already has. Sends only templated ' +
         'pattern identities (no variable values, no raw log content). Skipped automatically when ' +
         'the host does not advertise the `sampling` capability; the report falls back to raw ' +
@@ -185,7 +186,7 @@ export const pocFromSiemSubmitSchema = {
     .max(32000)
     .default(8000)
     .describe('Output token cap for the host-agent enrichment call. Default 8000.'),
-  environment: z.string().optional().describe('Optional environment nickname — cosmetic only, for the report header.'),
+  environment: z.string().optional().describe('Optional environment nickname: cosmetic only, for the report header.'),
   target_percent_reduction: z
     .number()
     .min(0)
@@ -206,6 +207,15 @@ export const pocFromSiemSubmitSchema = {
         'are pinned to pass on the envelope outputs and their bytes are subtracted from the achievable ' +
         'reduction pool used for the feasibility verdict.'
     ),
+  record_overhead_bytes: z
+    .number()
+    .int()
+    .min(0)
+    .max(100_000)
+    .optional()
+    .describe(
+      'Bytes of forwarder metadata per record. The Receiver counts each record as the forwarder sends it, metadata included, and events read back from a SIEM\'s API seldom carry that record, so the caps add this to every event. Default 760, the median of a Fluent Bit kubernetes record on an EKS capture.'
+    ),
   pin_services: z
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
@@ -218,12 +228,12 @@ export const pocFromSiemSubmitSchema = {
     .record(z.string(), z.enum(['pass','sample','compact','tier_down','offload','drop']))
     .optional()
     .describe(
-      'Advanced — most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
+      'Advanced: most customers will not need this. Map of pattern_hash to action for rare per-pattern ' +
         'overrides within a service. Applied AFTER pin_services. Use only when a single pattern inside an ' +
         'otherwise-reducible service must be excepted (e.g., audit-trail log line inside a chatty service).'
     ),
   // ClickHouse-specific
-  clickhouse_table: z.string().optional().describe('[ClickHouse] Required — table name holding log events.'),
+  clickhouse_table: z.string().optional().describe('[ClickHouse] Required: table name holding log events.'),
   clickhouse_timestamp_column: z.string().optional().describe('[ClickHouse] Column holding the timestamp. Default auto-detected.'),
   clickhouse_message_column: z.string().optional().describe('[ClickHouse] Column holding the message body. Default auto-detected.'),
   clickhouse_service_column: z.string().optional().describe('[ClickHouse] Optional column for service name.'),
@@ -239,7 +249,7 @@ export const pocFromSiemStatusSchema = {
       "How to surface the report. Default `summary` returns the v2 structured envelope " +
         '(`data.result` carries the full JSON: input section with scale + methodology + ' +
         'coverage, output section with aggregates, incidents, per-pattern actions). ' +
-        'The agent reads this directly and writes prose in its own voice — no rendered ' +
+        'The agent reads this directly and writes prose in its own voice: no rendered ' +
         'markdown is included in the summary path. Use `markdown` to receive the rendered ' +
         '9-section markdown report (legacy / human-readable surface). `yaml` returns ' +
         'paste-ready receiver mute-file entries; `configs` returns native SIEM exclusion ' +
@@ -372,6 +382,8 @@ function retain(s: Snapshot): void {
 
 export interface PocSubmitArgs {
   siem?: (typeof SIEM_ENUM)[number];
+  /** Forwarder metadata bytes per record assumed for events that do not carry the forwarder's record. */
+  record_overhead_bytes?: number;
   window: string;
   scope?: string;
   query?: string;
@@ -518,7 +530,7 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
   if (siemDetectedNote) planParts.push(siemDetectedNote);
 
   const out = [
-    '## Log10x POC — submit accepted',
+    '## Log10x POC: submit accepted',
     '',
     `**snapshot_id**: \`${snapshot.id}\``,
     `**siem_detected**: ${connector.id}`,
@@ -528,15 +540,15 @@ async function executePocSubmitInner(args: PocSubmitArgs): Promise<string> {
     '',
     '### Phases',
     '',
-    `1. \`pulling\` — fetching events from ${SIEM_DISPLAY_NAMES[connector.id]} (typical 1-3 min)`,
-    `2. \`analyzing\` — extracting patterns from the sample (typical 3-8 min depending on event count)`,
-    `3. \`rendering\` — building the final report (<5s)`,
-    `4. \`complete\` — full report available; call status with \`view: "summary"\` (default), \`"yaml"\`, \`"configs"\`, \`"top"\`, or \`"pattern"\`.`,
+    `1. \`pulling\`: fetching events from ${SIEM_DISPLAY_NAMES[connector.id]} (typical 1-3 min)`,
+    `2. \`analyzing\`: extracting patterns from the sample (typical 3-8 min depending on event count)`,
+    `3. \`rendering\`: building the final report (<5s)`,
+    `4. \`complete\`: full report available; call status with \`view: "summary"\` (default), \`"yaml"\`, \`"configs"\`, \`"top"\`, or \`"pattern"\`.`,
     '',
     '### Polling',
     '',
     `Call \`log10x_poc_from_siem_status({snapshot_id: "${snapshot.id}"})\` every ~30s while the pipeline runs.`,
-    `During \`analyzing\`, the snapshot exposes \`partialPatternsFound\` — when that number stabilizes, the engine is winding down and the report is close to ready.`,
+    `During \`analyzing\`, the snapshot exposes \`partialPatternsFound\`: when that number stabilizes, the engine is winding down and the report is close to ready.`,
     `Hard ceiling on pull time: ${args.max_pull_minutes} min (per the submit \`max_pull_minutes\` arg).`,
   ].join('\n');
 
@@ -751,7 +763,7 @@ export async function executePocStatus(args: PocStatusArgs): Promise<import('../
         ? [offer.action]
         : []
       : s.status === 'failed'
-        ? [{ tool: 'log10x_poc_from_siem_submit', args: {}, reason: 'POC failed — resubmit with adjusted args' }]
+        ? [{ tool: 'log10x_poc_from_siem_submit', args: {}, reason: 'POC failed: resubmit with adjusted args' }]
         : [{ tool: 'log10x_poc_from_siem_status', args: { snapshot_id: s.id }, reason: 'continue polling every ~30s until status=complete' }],
   });
 }
@@ -791,7 +803,7 @@ async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
         case 'pattern':
           if (!args.pattern) {
             throw new Error(
-              'view="pattern" requires a `pattern` arg — pass the snake_case identity from a prior view (e.g., from the top drivers table).'
+              'view="pattern" requires a `pattern` arg: pass the snake_case identity from a prior view (e.g., from the top drivers table).'
             );
           }
           body = renderPocPattern(ri, args.pattern);
@@ -812,7 +824,7 @@ async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
 
   if (s.status === 'failed') {
     const lines: string[] = [];
-    lines.push('## POC — failed');
+    lines.push('## POC: failed');
     lines.push('');
     lines.push(`**snapshot_id**: \`${s.id}\``);
     lines.push(`**error**: ${s.error}`);
@@ -828,7 +840,7 @@ async function executePocStatusInner(args: PocStatusArgs): Promise<string> {
 
   // In-progress
   const lines = [
-    '## POC — in progress',
+    '## POC: in progress',
     '',
     `**snapshot_id**: \`${s.id}\``,
     `**status**: ${s.status}`,
@@ -1026,6 +1038,12 @@ export async function runPipeline(
       // The Datadog report sets native index filters against the plan, which
       // needs each pattern's events by service, status and parsed attribute.
       cells: connector.id === 'datadog',
+      // The Receiver's unit: a pulled event that carries the forwarder's
+      // record (a CloudWatch export of fluentd JSON, an Elasticsearch
+      // document) is measured; any other is its text plus the assumed
+      // metadata per record, stated with the caps.
+      ...receiverRecordBytes(pullResult.events),
+      ...(args.record_overhead_bytes !== undefined ? { recordOverheadBytes: args.record_overhead_bytes } : {}),
     });
   } catch (e) {
     snapshot.status = 'failed';

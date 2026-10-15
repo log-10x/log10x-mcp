@@ -51,7 +51,7 @@ export const dependencyCheckSchema = {
     .enum(['datadog', 'splunk', 'elasticsearch', 'cloudwatch'])
     .optional()
     .describe(
-      'SIEM vendor to scan. Omit to auto-detect from ambient credentials (DD_API_KEY+DD_APP_KEY → datadog; SPLUNK_HOST+SPLUNK_TOKEN → splunk; ELASTIC_URL → elasticsearch; AWS chain → cloudwatch). When multiple SIEMs are configured, the tool returns an "ambiguous" error listing them — pass vendor= to disambiguate. When the resolved SIEM has live credentials the scan runs in-process and returns actual dashboard/alert/saved-search names + URLs; otherwise the tool falls back to a paste-ready bash command.'
+      'SIEM vendor to scan. Omit to auto-detect from ambient credentials (DD_API_KEY+DD_APP_KEY → datadog; SPLUNK_HOST+SPLUNK_TOKEN → splunk; ELASTIC_URL → elasticsearch; AWS chain → cloudwatch). When multiple SIEMs are configured, the tool returns an "ambiguous" error listing them: pass vendor= to disambiguate. When the resolved SIEM has live credentials the scan runs in-process and returns actual dashboard/alert/saved-search names + URLs; otherwise the tool falls back to a paste-ready bash command.'
     ),
   service: z.string().optional().describe('Service name to scope the scan'),
   severity: z.string().optional().describe('Severity level'),
@@ -132,7 +132,7 @@ function buildHumanSummary(d: DependencyCheckSummary): string {
   }
   const count = d.dependencies.length;
   const verdict = d.safe_to_drop_recommendation;
-  return `Scanned ${d.vendor ?? 'analyzer'} for dependencies on \`${d.pattern}\` and found ${count} matching ${count === 1 ? 'dependency' : 'dependencies'}. Verdict: ${verdict}${verdict === 'blocked' ? ' — review the listed dashboards / alerts / saved searches before mute or drop.' : verdict === 'safe' ? ' — no literal references in what was scanned; queries that filter by slice (service, index, severity) can still include these events without naming them.' : '.'}`;
+  return `Scanned ${d.vendor ?? 'analyzer'} for dependencies on \`${d.pattern}\` and found ${count} matching ${count === 1 ? 'dependency' : 'dependencies'}. Verdict: ${verdict}${verdict === 'blocked' ? ': review the listed dashboards / alerts / saved searches before mute or drop.' : verdict === 'safe' ? ': no literal references in what was scanned; queries that filter by slice (service, index, severity) can still include these events without naming them.' : '.'}`;
 }
 
 export async function executeDependencyCheck(args: DependencyCheckArgs): Promise<import('../lib/output-types.js').StructuredOutput> {
@@ -202,7 +202,7 @@ export async function executeDependencyCheck(args: DependencyCheckArgs): Promise
     d.safe_to_drop_recommendation === 'safe'
       ? 'no literal references found in what was scanned'
       : d.safe_to_drop_recommendation === 'blocked'
-        ? 'referenced — review before acting'
+        ? 'referenced: review before acting'
         : 'unverifiable';
   const headline = `${patternNotFoundWarning}\`${d.pattern}\`: ${d.dependencies.length} dependencies found in ${d.vendor ?? 'analyzer'} (${verdictLabel})`;
 
@@ -276,7 +276,7 @@ async function executeDependencyCheckInner(args: DependencyCheckArgs, sumOut?: {
       };
     }
     return [
-      'Dependency Check — vendor required',
+      'Dependency Check: vendor required',
       '',
       `No SIEM credentials detected and no \`vendor\` arg supplied. Pass \`vendor=<name>\` (one of: ${DEP_CHECK_VENDORS.join(', ')}) to generate a paste-ready scan command, or set credentials for one of the supported SIEMs and re-run for an in-process scan.`,
       '',
@@ -402,11 +402,11 @@ function renderBashFallback(
   ].join('\n');
 
   const lines: string[] = [];
-  lines.push(`Dependency Check — ${vc.label} (paste-ready)`);
+  lines.push(`Dependency Check: ${vc.label} (paste-ready)`);
   lines.push('');
   if (!wasExplicit && detectedNote) lines.push(`_${detectedNote}_`);
   lines.push(
-    `In-process scan unavailable (${whyFallback}). Falling back to a paste-ready bash command — runs locally, read-only, against your own credentials.`
+    `In-process scan unavailable (${whyFallback}). Falling back to a paste-ready bash command: runs locally, read-only, against your own credentials.`
   );
   lines.push('');
   // User-facing fact: the tool didn't run yet. Critical to surface so the
@@ -417,7 +417,7 @@ function renderBashFallback(
   // Agent-only constraint: don't fabricate "zero dependencies" before the
   // user pastes results back.
   lines.push(agentOnly(
-    `Constraint: do not report "zero dependencies" or "safe to drop" based on this output — wait for the user to paste the script's results back.` // verdict-lint-ok: anti-verdict constraint, instructs the agent AGAINST asserting safe-to-drop (the audit credited dependency_check for already modeling this)
+    `Constraint: do not report "zero dependencies" or "safe to drop" based on this output, wait for the user to paste the script's results back.` // verdict-lint-ok: anti-verdict constraint, instructs the agent AGAINST asserting safe-to-drop (the audit credited dependency_check for already modeling this)
   ));
   lines.push('');
   lines.push(
@@ -428,7 +428,7 @@ function renderBashFallback(
   lines.push('');
   lines.push(cmd);
   lines.push('');
-  lines.push('Runs locally — reads your SIEM config (read-only). No data sent to Log10x.');
+  lines.push('Runs locally: reads your SIEM config (read-only). No data sent to Log10x.');
   lines.push('Source: https://github.com/log-10x/siem-check');
 
   return lines.join('\n');

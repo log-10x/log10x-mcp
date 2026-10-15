@@ -28,7 +28,7 @@ import { resolvePatternHashFromMetrics } from '../lib/resolve-pattern-hash.js';
 import { resolveVolumeLens, volumeLensDisclosure, type VolumeLensResolution } from '../lib/volume-lens.js';
 
 export const trendSchema = {
-  pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash — pattern_hash is preferred when available (skips a metrics lookup).'),
+  pattern: z.string().optional().describe('Pattern name (e.g., "Payment_Gateway_Timeout"). Provide either pattern or pattern_hash: pattern_hash is preferred when available (skips a metrics lookup).'),
   pattern_hash: z.string().optional().describe('The tenx_hash of the pattern (11-char stable identity from top_patterns / preview_filter). Preferred over pattern when available.'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. '24h' and '1d' are equivalent (one-day window). Sub-day values show fine-grained trajectory around an incident."),
   step: z
@@ -45,7 +45,7 @@ export const trendSchema = {
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),
-  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary" — the structured envelope. Field retained for backward-compat.'),
+  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary": the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
   // dropped flag. Three states: `kept` (default) = events that actually
   // reached the destination (selector `routeState=~"pass|"`, absence-tolerant
@@ -287,7 +287,7 @@ export async function executeTrend(
       value: p.bytes,
     }));
     const png = await renderTimeseries(points, {
-      title: `${d.pattern} — bytes/sec over ${d.window}`,
+      title: `${d.pattern}: bytes/sec over ${d.window}`,
       yLabel: 'bytes/sec',
       lineColor: d.spike_detected ? '#ef4444' : '#1e88e5',
     });
@@ -361,7 +361,7 @@ export async function executeTrend(
     trendActions.push({
       tool: 'log10x_pattern_examples',
       args: { pattern_hash: d.pattern_hash },
-      reason: "content/slot angle — real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
+      reason: "content/slot angle: real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
       role: 'recommended-next',
     });
   } else if (d.pattern) {
@@ -370,7 +370,7 @@ export async function executeTrend(
     trendActions.push({
       tool: 'log10x_pattern_examples',
       args: { pattern: d.pattern },
-      reason: "content/slot angle — real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
+      reason: "content/slot angle: real events + slot variations for this pattern (the WHAT to pair with trend's WHEN)",
       role: 'recommended-next',
     });
   }
@@ -763,13 +763,13 @@ async function executeTrendInner(
     lines.push('');
     lines.push(agentOnly(
       `Inflection or spike detected. Suggested next calls: ` +
-      `Trace the cause — log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
-      `Find which customer metrics moved with the spike — log10x_metrics_that_moved({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }), then rank with log10x_rank_by_shape_similarity and overlay with log10x_metric_overlay.`
+      `Trace the cause: log10x_investigate({ starting_point: '${pattern}', window: '${timeRange}' }). ` +
+      `Find which customer metrics moved with the spike: log10x_metrics_that_moved({ anchor_type: 'log10x_pattern', anchor: '${pattern}', window: '${timeRange}' }), then rank with log10x_rank_by_shape_similarity and overlay with log10x_metric_overlay.`
     ));
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern, window: timeRange },
-      reason: spikePoint ? 'spike detected — trace the cause' : 'elevated vs baseline — trace the cause',
+      reason: spikePoint ? 'spike detected: trace the cause' : 'elevated vs baseline: trace the cause',
     });
     nextActions.push({
       tool: 'log10x_metrics_that_moved',
@@ -785,7 +785,7 @@ async function executeTrendInner(
     nextActions.push({
       tool: 'log10x_investigate',
       args: { starting_point: pattern, window: '30d' },
-      reason: 'gradual drift — slope-similarity cohort analysis',
+      reason: 'gradual drift: slope-similarity cohort analysis',
     });
   }
   // Always offer baseline next steps — even a STABLE trend is not a

@@ -209,7 +209,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         name: 'environment_config',
         status: 'fail',
         message:
-          `**DEMO FALLBACK** — ${process.env.LOG10X_API_KEY && process.env.LOG10X_API_KEY !== DEMO_ENV.apiKey && !isDemoFallbackActive() ? 'your configured LOG10X_API_KEY failed validation, so ' : ''}the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
+          `**DEMO FALLBACK**: ${process.env.LOG10X_API_KEY && process.env.LOG10X_API_KEY !== DEMO_ENV.apiKey && !isDemoFallbackActive() ? 'your configured LOG10X_API_KEY failed validation, so ' : ''}the MCP is running against the public Log10x demo env (read-only). Reason: ${envs.demoFallbackReason.split('\n')[0].slice(0, 300)}. ` +
           `All API-hitting tools will return demo data, NOT your account. ` +
           `${envs.all.length} demo env${envs.all.length === 1 ? '' : 's'}: ${summary}. Default: ${envs.default.nickname}.`,
         fix: 'Easiest fix: run `log10x_signin_start` (the model will chain to `log10x_signin_complete` automatically) for the Auth0 Device Flow with GitHub or Google, or call `log10x_signin_complete` directly with `{ api_key: "<key>" }` to paste an existing key from https://console.log10x.com → Profile → API Settings. Either path mints / validates the key and auto-clears the bad `LOG10X_API_KEY` from this MCP server\'s process so the new key takes effect immediately, no host restart needed. Alternatively: re-check `LOG10X_API_KEY` at https://console.log10x.com → Profile → API Settings, update the value in your MCP host\'s config (e.g. claude_desktop_config.json) and fully restart the host. Or unset `LOG10X_API_KEY` entirely to keep demo mode without the warning. See `log10x_login_status` for the full breakdown.',
@@ -230,7 +230,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
         name: 'environment_config',
         status: 'warn',
         message:
-          'No environments loaded — the MCP booted in **offline mode** because the log10x gateway was unreachable. ' +
+          'No environments loaded: the MCP booted in **offline mode** because the log10x gateway was unreachable. ' +
           'Local-only tools (POC from local files, install advice, offload/CDK recipes, discovery via your own AWS or kubectl credentials) work normally; ' +
           'anything that queries a metrics backend will report "not configured".',
         fix: 'If this host is meant to reach log10x, allowlist `api.log10x.com` (signin/license) and `prometheus.log10x.com` (hosted metrics), then restart the MCP. If it is deliberately air-gapped, configure a local metrics backend with `log10x_configure_env`, or stay on the local-only tools.',
@@ -314,7 +314,7 @@ export async function runDoctorChecks(envNickname?: string): Promise<DoctorRepor
       perEnvChecks[nickname] = [{
         name: 'metrics_backend_reachable',
         status: 'warn',
-        message: `Per-environment checks for ${nickname} did not complete in time — the metrics backend may be slow or unreachable. Other environments were unaffected.`,
+        message: `Per-environment checks for ${nickname} did not complete in time: the metrics backend may be slow or unreachable. Other environments were unaffected.`,
         fix: `Re-run \`log10x_doctor\` scoped to this env (environment: "${nickname}") once the backend is responsive, or verify connectivity to ${nickname}'s metrics endpoint.`,
       }];
     }
@@ -381,7 +381,7 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
         message:
           `Retriever resolved to a CLUSTER-INTERNAL address via ${retrieverRes.detectionPath}: url=${retrieverRes.url}. ` +
           'That hostname only resolves inside the Kubernetes cluster, and this MCP host is outside it (no KUBERNETES_SERVICE_HOST). ' +
-          'With no SQS query queue registered as a fallback, log10x_retriever_query and log10x_backfill_metric will fail with a connection error — the Retriever may be fully deployed, but its query path is unreachable from here. ' +
+          'With no SQS query queue registered as a fallback, log10x_retriever_query and log10x_backfill_metric will fail with a connection error: the Retriever may be fully deployed, but its query path is unreachable from here. ' +
           'The S3 overflow bucket itself is fine; only the query SERVICE is unreachable.',
         fix:
           'Register the deployed Retriever so the MCP routes via SQS (not the in-cluster HTTP URL): run log10x_retriever_register with the HTTP ingress URL + the 4 SQS queue URLs, or set LOG10X_RETRIEVER_QUERY_QUEUE_URL to the Quarkus query queue. Find the coordinates via log10x_advise_retriever (its preflight lists the live SQS queue URLs). Or run this MCP inside the cluster.',
@@ -406,7 +406,7 @@ async function addInfrastructureChecks(checks: DoctorCheck[]): Promise<void> {
         'The overflow bucket holds the cohort the engine routed out of the stack, so these events are not in the SIEM at any tier. For events the SIEM still holds, query the SIEM directly; do not block on retriever setup.\n' +
         formatRetrieverTrace(retrieverRes.trace),
       fix:
-        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever — https://doc.log10x.com/apps/retriever/',
+        'Options: (a) set __SAVE_LOG10X_RETRIEVER_URL__ + __SAVE_LOG10X_RETRIEVER_BUCKET__ explicitly; (b) expose AWS creds (AWS_REGION + IAM with s3:ListAllMyBuckets) so auto-detect can find a log10x-retriever-* bucket; (c) deploy the Retriever, https://doc.log10x.com/apps/retriever/',
     });
   }
 
@@ -613,7 +613,7 @@ async function addRetrieverCwLoggingCheck(checks: DoctorCheck[]): Promise<void> 
       status: 'warn',
       message:
         `Retriever is installed (release ${namespace}/${releaseName}) but queryLogGroup is not set. ` +
-        'Per-query CloudWatch logging is disabled; dispatcher failures will not appear in CloudWatch — only pod stdout is visible.',
+        'Per-query CloudWatch logging is disabled; dispatcher failures will not appear in CloudWatch: only pod stdout is visible.',
       fix:
         'Set queryLogGroup in your retriever helm values (e.g. `queryLogGroup: log10x-retriever-query-events`) and ensure the IRSA role has logs:CreateLogStream and logs:PutLogEvents on the log group ARN. ' +
         'Call log10x_advise_retriever for the complete helm + IAM snippet.',
@@ -810,8 +810,8 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
             checks.push({
               name: 'severity_distribution',
               status: 'warn',
-              message: `Environment is ${Math.round(infoRatio * 100)}% INFO-severity with ${(errorRatio * 100).toFixed(2)}% error-class (ERROR/WARN/CRIT/FATAL). Two possibilities: (a) services are genuinely healthy, or (b) services aren't emitting error-level logs at all — instrumentation gap. If the latter, real problems won't surface until an incident exposes them.`,
-              fix: 'Verify that at least one of your services has emitted an ERROR or WARN in the last 30 days (pick a service you know has had issues). If the count is zero and you expected otherwise, check your logger configuration — log levels below WARN are sometimes filtered at the forwarder.',
+              message: `Environment is ${Math.round(infoRatio * 100)}% INFO-severity with ${(errorRatio * 100).toFixed(2)}% error-class (ERROR/WARN/CRIT/FATAL). Two possibilities: (a) services are genuinely healthy, or (b) services aren't emitting error-level logs at all, instrumentation gap. If the latter, real problems won't surface until an incident exposes them.`,
+              fix: 'Verify that at least one of your services has emitted an ERROR or WARN in the last 30 days (pick a service you know has had issues). If the count is zero and you expected otherwise, check your logger configuration: log levels below WARN are sometimes filtered at the forwarder.',
             });
           } else if (errorRatio === 0 && total > 0) {
             checks.push({
@@ -917,7 +917,7 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
               name: 'silent_services',
               status: 'warn',
               message: `${quiet.length} service${quiet.length === 1 ? ' is' : 's are'} >100× below the environment median log volume: ${names}. Either genuinely healthy and quiet, OR instrumentation is not reaching the log pipeline (the app may be emitting only OTel spans/traces, not log records). Worth verifying whichever interpretation applies.`,
-              fix: 'For each flagged service: call log10x_top_patterns({service: "<name>"}) to see what patterns it emits. If the patterns are only SDK/runtime boilerplate (service.instance.id, process.runtime.*, host.name), the service is instrumented for traces but not logs — add a logger.info/warn call on a business-event code path. If the patterns include application events, the service is genuinely quiet and this is a healthy signal.',
+              fix: 'For each flagged service: call log10x_top_patterns({service: "<name>"}) to see what patterns it emits. If the patterns are only SDK/runtime boilerplate (service.instance.id, process.runtime.*, host.name), the service is instrumented for traces but not logs: add a logger.info/warn call on a business-event code path. If the patterns include application events, the service is genuinely quiet and this is a healthy signal.',
             });
           }
         }
@@ -1064,9 +1064,9 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
           checks.push({
             name: 'forwarder_dark_zones',
             status: 'warn',
-            message: `${darkZoneServices.length} services with 24h history have zero volume in the last 15 minutes. This is the signature of a forwarder-level failure — either the fluentd/tenx-edge pipeline is rejecting writes, or the subprocess has stale state from a past remote-write error (GAPS G9). Affected services: ${darkZoneServices.slice(0, 5).join(', ')}${darkZoneServices.length > 5 ? ', ...' : ''}`,
+            message: `${darkZoneServices.length} services with 24h history have zero volume in the last 15 minutes. This is the signature of a forwarder-level failure: either the fluentd/tenx-edge pipeline is rejecting writes, or the subprocess has stale state from a past remote-write error (GAPS G9). Affected services: ${darkZoneServices.slice(0, 5).join(', ')}${darkZoneServices.length > 5 ? ', ...' : ''}`,
             fix:
-              'Check forwarder pod logs for "out of order sample" errors (`kubectl logs -n <forwarder-ns> <fluentd-pod> --tail=200 | grep -iE "out of order|400"`). If present, the write path is broken — fix it (see G8 history for the Lambda-side collision). If write errors are absent but volume is still zero, trigger a forwarder restart (`kubectl rollout restart ds/<forwarder-ds>`) to clear any stale tenx-edge subprocess state.',
+              'Check forwarder pod logs for "out of order sample" errors (`kubectl logs -n <forwarder-ns> <fluentd-pod> --tail=200 | grep -iE "out of order|400"`). If present, the write path is broken: fix it (see G8 history for the Lambda-side collision). If write errors are absent but volume is still zero, trigger a forwarder restart (`kubectl rollout restart ds/<forwarder-ds>`) to clear any stale tenx-edge subprocess state.',
           });
         }
       }
@@ -1134,10 +1134,10 @@ async function runPerEnvChecks(env: EnvConfig): Promise<DoctorCheck[]> {
             `A quiet hour is the most common cause and is not a fault: the probe only reads events the Receiver actually offloaded, so an environment with no offload activity in the last hour reads 0 here while healthy. ` +
             `Do not conclude the index is stale without checking object recency first.`,
           fix:
-            'In order, cheapest first: (1) `aws s3 ls s3://<retriever-bucket>/app/ --recursive | tail -5` — if the newest object is older than an hour there is nothing to find and this WARN is expected. ' +
+            'In order, cheapest first: (1) `aws s3 ls s3://<retriever-bucket>/app/ --recursive | tail -5`, if the newest object is older than an hour there is nothing to find and this WARN is expected. ' +
             '(2) Compare against the `offload_delivery` check above: it reads object recency directly, so offload_delivery=pass with this check at 0 means objects are arriving but the read path is not returning them. ' +
             '(3) Only then suspect indexing: confirm index objects exist under the index prefix with timestamps tracking the data objects. ' +
-            '(4) If bytes are read but no events come back, the query envelope carries a diagnostics_funnel — a PARSE_EMPTY verdict there points at the read/parse path, not at the index.',
+            '(4) If bytes are read but no events come back, the query envelope carries a diagnostics_funnel: a PARSE_EMPTY verdict there points at the read/parse path, not at the index.',
         });
       }
     } catch (e) {
@@ -1290,7 +1290,7 @@ async function addConfigLiveCheck(
 
   const FIX: Record<string, string | undefined> = {
     stale:
-      'The engine is not running the cap policy you wrote — it is still polling the ConfigMap, has not reloaded, or is crash-looping. Check the receiver pod (kubectl get pods, restartCount) and its logs; once it reloads, tenx_config_version will match the written generation.',
+      'The engine is not running the cap policy you wrote: it is still polling the ConfigMap, has not reloaded, or is crash-looping. Check the receiver pod (kubectl get pods, restartCount) and its logs; once it reloads, tenx_config_version will match the written generation.',
     unverified:
       'A generation was written but the engine advertises none. Confirm the receiver is deployed with the config-generation stamp (the tenx_config_version enrichment field) and that the metric backend is reachable.',
   };
@@ -1329,7 +1329,7 @@ export function offloadDeliveryFixes(
       : `Could not read the offload bucket. ${storeReadAccessRemedy(store)}`,
     stale: isBlob
       ? 'Blobs exist but none are recent and nothing is being stamped now, so offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.'
-      : 'Offload objects exist but none are recent and nothing is being stamped now — offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.',
+      : 'Offload objects exist but none are recent and nothing is being stamped now: offload looks stopped. Confirm this is intended (offload turned off) vs the forwarder having silently stopped.',
   };
 }
 
@@ -1552,7 +1552,7 @@ async function addEngineCheck(globalChecks: DoctorCheck[]): Promise<void> {
     globalChecks.push({
       name: 'engine_local_tenx',
       status: 'pass',
-      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). The engine runs locally — events never leave the box.`,
+      message: `Local tenx CLI available (${tenxAvailable.version || 'version unknown'}). The engine runs locally: events never leave the box.`,
     });
   } else {
     globalChecks.push({
@@ -1632,7 +1632,7 @@ async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void>
             .map(([k, v]) => `${k}=${String(v).slice(0, 80)}`)
             .join(', ')
         : '';
-      lines.push(`  - ${r.id} (${r.displayName}): ${status}${src}${extra ? ` — ${extra}` : ''}`);
+      lines.push(`  - ${r.id} (${r.displayName}): ${status}${src}${extra ? `: ${extra}` : ''}`);
     }
     const ids = detected.map((d) => d.id).join(', ');
     const overall = detected.length === 1 ? 'pass' : 'warn';
@@ -1879,8 +1879,8 @@ function addNetworkEgressInventory(checks: DoctorCheck[], envs: Environments): v
   }
   const status: CheckStatus = hasLog10x ? 'warn' : 'pass';
   const summary = hasLog10x
-    ? `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. AT LEAST ONE uses kind=log10x — the MCP makes outbound calls to log10x.com for that env's queries.** Move to a self-hosted Prometheus / Mimir / Cortex / AMP / Datadog / Grafana Cloud Prom / GCP Managed Prom to keep telemetry inside your perimeter.`
-    : `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. ZERO outbound calls to log10x.com — every env points at a customer-owned metrics backend.** This is the 100%-disconnect state.`;
+    ? `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. AT LEAST ONE uses kind=log10x: the MCP makes outbound calls to log10x.com for that env's queries.** Move to a self-hosted Prometheus / Mimir / Cortex / AMP / Datadog / Grafana Cloud Prom / GCP Managed Prom to keep telemetry inside your perimeter.`
+    : `**${envs.all.length} env${envs.all.length === 1 ? '' : 's'} configured. ZERO outbound calls to log10x.com: every env points at a customer-owned metrics backend.** This is the 100%-disconnect state.`;
   checks.push({
     name: 'network_egress_inventory',
     status,

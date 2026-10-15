@@ -497,7 +497,7 @@ export function writeRunReport(
   for (const d of acted) byAction.set(d.action, (byAction.get(d.action) ?? 0) + 1);
   const actionMix = [...byAction.entries()].map(([a, n]) => `${n} ${a}`).join(', ') || 'none';
   const lines: string[] = [
-    `# Recurring tick — ${now}`,
+    `# Recurring tick: ${now}`,
     ``,
     `- **Goal**: ${goal}`,
     `- **Scope**: ${scope} · lookback ${policy.lookback_window}`,
@@ -511,11 +511,11 @@ export function writeRunReport(
   ];
   const top = [...acted].sort((a, b) => b.bytes - a.bytes).slice(0, 10);
   if (top.length === 0) {
-    lines.push('(none — every row passed)');
+    lines.push('(none: every row passed)');
   } else {
     for (const d of top) {
       lines.push(
-        `1. \`${d.pattern_hash}\` · ${d.service || '(no service)'} · ${d.severity || '(no severity)'} — ` +
+        `1. \`${d.pattern_hash}\` · ${d.service || '(no service)'} · ${d.severity || '(no severity)'}: ` +
           `${fmtBytes(d.bytes)} (${d.share_pct.toFixed(1)}%) → **${d.action}** (${d.reason})`
       );
     }
@@ -544,7 +544,7 @@ async function commitToConfigPlane(
   const branchName = `log10x-recur-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
 
   const reducedCount = decisions.filter((d) => d.action !== 'pass').length;
-  const commitMsg = `chore(log10x): recurring tick — ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings${basis ? ` (${basis})` : ''}`;
+  const commitMsg = `chore(log10x): recurring tick, ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings${basis ? ` (${basis})` : ''}`;
 
   // Stage the three changed paths.
   const filesToAdd = [
@@ -834,7 +834,7 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   if (Math.abs(deltaPp) < policy.min_delta_pp) {
     const result: TickResult = {
       status: 'no_change',
-      message: `delta ${deltaPp.toFixed(1)}pp is below min_delta_pp=${policy.min_delta_pp} — no change needed`,
+      message: `delta ${deltaPp.toFixed(1)}pp is below min_delta_pp=${policy.min_delta_pp}: no change needed`,
       projected_savings_pct: projectedSavingsPct,
       ...basisField,
       applied_changes: decisions,

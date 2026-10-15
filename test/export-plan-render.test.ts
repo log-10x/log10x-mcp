@@ -115,7 +115,7 @@ for (const c of CASES) {
       script,
       readFileSync(file, 'utf8'),
       `${c.name} export script drifted from its golden. This is the text a customer's security ` +
-        `reviewer reads before running it against their own logs — read the diff, then regenerate ` +
+        `reviewer reads before running it against their own logs: read the diff, then regenerate ` +
         `with UPDATE_EXPORT_PLAN_GOLDEN=1 npm test.`,
     );
   });
@@ -132,7 +132,7 @@ for (const c of CASES) {
       for (const label of ['log10x', 'log-10x', 'tenx', '10x']) {
         assert.ok(
           !labels.includes(label),
-          `${c.name} script names "${host}" — emitted scripts must reach the user's analyzer and nothing else`,
+          `${c.name} script names "${host}": emitted scripts must reach the user's analyzer and nothing else`,
         );
       }
     }

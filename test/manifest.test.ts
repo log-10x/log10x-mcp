@@ -43,7 +43,7 @@ function stubFetchReject(err: Error): void {
   }) as unknown as typeof fetch;
 }
 
-test('loadManifest: happy path — fetches, validates, caches', async () => {
+test('loadManifest: happy path, fetches, validates, caches', async () => {
   const remote: Manifest = {
     manifestVersion: 1,
     tools: { log10x_cost_drivers: { description: 'override desc' } },
@@ -57,7 +57,7 @@ test('loadManifest: happy path — fetches, validates, caches', async () => {
   assert.deepEqual(onDisk, remote);
 });
 
-test('loadManifest: idempotent — second call returns cached singleton without re-fetching', async () => {
+test('loadManifest: idempotent, second call returns cached singleton without re-fetching', async () => {
   let calls = 0;
   globalThis.fetch = (async () => {
     calls++;

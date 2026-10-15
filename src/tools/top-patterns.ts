@@ -66,7 +66,7 @@ export const topPatternsSchema = {
   timeRange: z.string().regex(/^\d+[mhd]$/).default('1h').describe('Time range to aggregate over. Default 1h.'),
   limit: z.number().min(1).max(50).default(10).describe('Number of patterns to return. Default 10.'),
   offset: z.number().min(0).default(0).describe('Skip the first N patterns of the ranked result (for pagination). Default 0.'),
-  analyzerCost: z.number().optional().describe('DEPRECATED — use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
+  analyzerCost: z.number().optional().describe('DEPRECATED: use effective_ingest_per_gb. stack ingestion cost in $/GB. Auto-detected from profile if omitted.'),
   effective_ingest_per_gb: z.number().optional().describe('Customer-supplied $/GB rate used for the dollar overlay. When set, headline tags `rate_source=customer_supplied`. When absent, falls back to the destination default rate (`rate_source=list_price`; a list price only where the vendor sells logs per GB) or omits dollars entirely (`rate_source=unset`).'),
   siemScope: z.string().optional().describe('Ignored: the summary envelope carries no verbatim sample line. Accepted so existing callers still validate.'),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: keep the real volumes, price the $/mo columns at this destination\'s default rates (env-configured rates never cross destinations). Envelope stamps siem_actual vs siem_lens.'),
@@ -87,7 +87,7 @@ export const topPatternsSchema = {
     .default('summary')
     .optional()
     .describe(
-      'Output format. Always "summary" — the structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. Field retained for backward-compat with callers that still pass `view: "summary"`.'
+      'Output format. Always "summary": the structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. Field retained for backward-compat with callers that still pass `view: "summary"`.'
     ),
   // PL-12a — three-way engine-decision cohort filter. Replaces the
   // earlier boolean dropped-flag swap (which could only express
@@ -100,7 +100,7 @@ export const topPatternsSchema = {
     .default('kept')
     .describe(
       'Which engine-decision cohort to scope to. ' +
-      '`kept` (default) = events the engine forwarded as-is (routeState!="drop") — the pre-PL-12 behavior. ' +
+      '`kept` (default) = events the engine forwarded as-is (routeState!="drop"): the pre-PL-12 behavior. ' +
       '`dropped` = events stamped routeState="drop" by the engine (the offload/down-tier cohort). ' +
       '`both` = the pre-decision union; per-row output adds kept_bytes / dropped_bytes / dropped_share_pct. ' +
       'Use `dropped` to verify post-deploy realised savings or to answer "which patterns are we offloading right now". ' +
@@ -348,7 +348,7 @@ export async function executeTopPatterns(
         // State A: routeState label never seen in this env.
         enrichmentState = 'enrichment_not_wired';
         message =
-          'routeState enrichment is not wired on this env\'s Receiver — the receiver does not emit the routeState label. ' +
+          'routeState enrichment is not wired on this env\'s Receiver: the receiver does not emit the routeState label. ' +
           'To enable, ensure the rate-receiver settings.yaml includes \'routeState\' in enrichmentFields (it is on by default), ' +
           'and the engine is on a run-edge release that appends the routeState label on the wire. ' +
           'See docs/cross-pillar-primitives.md for setup details.';
@@ -831,12 +831,12 @@ export async function executeTopPatterns(
   nextActions.push({
     tool: 'log10x_savings',
     args: { timeRange: tf.range },
-    reason: 'projected savings across the env if you act — drop vs compact vs sample',
+    reason: 'projected savings across the env if you act: drop vs compact vs sample',
   });
   nextActions.push({
     tool: 'log10x_whats_changing',
     args: { timeRange: '7d' },
-    reason: 'growth/delta ranking over 7d — what is rising, vs the current-cost ranking shown here',
+    reason: 'growth/delta ranking over 7d: what is rising, vs the current-cost ranking shown here',
   });
 
   if (topActive) {
@@ -1402,11 +1402,11 @@ export async function executeTopPatterns(
           { header: 'Service', align: 'left',   get: (p) => p.service ?? '', max_width: 24 },
           { header: 'Vol/mo',  align: 'right',  get: (p) => p.bytes_display },
           { header: '%',       align: 'right',  get: (p) => p.share_pct_display },
-          { header: 'Trend',   align: 'left',   get: (p) => p.trend_delta_display?.display ?? `${p.trend_delta?.glyph ?? ''} ${p.trend_delta?.label ?? '—'}`.trim() },
-          { header: '$/mo',    align: 'right',  get: (p) => p.cost_per_month_usd_display ?? '—' },
+          { header: 'Trend',   align: 'left',   get: (p) => p.trend_delta_display?.display ?? `${p.trend_delta?.glyph ?? ''} ${p.trend_delta?.label ?? '-'}`.trim() },
+          { header: '$/mo',    align: 'right',  get: (p) => p.cost_per_month_usd_display ?? '-' },
         ],
         {
-          title: `Top patterns — ${tf.label}${args.service ? ` — ${args.service}` : ''}`,
+          title: `Top patterns: ${tf.label}${args.service ? `: ${args.service}` : ''}`,
           footer: patternCountTotal != null && patternCountTotal > dataPatterns.length
             ? `Showing ${dataPatterns.length} of ${patternCountTotal} patterns.${paginationFooter}`
             : undefined,

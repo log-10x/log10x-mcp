@@ -81,7 +81,7 @@ export const overflowContentsSchema = {
     .literal('summary')
     .default('summary')
     .optional()
-    .describe('Output format. Always "summary" — the typed envelope (data.patterns[], data.totals).'),
+    .describe('Output format. Always "summary": the typed envelope (data.patterns[], data.totals).'),
 };
 
 interface OverflowPattern {
@@ -551,12 +551,12 @@ export async function executeOverflowContents(
   } else if (!offloadBucket) {
     // No cap-CSV AND no offload bucket anywhere (env-config or env vars) —
     // bytes are dropped with no archive to land in.
-    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped — no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
+    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} currently soft-dropped: no S3 offload bucket is configured${filterLabel}. Install the Retriever to start archiving these patterns.`;
   } else {
     // Bucket IS configured (via env-config or env-var) but cap-CSV split
     // couldn't be loaded — bytes likely route to S3 but the offload-vs-
     // hard-drop split is unverified.
-    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified — check log10x_doctor${filterLabel}.`;
+    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified: check log10x_doctor${filterLabel}.`;
   }
 
   // Window-coverage caveat. When most or all surfaced rows have degraded

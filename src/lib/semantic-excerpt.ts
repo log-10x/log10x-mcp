@@ -66,10 +66,10 @@ export function semanticExcerpt(
   const out: ExcerptLine[] = [];
 
   if (!logLine) {
-    return [{ tag: 'multi-line', text: '(multi-line JSON; engine grouped this — see pattern_examples for full body)' }];
+    return [{ tag: 'multi-line', text: '(multi-line JSON; engine grouped this: see pattern_examples for full body)' }];
   }
   if (logLine.trim() === '{') {
-    return [{ tag: 'multi-line', text: '(multi-line JSON; engine grouped this — see pattern_examples for full body)' }];
+    return [{ tag: 'multi-line', text: '(multi-line JSON; engine grouped this: see pattern_examples for full body)' }];
   }
 
   // Header line: when the log is in the otelcol "ts\tlevel\tsource\tmsg"

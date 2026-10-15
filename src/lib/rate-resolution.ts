@@ -228,7 +228,7 @@ export function resolveRate(
     rate_per_gb: null,
     source: 'unset',
     disclosure:
-      '(no $/GB rate configured — pass effective_ingest_per_gb, set envs.json analyzerCost, or export LOG10X_ANALYZER_COST)',
+      '(no $/GB rate configured: pass effective_ingest_per_gb, set envs.json analyzerCost, or export LOG10X_ANALYZER_COST)',
     origin: 'none',
   };
 }

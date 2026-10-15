@@ -34,7 +34,7 @@ export const validateSchema = {
     .min(1)
     .max(500)
     .describe(
-      'Sample event lines piped to the pipeline via stdin, one line per event. 3-20 lines is typical. Caller is responsible for generating realistic shapes — e.g., if testing a timestamp filter, include events with timestamps straddling the filter boundary.'
+      'Sample event lines piped to the pipeline via stdin, one line per event. 3-20 lines is typical. Caller is responsible for generating realistic shapes: e.g., if testing a timestamp filter, include events with timestamps straddling the filter boundary.'
     ),
   extra_files: z
     .record(z.string(), z.string())
@@ -46,7 +46,7 @@ export const validateSchema = {
     .string()
     .default('@apps/mcp')
     .describe(
-      'Launch config to invoke. Default `@apps/mcp` — the stdin/stdout scaffold shipped alongside this tool. Set to a different `@apps/...` path (e.g. `@apps/dev`) to exercise a different pipeline shape. The named app MUST be on the CLI config search path.'
+      'Launch config to invoke. Default `@apps/mcp`: the stdin/stdout scaffold shipped alongside this tool. Set to a different `@apps/...` path (e.g. `@apps/dev`) to exercise a different pipeline shape. The named app MUST be on the CLI config search path.'
     ),
   extra_args: z
     .array(z.tuple([z.string(), z.string()]))

@@ -113,7 +113,7 @@ export async function sampleFromKubectl(
   } catch (e) {
     const msg = (e as Error).message;
     if (/ENOENT|not found/i.test(msg)) {
-      notes.push('kubectl binary not found on PATH — install kubectl or set kubectlPath.');
+      notes.push('kubectl binary not found on PATH: install kubectl or set kubectlPath.');
     } else {
       notes.push(`kubectl get pods failed: ${msg.slice(0, 200)}`);
     }
@@ -320,7 +320,7 @@ export async function sampleFromFiles(opts: FileSourceOptions): Promise<LocalSou
   });
 
   if (!opts.paths || opts.paths.length === 0) {
-    notes.push('No paths supplied — pass files, directories, or glob patterns.');
+    notes.push('No paths supplied: pass files, directories, or glob patterns.');
     return empty();
   }
 

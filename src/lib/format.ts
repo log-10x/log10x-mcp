@@ -164,9 +164,9 @@ export function fmtPctRange(low: number, expected: number, high: number): string
 export function fmtDisclosedDollar(
   d: { value: number; source: 'list_price' | 'customer_supplied' | 'unset'; disclosure: string | null } | null | undefined
 ): string {
-  if (d == null) return '—';
+  if (d == null) return '-';
   if (d.source === 'unset') {
-    return `— ${d.disclosure ?? '(no $/GB rate configured)'}`;
+    return `${d.disclosure ?? '(no $/GB rate configured)'}`;
   }
   const head = fmtDollar(d.value);
   return d.disclosure ? `${head} ${d.disclosure}` : head;

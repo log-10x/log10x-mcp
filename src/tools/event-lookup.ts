@@ -34,7 +34,7 @@ import { normalizeTimeRange } from '../lib/time-range.js';
 export const eventLookupSchema = {
   pattern: z.string().optional().describe('Pattern name or search term to look up (e.g., "Payment_Gateway_Timeout"). Omit when passing `pattern_hash` / `tenxHash` instead.'),
   pattern_hash: z.string().optional().describe('Canonical 11-char hash seen on a SIEM / CloudWatch Logs event (e.g. "03ndjreM-sU"). Alias of `tenxHash`; both are accepted. Resolved against the 10x metrics to recover the pattern, then the normal cost/services breakdown is shown.'),
-  tenxHash: z.string().optional().describe('Legacy alias of `pattern_hash`. Both are accepted. Pass either the canonical `pattern_hash` form or this legacy form — they are treated identically.'),
+  tenxHash: z.string().optional().describe('Legacy alias of `pattern_hash`. Both are accepted. Pass either the canonical `pattern_hash` form or this legacy form: they are treated identically.'),
   service: z.string().optional().describe('Service to scope the lookup'),
   timeRange: z.enum(['15m', '1h', '6h', '24h', '1d', '7d', '30d']).default('7d').describe("Time range. Sub-day values for incident-window lookups. '24h' and '1d' are equivalent."),
   analyzerCost: z.number().optional().describe('SIEM ingestion cost in $/GB (deprecated alias of `effective_ingest_per_gb`)'),
@@ -134,7 +134,7 @@ export async function executeEventLookup(
       .filter((l) => l.trim().length > 0 && !l.trim().startsWith('-') && !l.trim().startsWith('|'))
       .join(' ')
       .slice(0, 600);
-    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'event_lookup — no result';
+    const headline = md.split('\n')[0]?.replace(/^##\s*/, '').slice(0, 200) || 'event_lookup: no result';
     return buildChassisEnvelope({
       tool: 'log10x_event_lookup',
       view: 'summary',
@@ -712,7 +712,7 @@ async function formatResults(
       nextActions.push({
         tool: 'log10x_advise_retriever',
         args: {},
-        reason: 'receiver is offloading this pattern but no retriever surface is configured — get the bucket recipe',
+        reason: 'receiver is offloading this pattern but no retriever surface is configured: get the bucket recipe',
       });
     }
   }
@@ -780,7 +780,7 @@ async function formatResults(
     args: { pattern },
     reason: 'real events + slot variations for this pattern (content view)',
   });
-  hints.push(`Reduce the cost of this pattern: log10x_pattern_mitigate({ pattern: '${pattern}' }) — presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
+  hints.push(`Reduce the cost of this pattern: log10x_pattern_mitigate({ pattern: '${pattern}' }): presents drop @ analyzer / drop @ forwarder / mute @ 10x / compact @ 10x, gated on env capabilities.`);
   nextActions.push({
     tool: 'log10x_pattern_mitigate',
     args: { pattern },

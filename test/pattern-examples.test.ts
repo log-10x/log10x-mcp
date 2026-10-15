@@ -134,7 +134,7 @@ test('jaccardSimilarity: array-length variation produces 1.0 (slot count change 
   assert.equal(jaccardSimilarity(a, b), 1);
 });
 
-test('jaccardSimilarity: 0.85 threshold case — 30-token template with 1 token diff', () => {
+test('jaccardSimilarity: 0.85 threshold case, 30-token template with 1 token diff', () => {
   // 29 of 30 tokens overlap → 29/30 ≈ 0.97
   const a = new Set(Array.from({ length: 30 }, (_, i) => `tok${i}`));
   const b = new Set(Array.from({ length: 30 }, (_, i) => (i === 29 ? 'extra' : `tok${i}`)));

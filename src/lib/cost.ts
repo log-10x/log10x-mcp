@@ -458,7 +458,7 @@ export function buildDisclosedDollarValue(
     return { value, source, disclosure: null };
   }
   if (source === 'unset') {
-    return { value, source, disclosure: '(no $/GB rate configured — set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)' };
+    return { value, source, disclosure: '(no $/GB rate configured: set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)' };
   }
   return {
     value,
@@ -685,7 +685,7 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_requires:
       'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0)',
     tier_down_requires:
-      'frozen searchable snapshots — an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
+      'frozen searchable snapshots: an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
     // The one Elasticsearch measurement, taken without pruning, stands in for
     // the pruned mode as a floor: pruning removes more, and that is unmeasured.
     // The unpruned variant (getDestinationCostModel) carries the same figure
@@ -765,12 +765,12 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // 65% saving the platform cannot deliver.
     compact_mode: 'no-op',
     compact_unavailable_reason:
-      'the l1es expander is an Elasticsearch plugin and Elastic Serverless has no plugin surface — compacted events would arrive unreadable',
+      'the l1es expander is an Elasticsearch plugin and Elastic Serverless has no plugin surface: compacted events would arrive unreadable',
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
     tier_down_requires:
-      'the Serverless cost-efficient tier (rate below is derived, not quoted — confirm against your live Serverless price)',
+      'the Serverless cost-efficient tier (rate below is derived, not quoted: confirm against your live Serverless price)',
     // Elastic Serverless DOES offer a cheaper searchable tier (confirmed with
     // product): tier_down routes there, and per the ladder it is taken before
     // offload. Rate is the conservative 0.60 cost-delta on the ingest floor

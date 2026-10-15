@@ -63,7 +63,7 @@ export const costOptionsSchema = {
     .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix', 'elastic-serverless'])
     .optional()
     .describe(
-      'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings — overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
+      'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings: overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
     ),
   siem_lens: z
     .enum(SIEM_LENS_ENUM)
@@ -474,14 +474,14 @@ function renderVerbatim(
     ? overridden
       ? `Target stack: \`${effectiveDestination}\` (overrides detected \`${siemDetected}\`).`
       : `Stack detected: \`${effectiveDestination}\`.`
-    : 'No stack credentials detected — destinations will need to be specified when you pick a mode.';
+    : 'No stack credentials detected: destinations will need to be specified when you pick a mode.';
 
   const isCollapsed = tier === 'dev' || tier === 'reporter';
 
   const modeLines = modes
     .map((m, i) => {
       const gate = m.applicable ? '' : `  _(not available: ${m.gated_reason})_`;
-      return `  ${i + 1}. **${m.id}** — ${m.label}${gate}`;
+      return `  ${i + 1}. **${m.id}**: ${m.label}${gate}`;
     })
     .join('\n');
 
@@ -595,8 +595,8 @@ export async function executeCostOptions(args: {
 
   const mustAskUser: MustAskUser = {
     question:
-      'Pick the enforcement mode that matches what you want — answer with the number from the menu above.',
-    options: modes.map((m, i) => `${i + 1}. ${m.id} — ${m.label}`),
+      'Pick the enforcement mode that matches what you want: answer with the number from the menu above.',
+    options: modes.map((m, i) => `${i + 1}. ${m.id}: ${m.label}`),
   };
 
   const forbidden = buildCostOptionsForbidden();

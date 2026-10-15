@@ -50,7 +50,7 @@ const INTERNAL_LABELS = new Set([
 const FEATURED_LABELS = [
   { name: 'tenx_user_service', hint: 'the service that emitted the log' },
   { name: 'severity_level', hint: 'TRACE / DEBUG / INFO / WARN / ERROR / CRITICAL' },
-  { name: 'message_pattern', hint: 'the stable pattern identity (symbolMessage; its hash is tenx_hash) — the unit of cost attribution' },
+  { name: 'message_pattern', hint: 'the stable pattern identity (symbolMessage; its hash is tenx_hash): the unit of cost attribution' },
   { name: 'tenx_env', hint: 'edge or cloud' },
   { name: 'http_code', hint: 'HTTP response status (100–511)' },
   { name: 'k8s_namespace', hint: 'Kubernetes namespace (from enrichment)' },
@@ -192,7 +192,7 @@ async function executeDiscoverLabelsInner(
     const shown = values.slice(0, limit);
     if (sumOut) sumOut.data = { mode: 'label_values', label: args.label, total_count: values.length, shown_count: shown.length, values: shown };
     const lines: string[] = [];
-    lines.push(`Label "${args.label}" — ${values.length} distinct value${values.length !== 1 ? 's' : ''}${values.length > shown.length ? ` (showing ${shown.length})` : ''}`);
+    lines.push(`Label "${args.label}": ${values.length} distinct value${values.length !== 1 ? 's' : ''}${values.length > shown.length ? ` (showing ${shown.length})` : ''}`);
     lines.push('');
     for (const v of shown) lines.push(`  ${v}`);
     return lines.join('\n');
@@ -229,7 +229,7 @@ async function executeDiscoverLabelsInner(
   const lines: string[] = [];
   lines.push(`Queryable labels (${queryable.length})`);
   lines.push('');
-  lines.push('Featured — use these as filter keys in log10x_top_patterns, log10x_metrics_that_moved, etc.:');
+  lines.push('Featured: use these as filter keys in log10x_top_patterns, log10x_metrics_that_moved, etc.:');
   for (const feat of featuredAvail) {
     lines.push(`  ${feat.name.padEnd(22)} ${feat.hint}`);
   }

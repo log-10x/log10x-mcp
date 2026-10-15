@@ -65,7 +65,7 @@ export const retrieverSeriesSchema = {
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `includes(text, "<pattern_hash>")`, `severity_level == "ERROR"`) are dramatically cheaper. (legacy example removed: `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic — without one, mode selection falls back to window-length only. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
+      'Bloom-filter search expression using the TenX subset. Tightly bound queries (e.g., `includes(text, "<pattern_hash>")`, `severity_level == "ERROR"`) are dramatically cheaper. (legacy example removed: `tenx_user_pattern == "PaymentRetry"`) get the cheapest fetch path. Pattern-bound expressions are also what unlocks the Reporter-driven cost heuristic: without one, mode selection falls back to window-length only. Pass `pattern` instead for the common case of scoping to one Reporter-named pattern.'
     ),
   from: z
     .string()
@@ -86,15 +86,15 @@ export const retrieverSeriesSchema = {
     .string()
     .optional()
     .describe(
-      'Optional enrichment field to group the series by — e.g., `tenx_user_service`, `severity_level`, `k8s_namespace`. Top-1000 group values are retained; tail collapsed to `_other_`.'
+      'Optional enrichment field to group the series by: e.g., `tenx_user_service`, `severity_level`, `k8s_namespace`. Top-1000 group values are retained; tail collapsed to `_other_`.'
     ),
   fidelity: z
     .string()
     .default('auto')
     .describe(
-      '`auto` (tool decides via Reporter volume + window length), `full` (force exact aggregation — may exceed Lambda budget), `per_window_sampled` (force sampling, default K=1000 per sub-window), or `per_window_sampled:K` (custom K).'
+      '`auto` (tool decides via Reporter volume + window length), `full` (force exact aggregation: may exceed Lambda budget), `per_window_sampled` (force sampling, default K=1000 per sub-window), or `per_window_sampled:K` (custom K).'
     ),
-  environment: z.string().optional().describe('Environment nickname — required if multi-env.'),
+  environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
     .default('summary')
@@ -148,7 +148,7 @@ export async function executeRetrieverSeries(
       tool: 'log10x_retriever_series',
       kind: 'retriever',
       remediation:
-        'Retriever runtime is not detected for this env — env vars may be set but no live pods / ELB / svc ' +
+        'Retriever runtime is not detected for this env: env vars may be set but no live pods / ELB / svc ' +
         'answered the discovery probes (snapshot, helm_release_probe, kubectl_probe all came up empty). ' +
         'Run log10x_advise_retriever for the redeploy / wiring recipe.',
     });
@@ -347,7 +347,7 @@ export async function executeRetrieverSeries(
           result.workerFiles === 0 &&
           wallTimeMs > 30_000;
         return degraded
-          ? `${baseHeadline} ⚠ Degraded: wall ${wallTimeMs}ms with 0 worker files suggests timeout/starvation, not a confirmed-empty window — treat as unknown.`
+          ? `${baseHeadline} ⚠ Degraded: wall ${wallTimeMs}ms with 0 worker files suggests timeout/starvation, not a confirmed-empty window: treat as unknown.`
           : baseHeadline;
       })(),
     },
@@ -790,14 +790,14 @@ function buildSeriesHumanSummary(s: {
     const transportBound = wallTimeMs > 30_000 && result.workerFiles === 0;
     if (transportBound) {
       third =
-        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0 — retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale archive index). ` +
+        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0: retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale archive index). ` +
         `Less likely: pattern truly empty in window, OR search expression did not match. Check log10x_doctor retriever_forensic_health.`;
     } else {
       third =
         `Series is empty. Three possible causes (most likely first): ` +
         `(a) the pattern truly produced no events in this window, ` +
         `(b) the search expression did not match the pattern's actual symbol_message, ` +
-        `(c) the retriever returned no rows for an unrelated reason — verify with log10x_retriever_query on the same window.`;
+        `(c) the retriever returned no rows for an unrelated reason: verify with log10x_retriever_query on the same window.`;
     }
   } else {
     third = `Worker files: ${result.workerFiles}.`;

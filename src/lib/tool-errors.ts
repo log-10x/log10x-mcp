@@ -50,7 +50,7 @@ function suggestForTool(toolName: string, msg: string): string | undefined {
       if (/No data found/i.test(msg)) {
         return 'The pattern was not found in this environment. Try `log10x_resolve_batch` with a sample line to see how the engine normalizes it, or call `log10x_discover_labels({ label: \'tenx_user_service\' })` to list known services.';
       }
-      return 'If you pasted a multi-line batch, use `log10x_resolve_batch` instead — event_lookup is for single-line resolution.';
+      return 'If you pasted a multi-line batch, use `log10x_resolve_batch` instead: event_lookup is for single-line resolution.';
 
     case 'log10x_resolve_batch':
       if (/CLI is not installed|tenx/i.test(msg)) {

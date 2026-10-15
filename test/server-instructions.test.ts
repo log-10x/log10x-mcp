@@ -97,7 +97,7 @@ test('instructions carry the review riders: window, ceiling gloss, audit-first, 
   // rollback is stated where the mechanism is stated
   assert.match(SERVER_INSTRUCTIONS, /Reverting that commit IS the rollback/);
   // the skeleton is the unit made visible — rendered whenever a row carries it
-  assert.match(SERVER_INSTRUCTIONS, /skeleton — the template body, \$ slots and all/);
+  assert.match(SERVER_INSTRUCTIONS, /skeleton: the template body, \$ slots and all/);
   assert.match(SERVER_INSTRUCTIONS, /skeleton IS the message type made visible/);
 });
 

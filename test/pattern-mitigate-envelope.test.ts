@@ -75,7 +75,7 @@ test('GA pattern_mitigate: whitespace-only pattern → status=error', async () =
 
 // ── status: no_signal (no env config, no env vars, no snapshot) ──────
 
-test('GA pattern_mitigate: envelope shape — recommendation_audit + status valid for any env state', async () => {
+test('GA pattern_mitigate: envelope shape, recommendation_audit + status valid for any env state', async () => {
   // We can't reliably isolate from the local ~/.log10x/credentials +
   // envs.json that loadEnvironments() reads, so we pin SHAPE (every
   // envelope must have status/basis/audit/sources) not specific values.

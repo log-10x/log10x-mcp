@@ -75,8 +75,8 @@ const DEMO_LICENSE_URL = 'https://api.log10x.com/api/v1/license/demo';
 export function fencedPreMintInstructions(reason: 'missing' | 'expired' = 'missing'): string {
   const opener =
     reason === 'expired'
-      ? 'The licence in TENX_LICENSE_KEY has expired, and the fenced profile never mints a replacement — it has no network. Mint one yourself, outside the fence:'
-      : 'No licence in this container: TENX_LICENSE_KEY is unset, and the fenced profile never mints one — it has no network. Mint it yourself, outside the fence:';
+      ? 'The licence in TENX_LICENSE_KEY has expired, and the fenced profile never mints a replacement: it has no network. Mint one yourself, outside the fence:'
+      : 'No licence in this container: TENX_LICENSE_KEY is unset, and the fenced profile never mints one, it has no network. Mint it yourself, outside the fence:';
   return [
     opener,
     '',
@@ -85,7 +85,7 @@ export function fencedPreMintInstructions(reason: 'missing' | 'expired' = 'missi
     'Put the returned JWT in TENX_LICENSE_KEY on the docker run line and run again.',
     '',
     'The licence is anonymous and lasts 14 days. The engine verifies it offline against an',
-    'embedded public key, so once you have it, nothing needs the network again — which is why',
+    'embedded public key, so once you have it, nothing needs the network again: which is why',
     'minting happens before any log data is in scope rather than at the moment it is needed.',
     'Signed-in customers use their own longer-lived licence in the same variable.',
   ].join('\n');

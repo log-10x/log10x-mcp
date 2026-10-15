@@ -498,7 +498,7 @@ function renderVerbatim(args: {
     });
     lines.push('');
   } else if (siemKind !== 'resolved') {
-    lines.push('Sample events: not available (no stack connector resolved — set LOG10X_METRICS_* or run log10x_discover_env).');
+    lines.push('Sample events: not available (no stack connector resolved, set LOG10X_METRICS_* or run log10x_discover_env).');
     lines.push('');
   } else {
     lines.push(`Sample events: not available (no matching events in the last ${timeRange}; this is normal for bursty patterns with the window outside their burst, or for very low-volume patterns).`);
@@ -730,8 +730,8 @@ export async function executePatternDetail(args: {
   const mustAskUser = {
     question: 'What next?',
     options: [
-      'Back — return to the preview list',
-      'Apply — proceed with applying the mode to this pattern',
+      'Back: return to the preview list',
+      'Apply: proceed with applying the mode to this pattern',
     ],
   };
 
@@ -818,21 +818,21 @@ export async function executePatternDetail(args: {
       {
         tool: 'log10x_preview_filter',
         args: {},
-        reason: 'Back — return to the preview list',
+        reason: 'Back: return to the preview list',
         role: 'alternative',
       },
       {
         tool: 'log10x_configure_engine',
         args: applyArgs,
         reason: services.length > 1
-          ? `Apply with this pattern in the picture (${services.length} services emit this hash — pick a service to scope)`
+          ? `Apply with this pattern in the picture (${services.length} services emit this hash: pick a service to scope)`
           : 'Apply with this pattern in the picture',
         role: 'alternative',
       },
       {
         tool: 'log10x_pattern_examples',
         args: { pattern: patternName ?? args.pattern_hash },
-        reason: 'Bucket sample events by slot value to see if a single slot value dominates (low-cardinality skew) — useful before deciding drop vs sample vs compact.',
+        reason: 'Bucket sample events by slot value to see if a single slot value dominates (low-cardinality skew): useful before deciding drop vs sample vs compact.',
         role: 'optional-followup',
       },
     ],

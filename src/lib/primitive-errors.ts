@@ -144,7 +144,7 @@ export function wrapBackendError(err: unknown): PrimitiveError {
         error_type: 'anchor_not_found',
         retryable: false,
         suggested_backoff_ms: null,
-        hint: `Backend returned HTTP 404 — the queried metric or endpoint does not exist. Original: ${msg.slice(0, 200)}`,
+        hint: `Backend returned HTTP 404: the queried metric or endpoint does not exist. Original: ${msg.slice(0, 200)}`,
       };
     }
   }

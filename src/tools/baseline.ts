@@ -289,7 +289,7 @@ export const baselineSchema = {
     .default('summary')
     .optional()
     .describe(
-      'Output format. Always "summary" — the typed envelope. Field retained for backward-compat with callers that still pass `view: "summary"`.'
+      'Output format. Always "summary": the typed envelope. Field retained for backward-compat with callers that still pass `view: "summary"`.'
     ),
 };
 
@@ -1095,8 +1095,8 @@ function headlineFor(d: BaselineEnvelopeData): string {
     const fut = d.projection_no_action_90d.monthly_usd_in_90d_disclosed;
     // Format raw dollar amounts without the per-value disclosure tail so
     // the parenthetical appears exactly once at the end of the clause.
-    const curAmt  = cur.source === 'unset'  ? '—' : fmtDollar(cur.value);
-    const futAmt  = fut.source === 'unset'  ? '—' : fmtDollar(fut.value);
+    const curAmt  = cur.source === 'unset'  ? '-' : fmtDollar(cur.value);
+    const futAmt  = fut.source === 'unset'  ? '-' : fmtDollar(fut.value);
     // Pick whichever non-null disclosure string is available (both carry the
     // same text when source === 'list_price'; neither fires for customer_supplied).
     // Fall back to the rate resolver's own sentence, which is where the

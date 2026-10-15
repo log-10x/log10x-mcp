@@ -467,7 +467,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       retentionBytes > 0 ? weightedRetentionDays / retentionBytes : 30
     );
     const neverExpireNote =
-      neverExpireCount > 0 ? ` — ${neverExpireCount} group(s) have NEVER_EXPIRE retention; assumed 30d for that subset` : '';
+      neverExpireCount > 0 ? `: ${neverExpireCount} group(s) have NEVER_EXPIRE retention; assumed 30d for that subset` : '';
     // When any log group has NEVER_EXPIRE retention, the 30-day floor
     // is a guess: real ingest could be anywhere from 0.3× (data has
     // accumulated for 90+ days) to 3× (data is much fresher than 30d).

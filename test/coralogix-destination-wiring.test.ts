@@ -53,7 +53,7 @@ test('cost_options -> estimate_savings handoff is not a guaranteed failure', () 
   const accepted = parseField(costOptionsSchema, 'destination', 'coralogix');
   assert.doesNotThrow(
     () => parseField(estimateSavingsSchema, 'destination', accepted),
-    'cost_options accepts a destination estimate_savings refuses — broken handoff'
+    'cost_options accepts a destination estimate_savings refuses: broken handoff'
   );
 });
 
@@ -89,7 +89,7 @@ test('coralogix is priced and modelled consistently across both tables', () => {
   const m = COST_MODEL_BY_DESTINATION.coralogix;
   assert.equal(m.ingest_per_gb, DEFAULT_ANALYZER_COST_PER_GB.coralogix, 'rate tables disagree');
   const tier = m.tier_down_target_tier;
-  assert.ok(tier, 'no tier_down target — estimate_savings would return no delta');
+  assert.ok(tier, 'no tier_down target: estimate_savings would return no delta');
   assert.ok(
     tier.ingest_rate_usd_per_gb < m.ingest_per_gb,
     'target tier must be cheaper than the baseline or tier_down saves nothing'
@@ -107,7 +107,7 @@ test('the advisor never hands a Coralogix operator a marker-stripping config', (
   const strips = [...md.matchAll(/Match\s+(\S+)\s*\n\s*Remove_key\s+routeState/g)].map(m => m[1]);
   assert.ok(strips.length > 0, 'expected at least the offload-path strip');
   for (const tag of strips) {
-    assert.equal(tag, 'tenx.offload', `routeState stripped on '${tag}' — the marker must survive to Coralogix`);
+    assert.equal(tag, 'tenx.offload', `routeState stripped on '${tag}': the marker must survive to Coralogix`);
   }
   assert.match(md, /Coralogix build/, 'must render the Coralogix shipper, not the generic one');
 });

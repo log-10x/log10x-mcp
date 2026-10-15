@@ -64,7 +64,7 @@ test('file-output lane resolves severity like the stdin lane does', { timeout: 3
   assert.ok(r.patterns.length > 0, 'patterns extracted');
   assert.ok(
     r.severityCoverage >= 0.5,
-    `file-output severityCoverage is ${r.severityCoverage.toFixed(3)} — below the report's ` +
+    `file-output severityCoverage is ${r.severityCoverage.toFixed(3)}: below the report's ` +
       `fail-closed floor (0.5). The anchor env vars are not reaching the engine, so the ` +
       `aggregated join misses and every SIEM POC ships "No recommendations."`
   );

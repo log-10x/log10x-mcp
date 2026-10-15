@@ -297,7 +297,7 @@ export async function loadBackendFromEnv(): Promise<CustomerMetricsBackend | und
 export function formatDetectionTrace(trace: BackendResolution['trace']): string {
   if (!trace.length) return '(no detection attempts logged)';
   return trace
-    .map((t) => `  - ${t.path}: ${t.status} — ${t.reason}`)
+    .map((t) => `  - ${t.path}: ${t.status}: ${t.reason}`)
     .join('\n');
 }
 
@@ -388,7 +388,7 @@ function tryDetectGrafanaCloud(): { backend?: CustomerMetricsBackend; reason: st
   if (!url) {
     return {
       reason:
-        'GRAFANA_CLOUD_API_KEY set but no GRAFANA_CLOUD_URL / grafana-cli-config.yaml — unable to infer Prometheus endpoint',
+        'GRAFANA_CLOUD_API_KEY set but no GRAFANA_CLOUD_URL / grafana-cli-config.yaml: unable to infer Prometheus endpoint',
     };
   }
   return {
@@ -440,7 +440,7 @@ function tryDetectDatadog(): { backend?: CustomerMetricsBackend; reason: string 
   if (!appKey) {
     return {
       reason:
-        'DD_API_KEY set but no DD_APP_KEY — Datadog Prometheus read API needs both API and Application keys',
+        'DD_API_KEY set but no DD_APP_KEY: Datadog Prometheus read API needs both API and Application keys',
     };
   }
   const endpoint = `https://api.${site}`;

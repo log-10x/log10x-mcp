@@ -31,7 +31,7 @@ export const deleteEnvSchema = {
     .string()
     .min(1)
     .describe(
-      'The exact display name of the env being deleted. Must match the current `name` (case-sensitive). This is a typo-prevention guard — if it does not match, the tool refuses without calling the backend, and shows the correct name so the LLM can confirm with the user before retrying.'
+      'The exact display name of the env being deleted. Must match the current `name` (case-sensitive). This is a typo-prevention guard: if it does not match, the tool refuses without calling the backend, and shows the correct name so the LLM can confirm with the user before retrying.'
     ),
 };
 
@@ -82,19 +82,19 @@ async function executeDeleteEnvInner(args: { env_id: string; confirm_name: strin
   // with the user) state the env name verbatim. Sloppy matching defeats
   // the purpose.
   if (args.confirm_name !== target.nickname) {
-    const md = '## Confirmation does not match — refusing to delete\n\n' +
+    const md = '## Confirmation does not match: refusing to delete\n\n' +
       `You passed \`confirm_name: "${args.confirm_name}"\` for env \`${args.env_id}\`, but ` +
       `the env's actual name is **${target.nickname}** (case-sensitive). The delete is ` +
-      `cancelled — no backend call was made.\n\n` +
+      `cancelled: no backend call was made.\n\n` +
       `If you really want to delete \`${target.nickname}\`, retry with ` +
       `\`{ "env_id": "${args.env_id}", "confirm_name": "${target.nickname}" }\`. ` +
-      `**Confirm with the user before retrying** — deletion is irrecoverable, including any ` +
+      `**Confirm with the user before retrying**: deletion is irrecoverable, including any ` +
       `metrics history scoped to this env.`;
-    return { ok: false, error: `confirm_name mismatch — expected "${target.nickname}"`, markdown: md };
+    return { ok: false, error: `confirm_name mismatch: expected "${target.nickname}"`, markdown: md };
   }
 
   if (target.permissions && target.permissions !== 'OWNER') {
-    const md = '## Cannot delete — not the owner\n\n' +
+    const md = '## Cannot delete: not the owner\n\n' +
       `Your permission on **${target.nickname}** is \`${target.permissions}\`, not \`OWNER\`. ` +
       `Only the env owner can delete it. Ask the owner (\`${target.owner ?? 'unknown'}\`) ` +
       `to either delete it themselves or transfer ownership to you first.`;

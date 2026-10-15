@@ -36,7 +36,7 @@ test('GenericPromBackend.remoteWriteUrl() returns /api/v1/write', () => {
   assert.equal(b.remoteWriteUrl(), 'https://prom.internal/api/v1/write');
 });
 
-test('DatadogPromBackend.remoteWriteUrl() returns undefined — Datadog uses /api/v2/series instead', () => {
+test('DatadogPromBackend.remoteWriteUrl() returns undefined: Datadog uses /api/v2/series instead', () => {
   const b = new DatadogPromBackend({
     endpoint: 'https://api.datadoghq.com',
     apiKey: 'a',
@@ -45,7 +45,7 @@ test('DatadogPromBackend.remoteWriteUrl() returns undefined — Datadog uses /ap
   assert.equal(b.remoteWriteUrl(), undefined);
 });
 
-test('GcpManagedPrometheusBackend.remoteWriteUrl() returns undefined — GMP has no remote_write path', () => {
+test('GcpManagedPrometheusBackend.remoteWriteUrl() returns undefined: GMP has no remote_write path', () => {
   const b = new GcpManagedPrometheusBackend({
     endpoint: 'https://monitoring.googleapis.com/v1/projects/demo/location/global/prometheus',
     project: 'demo',

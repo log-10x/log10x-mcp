@@ -64,12 +64,13 @@ test('configure_engine divides a tier_down cap by the nodes its container runs o
   ] as never;
   const actions = new Map([['cart', 'tier_down' as const]]);
   const whole = renderCsvDiff(['cart'], undefined, rows, 'tier_down', actions, 'hard');
-  assert.match(whole, /\+cart,9000::/);
+  // Between the kept 9,000 and the moved 50,000, at their geometric mean: sqrt(9000 x 50000) = 21,213.
+  assert.match(whole, /\+cart,21213::/);
   const perNode = renderCsvDiff(
     ['cart'], undefined, rows, 'tier_down', actions, 'hard', undefined,
     resolveEnforcingInstances(['cart'], { discovered: { cart: 3 } }),
   );
-  assert.match(perNode, /\+cart,3000::/);
+  assert.match(perNode, /\+cart,7071::/);
 });
 
 test('POC engine files divide the same way; offload stays at 1 byte', () => {

@@ -407,7 +407,7 @@ async function defaultSubmitRetrieverQuery(req: {
   const envs = await loadEnvironments();
   const env = envs.default ?? envs.all[0];
   if (!env) {
-    throw new Error('No EnvConfig available — set LOG10X_API_KEY + LOG10X_ENV_ID');
+    throw new Error('No EnvConfig available: set LOG10X_API_KEY + LOG10X_ENV_ID');
   }
   const resp = await runRetrieverQuery(env, {
     search: req.search,
@@ -652,7 +652,7 @@ async function assertSqsQueuesDrained(deps: ProbeDeps): Promise<ProbeAssert> {
     return {
       name: 'sqs_queues_drained',
       pass: true,
-      observed: 'sqs:ListQueues unavailable — assert skipped (treat as drained)',
+      observed: 'sqs:ListQueues unavailable: assert skipped (treat as drained)',
     };
   }
   const urls = [...subqueryUrls, ...streamUrls];
@@ -662,7 +662,7 @@ async function assertSqsQueuesDrained(deps: ProbeDeps): Promise<ProbeAssert> {
     return {
       name: 'sqs_queues_drained',
       pass: true,
-      observed: 'no tenx-retriever-subquery / tenx-retriever-stream queues found — skipped',
+      observed: 'no tenx-retriever-subquery / tenx-retriever-stream queues found: skipped',
     };
   }
   let depths: Record<string, number>;
@@ -672,7 +672,7 @@ async function assertSqsQueuesDrained(deps: ProbeDeps): Promise<ProbeAssert> {
     return {
       name: 'sqs_queues_drained',
       pass: true,
-      observed: `sqs:GetQueueAttributes failed on ${urls.length} queue(s) — skipped`,
+      observed: `sqs:GetQueueAttributes failed on ${urls.length} queue(s): skipped`,
     };
   }
   const over = Object.entries(depths).filter(([, d]) => d > 10);

@@ -60,8 +60,8 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
   }
   trace.push(
     envUrl || envBucket
-      ? 'env_var: skipped — only one of the two env vars set'
-      : 'env_var: skipped — neither env var set',
+      ? 'env_var: skipped, only one of the two env vars set'
+      : 'env_var: skipped, neither env var set',
   );
 
   // ── Step 2: snapshot ────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
       // Probe for the service URL in the known namespace.
       const svcResult = await probeKubectlRetrieverSvc(detail.namespace);
       if (svcResult.url) {
-        trace.push(`snapshot: kubectl svc probe succeeded — ${svcResult.reason}`);
+        trace.push(`snapshot: kubectl svc probe succeeded, ${svcResult.reason}`);
         return {
           installed: true,
           url: svcResult.url,
@@ -82,7 +82,7 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
           trace,
         };
       }
-      trace.push(`snapshot: kubectl svc probe did not resolve URL — ${svcResult.reason}; namespace recorded`);
+      trace.push(`snapshot: kubectl svc probe did not resolve URL, ${svcResult.reason}; namespace recorded`);
       // Partial hit: we know the namespace from the snapshot but no URL.
       // Fall through to kubectl_probe (cluster-wide search) which may still
       // find the svc in a different namespace label match.
@@ -96,7 +96,7 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
   // ── Step 3: helm-release discovery (primary, no label dependency) ───────────
   const hResult = await helmReleaseDiscovery();
   if (hResult.url) {
-    trace.push(`helm_release_probe: matched — ${hResult.reason}`);
+    trace.push(`helm_release_probe: matched, ${hResult.reason}`);
     return {
       installed: true,
       url: hResult.url,
@@ -111,7 +111,7 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
   // ── Step 4: kubectl probe (cluster-wide) ────────────────────────────────────
   const kResult = await probeKubectlRetrieverSvcAll();
   if (kResult.url) {
-    trace.push(`kubectl_probe: matched — ${kResult.reason}`);
+    trace.push(`kubectl_probe: matched, ${kResult.reason}`);
     return {
       installed: true,
       url: kResult.url,
@@ -121,7 +121,7 @@ export async function getRetrieverState(snapshot?: DiscoverySnapshot | null): Pr
       trace,
     };
   }
-  trace.push(`kubectl_probe: no service found — ${kResult.reason}`);
+  trace.push(`kubectl_probe: no service found, ${kResult.reason}`);
 
   // ── Step 5: nothing resolved ─────────────────────────────────────────────────
   trace.push('none: retriever not reachable from env vars, snapshot, helm-release probe, or kubectl probe');
@@ -493,7 +493,7 @@ function pickServiceUrl(
     items.find((i) => i.metadata.name.includes('query-handler') || i.metadata.name.endsWith('query')) ??
     (items.length === 1 ? items[0] : undefined);
   if (!qh) {
-    return { reason: `${items.length} retriever-10x service(s) found — none clearly a query-handler` };
+    return { reason: `${items.length} retriever-10x service(s) found: none clearly a query-handler` };
   }
 
   const port = qh.spec?.ports?.[0]?.port ?? 8080;

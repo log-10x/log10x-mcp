@@ -211,7 +211,7 @@ function translate(expr: Expr, sourcePromql: string): string {
   if (isBinaryExpr(expr)) {
     throw new PromQLTranslationError(
       `Binary expressions (${expr.op}) are not yet supported in the PromQL→Datadog translator. ` +
-      `MCP queries use them only inside count() — file an issue with the query.`,
+      `MCP queries use them only inside count(): file an issue with the query.`,
       sourcePromql
     );
   }

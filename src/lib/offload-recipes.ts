@@ -124,7 +124,7 @@ const KEPT_MARKER_NOTE =
 function basePrereqs(p: OffloadParams): string[] {
   return [
     'Engine: the receiver runs with `outputOffload true` (full-text events + `routeState` marker, all events flow back to the forwarder).',
-    `IAM: the forwarder's identity can \`s3:PutObject\` to \`${p.bucket}/${p.prefix ?? DEFAULT_PREFIX}/*\` — see \`forwarderWriteIamPolicy()\` (only the \`offload\` branch needs this grant).`,
+    `IAM: the forwarder's identity can \`s3:PutObject\` to \`${p.bucket}/${p.prefix ?? DEFAULT_PREFIX}/*\`: see \`forwarderWriteIamPolicy()\` (only the \`offload\` branch needs this grant).`,
     'Match the route-state name as a STRING (`routeState == "offload"`, `"tier_down"`, `"drop"`, ...), never a boolean test (the engine writes the action name as a JSON string).',
   ];
 }
@@ -174,7 +174,7 @@ ${p.keepMarkerAtDestination
 
 # drop slice -> SUPPRESSED. The "drop" route has no sink, so Vector discards
 # it: shedding the slice the engine marked as pure noise. (Leaving it
-# unwired is the suppression — do not add a sink here.)
+# unwired is the suppression: do not add a sink here.)
 
 # pass / compact / sample -> your existing SIEM sink (the _unmatched route).
 # compact already carries the engine's encoded bytes on the wire, so no
@@ -475,7 +475,7 @@ function recipeOtelCollector(p: OffloadParams): OffloadRecipe {
   routing:
     default_pipelines: [logs/siem]      # pass/compact/sample fall through here
     table:
-      # context: log is REQUIRED — routeState is a LOG attribute. The default
+      # context: log is REQUIRED, routeState is a LOG attribute. The default
       # resource context never matches it (every event falls through to default).
       - context: log
         condition: attributes["routeState"] == "offload"
@@ -544,7 +544,7 @@ ${p.keepMarkerAtDestination
       'pass/compact/sample fall through to the default SIEM pipeline.',
     prerequisites: [
       ...basePrereqs(p),
-      'Distribution: requires the FULL otelcol-contrib distro (routingconnector + transformprocessor + awss3exporter). A minimal/custom "contrib" build can omit them — verified: a stripped otelcol-contrib had connectors:[] and no transform/awss3.',
+      'Distribution: requires the FULL otelcol-contrib distro (routingconnector + transformprocessor + awss3exporter). A minimal/custom "contrib" build can omit them: verified: a stripped otelcol-contrib had connectors:[] and no transform/awss3.',
       'Routing MUST use `context: log` + `condition` (verified live). `statement: route() where ...` defaults to RESOURCE context and never matches the log attribute, so every event falls through to the SIEM.',
       'tenx_hash is a LOG attribute; `marshaler: body` alone drops it, so the offload pipeline folds attributes into the body (`set(log.body, log.attributes)`). VERIFIED live against MinIO S3: the object is flat JSONL `{"...":...,"tenx_hash":"..."}` with routeState removed (the awss3 body marshaler serializes the kvlist body to a flat JSON object).',
       'Object layout: the awss3 exporter TIME-PARTITIONS the key under the prefix (e.g. `app/year=2026/month=06/day=01/...`), so the Retriever S3->SQS notification must fire recursively under `app/` (it does). Set `s3uploader.s3_partition_format` to flatten the layout if a specific key shape is required.',
@@ -559,7 +559,7 @@ function recipeLogstash(p: OffloadParams): OffloadRecipe {
   const prefix = p.prefix ?? DEFAULT_PREFIX;
   return {
     language: 'ruby',
-    body: `# Route + strip run in filter {} — mutate is a filter plugin and is NOT
+    body: `# Route + strip run in filter {}: mutate is a filter plugin and is NOT
 # valid inside output {}. The route decision is recorded in [@metadata]
 # (logstash-internal, never serialized to a destination), so no routing
 # field leaks into S3 or the SIEM. One branch per stamped action.
@@ -608,7 +608,7 @@ output {
     # <your_cheap_tier_output> { ... }
   } else if [@metadata][tenx_route] == "drop" {
     # SUPPRESSED: no output for the drop slice (the noise the engine shed).
-    # The empty branch is the suppression — nothing is emitted here.
+    # The empty branch is the suppression: nothing is emitted here.
   } else {
     # pass / compact / sample -> your existing SIEM output. compact already
     # carries the engine's encoded bytes on the wire, so no special handling.
@@ -627,7 +627,7 @@ output {
         : 'or the SIEM, and `routeState` is removed before either.'),
     prerequisites: [
       ...basePrereqs(p),
-      'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with routeState), so the strip removes it too — or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
+      'Verified live (logstash 8.x): routing + strip + tenx_hash. Under ECS-compat v8 the json codec adds `[event][original]` holding the raw line (with routeState), so the strip removes it too: or set `pipeline.ecs_compatibility: disabled` on this pipeline.',
     ],
   };
 }
@@ -655,7 +655,7 @@ Route 2  "tenx-tier-down"
 
 Route 3  "tenx-drop"
   Filter:      routeState == 'drop'
-  Output:      devnull           (Cribl's built-in null destination — SUPPRESSED)
+  Output:      devnull           (Cribl's built-in null destination, SUPPRESSED)
   Final:       Yes
 
 Route 4  "siem" (catch-all: pass / compact / sample)
@@ -690,7 +690,7 @@ ${p.keepMarkerAtDestination
       'objects appear on the flush interval, not per event.',
     prerequisites: [
       ...basePrereqs(p),
-      'Logic verified live via `cribl pipe` (Cribl 4.x real expression engine): a Route filter `routeState == \'offload\'` matched the marker, the Eval "Remove fields" dropped routeState on the outputs, tenx_hash kept. This recipe ships as prose, not paste-ready config — build it in the Cribl UI/API. A full single-mode daemon run additionally needs an event-breaker ruleset + a file-monitor source scoped to your input.',
+      'Logic verified live via `cribl pipe` (Cribl 4.x real expression engine): a Route filter `routeState == \'offload\'` matched the marker, the Eval "Remove fields" dropped routeState on the outputs, tenx_hash kept. This recipe ships as prose, not paste-ready config: build it in the Cribl UI/API. A full single-mode daemon run additionally needs an event-breaker ruleset + a file-monitor source scoped to your input.',
     ],
   };
 }
@@ -777,7 +777,7 @@ export function forwarderWriteIamPolicy(params: OffloadParams): ForwarderWriteIa
       'EKS: attach this policy to a role, annotate the forwarder ServiceAccount ' +
       'with `eks.amazonaws.com/role-arn` (IRSA). Non-EKS: attach to the instance ' +
       'profile or supply scoped access keys to the forwarder\'s S3 output. This ' +
-      'is the forwarder WRITE grant — the Retriever\'s own role only READS the ' +
+      'is the forwarder WRITE grant: the Retriever\'s own role only READS the ' +
       'source bucket, so this is a separate, additive permission.',
   };
 }
@@ -1182,7 +1182,7 @@ export function fluentBitCoralogixRecipe(
       'all FILTERs sit on the 10x return path (`Match tenx.*`). Unlike the other ' +
       'recipes this one does NOT strip `routeState`: on Coralogix the marker is ' +
       'what the destination reads. The reason is NOT pipeline order (Coralogix ' +
-      'runs TCO after enrichment, not before) — it is that a byte-budget ' +
+      'runs TCO after enrichment, not before): it is that a byte-budget ' +
       'decision is a property of a STREAM counted in the sidecar, which no ' +
       'per-event destination rule can derive whenever it runs. `severity` is ' +
       'hardcoded to 3 (Info); map it from the event if the policy needs to ' +
@@ -1190,11 +1190,11 @@ export function fluentBitCoralogixRecipe(
       'are mutually exclusive in one policy.',
     prerequisites: [
       ...basePrereqs(p),
-      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`. Do NOT set it to `json` on this path — `json` collapses the record into a single string field and the lua can no longer read `routeState`, which mislabels every event with no error. (The lua below carries a substring fallback for this case, but delimited is the supported shape.)',
+      'Encoding: KEEP the shipped default `fluentbitOutputEncodeType: delimited`. Do NOT set it to `json` on this path: `json` collapses the record into a single string field and the lua can no longer read `routeState`, which mislabels every event with no error. (The lua below carries a substring fallback for this case, but delimited is the supported shape.)',
       'Set `CORALOGIX_SEND_KEY` in the forwarder environment to a Send-Your-Data key for the target team (NOT a user/management key).',
       'TCO policy changes are NOT instant despite the docs saying "changes take effect immediately". Measured on a live tenant: a freshly enabled policy did not affect routing ~60s after enabling, and did ~6min after. Allow several minutes before concluding a policy does not work.',
       'Do NOT add a `record_modifier` that removes `routeState` on this path: it is the field the TCO policy matches.',
-      'The destination-side TCO policy is a SEPARATE apply — see coralogixMonitoringRecipe(). Without it every event stays in High (Frequent Search), which is the documented default when no policy matches.',
+      'The destination-side TCO policy is a SEPARATE apply: see coralogixMonitoringRecipe(). Without it every event stays in High (Frequent Search), which is the documented default when no policy matches.',
     ],
   };
 }
@@ -1353,7 +1353,7 @@ provider "coralogix" {
 # must precede any broader catch-all already in the list.
 resource "coralogix_tco_policies_logs" "tenx" {
   policies = [
-    # FORM A — match the routeState body field directly (provider >= 3.4.0).
+    # FORM A: match the routeState body field directly (provider >= 3.4.0).
     # The engine's marker drives tier selection with no label mapping at all.
     # The \`<v1>\` version prefix is REQUIRED.
     #
@@ -1361,7 +1361,7 @@ resource "coralogix_tco_policies_logs" "tenx" {
     # \`dpxl_expression\` mutually exclusive with \`severities\`. The server is
     # stricter: "Cannot have both rules (applicationRule, subsystemRule,
     # severities) and dpxlExpression". So a dpxl policy CANNOT also be scoped
-    # to an application or subsystem — it is expression-only, evaluated across
+    # to an application or subsystem: it is expression-only, evaluated across
     # everything. Scope it inside the expression instead, e.g.
     #   "<v1> $d.routeState == '${sub}' && $l.applicationname == 'checkout'"
     {
@@ -1370,7 +1370,7 @@ resource "coralogix_tco_policies_logs" "tenx" {
       dpxl_expression = "<v1> $d.routeState == '${sub}'"
     },
 
-    # FORM B — match the subsystem the forwarder lua set from routeState.
+    # FORM B: match the subsystem the forwarder lua set from routeState.
     # Works on every provider version and on the plain HTTP API, which exposes
     # only application / subsystem / severity matchers. Use this if you are
     # pinned below 3.4.0, or keep it as a second entry for defence in depth.
@@ -1389,7 +1389,7 @@ resource "coralogix_tco_policies_logs" "tenx" {
 }`,
     note:
       'Medium (Monitoring) keeps the slice DataPrime-queryable with alerting and ' +
-      'dashboarding, stored in the customer\'s own S3 — so this is a down-tier, ' +
+      'dashboarding, stored in the customer\'s own S3: so this is a down-tier, ' +
       'not an archive, and there is no rehydration step. Data matching no policy ' +
       'stays in High (Frequent Search) by default. ' +
       'VERIFIED BY APPLY on a live US2 tenant (provider 3.8.0, CORALOGIX_ENV=US2): ' +
@@ -1397,7 +1397,7 @@ resource "coralogix_tco_policies_logs" "tenx" {
       'PRIORITY_TYPE_MEDIUM. Form A is verified to FIRE, not merely to create: ' +
       'two events in one request, same application and both on the pass ' +
       'subsystem so no subsystem rule could match, differing only in ' +
-      '`$d.routeState` — the `pass` one stayed in Frequent Search at ' +
+      '`$d.routeState`: the `pass` one stayed in Frequent Search at ' +
       'priorityclass=high, the `tier_down` one was removed. ' +
       'Still UNVERIFIED: that the TCO usage report actually BILLS a matching ' +
       'event at the Medium rate (that data lags and was not checked), and ' +
@@ -1419,7 +1419,7 @@ export function coralogixTcoApiContract(): SiemTierRecipe {
   return {
     target: 'coralogix-tco-api',
     language: 'text',
-    body: `WRITE — atomic overwrite of the ENTIRE policy list (not create-one):
+    body: `WRITE: atomic overwrite of the ENTIRE policy list (not create-one):
 
   PUT https://api.<region>.coralogix.com/mgmt/openapi/5/dataplans/log-policies/v1
   Authorization: Bearer <user key with LOGS.TCO:UPDATEPOLICIES>
@@ -1445,7 +1445,7 @@ WHERE THE PUBLISHED DOCS ARE WRONG (each reproduced independently):
      Omitted -> 400. Empty array -> 500 "failed to create policy". The docs show
      it empty, which cannot work. This does NOT apply to a \`dpxlExpression\`
      policy: that form excludes severities AND rules, and reads back with
-     \`"severities": []\` — so stated unconditionally, this item would make the
+     \`"severities": []\`, so stated unconditionally, this item would make the
      dpxl policy in coralogixMonitoringRecipe() impossible to create.
   3. \`applicationName\` must be absent or COMPLETE. An empty object -> 400.
      The docs show an empty object.
@@ -2706,7 +2706,7 @@ export function renderOffloadSection(
   if (coralogixShipper) {
     const cx = fluentBitCoralogixRecipe({ ...params, domain: '<team>.coralogix.com' });
     lines.push(
-      '**Fluent Bit — Coralogix build.** This is NOT the generic recipe: it keeps ' +
+      '**Fluent Bit: Coralogix build.** This is NOT the generic recipe: it keeps ' +
         '`routeState` on the wire, because on Coralogix the marker is what the TCO ' +
         'policy matches. Do not substitute the generic fluent-bit recipe here.',
       '',
@@ -2746,7 +2746,7 @@ export function renderOffloadSection(
     lines.push(`Other supported forwarders: ${others.join(', ')}.`, '');
   } else {
     lines.push(
-      'No forwarder detected — showing the two verified leads. Pass the forwarder ' +
+      'No forwarder detected: showing the two verified leads. Pass the forwarder ' +
         'to get a single tailored recipe.',
       ''
     );
@@ -2762,7 +2762,7 @@ export function renderOffloadSection(
   }
 
   lines.push(
-    '**Forwarder write access** (the one new IAM grant — the Retriever\'s own role only READS the source bucket). Ready-to-apply Terraform, EKS IRSA, non-EKS noted at the bottom:',
+    '**Forwarder write access** (the one new IAM grant: the Retriever\'s own role only READS the source bucket). Ready-to-apply Terraform, EKS IRSA, non-EKS noted at the bottom:',
     '',
     '```hcl',
     forwarderWriteTerraform(),
@@ -2809,7 +2809,7 @@ export function renderOffloadSection(
     if (showDatadog) {
       const ddog = datadogFlexRecipe();
       lines.push(
-        `_Datadog Flex_ — ${ddog.note}`,
+        `_Datadog Flex_: ${ddog.note}`,
         '',
         '```hcl',
         ddog.body,
@@ -2820,7 +2820,7 @@ export function renderOffloadSection(
     if (showCloudWatch) {
       const cw = cloudwatchIaRecipe();
       lines.push(
-        `_CloudWatch Infrequent Access_ — ${cw.note}`,
+        `_CloudWatch Infrequent Access_: ${cw.note}`,
         '',
         '```hcl',
         cw.body,
@@ -2845,7 +2845,7 @@ export function renderOffloadSection(
           : 'Basic';
         const az = azureLogsTierRecipe({ plan });
         lines.push(
-          `_${tier.name}_ ($${tier.ingest_rate_usd_per_gb}/GB ingest) — ${az.note}`,
+          `_${tier.name}_ ($${tier.ingest_rate_usd_per_gb}/GB ingest): ${az.note}`,
           '',
           '```bash',
           az.body,
@@ -2857,7 +2857,7 @@ export function renderOffloadSection(
     if (showCoralogix) {
       const cx = coralogixMonitoringRecipe();
       lines.push(
-        `_Coralogix Monitoring_ — ${cx.note}`,
+        `_Coralogix Monitoring_: ${cx.note}`,
         '',
         '```hcl',
         cx.body,
@@ -2869,7 +2869,7 @@ export function renderOffloadSection(
         // must be told not to strip it.
         'On Coralogix the down-tiered slice is NOT sent to a second sink: it ships to the ' +
           'same endpoint and the policy above moves it. That makes the forwarder half ' +
-          'load-bearing — `routeState` must survive to the destination. A byte-budget ' +
+          'load-bearing: `routeState` must survive to the destination. A byte-budget ' +
           'decision is a property of a stream counted in the sidecar, so no ' +
           'per-event rule at the destination can derive it. The fluent-bit ' +
           'config rendered above is the Coralogix build and already keeps the ' +
@@ -2880,7 +2880,7 @@ export function renderOffloadSection(
     if (showElastic) {
       const el = elasticFrozenTierRecipe();
       lines.push(
-        `_Elasticsearch frozen tier_ — ${el.note}`,
+        `_Elasticsearch frozen tier_: ${el.note}`,
         '',
         '```text',
         el.body,
@@ -3018,7 +3018,7 @@ connectors:
   routing/tenx:
     default_pipelines: [logs/tenx-siem]     # pass/compact/sample fall through
     table:
-      # context: log is REQUIRED — routeState is a LOG attribute (measured on
+      # context: log is REQUIRED, routeState is a LOG attribute (measured on
       # the loopback pairing). The resource context never matches it.
       - context: log
         condition: attributes["routeState"] == "offload"
@@ -3037,7 +3037,7 @@ processors:
   # (two records, one POST, identical but for routeState): the Coralogix OTLP
   # exporter nests every record under "logRecord", so the addressable keypaths
   # are $d.logRecord.attributes.* and $d.logRecord.body.*, and a flat
-  # $d.routeState does not exist — it compiles to "keypath does not exist" and
+  # $d.routeState does not exist: it compiles to "keypath does not exist" and
   # the live flat-keypath policy left BOTH events at priorityclass=high,
   # tiering nothing. The Fluent Bit path is different and its flat
   # $d.routeState remains correct there; do not unify the two.
@@ -3080,14 +3080,14 @@ ${offloadPipeline}
       'The tier_down slice needs no collector branch on Coralogix: it ships to the ' +
       'same exporter and the destination-side TCO policy (dpxl on ' +
       '$d.logRecord.attributes.routeState, the NESTED keypath this path requires) ' +
-      'moves it to the Monitoring tier — see coralogixMonitoringRecipe().',
+      'moves it to the Monitoring tier: see coralogixMonitoringRecipe().',
     prerequisites: [
       `Engine pairing measured on the loopback (engine 1.1.57 native): records return with tenx_hash + routeState as log-record attributes; bodies byte-identical.`,
-      'The routing connector, transform processor, and decouple processor require a collector build that includes them (otelcol-contrib and the community Lambda collector layer have them; a minimal custom build may not — check `components` output). decouple is not optional on Lambda — see the pipeline comments.',
-      'THE POLICY KEYPATH IS NESTED ON THIS PATH, and it is not the one the Fluent Bit recipe uses. Verified live on the US2 tenant with a two-record single-POST control, identical but for routeState: the Coralogix OTLP exporter wraps each record under `logRecord`, so the policy expression must be `<v1> $d.logRecord.attributes.routeState == \'tier_down\'`. A flat `$d.routeState` compiles to "keypath does not exist" and tiers nothing — both control events stayed at priorityclass=high. `$d.logRecord.body.routeState` also resolves (the fold puts it there), so either nested keypath works; the flat one never does.',
-      'PER-PATTERN dispositions need no engine change and are OFF by default. The receiver app offers `run/receive/rate` as an optional module and the extension reads `TENX_RECEIVE_APPS`, so adding `@run/receive/rate` to that list plus `rateReceiverFieldNames=message_pattern` (NOT symbolMessage — that field does not exist in this composition and silently retains everything) and `rateReceiverLookupFile=/opt/tenx/mutes.csv` arms a per-pattern mute/sample file (build-receive-layer.sh stages it with its 6th argument and prepends the `pattern,disposition` header the lookup consumes as line 1). WITHOUT that file every lever on this estate is estate-wide — outputOffload and routeState apply to the whole stream — so a plan promising per-pattern rows on a Lambda estate is over-promising unless the mute file ships. Baked in the layer the policy is static; from engine 1.1.66, `TENX_RECEIVE_MUTE_S3_URI` fetches it from the offload bucket into /tmp at INIT and refreshes on INVOKE, so dispositions change without a redeploy.',
+      'The routing connector, transform processor, and decouple processor require a collector build that includes them (otelcol-contrib and the community Lambda collector layer have them; a minimal custom build may not: check `components` output). decouple is not optional on Lambda: see the pipeline comments.',
+      'THE POLICY KEYPATH IS NESTED ON THIS PATH, and it is not the one the Fluent Bit recipe uses. Verified live on the US2 tenant with a two-record single-POST control, identical but for routeState: the Coralogix OTLP exporter wraps each record under `logRecord`, so the policy expression must be `<v1> $d.logRecord.attributes.routeState == \'tier_down\'`. A flat `$d.routeState` compiles to "keypath does not exist" and tiers nothing: both control events stayed at priorityclass=high. `$d.logRecord.body.routeState` also resolves (the fold puts it there), so either nested keypath works; the flat one never does.',
+      'PER-PATTERN dispositions need no engine change and are OFF by default. The receiver app offers `run/receive/rate` as an optional module and the extension reads `TENX_RECEIVE_APPS`, so adding `@run/receive/rate` to that list plus `rateReceiverFieldNames=message_pattern` (NOT symbolMessage: that field does not exist in this composition and silently retains everything) and `rateReceiverLookupFile=/opt/tenx/mutes.csv` arms a per-pattern mute/sample file (build-receive-layer.sh stages it with its 6th argument and prepends the `pattern,disposition` header the lookup consumes as line 1). WITHOUT that file every lever on this estate is estate-wide (outputOffload and routeState apply to the whole stream) so a plan promising per-pattern rows on a Lambda estate is over-promising unless the mute file ships. Baked in the layer the policy is static; from engine 1.1.66, `TENX_RECEIVE_MUTE_S3_URI` fetches it from the offload bucket into /tmp at INIT and refreshes on INVOKE, so dispositions change without a redeploy.',
       'transform/tenx-fold is for the OFFLOAD slice, not for the policy: awss3 uses `marshaler: body`, so without it the S3 objects lose tenx_hash, which is the Retriever\'s index key. Coralogix tiering works with or without it, on the nested keypath either way.',
-      'TCO policy changes take ~6 minutes to apply (measured live) — do not conclude failure inside a minute.',
+      'TCO policy changes take ~6 minutes to apply (measured live): do not conclude failure inside a minute.',
       `Coralogix exporter stays exactly as the customer runs it today (domain ${domain}, applicationName ${app} or their own).`,
     ],
   };
@@ -3123,28 +3123,28 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
 # TENX_RECEIVE_APPS=@run/input/forwarder/otel-collector,@apps/receiver,@run/receive/rate
 # rateReceiverFieldNames=message_pattern    # key mutes by the pattern identity
 #                                           # (symbolMessage does not exist in
-#                                           # this composition — empty key
+#                                           # this composition: empty key
 #                                           # silently retains everything)
 # rateReceiverLookupFile=/opt/tenx/mutes.csv
 #
-# mutes.csv — line 1 is a HEADER the lookup consumes (the build script
+# mutes.csv: line 1 is a HEADER the lookup consumes (the build script
 # prepends it when missing); entries: <pattern>,<rate>:<untilEpochSec>:<reason>
 #   pattern,disposition
 #   heartbeat_check_ok,0:1786400000:liveness spam OPS-4821   # 0 = full mute
 #   jwt_validated,0.25:1786400000:auth flood after deploy    # keep 25%
-# Baked into the layer the policy is STATIC — a change means republishing the
+# Baked into the layer the policy is STATIC: a change means republishing the
 # layer and updating each function. From engine 1.1.66,
 # TENX_RECEIVE_MUTE_S3_URI fetches it to /tmp at INIT and refreshes on
-# INVOKE — dispositions change with one "aws s3 cp", no redeploy. One layout
+# INVOKE: dispositions change with one "aws s3 cp", no redeploy. One layout
 # across planes: point it at the config-plane key,
 # TENX_RECEIVE_MUTE_S3_URI=s3://<bucket>/<prefix>/pipelines/run/receive/rate/mutes.csv
-# — the same key the eventbridge recurring tick writes.
+#: the same key the eventbridge recurring tick writes.
 # optional BYO metrics:
 # PROMETHEUS_REMOTE_WRITE_URL=https://<your-prometheus>/api/v1/write`,
     placementNote:
       'the engine listens on loopback :4317 (OTLP/gRPC in) and returns processed ' +
       'events to :24225. receiverReadOnly defaults to false, so writeback is on ' +
-      'as soon as the forwarder module is included — no extra flag.',
+      'as soon as the forwarder module is included: no extra flag.',
     prerequisites: [
       'TENX_AIRGAPPED=true is mandatory, not optional: with a license key set, validation is otherwise an online, fail-closed call on EVERY cold start (10 s connect timeout). Every license verifies offline when airgapped, and the built-in evaluation license needs no network at all. See SERVERLESS_TASK6_LICENSE_EGRESS.md.',
       'Engine memory: ~175 MB resident (measured, 1.1.57 native, post-traffic). Size the function memory for function + collector + engine.',
@@ -3186,7 +3186,7 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
       '/opt/extensions/ it speaks the Extensions API loop above ' +
       '(ReceiveExtension); started as the function runtime bootstrap it ' +
       'long-polls the Runtime API (ROLE=receive handles CloudWatch ' +
-      'subscription envelopes there — the remainder path).',
+      'subscription envelopes there: the remainder path).',
     prerequisites: [
       'The engine extension layer is public: `tenx-receive` (x86_64) and `tenx-receive-arm64` in account 351939435334, in eight regions. The version differs by region; take the ARN from https://doc.log10x.com/engine/launcher/extension/',
       'Without TENX_LICENSE_KEY each function runs the engine\'s built-in evaluation license (10 nodes, 30 days from each start, airgapped). Set TENX_LICENSE_KEY on each function to license it.',
@@ -3314,14 +3314,14 @@ connectors:
     prerequisites: [
       "CERTIFIED against a live Event Hub (otelcol-contrib 0.158, engine 1.1.68): events returned with tenx_hash + routeState and distinct pattern identities per message type.",
       "format must match what the hub carries: 'azure' for diagnostic-settings envelopes, 'raw' for application logs. The azure unmarshaler rejects plain text outright (measured).",
-      "With format: raw, wire transform/decode into the intake pipeline before the engine exporter — a bytes body patterns to a single identity, silently (measured).",
+      "With format: raw, wire transform/decode into the intake pipeline before the engine exporter, a bytes body patterns to a single identity, silently (measured).",
       'The azure_event_hub receiver is beta in otelcol-contrib.',
     ],
   };
 
   const engine: OffloadRecipe = {
     language: 'text',
-    body: `# The engine runs beside the collector as peer containers — Azure
+    body: `# The engine runs beside the collector as peer containers: Azure
 # Container Apps, AKS, or any container host:
 tenx @run/input/forwarder/otel-collector @apps/receiver
 
@@ -3364,8 +3364,8 @@ noisy_heartbeat_ok,0:4102444800:liveness spam OPS-1234`,
       'involved on either half, so the loop is identical on any container host.',
     prerequisites: [
       'Engine 1.1.69 or later. GH_DEST is the load-bearing line: the pull cache lives under a sha-addressed temp path, so without the stable mirror a delivered mute file loads and silently never matches (engine#134, fixed by #135).',
-      'CERTIFIED live on the released 1.1.69 image: a git-pushed mute reached the GH_DEST mirror in 23s and enforced on the next reload pass — checkout drop-marked 36/40 with the documented 10% floor, sibling pattern 40/40 untouched, identical to a local-file control.',
-      'GH_DEST must be writable by the engine user — the shipped container runs as uid 1000, so a root-level path like /policy fails the launch (measured; the error names a temp file, not the permission). /tmp/policy works out of the box.',
+      'CERTIFIED live on the released 1.1.69 image: a git-pushed mute reached the GH_DEST mirror in 23s and enforced on the next reload pass, checkout drop-marked 36/40 with the documented 10% floor, sibling pattern 40/40 untouched, identical to a local-file control.',
+      'GH_DEST must be writable by the engine user: the shipped container runs as uid 1000, so a root-level path like /policy fails the launch (measured; the error names a temp file, not the permission). /tmp/policy works out of the box.',
       'rateReceiverLookupFile must be the absolute path inside GH_DEST, mirroring the file’s path in the repo (here: test/mutes.csv).',
       'A past untilEpochSec is not an error: the entry loads, the log names the file, and nothing is muted. 4102444800 is 2100-01-01, a placeholder.',
       'The pull lane needs GitHub egress; the certified composition ran TENX_AIRGAPPED=false.',
