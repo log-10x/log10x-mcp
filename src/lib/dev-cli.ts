@@ -368,7 +368,7 @@ export async function resolveEngineCredentials(): Promise<EngineCredentials> {
 export async function runDevCliFileOutput(
   rawLogText: string,
   runtimeName?: string,
-): Promise<DevCliResult & { encodedFile: string; templatesFile: string; aggregatedFile: string; runtimeName: string }> {
+): Promise<DevCliResult & { compactLog: string; encodedFile: string; compactFile: string; templatesFile: string; aggregatedFile: string; runtimeName: string }> {
   const mode = await resolveTenxMode();
   const name = runtimeName ?? `mcp-${Date.now()}-${process.pid}`;
   const outputDir = `/tmp/log10x-mcp-pull/${name}`;
@@ -389,10 +389,13 @@ export async function runDevCliFileOutput(
     ({ cliVersion } = await runAppsMcpFileViaLocalBinary(rawLogText, name));
   }
 
-  const [encodedLog, templatesRaw, aggregatedCsv] = await Promise.all([
+  const [encodedLog, templatesRaw, aggregatedCsv, compactLog] = await Promise.all([
     readFile(join(outputDir, 'encoded.log'), 'utf8').catch(() => ''),
     readFile(join(outputDir, 'templates.json'), 'utf8').catch(() => ''),
     readFile(join(outputDir, 'aggregated.csv'), 'utf8').catch(() => ''),
+    // The anchor-free compact records the decode pass reads back; absent on
+    // an engine config that predates it, and then derived from encoded.log.
+    readFile(join(outputDir, 'compact.log'), 'utf8').catch(() => ''),
   ]);
 
   // templates.json is one JSON object per line. Parser expects raw
@@ -407,7 +410,9 @@ export async function runDevCliFileOutput(
     cliVersion,
     configPath,
     tempDir: outputDir,
+    compactLog: compactLog || stripEncodedAnchors(encodedLog),
     encodedFile: join(outputDir, 'encoded.log'),
+    compactFile: join(outputDir, 'compact.log'),
     templatesFile: join(outputDir, 'templates.json'),
     aggregatedFile: join(outputDir, 'aggregated.csv'),
     runtimeName: name,
@@ -684,6 +689,12 @@ interface RunDevCliOptions {
   configPath: string;
   extraOverlays?: string[];
   timeoutMs?: number;
+  /**
+   * False for a run whose only product is decoded.log (the round-trip decode
+   * pass): the "no parseable output" check reads encoded.log and
+   * templates.json, which that run never writes.
+   */
+  requireEncoded?: boolean;
 }
 
 async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
@@ -739,7 +750,7 @@ async function runDevCliCore(opts: RunDevCliOptions): Promise<DevCliResult> {
       readFile(join(tempDir, 'aggregated.csv'), 'utf8').catch(() => ''),
     ]);
 
-    if (!encodedLog && !templatesJson) {
+    if (opts.requireEncoded !== false && !encodedLog && !templatesJson) {
       throw new Error(
         `tenx ran but produced no parseable output. ` +
           `tempDir=${tempDir}, config=${opts.configPath}, mode=${mode}.`
@@ -1288,4 +1299,103 @@ function runCommandWithStdin(
       child.stdin.end();
     }
   });
+}
+
+// ── Round trip ──
+
+export interface RoundTripResult {
+  /**
+   * `identical`: the decode pass wrote back, byte for byte, the text the
+   * encode pass was given. `differs`: it did not, and the counts say where.
+   * `not_run`: no decode pass ran; `note` says why.
+   */
+  status: 'identical' | 'differs' | 'not_run';
+  /** Compact records the decode pass was given. */
+  records: number;
+  inputLines: number;
+  decodedLines: number;
+  differingLines: number;
+  firstDifference?: { line: number; input: string; decoded: string };
+  note?: string;
+  wallTimeMs?: number;
+}
+
+/**
+ * The plain `~hash,val,...` form of an encoded line. The engine's MCP apps
+ * append `,pattern=,<message_pattern>,patternHash=,<tenx_hash>` for the
+ * parser; the decode pass reads the record without them. The anchor is the
+ * first `,pattern=,` not preceded by a backslash, the same rule the parser
+ * applies.
+ */
+export function stripEncodedAnchors(encodedLog: string): string {
+  return encodedLog
+    .split('\n')
+    .map((line) => {
+      const m = /(^|[^\\]),pattern=,/.exec(line);
+      return m ? line.slice(0, m.index + m[1].length) : line;
+    })
+    .join('\n');
+}
+
+/**
+ * Compare the text an encode pass was given with the text its decode pass
+ * wrote. The engine ends every decoded record with a newline and the input
+ * may or may not, so one trailing newline is ignored on each side.
+ */
+export function compareRoundTrip(inputText: string, decodedText: string, records: number): RoundTripResult {
+  const strip = (s: string) => (s.endsWith('\n') ? s.slice(0, -1) : s);
+  const input = strip(inputText);
+  const decoded = strip(decodedText);
+  const inputLines = input === '' ? 0 : input.split('\n').length;
+  const decodedLines = decoded === '' ? 0 : decoded.split('\n').length;
+  if (input === decoded) {
+    return { status: 'identical', records, inputLines, decodedLines, differingLines: 0 };
+  }
+  const a = input.split('\n');
+  const b = decoded.split('\n');
+  let differingLines = 0;
+  let firstDifference: RoundTripResult['firstDifference'];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue;
+    differingLines++;
+    if (!firstDifference) {
+      firstDifference = { line: i + 1, input: (a[i] ?? '').slice(0, 300), decoded: (b[i] ?? '').slice(0, 300) };
+    }
+  }
+  const note =
+    /\r/.test(input) && !/\r/.test(decoded)
+      ? 'the input carries carriage returns, which the engine does not keep: LF-only input is the documented limit'
+      : undefined;
+  return { status: 'differs', records, inputLines, decodedLines, differingLines, firstDifference, ...(note ? { note } : {}) };
+}
+
+/**
+ * Decode an encode pass's output with the engine and compare with the input
+ * it was given: the proof, on the caller's own sample, that the compact form
+ * holds the text. One more engine run, over templates.json followed by the
+ * plain compact records.
+ */
+export async function verifyRoundTrip(args: {
+  inputText: string;
+  templatesJson: string;
+  /** The plain `~hash,val,...` records (see stripEncodedAnchors). */
+  compactLog: string;
+  timeoutMs?: number;
+}): Promise<RoundTripResult> {
+  const records = args.compactLog.split('\n').filter((l) => l.length > 0).length;
+  if (records === 0) {
+    return { status: 'not_run', records: 0, inputLines: 0, decodedLines: 0, differingLines: 0, note: 'the encode pass wrote no compact records' };
+  }
+  const configPath = resolveConfigPath('LOG10X_MCP_DECODE_CONFIG_PATH', 'tenx-mcp-decode.config.yaml');
+  const dir = await mkdtemp(join(tmpdir(), 'log10x-mcp-roundtrip-'));
+  try {
+    const inputPath = join(dir, 'compact-all.log');
+    const templates = args.templatesJson === '' || args.templatesJson.endsWith('\n') ? args.templatesJson : args.templatesJson + '\n';
+    const compact = args.compactLog.endsWith('\n') ? args.compactLog : args.compactLog + '\n';
+    await fsWriteFile(inputPath, templates + compact, 'utf8');
+    const r = await runDevCliCore({ mode: 'file', inputPath, configPath, requireEncoded: false, timeoutMs: args.timeoutMs });
+    return { ...compareRoundTrip(args.inputText, r.decodedLog, records), wallTimeMs: r.wallTimeMs };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }

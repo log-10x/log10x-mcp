@@ -11,11 +11,11 @@
  *   3. Rank patterns by bytes; walk top-N applying severity + threshold rules.
  *   4. Compute delta vs. current applied state (read existing CSVs / action-intent).
  *   5a. If delta < min_delta_pp → exit 0 with "no change needed".
- *   5b. Else write mute/compact/action-intent files and commit via gh CLI or
+ *   5b. Else write mute/action-intent files and commit via gh CLI or
  *       direct git push.
  *
  * The runner NEVER directly imports heavy MCP tool modules — it only uses the
- * lower-level libs (cost.ts, compact-csv-writer.ts, mute-csv-writer.ts,
+ * lower-level libs (cost.ts, mute-csv-writer.ts,
  * action-intent-writer.ts) so it can run as a standalone CLI binary.
  *
  * Prometheus queries go through the existing `customer-metrics.ts` adapter
@@ -31,7 +31,6 @@ import { tmpdir } from 'node:os';
 
 import type { Policy } from './policy-loader.js';
 import type { CustomerMetricsBackend } from './customer-metrics.js';
-import { emitCompactRows, type CompactCsvRow } from './compact-csv-writer.js';
 import { emitMuteRows, type MuteCsvRow } from './mute-csv-writer.js';
 import {
   writeActionIntent,
@@ -285,13 +284,16 @@ function readCurrentSavingsPct(
  *   1. Service is in exceptions → 'pass' (skip entirely)
  *   2. Severity rule is 'keep'  → 'pass' (floor: never reduce)
  *   3. Severity rule specifies a concrete action → use it
- *   4. Severity rule is 'auto' or unset → look at bytes vs threshold
+ *   4. Severity rule is 'auto', unset or unknown → look at bytes vs threshold
  *      - below threshold → 'pass'
  *      - at or above threshold → choose based on bytes magnitude:
  *          very high (>= 500 MB)  → 'drop'
- *          high      (>= 50 MB)   → 'sample'
- *          moderate  (>= 5 MB)    → 'compact'
- *          low                    → 'pass'
+ *          otherwise              → 'sample'
+ *
+ * Compaction is not a tick decision. It is a per-source switch, the
+ * sidecar's `optimize` flag, set at install from the ratio
+ * log10x_measure_compaction reads off the stream; a per-pattern row cannot
+ * trade saving for anything, so the tick writes none.
  */
 function decideAction(
   service: string,
@@ -309,11 +311,16 @@ function decideAction(
   if (sevRule === 'keep') {
     return { action: 'pass', reason: `severity ${severity} is kept at floor by policy` };
   }
-  if (sevRule !== 'auto') {
+  if (sevRule === 'drop' || sevRule === 'sample') {
     return {
-      action: sevRule as Action,
+      action: sevRule,
       reason: `severity ${severity} rule → ${sevRule}`,
     };
+  }
+  if (sevRule !== 'auto') {
+    // A rule the tick does not know (a stale `compact`) never makes the
+    // severity lossy: it is kept, as a `keep` rule would be.
+    return { action: 'pass', reason: `severity ${severity} rule "${String(sevRule)}" is not a tick action; kept` };
   }
 
   // auto mode: threshold-based
@@ -323,14 +330,10 @@ function decideAction(
   }
 
   const GB = 1024 * 1024 * 1024;
-  const MB = 1024 * 1024;
   if (bytes >= 0.5 * GB) {
     return { action: 'drop', reason: `high volume ${fmtBytes(bytes)} over lookback window` };
   }
-  if (bytes >= 50 * MB) {
-    return { action: 'sample', reason: `moderate volume ${fmtBytes(bytes)}; sampling to 10%` };
-  }
-  return { action: 'compact', reason: `low-moderate volume ${fmtBytes(bytes)}; compacting` };
+  return { action: 'sample', reason: `moderate volume ${fmtBytes(bytes)}; sampling to 10%` };
 }
 
 /** PromQL range string -> hours ("24h" -> 24, "7d" -> 168, "30m" -> 0.5). 24h fallback. */
@@ -358,16 +361,11 @@ function fmtBytes(b: number): string {
 // ─── savings calculation ───────────────────────────────────────────────────
 
 /**
- * The compact saving the tick assumes. The tick has no destination, so it
- * has no platform measurement to use, and every percentage it prints that
- * leans on this says so.
+ * The assumption behind a projection. The tick plans drop and sample only,
+ * whose savings are arithmetic on the bytes it read, so there is none.
  */
-const COMPACT_ASSUMED_SAVING = 0.75;
-export const COMPACT_ASSUMPTION_NOTE = `assumes ${COMPACT_ASSUMED_SAVING * 100}% compaction, unmeasured for this estate`;
-
-/** The assumption behind a projection, or undefined when none is compacted. */
-function savingsBasis(decisions: PatternDecision[]): string | undefined {
-  return decisions.some((d) => d.action === 'compact') ? COMPACT_ASSUMPTION_NOTE : undefined;
+function savingsBasis(_decisions: PatternDecision[]): string | undefined {
+  return undefined;
 }
 
 function projectedSavingsBytes(decisions: PatternDecision[]): number {
@@ -380,9 +378,6 @@ function projectedSavingsBytes(decisions: PatternDecision[]): number {
         break;
       case 'sample':
         saved += d.bytes * 0.9; // keep 10%
-        break;
-      case 'compact':
-        saved += d.bytes * COMPACT_ASSUMED_SAVING;
         break;
       default:
         break;
@@ -402,16 +397,6 @@ export function writeOutputFiles(
   const nowEpoch = Math.floor(Date.now() / 1000);
   const expiryEpoch = nowEpoch + 30 * 24 * 3600; // 30 days from now
 
-  // Compact CSV rows (encode=true for compact action)
-  const compactRows: CompactCsvRow[] = decisions
-    .filter((d) => d.action === 'compact')
-    .map((d) => ({
-      pattern_hash: d.pattern_hash,
-      encode: true,
-      untilEpoch: expiryEpoch,
-      reason: d.reason,
-    }));
-
   // Mute CSV rows (drop → sample_rate=0, sample → sample_rate=0.1)
   const muteRows: MuteCsvRow[] = decisions
     .filter((d) => d.action === 'drop' || d.action === 'sample')
@@ -423,9 +408,11 @@ export function writeOutputFiles(
     }));
 
   // Action intent
+  // Compaction is a per-source switch, never a per-pattern row: a compact
+  // decision handed in from elsewhere is written nowhere.
   const intentEntries = buildActionIntentEntries(
     decisions
-      .filter((d) => d.action !== 'pass')
+      .filter((d) => d.action !== 'pass' && d.action !== 'compact')
       .map((d) => ({
         pattern_hash: d.pattern_hash,
         service: d.service,
@@ -434,11 +421,6 @@ export function writeOutputFiles(
       })),
     { set_at_iso: now }
   );
-
-  // Write compact CSV
-  const compactDir = pathJoin(repoPath, 'pipelines', 'run', 'receive', 'compact');
-  mkdirSync(compactDir, { recursive: true });
-  writeFileSync(pathJoin(compactDir, 'compact-cap.csv'), emitCompactRows(compactRows));
 
   // Write mute CSV — the ENGINE's per-pattern mute file
   // (rateReceiverLookupFile), keyed by message_pattern. NEVER caps.csv:
@@ -459,8 +441,7 @@ export function writeOutputFiles(
 
   if (verbose) {
     process.stderr.write(
-      `[tenx-recur] wrote ${compactRows.length} compact rows, ` +
-      `${muteRows.length} mute rows, ${intentEntries.length} intent entries\n`
+      `[tenx-recur] wrote ${muteRows.length} mute rows, ${intentEntries.length} intent entries\n`
     );
   }
 }

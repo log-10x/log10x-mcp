@@ -13,7 +13,14 @@
  * machinery so the engine contract stays single-source.
  */
 
-import { runDevCli, runDevCliFileOutput, DevCliNotInstalledError } from './dev-cli.js';
+import {
+  runDevCli,
+  runDevCliFileOutput,
+  DevCliNotInstalledError,
+  verifyRoundTrip,
+  stripEncodedAnchors,
+  type RoundTripResult,
+} from './dev-cli.js';
 import {
   ASSUMED_RECORD_OVERHEAD_BYTES,
   RECEIVER_WINDOW_SECONDS,
@@ -236,6 +243,11 @@ export interface ExtractedPatterns {
   recordsBound?: number;
   recordsResynced?: number;
   recordsUnbound?: number;
+  /**
+   * The decode pass over this run's output compared with its input, when
+   * `verifyRoundTrip` was asked for.
+   */
+  roundTrip?: RoundTripResult;
 }
 
 export interface ExtractPatternsOptions {
@@ -313,6 +325,12 @@ export interface ExtractPatternsOptions {
   recordOverheadBytes?: number;
   /** Each event's time in epoch ms, aligned with `events`; a gap takes the previous event's time. */
   lineTimesMs?: Array<number | undefined>;
+  /**
+   * Decode the compact records the engine wrote and compare them with the
+   * text it was given, one more engine run. Not run on a chunked run, where
+   * the output is spread over several directories.
+   */
+  verifyRoundTrip?: boolean;
 }
 
 /**
@@ -489,6 +507,7 @@ export async function extractPatterns(
   const mergedAggregated: AggregatedRow[] = [];
   let totalWallTimeMs = 0;
   let engineBuild: string | undefined;
+  let roundTrip: RoundTripResult | undefined;
   const executionMode = 'local_cli' as const;
 
   // The local 10x engine absorbs the full batch in one shot.
@@ -519,6 +538,9 @@ export async function extractPatterns(
       for (const ev of parseEncoded(local.encodedLog)) mergedEncoded.push(ev);
       for (const row of parseAggregated(local.aggregatedCsv)) mergedAggregated.push(row);
       totalWallTimeMs += local.wallTimeMs;
+      if (opts.verifyRoundTrip) {
+        roundTrip = await roundTripOf(text, local, Boolean(opts.chunkParallel && opts.useFileOutput));
+      }
     } catch (e) {
       if (e instanceof DevCliNotInstalledError) throw e;
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
@@ -790,7 +812,36 @@ export async function extractPatterns(
     recordsBound: binding.bound,
     recordsResynced: binding.resyncs,
     recordsUnbound: binding.unbound,
+    ...(roundTrip ? { roundTrip } : {}),
   };
+}
+
+/**
+ * The decode pass over one engine run. A failure of the pass is reported as
+ * `not_run` with its message: the extraction already succeeded, and a proof
+ * that could not run is not a proof that failed.
+ */
+async function roundTripOf(
+  inputText: string,
+  run: { templatesJson: string; encodedLog: string; compactLog?: string },
+  chunked: boolean,
+): Promise<RoundTripResult> {
+  const notRun = (note: string): RoundTripResult => ({
+    status: 'not_run',
+    records: 0,
+    inputLines: inputText === '' ? 0 : inputText.split('\n').length,
+    decodedLines: 0,
+    differingLines: 0,
+    note,
+  });
+  if (chunked) return notRun('not run on a chunked engine run');
+  const compactLog = run.compactLog && run.compactLog.length > 0 ? run.compactLog : stripEncodedAnchors(run.encodedLog);
+  try {
+    return await verifyRoundTrip({ inputText, templatesJson: run.templatesJson, compactLog });
+  } catch (e) {
+    if (e instanceof DevCliNotInstalledError) throw e;
+    return notRun(`the decode pass failed: ${(e as Error).message.slice(0, 300)}`);
+  }
 }
 
 /**

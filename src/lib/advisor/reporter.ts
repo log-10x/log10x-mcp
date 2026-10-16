@@ -523,20 +523,20 @@ function detectExistingHelmRelease(
 function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
   return {
     headline:
-      'The compactReceiver decides per-event whether to emit `encode()` (compact, smaller on a destination whose 10x expander is installed, see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream) or `fullText`. The decision is per pattern: a CSV keyed by the pattern name lists the patterns to compact, or the patterns to keep as full text when compactReceiverDefault is true. Wire GitOps once and the recurring tick (`tenx-recur`) writes the rows as PRs; the engine hot-reloads the CSV without a pod restart.',
+      'Compaction is a per-source switch: the chart `optimize` flag makes the sidecar emit `encode()` for every event it sees, smaller on a destination whose 10x expander is installed (see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream). The compactReceiver cap file is the exception list under that switch: with compactReceiverDefault true, a CSV keyed by the pattern name lists the patterns to keep as full text. Wire GitOps once and edit the list as PRs; the engine hot-reloads the CSV without a pod restart.',
     whenToEnable: [
-      'You want **selective** compaction: compact specific patterns but preserve others (audit, compliance, debug).',
+      'You compact the source and want to keep specific patterns in full text (audit, compliance, debug).',
       'You want decisions to evolve over time without redeploying the receiver.',
       'You want the MCP to manage the cap-file via PRs (review-able, reversible).',
     ],
     whenToSkip: [
       opts.optimize
-        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event. Add GitOps only if you need to opt specific patterns OUT of compaction (audit/compliance).'
-        : 'You will turn on the chart `optimize` feature flag later to compact every event uniformly: no per-pattern decisions needed. Install the destination expander first (see the prerequisite below).',
+        ? 'The chart `optimize` feature flag is already set on this plan, which compacts every event of this source. Add GitOps only if you need to keep specific patterns in full text (audit/compliance).'
+        : 'You will turn on the chart `optimize` feature flag later to compact every event of this source. Install the destination expander first (see the prerequisite below).',
       'You will not be using the receiver app at all (this section is receiver-only).',
     ],
     repoLayout: [
-      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'MCP edits this: per-pattern CSV (pattern_hash key, boolean true|false value); in-place writes hot-reload (no restart)' },
+      { path: 'pipelines/run/receive/compact/compact-cap.csv', comment: 'the exception list: one row per pattern, keyed by the pattern name (message_pattern, the first column of log10x_top_patterns), boolean true|false value; in-place writes hot-reload (no restart)' },
       { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic: JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
@@ -545,8 +545,8 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
       { name: 'GH_SYNC_INTERVAL', value: '30s', required: false, note: 'engine re-fetches the repo this often' },
-      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-cap.csv', required: true, note: 'must match the path inside your GitOps repo; rows are per-pattern (pattern_hash key), boolean true|false value' },
-      { name: 'compactReceiverDefault', value: 'false', required: false, note: '`false`: cap-file entries opt INTO compaction. `true`: cap-file entries opt OUT (use with the chart `optimize` flag)' },
+      { name: 'compactReceiverLookupFile', value: 'pipelines/run/receive/compact/compact-cap.csv', required: true, note: 'must match the path inside your GitOps repo; one row per pattern, keyed by the pattern name (message_pattern), boolean true|false value' },
+      { name: 'compactReceiverDefault', value: 'true', required: false, note: '`true`: a listed pattern with value false keeps its full text, every other pattern compacts (the exception list under the chart `optimize` flag). `false`: only listed patterns with value true compact.' },
     ],
     mcpHandoff: {
       tool: 'log10x_configure_engine',

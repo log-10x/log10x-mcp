@@ -104,3 +104,10 @@ outputFile:
       - summaryVolume
       - summaryBytes
       - summaryTotals
+
+  # The same compact records without the anchor fields: the form the decode
+  # pass (assets/tenx-mcp-decode.config.yaml) reads back for the round-trip
+  # check, appended to templates.json.
+  - path: $=TenXEnv.get("LOG10X_MCP_OUTPUT_DIR") + "/compact.log"
+    fields:
+      - encode()

@@ -97,9 +97,11 @@ test('recurring-tick: mute decisions land in mutes.csv, never caps.csv', () => {
     assert.match(mutes, /^cart_item_added_sku,0\.1:/m, 'sample -> sample_rate 0.1');
     assert.doesNotMatch(mutes, /payment_charged_ok/, 'compact decisions stay out of the mute file');
 
-    // Compact decisions go to the compact CSV; intent JSON is written.
-    assert.ok(existsSync(join(repo, 'pipelines', 'run', 'receive', 'compact', 'compact-cap.csv')));
+    // Compaction is a per-source switch, so a compact decision is written
+    // nowhere: no compact CSV, and no intent entry for it.
+    assert.ok(!existsSync(join(repo, 'pipelines', 'run', 'receive', 'compact', 'compact-cap.csv')));
     assert.ok(existsSync(join(repo, 'data', 'action-intent.json')));
+    assert.doesNotMatch(readFileSync(join(repo, 'data', 'action-intent.json'), 'utf8'), /payment_charged_ok/);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
