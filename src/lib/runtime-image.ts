@@ -80,10 +80,12 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * k8sTeamLabel, which the fleet-default gate requires. 1.1.142: per-source
  * flush (E81) and the timestamp-fraction fix. 1.1.144: the compact cap file
  * on the forwarder output, an exact first burst (E82) and PostgreSQL context
- * lines joined to their error (E84). Pinned by digest.
+ * lines joined to their error (E84). 1.1.145: a line's timestamp templates
+ * no longer depend on the lines before it, so the same line gets the same
+ * template hash on every node (E85). Pinned by digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.144@sha256:2069e3e4249691622bc1a2e97035252e3f9b513a878a3b036435e439318f08c9';
+  'log10x/edge-10x:1.1.145@sha256:aec232a2f7d9da8277a529ea9d844267f8c6f10bb241f088c1fbe774b8b9949e';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
