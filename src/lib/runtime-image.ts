@@ -78,10 +78,12 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * Bit sidecar: 0 fullText fallbacks, 2,000 of 2,000 lines.
  * 1.1.141: the first release whose receiver reads rateReceiverDefaultAction and
  * k8sTeamLabel, which the fleet-default gate requires. 1.1.142: per-source
- * flush (E81) and the timestamp-fraction fix. Pinned by digest.
+ * flush (E81) and the timestamp-fraction fix. 1.1.144: the compact cap file
+ * on the forwarder output, an exact first burst (E82) and PostgreSQL context
+ * lines joined to their error (E84). Pinned by digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.142@sha256:24e31c07a95e1f7dc356f11dc5cac4b21602ff91040ea831f94668b05afe6bf1';
+  'log10x/edge-10x:1.1.144@sha256:2069e3e4249691622bc1a2e97035252e3f9b513a878a3b036435e439318f08c9';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
