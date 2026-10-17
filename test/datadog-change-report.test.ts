@@ -239,10 +239,10 @@ test('the tool reads only GETs on the metrics API, detects the team tag, and wri
     { creds: { site: 'datadoghq.eu', apiKey: 'k', appKey: 'a' }, readPolicy: async () => ({ source: null }), nowMs: () => NOW * 1000 },
   );
   assert.ok(seen.every((s) => s.method === 'GET' && s.host === 'api.datadoghq.eu'), JSON.stringify(seen));
-  assert.ok(seen.some((s) => s.path === '/api/v2/metrics/emitted_events_summaryVolume/all-tags'));
+  assert.ok(seen.some((s) => s.path === '/api/v2/metrics/log10x.emitted_events_summaryVolume/all-tags'));
   assert.equal(seen.filter((s) => s.path === '/api/v1/query').length, 2);
   assert.equal(seen.length, 3);
-  assert.ok(queries.every((q) => q.startsWith('sum:emitted_events_summaryVolume{tenx_env:prod} by {')));
+  assert.ok(queries.every((q) => q.startsWith('sum:log10x.emitted_events_summaryVolume{tenx_env:prod} by {')));
   assert.ok(queries.some((q) => q.includes('tenx_team')));
   assert.equal(out.status, 'success');
   const payload = out.data.payload as Record<string, unknown>;
@@ -270,7 +270,7 @@ test('the route monitor fires per statement when its lines turn tier_down or off
   const m = buildSpikeMonitors({ tenxEnv: 'Prod', notify: ['@slack-log-cost', 'not-a-handle'] });
   assert.equal(
     m.route.query,
-    'sum(last_1h):sum:emitted_events_summaryVolume{tenx_env:prod AND routestate IN (tier_down, offload)} ' +
+    'sum(last_1h):sum:log10x.emitted_events_summaryVolume{tenx_env:prod AND routestate IN (tier_down, offload)} ' +
       'by {message_pattern,tenx_hash,k8s_container,tenx_user_service,routestate}.as_count() > 0',
   );
   assert.equal(m.route.type, 'query alert');
@@ -281,7 +281,7 @@ test('the route monitor fires per statement when its lines turn tier_down or off
 
 test('the volume monitor is an anomaly monitor with weekly seasonality, above only', () => {
   const m = buildSpikeMonitors({ teamTag: 'tenx_team' });
-  assert.ok(m.volume.query.startsWith('avg(last_5h):anomalies(sum:emitted_events_summaryVolume{*} by {message_pattern,tenx_hash,k8s_container,tenx_user_service,tenx_team}.as_count(), \'robust\', 3,'));
+  assert.ok(m.volume.query.startsWith('avg(last_5h):anomalies(sum:log10x.emitted_events_summaryVolume{*} by {message_pattern,tenx_hash,k8s_container,tenx_user_service,tenx_team}.as_count(), \'robust\', 3,'));
   assert.ok(m.volume.query.includes("direction='above'"));
   assert.ok(m.volume.query.includes("seasonality='weekly'"));
   assert.ok(m.volume.query.endsWith('>= 1'));

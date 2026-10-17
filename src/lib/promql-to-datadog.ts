@@ -197,12 +197,12 @@ function translate(expr: Expr, sourcePromql: string): string {
   }
   // Bare vector selector — `M{f}` alone.
   if (isVectorSelector(expr)) {
-    return `sum:${expr.metric}${ddSelectorString(expr.selectors)}`;
+    return `sum:${ddMetricName(expr.metric)}${ddSelectorString(expr.selectors)}`;
   }
   // Bare matrix selector — `M{f}[range]`. Datadog ignores the range;
   // we treat as a sum-as-count over the metric.
   if (isMatrixSelector(expr)) {
-    return `sum:${expr.metric}${ddSelectorString(expr.selectors)}.as_count()`;
+    return `sum:${ddMetricName(expr.metric)}${ddSelectorString(expr.selectors)}.as_count()`;
   }
   // BinaryExpr — currently NOT supported. The MCP issues only
   // `(increase(M[range]) > 0)` inside a `count()` wrapper, which we
@@ -398,16 +398,18 @@ function extractBaseSelector(expr: Expr, sourcePromql: string): string {
 }
 
 /**
- * Datadog convention strips `_total` from Prometheus-style counter
- * metric names on ingest. So the engine's `all_events_summaryBytes_total`
- * lands in Datadog as `all_events_summaryBytes`. We strip on query so
- * the MCP's PromQL works unchanged.
- *
- * Counter metric names ending in `_count`, `_sum`, `_bucket` are NOT
- * stripped (Datadog only strips `_total`).
+ * The engine's Datadog output posts its counters as distributions named
+ * `log10x.<aggregator>_<counter>`, so the Prometheus name
+ * `all_events_summaryBytes_total` is `log10x.all_events_summaryBytes` in
+ * Datadog. Other names lose only a trailing `_total`, as Datadog's
+ * OpenMetrics convention does. Names ending in `_count`, `_sum` or `_bucket`
+ * are kept.
  */
+const ENGINE_COUNTER = /^(all|emitted|indexed|streamed)_events_\w+$/;
+
 function ddMetricName(metric: string): string {
-  return metric.endsWith('_total') ? metric.slice(0, -'_total'.length) : metric;
+  const name = metric.endsWith('_total') ? metric.slice(0, -'_total'.length) : metric;
+  return ENGINE_COUNTER.test(name) ? `log10x.${name}` : name;
 }
 
 /**

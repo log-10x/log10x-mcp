@@ -327,12 +327,13 @@ export interface BackendEnvSpec {
 
 export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpec>> = {
   // datadog — `config/pipelines/run/output/metric/datadog/config.yaml`
-  // reads DD_API_KEY + DD_APP_KEY (required) + DD_SITE (defaults to
-  // us5.datadoghq.com inside the engine config).
+  // reads DD_API_KEY (required) + DD_SITE (defaults to us5.datadoghq.com
+  // inside the engine config). The output posts distributions with the API
+  // key alone, so no Application key, which can read the account, goes on
+  // the engine pods.
   datadog: {
     secret: [
       { envVar: 'DD_API_KEY', secretKey: 'api-key' },
-      { envVar: 'DD_APP_KEY', secretKey: 'app-key' },
     ],
     plain: [{ envVar: 'DD_SITE', default: 'us5.datadoghq.com' }],
   },
