@@ -52,13 +52,28 @@ function scope(envId: string | undefined): string {
 }
 
 /**
- * Every statement's events over the lookback, by hash, name, container and
- * level, as one point per series (`rollup(sum, <lookback>)`): Datadog caps a
- * series at 1,500 points (docs.datadoghq.com/dashboards/functions/rollup/),
- * and one point keeps the response as small as the group count allows.
+ * Every statement's events, hourly, by hash, name, container and level. A
+ * series is at most 1,500 points (docs.datadoghq.com/dashboards/functions/
+ * rollup/); a 24-hour lookback is 25. Hourly buckets, summed over the span
+ * they cover: Datadog aligns a rollup bucket to its interval, so one bucket
+ * the size of the lookback would start before the window and be lost.
  */
-export function patternEventsQuery(envId: string | undefined, lookbackSec: number): string {
-  return `sum:${DD_ALL_EVENTS_DISTRIBUTION}{${scope(envId)}} by {tenx_hash,message_pattern,k8s_container,severity_level}.rollup(sum, ${Math.max(3600, Math.round(lookbackSec))})`;
+export function patternEventsQuery(envId?: string): string {
+  return `sum:${DD_ALL_EVENTS_DISTRIBUTION}{${scope(envId)}} by {tenx_hash,message_pattern,k8s_container,severity_level}.rollup(sum, 3600)`;
+}
+
+/** Events an hour from a series of hourly buckets: their sum over the hours they span, whatever their alignment. */
+export function hourlyRate(points: Array<[number, number]>): number {
+  if (points.length === 0) return 0;
+  let total = 0;
+  let first = Infinity;
+  let last = -Infinity;
+  for (const [ts, v] of points) {
+    total += v;
+    if (ts < first) first = ts;
+    if (ts > last) last = ts;
+  }
+  return total / Math.max(1, (last + HOUR - first) / HOUR);
 }
 
 /** Lines the Receiver emitted, hourly, by where each went. */
@@ -504,14 +519,14 @@ export async function readBudgetInputs(
   const [usage, routes, pats] = await Promise.all([
     q(creds, STANDARD_USAGE_QUERY, start, nowSec),
     q(creds, receiverRouteQuery(envId), start, nowSec),
-    q(creds, patternEventsQuery(envId, lookbackHours * HOUR), from, nowSec),
+    q(creds, patternEventsQuery(envId), from, nowSec),
   ]);
   const patterns: PatternRate[] = pats.map((s) => ({
     container: s.tags['k8s_container'] ?? '',
     pattern: s.tags['tenx_hash'] ?? '',
     name: s.tags['message_pattern'] ?? '',
     severity: (s.tags['severity_level'] ?? '').toUpperCase(),
-    eventsPerHour: sumPoints([s], from, nowSec) / Math.max(1, lookbackHours),
+    eventsPerHour: hourlyRate(s.points),
   }));
   return { usage, routes, patterns };
 }

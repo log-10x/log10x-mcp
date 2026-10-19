@@ -75,7 +75,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
 import { buildFleetDefaultStep } from '../lib/advisor/fleet-default-step.js';
-import { receiverFleetValues } from '../lib/fleet-default-install.js';
+import { CEILING_MIN_ENGINE, engineReadsCeiling, receiverFleetValues } from '../lib/fleet-default-install.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -2314,6 +2314,10 @@ async function renderInstallPlan(
     ...(app === 'receiver' ? {} : { engineVersion: '' }),
   });
 
+  // The git path's lane (GH_ENABLED pulling log10x/policy/) ships in engine
+  // 1.1.146; below it GH_ENABLED pulls test/*.csv and the Receiver would have
+  // no policy source.
+  const policyGitReady = !!session.policyGit && app === 'receiver' && engineReadsCeiling(fleetValues.engineVersion);
   const plan = await buildReporterPlan({
     snapshot,
     app,
@@ -2332,12 +2336,17 @@ async function renderInstallPlan(
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
-    ...(app === 'receiver' ? { engineOptions: fleetValues.options, engineEnv: fleetValues.env, ...(session.policyGit ? { policyGit: session.policyGit } : {}) } : {}),
+    ...(app === 'receiver' ? { engineOptions: fleetValues.options, engineEnv: fleetValues.env, ...(policyGitReady ? { policyGit: session.policyGit } : {}) } : {}),
   });
   if (session.teamLabel !== undefined) {
     plan.notes.push(
       ...fleetValues.notes.filter((n) => n.includes('team label')),
       ...(fleetValues.teamLabelWritten ? [`The Receiver reads the team from the pod label \`${session.teamLabel}\` (\`k8sTeamLabel\`); its metrics carry it as \`tenx_team\`.`] : []),
+    );
+  }
+  if (session.policyGit && app === 'receiver' && !policyGitReady) {
+    plan.notes.push(
+      `The git path for the policy files (policy_git) needs engine ${CEILING_MIN_ENGINE} or later, the first whose GH_ENABLED pulls log10x/policy/; this plan installs ${fleetValues.engineVersion ?? 'an engine whose version is not pinned'}, so the Receiver reads the policy ConfigMap instead.`,
     );
   }
   if (session.logDestination === 'datadog') {

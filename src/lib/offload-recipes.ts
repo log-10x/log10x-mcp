@@ -41,6 +41,7 @@
  * (mirroring the original single-route drop branch).
  */
 
+import { engineReadsCeiling, manifestEngineVersion } from './fleet-default-install.js';
 import { getAllowedActionsForDestination, COST_MODEL_BY_DESTINATION } from './cost.js';
 
 export type OffloadForwarderId =
@@ -3229,7 +3230,10 @@ export interface AzureStreamsRecipe {
  * distinct pattern identities per message type. The three prerequisites
  * marked "measured" below are failures observed in that run.
  */
-export function azureStreamsRecipe(p: { eventHubNamespace?: string } = {}): AzureStreamsRecipe {
+export function azureStreamsRecipe(p: { eventHubNamespace?: string; engineVersion?: string } = {}): AzureStreamsRecipe {
+  // The mute file pulls through the files lane: GH_FILES_ENABLED from 1.1.146,
+  // where GH_ENABLED pulls the regulator policy folder instead.
+  const filesSwitch = engineReadsCeiling(p.engineVersion ?? manifestEngineVersion()) ? 'GH_FILES_ENABLED' : 'GH_ENABLED';
   const ns = p.eventHubNamespace ?? '<namespace>';
 
   const hub: OffloadRecipe = {
@@ -3347,7 +3351,7 @@ log10xMetricsEnabled=false`,
 # policy repo's per-pattern mutes and hot-reloads on every push:
 tenx @run/input/forwarder/otel-collector @apps/receiver @run/receive/rate @gitops
 
-GH_ENABLED=true
+${filesSwitch}=true
 GH_TOKEN=<fine-grained PAT, contents:read on the policy repo>
 GH_REPO=<org>/<policy-repo>
 GH_BRANCH=main
