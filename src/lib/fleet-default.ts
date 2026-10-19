@@ -134,16 +134,20 @@ export function errorMonitorVisibility(
   action: FleetDefaultAction,
   errorFloor: number = defaultErrorFloor(action),
   alwaysPass: number = ALWAYS_PASS_LINES,
+  /** Error lines over the limit that pass per statement per node per window (engine 1.1.146); replaces the floor. */
+  keepCount?: number,
 ): string {
   const f = Math.min(1, Math.max(0, Number.isFinite(errorFloor) ? errorFloor : defaultErrorFloor(action)));
   const first = `up to ${fmtLinesPerDay(alwaysPassLinesPerDay(alwaysPass))} lines a day of each statement on each node`;
-  if (f >= 1) {
+  if (keepCount === undefined && f >= 1) {
     return 'An error monitor sees every ERROR and CRITICAL line: none leaves Standard, whatever the limit.';
   }
   const kept =
-    f > 0
-      ? `every ERROR and CRITICAL line under the limit, ${first}, and ${shareWords(f)} of the rest`
-      : `every ERROR and CRITICAL line under the limit and ${first}`;
+    keepCount !== undefined
+      ? `every ERROR and CRITICAL line under the limit, ${first}, and above the limit the first ${keepCount} lines of each error statement on each node in every ${REGULATOR_WINDOW_SECONDS / 60}-minute window (up to ${fmtLinesPerDay(alwaysPassLinesPerDay(keepCount))} a day)`
+      : f > 0
+        ? `every ERROR and CRITICAL line under the limit, ${first}, and ${shareWords(f)} of the rest`
+        : `every ERROR and CRITICAL line under the limit and ${first}`;
   if (action === 'offload') {
     return (
       `An error monitor sees ${kept}. ` +

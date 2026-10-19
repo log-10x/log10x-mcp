@@ -209,6 +209,8 @@ export interface ForwarderSpec {
     engineOptions?: Array<[string, string]>;
     /** Receiver only: env vars on the engine container (`outputOffload`). */
     engineEnv?: Array<[string, string]>;
+    /** Receiver only: pull the policy files from git instead of the ConfigMap. */
+    policyGit?: PolicyGitDelivery;
   }) => string;
   /**
    * Optional: extra files to emit alongside the values.yaml. Used by
@@ -241,6 +243,8 @@ export interface ForwarderSpec {
     engineOptions?: Array<[string, string]>;
     /** Receiver only: env vars on the engine container (`outputOffload`). */
     engineEnv?: Array<[string, string]>;
+    /** Receiver only: pull the policy files from git instead of the ConfigMap. */
+    policyGit?: PolicyGitDelivery;
   }) => import('./types.js').PlanFile[];
   /**
    * Optional: extra command-line flags appended to the
@@ -487,9 +491,67 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
 export const POLICY_CONFIGMAP_NAME = 'log10x-action-intent';
 
 /**
+ * Key of the policy ConfigMap that records the unit the Receiver counts in
+ * (`events` or `bytes`), written by the install. The budget run writes limits
+ * in events and refuses a Receiver whose unit this key does not say is events.
+ */
+export const REGULATOR_UNIT_KEY = 'regulator-unit';
+
+/** The folder of the policy repo the engine's git pull reads the four policy files from. */
+export const POLICY_GIT_DIR = 'log10x/policy';
+/** The branch the budget run commits to and the engine pulls (GH_BRANCH). */
+export const POLICY_GIT_BRANCH_DEFAULT = 'log10x-policy';
+
+/** The git path for the policy files: a repo the engine pulls with GH_ENABLED. */
+export interface PolicyGitDelivery {
+  /** owner/name on GitHub (GH_REPO). */
+  repo: string;
+  /** The dedicated branch (GH_BRANCH). */
+  branch: string;
+  /** Secret holding GH_TOKEN, a PAT with Contents read (write for the seed). */
+  tokenSecretName: string;
+}
+
+/**
+ * Seed the four policy files on the pulled branch BEFORE the Receiver starts:
+ * the first pull stops on a missing folder and a sync refreshes only files
+ * that pull found, so every file must exist, each with a no-op row. Files
+ * already there are kept (a re-install never resets the budget run's rows);
+ * `regulator-unit` records the unit this install counts in.
+ */
+export function renderPolicyGitSeedCommands(git: PolicyGitDelivery, unit: 'bytes' | 'events'): string {
+  const dir = POLICY_GIT_DIR;
+  const seed: Array<[string, string]> = [
+    ['caps.csv', 'container,cap\\ntenx-seed,1::install seed'],
+    ['actions.csv', 'container,action\\ntenx-seed,pass::install seed'],
+    ['totals.csv', 'container,total\\ntenx-seed,1::install seed'],
+    ['config-generation.csv', 'key,value\\ngeneration,seed'],
+  ];
+  // The token travels as a per-command header, never in a remote URL or a
+  // git config file, and the clone is removed on exit.
+  const auth = '-c "http.https://github.com/.extraheader=$AUTH"';
+  return [
+    `# needs GH_TOKEN exported: a PAT with Contents write on ${git.repo}`,
+    `set -euo pipefail`,
+    `AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\\n')"`,
+    `SEED=$(mktemp -d)`,
+    `trap 'rm -rf "$SEED"' EXIT`,
+    `git ${auth} clone --quiet "https://github.com/${git.repo}.git" "$SEED"`,
+    `cd "$SEED"`,
+    `if git ${auth} ls-remote --exit-code --heads origin ${git.branch} >/dev/null; then git ${auth} fetch --quiet origin ${git.branch} && git checkout --quiet -B ${git.branch} FETCH_HEAD; else git checkout --quiet -b ${git.branch}; fi`,
+    `mkdir -p ${dir}`,
+    ...seed.map(([f, body]) => `[ -f ${dir}/${f} ] || printf '${body}\\n' > ${dir}/${f}`),
+    `printf '${unit}\\n' > ${dir}/${REGULATOR_UNIT_KEY}`,
+    `git add ${dir}`,
+    `git -c user.name=log10x-install -c user.email=install@log10x.com commit --quiet -m "log10x: seed the policy files" || true`,
+    `git ${auth} push --quiet origin ${git.branch}`,
+  ].join('\n');
+}
+
+/**
  * Engine-policy pull env for the receiver container: activates the engine's
  * kubernetes ConfigMap lane (K8S_ENABLED, gated off by default engine-side)
- * and points the regulator's three lookup files at the pull driver's stable
+ * and points the regulator's lookup files at the pull driver's stable
  * destination `${java.io.tmpdir}/tenx/kubernetes/<ns>/<cm>/`.
  *
  * K8S_NAMESPACE comes from the downward API so the paths track the pod's
@@ -508,8 +570,26 @@ export const POLICY_CONFIGMAP_NAME = 'log10x-action-intent';
  *
  * `indent` is the leading whitespace of each `- name:` line.
  */
-export function renderPolicyPullEnvLines(indent: string): string[] {
+export function renderPolicyPullEnvLines(indent: string, git?: PolicyGitDelivery): string[] {
   const i2 = indent + '  ';
+  if (git) {
+    // The git path: the engine pulls log10x/policy/*.csv from the branch, and
+    // with GH_ENABLED its four lookup files default to that folder, so no
+    // lookup-file env is written here.
+    return [
+      `${indent}- name: GH_ENABLED`,
+      `${i2}value: "true"`,
+      `${indent}- name: GH_REPO`,
+      `${i2}value: "${git.repo}"`,
+      `${indent}- name: GH_BRANCH`,
+      `${i2}value: "${git.branch}"`,
+      `${indent}- name: GH_TOKEN`,
+      `${i2}valueFrom:`,
+      `${i2}  secretKeyRef:`,
+      `${i2}    name: ${git.tokenSecretName}`,
+      `${i2}    key: GH_TOKEN`,
+    ];
+  }
   const base = `/tmp/tenx/kubernetes/$(K8S_NAMESPACE)/${POLICY_CONFIGMAP_NAME}`;
   return [
     `${indent}- name: K8S_NAMESPACE`,
@@ -526,6 +606,8 @@ export function renderPolicyPullEnvLines(indent: string): string[] {
     `${i2}value: ${base}/actions.csv`,
     `${indent}- name: CONFIG_GENERATION_FILE`,
     `${i2}value: ${base}/config-generation.csv`,
+    `${indent}- name: TOTAL_LOOKUP_FILE`,
+    `${i2}value: ${base}/totals.csv`,
   ];
 }
 
@@ -546,7 +628,7 @@ export function renderPolicyPullEnvLines(indent: string): string[] {
  * ServiceAccount in the namespace because the forwarder chart's SA name
  * varies per chart and the grant is read-only on a single object.
  */
-export function renderPolicyConfigMapManifest(namespace: string): string {
+export function renderPolicyConfigMapManifest(namespace: string, unit: 'bytes' | 'events' = 'bytes'): string {
   return `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -562,6 +644,10 @@ data:
   actions.csv: |
     container,action
     tenx-seed,pass::install seed; replaced by log10x_configure_engine
+  totals.csv: |
+    container,total
+    tenx-seed,1::install seed; replaced by the budget run
+  ${REGULATOR_UNIT_KEY}: ${unit}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -643,6 +729,7 @@ function renderLog10xSidecar(opts: {
   engineOptions?: Array<[string, string]>;
   /** Env vars on the engine container. */
   engineEnv?: Array<[string, string]>;
+  policyGit?: PolicyGitDelivery;
 }): string {
   const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
   const argLines: string[] = [
@@ -697,7 +784,7 @@ function renderLog10xSidecar(opts: {
       envLines.push(`        value: "${v}"`);
     }
   }
-  envLines.push(...renderPolicyPullEnvLines('      '));
+  envLines.push(...renderPolicyPullEnvLines('      ', opts.policyGit));
   envLines.push(...engineEnvLines('      ', opts.engineEnv));
   // No licence: no mount and no volume. The container then has nothing to
   // wait on, and the engine logs that it runs the built-in evaluation licence.
@@ -759,10 +846,11 @@ export const RECEIVER_FORWARDER_SPECS: Record<Exclude<ForwarderKind, 'unknown'>,
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
+    renderValues: ({ destination, outputHost, splunkHecToken, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv, policyGit }) => {
       const sidecar = renderLog10xSidecar({
         engineOptions,
         engineEnv,
+        policyGit,
         destination,
         backends,
         backendCredentials,
@@ -1063,7 +1151,7 @@ podSecurityPolicy:
 # on :24225 and writes them to your destinations.
 ${fileConfigsBlock}`;
     },
-    renderExtraFiles: ({ releaseName, destination, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
+    renderExtraFiles: ({ releaseName, destination, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv, policyGit }) => {
       const deploymentName = `${releaseName}-fluentd`;
       // engine args for the sidecar — same convention as
       // renderLog10xSidecar but inline because the patch YAML lives
@@ -1098,7 +1186,7 @@ ${fileConfigsBlock}`;
         envLines.push(`                    - name: TENX_AIRGAPPED`);
         envLines.push(`                      value: "true"`);
       }
-      envLines.push(...renderPolicyPullEnvLines('                    '));
+      envLines.push(...renderPolicyPullEnvLines('                    ', policyGit));
       envLines.push(...engineEnvLines('                    ', engineEnv));
       // No licence: the patch adds the container only, with no licence
       // mount and no pod volume (see renderLog10xSidecar).
@@ -1265,7 +1353,7 @@ bash "%~dp0post-render.sh"
     hasTenxSidecar: false,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
+    renderValues: ({ destination, optimize, readOnly, backends, backendCredentials, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv, policyGit }) => {
       // Build TENX_RUN_ARGS. Default args wire the filebeat input and
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
@@ -1298,7 +1386,7 @@ bash "%~dp0post-render.sh"
         envLines.push(`    - name: TENX_AIRGAPPED`);
         envLines.push(`      value: "true"`);
       }
-      envLines.push(...renderPolicyPullEnvLines('    '));
+      envLines.push(...renderPolicyPullEnvLines('    ', policyGit));
       envLines.push(...engineEnvLines('    ', engineEnv));
       for (const b of nonLog10xBackends) {
         const spec = BACKEND_ENV_SPECS[b];
@@ -1443,7 +1531,7 @@ ${envLines.join('\n')}${licenseVolumes}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, engineOptions, engineEnv, policyGit }) => {
       // Logstash chart quirks (vs the other receiver overlays):
       //   - `extraContainers` is a YAML pipe-string, not a list, so the
       //     log10x container block is inlined here rather than taken from
@@ -1477,7 +1565,7 @@ ${envLines.join('\n')}${licenseVolumes}
         envLines.push(`      - name: TENX_AIRGAPPED`);
         envLines.push(`        value: "true"`);
       }
-      envLines.push(...renderPolicyPullEnvLines('      '));
+      envLines.push(...renderPolicyPullEnvLines('      ', policyGit));
       envLines.push(...engineEnvLines('      ', engineEnv));
       const destOutput = renderLogstashDestinationOutput(destination, outputHost);
       // No licence: no mount and no secretMounts entry (see renderLog10xSidecar).
@@ -1651,10 +1739,11 @@ ${indent(destOutput, 6)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv, policyGit }) => {
       const sidecar = renderLog10xSidecar({
         engineOptions,
         engineEnv,
+        policyGit,
         destination,
         backends,
         backendCredentials,
@@ -1789,10 +1878,11 @@ ${indent(destSink, 4)}
     hasTenxSidecar: true,
     selectorStyle: 'k8s-recommended',
     selectorLabel: (r) => k8sRecommendedSelector(r),
-    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv }) => {
+    renderValues: ({ destination, outputHost, optimize, airgapped, licenseSecretName, licenseSecretKey, builtinLicense, backends, backendCredentials, engineOptions, engineEnv, policyGit }) => {
       const sidecar = renderLog10xSidecar({
         engineOptions,
         engineEnv,
+        policyGit,
         destination,
         backends,
         backendCredentials,
