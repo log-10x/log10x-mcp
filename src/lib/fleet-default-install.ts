@@ -137,6 +137,10 @@ export interface ReceiverFleetValues {
   regulatorValuesWritten: boolean;
   /** True when `rateReceiverKeepCounts` is in `options`. */
   keepCountsWritten: boolean;
+  /** The count written in `rateReceiverKeepCounts`, when written. */
+  keepCount?: number;
+  /** The share floor written on the error levels. */
+  errorFloor?: number;
   /** The engine release the gate read. */
   engineVersion?: string;
   /** One sentence per value held back, and why. */
@@ -180,7 +184,13 @@ export function receiverFleetValues(input: {
           `${installs}, so it writes none of the fleet default's values, and a service with no rule keeps every statement in Standard.`,
       );
     } else {
-      options.push(...fleetDefaultEngineOptions(input.fleetDefault, keepCount));
+      const fd = {
+        ...input.fleetDefault,
+        errorFloor:
+          input.fleetDefault.errorFloor ??
+          defaultErrorFloor(input.anyOffload || input.fleetDefault.action === 'offload' ? 'offload' : 'tier_down'),
+      };
+      options.push(...fleetDefaultEngineOptions(fd, keepCount));
       env.push(...FLEET_DEFAULT_ENGINE_ENV);
       fleetDefaultWritten = true;
     }
@@ -198,6 +208,8 @@ export function receiverFleetValues(input: {
     }
   }
   const keepCountsWritten = regulatorValuesWritten && keepCount !== undefined;
+  const floorEntry = options.find(([k, v]) => k === 'rateReceiverSeverityFloors' && v.startsWith('ERROR='));
+  const errorFloor = floorEntry ? Number(floorEntry[1].slice('ERROR='.length)) : undefined;
   if (input.datadog && regulatorValuesWritten && keepCount === undefined) {
     notes.push(
       `Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine ${CEILING_MIN_ENGINE}; ${installs}, so they pass at the error floor's share instead.`,
@@ -223,6 +235,8 @@ export function receiverFleetValues(input: {
     teamLabelWritten,
     regulatorValuesWritten,
     keepCountsWritten,
+    ...(keepCountsWritten ? { keepCount } : {}),
+    ...(errorFloor !== undefined ? { errorFloor } : {}),
     ...(engineVersion ? { engineVersion } : {}),
     notes,
   };

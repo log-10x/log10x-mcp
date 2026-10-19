@@ -472,6 +472,10 @@ export interface WizardSession {
   fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number };
   /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */
   teamLabel?: string;
+  /** Error lines over a limit that pass per statement per node per window (rateReceiverKeepCounts). */
+  keepCount?: number;
+  /** Per-service destination for lines over the limit, as the plan set it. */
+  serviceActions?: Record<string, 'tier_down' | 'offload'>;
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }
