@@ -31,6 +31,43 @@ export interface SpikeAuditOptions {
   headroom?: number;
   standardUsdPerMillion?: number;
   ingestionUsdPerGb?: number;
+  /** X: a monthly Standard indexing budget for the whole account, dollars. */
+  budgetUsdMonthly?: number;
+  /** Index names that bill as Standard; empty or absent counts every index. */
+  standardIndexes?: string[];
+}
+
+/** One calendar month (UTC) of Standard indexing against the budget. */
+export interface BudgetMonth {
+  /** `2026-07`. */
+  month: string;
+  events: number;
+  usd: number;
+  overEvents: number;
+  overUsd: number;
+  /** True when the window holds only part of the month. */
+  partial: boolean;
+  /** The hour Standard crossed X, when it did. */
+  crossedIso?: string;
+}
+
+export interface BudgetOverService {
+  service: string;
+  overEvents: number;
+  overUsd: number;
+  /** Its share of the lines past the budget, 0 to 1. */
+  share: number;
+}
+
+/** Given X, how far over it the account went, month by month and per service. */
+export interface BudgetOverage {
+  usdMonthly: number;
+  standardIndexes: string[];
+  months: BudgetMonth[];
+  services: BudgetOverService[];
+  overUsd: number;
+  overEvents: number;
+  monthsOver: number;
 }
 
 export interface Spike {
@@ -68,6 +105,8 @@ export interface SpikeAudit {
   ingestionUsdPerGb: number;
   servicesScanned: number;
   services: ServiceSpikes[];
+  /** Present when a budget was given. */
+  budget?: BudgetOverage;
   totals: {
     spikes: number;
     excessEvents: number;
@@ -104,6 +143,82 @@ function grid(series: DdPointSeries[], key: (tags: Record<string, string>) => st
 }
 
 const serviceOf = (t: Record<string, string>): string => t.service || NO_SERVICE;
+
+function monthKey(sec: number): string {
+  return new Date(sec * 1000).toISOString().slice(0, 7);
+}
+
+/**
+ * Given X, the account's Standard indexing month by month (UTC): each hour's
+ * indexed events in order, and once the month's running total passes X every
+ * later line is past the budget. A service's overage is its share of those
+ * lines (the crossing hour split by each service's events in it), so the
+ * services' overages add up to the month's.
+ */
+export function budgetOverage(
+  input: SpikeAuditInput,
+  opts: { budgetUsdMonthly: number; standardUsdPerMillion: number; standardIndexes?: string[] },
+): BudgetOverage {
+  const rate = opts.standardUsdPerMillion;
+  const budgetEvents = (opts.budgetUsdMonthly / rate) * 1e6;
+  const standard = new Set(opts.standardIndexes ?? []);
+  const h0 = Math.floor(input.fromSec / HOUR);
+  const n = Math.max(0, Math.floor((input.toSec - 1) / HOUR) - h0 + 1);
+  const events = grid(
+    input.events.filter((s) => standard.size === 0 || standard.has(s.tags.datadog_index ?? '')),
+    serviceOf,
+    h0,
+    n,
+  );
+  const names = [...events.keys()];
+  const over = new Map<string, number>(names.map((k) => [k, 0]));
+  const months: BudgetMonth[] = [];
+  let cur: BudgetMonth | undefined;
+  let running = 0;
+  for (let i = 0; i < n; i++) {
+    const sec = (h0 + i) * HOUR;
+    const key = monthKey(sec);
+    if (!cur || cur.month !== key) {
+      const d = new Date(sec * 1000);
+      const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000;
+      const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000;
+      cur = { month: key, events: 0, usd: 0, overEvents: 0, overUsd: 0, partial: input.fromSec > start || input.toSec < end };
+      months.push(cur);
+      running = 0;
+    }
+    let hour = 0;
+    for (const k of names) hour += events.get(k)![i];
+    if (hour <= 0) continue;
+    const pastBefore = Math.max(0, running - budgetEvents);
+    running += hour;
+    const pastNow = Math.max(0, running - budgetEvents);
+    const past = pastNow - pastBefore;
+    if (past > 0) {
+      if (!cur.crossedIso) cur.crossedIso = new Date(sec * 1000).toISOString();
+      for (const k of names) over.set(k, over.get(k)! + (past * events.get(k)![i]) / hour);
+      cur.overEvents += past;
+    }
+    cur.events += hour;
+  }
+  for (const m of months) {
+    m.usd = (m.events / 1e6) * rate;
+    m.overUsd = (m.overEvents / 1e6) * rate;
+  }
+  const overEvents = months.reduce((t, m) => t + m.overEvents, 0);
+  const services = [...over.entries()]
+    .filter(([, e]) => e > 0)
+    .map(([service, e]) => ({ service, overEvents: e, overUsd: (e / 1e6) * rate, share: overEvents > 0 ? e / overEvents : 0 }))
+    .sort((a, b) => b.overEvents - a.overEvents || (a.service < b.service ? -1 : 1));
+  return {
+    usdMonthly: opts.budgetUsdMonthly,
+    standardIndexes: [...standard],
+    months,
+    services,
+    overUsd: (overEvents / 1e6) * rate,
+    overEvents,
+    monthsOver: months.filter((m) => m.overEvents > 0).length,
+  };
+}
 
 export function buildSpikeAudit(input: SpikeAuditInput, opts: SpikeAuditOptions = {}): SpikeAudit {
   const multiplier = opts.multiplier ?? SPIKE_MULTIPLIER;
@@ -209,6 +324,9 @@ export function buildSpikeAudit(input: SpikeAuditInput, opts: SpikeAuditOptions 
     ingestionUsdPerGb: ingest,
     servicesScanned: events.size,
     services,
+    ...(opts.budgetUsdMonthly !== undefined && opts.budgetUsdMonthly > 0
+      ? { budget: budgetOverage(input, { budgetUsdMonthly: opts.budgetUsdMonthly, standardUsdPerMillion: rate, standardIndexes: opts.standardIndexes }) }
+      : {}),
     totals: {
       spikes: sum((s) => s.spikes.length),
       excessEvents: sum((s) => s.excessEvents),
@@ -223,6 +341,40 @@ export function buildSpikeAudit(input: SpikeAuditInput, opts: SpikeAuditOptions 
 }
 
 const n0 = (v: number): string => Math.round(v).toLocaleString('en-US');
+
+function renderBudgetOverage(b: BudgetOverage): string[] {
+  const L: string[] = [];
+  const scope = b.standardIndexes.length > 0 ? `the indexes ${b.standardIndexes.join(', ')}` : 'every index';
+  L.push(`### Against a budget of ${fmtAboutUsd(b.usdMonthly)} a month`);
+  L.push('');
+  L.push(
+    b.monthsOver === 0
+      ? `Standard indexing (${scope}) stayed under ${fmtAboutUsd(b.usdMonthly)} in every month of the window.`
+      : `Standard indexing (${scope}) went over ${fmtAboutUsd(b.usdMonthly)} in ${b.monthsOver} of ${b.months.length} months, ` +
+          `by ${fmtEventCount(b.overEvents)} events, ${fmtAboutUsd(b.overUsd)} in all. Without a ceiling that was paid; held at the budget it would have landed in Flex or S3.`,
+  );
+  L.push('');
+  L.push('| Month | Standard events | Cost | Over the budget | Crossed it (UTC) |');
+  L.push('|---|---:|---:|---:|---|');
+  for (const m of b.months) {
+    L.push(
+      `| ${m.month}${m.partial ? ' (part)' : ''} | ${n0(m.events)} | ${usd(m.usd)} | ${m.overEvents > 0 ? `${n0(m.overEvents)}, ${usd(m.overUsd)}` : 'no'} | ${m.crossedIso ? m.crossedIso.slice(0, 13).replace('T', ' ') + ':00' : ''} |`,
+    );
+  }
+  if (b.services.length > 0) {
+    L.push('');
+    L.push('By service, from each one\'s share of the lines past the budget:');
+    L.push('');
+    L.push('| Service | Events past the budget | Share | Cost |');
+    L.push('|---|---:|---:|---:|');
+    for (const s of b.services) L.push(`| ${s.service} | ${n0(s.overEvents)} | ${Math.round(s.share * 100)}% | ${usd(s.overUsd)} |`);
+  }
+  if (b.months.some((m) => m.partial)) {
+    L.push('');
+    L.push('A month marked (part) counts only the days inside the window, so its overage can be larger in the meter.');
+  }
+  return L;
+}
 const usd = (v: number): string => (v > 0 && v < 0.01 ? 'under $0.01' : fmtAboutUsd(v));
 const days = (d: number): string => `${Number(d.toFixed(1))} ${d === 1 ? 'day' : 'days'}`;
 
@@ -292,6 +444,7 @@ export function renderSpikeAuditMarkdown(
       if (s.spikes.length > per) L.push(`| ${s.spikes.length - per} more spikes | | | | | |`);
     }
   }
+  if (a.budget) L.push('', ...renderBudgetOverage(a.budget));
   L.push('');
   L.push('**Caveats.**');
   L.push('');
