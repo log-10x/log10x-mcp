@@ -45,22 +45,24 @@ export const DD_TAGS = {
  */
 export const HELD_ROUTES: ReadonlySet<string> = new Set(['tier_down', 'offload']);
 
-export interface DatadogMetricsCreds {
-  site: string;
-  apiKey: string;
-  appKey: string;
-}
+/** An API and application key pair, or a personal access token sent as a Bearer token. */
+export type DatadogMetricsCreds =
+  | { site: string; apiKey: string; appKey: string; pat?: undefined }
+  | { site: string; pat: string; apiKey?: undefined; appKey?: undefined };
 
 /**
- * Keys from the environment, read the way the Datadog logs connector reads
- * them (DD_* first, DATADOG_* as fallback). Undefined when either key is
- * missing. The site defaults to US1, as the connector's SDK does.
+ * Credentials from the environment, read the way the Datadog logs connector
+ * reads them (DD_* first, DATADOG_* as fallback): DD_PAT when set, else the
+ * DD_API_KEY and DD_APP_KEY pair. Undefined when neither is complete. The
+ * site defaults to US1, as the connector's SDK does.
  */
 export function datadogMetricsCredsFromEnv(siteOverride?: string): DatadogMetricsCreds | undefined {
+  const site = siteOverride || process.env.DD_SITE || process.env.DATADOG_SITE || 'datadoghq.com';
+  const pat = process.env.DD_PAT || process.env.DATADOG_PAT;
+  if (pat) return { site, pat };
   const apiKey = process.env.DD_API_KEY || process.env.DATADOG_API_KEY;
   const appKey = process.env.DD_APP_KEY || process.env.DATADOG_APP_KEY;
   if (!apiKey || !appKey) return undefined;
-  const site = siteOverride || process.env.DD_SITE || process.env.DATADOG_SITE || 'datadoghq.com';
   return { site, apiKey, appKey };
 }
 
@@ -88,9 +90,10 @@ interface DdQueryResponse {
 }
 
 function headers(creds: DatadogMetricsCreds): Record<string, string> {
+  if (creds.pat) return { Authorization: `Bearer ${creds.pat}`, Accept: 'application/json' };
   return {
-    'DD-API-KEY': creds.apiKey,
-    'DD-APPLICATION-KEY': creds.appKey,
+    'DD-API-KEY': creds.apiKey!,
+    'DD-APPLICATION-KEY': creds.appKey!,
     Accept: 'application/json',
   };
 }

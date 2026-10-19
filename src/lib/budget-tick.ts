@@ -648,7 +648,7 @@ export async function readBudgetInputs(
   deps: BudgetReadDeps = {},
 ): Promise<BudgetReads> {
   const creds = deps.creds === undefined ? datadogMetricsCredsFromEnv() : deps.creds ?? undefined;
-  if (!creds) throw new Error('DD_API_KEY and DD_APP_KEY are not set; the run reads Datadog usage with them.');
+  if (!creds) throw new Error('Neither DD_PAT nor the DD_API_KEY and DD_APP_KEY pair is set; the run reads Datadog usage with them.');
   const q: DdQuery = deps.query ?? ((c, query, from, to) => ddQueryPoints(c, query, from, to));
   const { start } = monthBounds(nowSec);
   const from = nowSec - lookbackHours * HOUR;

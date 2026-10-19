@@ -338,7 +338,8 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
     `# log10x-action-intent ConfigMap the Receiver reads.`,
     `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
-    `#   --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key> [--from-literal=DD_SITE=<site>]`,
+    `#   --from-literal=DD_PAT=<personal access token> [--from-literal=DD_SITE=<site>]`,
+    `# or, instead of DD_PAT: --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
     `# Apply with: kubectl apply -f log10x-cronjob.yaml`,
     `---`,
     `apiVersion: v1`,
@@ -429,8 +430,9 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `                - |`,
     `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
     `              env:`,
-    ...ddEnv('DD_API_KEY'),
-    ...ddEnv('DD_APP_KEY'),
+    ...ddEnv('DD_PAT', true),
+    ...ddEnv('DD_API_KEY', true),
+    ...ddEnv('DD_APP_KEY', true),
     ...ddEnv('DD_SITE', true),
     ...(opts.env_id
       ? [
@@ -501,6 +503,7 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     `        env:`,
     ...(opts.budget_usd_monthly !== undefined
       ? [
+          `          DD_PAT: \${{ secrets.DD_PAT }}`,
           `          DD_API_KEY: \${{ secrets.DD_API_KEY }}`,
           `          DD_APP_KEY: \${{ secrets.DD_APP_KEY }}`,
           `          DD_SITE: \${{ secrets.DD_SITE }}`,

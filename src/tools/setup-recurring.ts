@@ -159,7 +159,7 @@ export const setupRecurringSchema = {
   datadog_secret_name: z
     .string()
     .optional()
-    .describe('With budget_usd_monthly on k8s_cron: the Secret holding DD_API_KEY, DD_APP_KEY and optional DD_SITE. Default: log10x-datadog.'),
+    .describe('With budget_usd_monthly on k8s_cron: the Secret holding DD_PAT (or DD_API_KEY and DD_APP_KEY) and optional DD_SITE. Default: log10x-datadog.'),
 
   /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
@@ -787,9 +787,9 @@ function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): st
       `### Apply instructions: budget run, Kubernetes CronJob`,
       ``,
       `1. ${install}`,
-      `2. **Create the Datadog key Secret** in \`${ns}\`, the Receiver's namespace (the keys need read access to metrics):`,
+      `2. **Create the Datadog Secret** in \`${ns}\`, the Receiver's namespace, with a personal access token that can read metrics (or \`DD_API_KEY\` and \`DD_APP_KEY\` instead), plus \`DD_SITE\` when the org is not on datadoghq.com:`,
       `   \`\`\`bash`,
-      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=DD_PAT=<personal access token> --from-literal=DD_SITE=<site>`,
       `   \`\`\``,
       `3. **Apply the CronJob manifest** (policy, service account, RBAC, CronJob):`,
       `   \`\`\`bash`,
@@ -809,7 +809,7 @@ function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): st
     `1. ${install} Pass \`policy_git: { repo: "<owner/name>" }\` so the Receiver pulls \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN); the plan seeds the four files and \`log10x/policy/regulator-unit\` there before the Receiver starts, and the run checks that unit before it writes a limit.`,
     `2. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
     `3. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
-    `4. **Add the secrets** \`DD_API_KEY\` and \`DD_APP_KEY\` (and \`DD_SITE\` when the org is not on datadoghq.com).`,
+    `4. **Add the secrets** \`DD_PAT\`, a personal access token that can read metrics (or \`DD_API_KEY\` and \`DD_APP_KEY\` instead), and \`DD_SITE\` when the org is not on datadoghq.com.`,
     `5. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch, never a PR, since nothing would merge it (schedule \`${cronExpr}\` UTC).`,
     ...(cronExpr === resolveCronExpression('hourly')
       ? [`6. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
