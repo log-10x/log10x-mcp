@@ -153,7 +153,10 @@ import { defaultErrorFloor, fleetDefaultNumber, FLEET_DEFAULT_HEADROOM, type Kep
 import {
   FLEET_DEFAULT_ENGINE_ENV,
   FLEET_DEFAULT_MIN_ENGINE,
+  KEEP_COUNT_DEFAULT,
+  engineReadsCeiling,
   fleetDefaultEngineOptions,
+  manifestEngineVersion,
 } from '../lib/fleet-default-install.js';
 import { medianInstances } from '../lib/enforcing-instances.js';
 import { placeServiceCap, marginSentence, type ServiceCapPlacement } from '../lib/service-cap.js';
@@ -3791,7 +3794,12 @@ export function fleetDefaultFromRows(
     nodes_for_lines: median.median,
     containers_with_known_nodes: median.known,
     sentence,
-    engine_options: fleetDefaultEngineOptions({ capBytesPerWindowPerNode: num.capBytesPerWindowPerNode, action, errorFloor }),
+    // What log10x_advise_install writes on the engine this release pins: the
+    // error keep count from 1.1.146, the share floor before it.
+    engine_options: fleetDefaultEngineOptions(
+      { capBytesPerWindowPerNode: num.capBytesPerWindowPerNode, action, errorFloor },
+      engineReadsCeiling(manifestEngineVersion()) ? KEEP_COUNT_DEFAULT : undefined,
+    ),
     engine_env: [...FLEET_DEFAULT_ENGINE_ENV],
     min_engine: FLEET_DEFAULT_MIN_ENGINE,
     install_note:

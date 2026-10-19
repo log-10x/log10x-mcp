@@ -474,6 +474,10 @@ export interface WizardSession {
   teamLabel?: string;
   /** `events` when a budget run holds the install: `rateReceiverUnit events` from engine 1.1.146. */
   regulatorUnit?: 'bytes' | 'events';
+  /** Error lines over a limit that pass per statement per node per window (rateReceiverKeepCounts). */
+  keepCount?: number;
+  /** Per-service destination for lines over the limit, as the plan set it. */
+  serviceActions?: Record<string, 'tier_down' | 'offload'>;
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

@@ -139,6 +139,10 @@ export interface ReceiverFleetValues {
   keepCountsWritten: boolean;
   /** True when `rateReceiverUnit events` is in `options`. */
   eventsUnitWritten: boolean;
+  /** The count written in `rateReceiverKeepCounts`, when written. */
+  keepCount?: number;
+  /** The share floor written on the error levels. */
+  errorFloor?: number;
   /** The engine release the gate read. */
   engineVersion?: string;
   /** One sentence per value held back, and why. */
@@ -199,7 +203,15 @@ export function receiverFleetValues(input: {
           `${installs}, so it writes none of the fleet default's values, and a service with no rule keeps every statement in Standard.`,
       );
     } else {
-      const fd = fleetDefaultEngineOptions(input.fleetDefault, keepCount);
+      const fd = fleetDefaultEngineOptions(
+        {
+          ...input.fleetDefault,
+          errorFloor:
+            input.fleetDefault.errorFloor ??
+            defaultErrorFloor(input.anyOffload || input.fleetDefault.action === 'offload' ? 'offload' : 'tier_down'),
+        },
+        keepCount,
+      );
       // The fleet default's number is bytes; with limits in lines the budget
       // run's `*` row sets it, so only its action is written.
       options.push(...(eventsUnitWritten ? fd.filter(([k]) => k !== 'rateReceiverAbsoluteCap') : fd));
@@ -223,6 +235,8 @@ export function receiverFleetValues(input: {
     }
   }
   const keepCountsWritten = regulatorValuesWritten && keepCount !== undefined;
+  const floorEntry = options.find(([k, v]) => k === 'rateReceiverSeverityFloors' && v.startsWith('ERROR='));
+  const errorFloor = floorEntry ? Number(floorEntry[1].slice('ERROR='.length)) : undefined;
   if (input.datadog && regulatorValuesWritten && keepCount === undefined) {
     notes.push(
       `Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine ${CEILING_MIN_ENGINE}; ${installs}, so they pass at the error floor's share instead.`,
@@ -249,6 +263,8 @@ export function receiverFleetValues(input: {
     regulatorValuesWritten,
     keepCountsWritten,
     eventsUnitWritten,
+    ...(keepCountsWritten ? { keepCount } : {}),
+    ...(errorFloor !== undefined ? { errorFloor } : {}),
     ...(engineVersion ? { engineVersion } : {}),
     notes,
   };
