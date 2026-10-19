@@ -63,11 +63,6 @@ function datadogStub(calls: string[]) {
         aligned({ tenx_hash: 'b', k8s_container: 'checkout', severity_level: 'ERROR' }, 1_000),
         aligned({ tenx_hash: 'c', k8s_container: 'payments', severity_level: 'INFO' }, 5_000),
       ];
-      return [
-        hourly({ tenx_hash: 'a', message_pattern: 'big_one', k8s_container: 'checkout', severity_level: 'INFO' }, from, to, 30_000),
-        hourly({ tenx_hash: 'b', k8s_container: 'checkout', severity_level: 'ERROR' }, from, to, 1_000),
-        hourly({ tenx_hash: 'c', k8s_container: 'payments', severity_level: 'INFO' }, from, to, 5_000),
-      ];
     }
     return [];
   };
