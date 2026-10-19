@@ -28,7 +28,7 @@ import { nodesPerContainerFromPods } from './enforcing-instances.js';
 import { computeGeneration, renderGenerationCsv } from './config-generation.js';
 import { HELD_ROUTES, datadogMetricsCredsFromEnv, ddQueryPoints, type DatadogMetricsCreds, type DdPointSeries } from './datadog-metrics-read.js';
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS, fmtAboutUsd } from './report/user-units.js';
-import { fmtEventCount } from './cost.js';
+import { DATADOG_FLEX_LIST_PRICING, fmtEventCount, fmtListRate } from './cost.js';
 import { FLEET_DEFAULT_HEADROOM, fleetDestination } from './fleet-default.js';
 import type { DollarBudget } from './policy-loader.js';
 import type { K8sApi } from './k8s-in-cluster.js';
@@ -93,6 +93,8 @@ export interface BudgetInput {
    * count toward their service's total, so the other lines give way first.
    */
   protectedPatterns?: ReadonlySet<string>;
+  /** Lines the Receiver moved off Standard this month, by route. */
+  movedEvents?: { tier_down: number; offload: number };
 }
 
 export interface ServiceRow {
@@ -130,6 +132,8 @@ export interface BudgetPlan {
   overBudget: boolean;
   rows: ServiceRow[];
   star: { action: BudgetAction; instances: number; cap: number; total: number; allowancePerHour: number };
+  /** The one line: Standard held at X, and what moved this month priced where it went. */
+  heldLine: string;
   lines: string[];
   warnings: string[];
 }
@@ -289,6 +293,13 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   };
 
   const usd = (events: number): string => fmtAboutUsd(events * perEventUsd);
+  const heldLine = ceilingReportLine({
+    budgetUsd: b.usd_monthly,
+    spentUsd: spent * perEventUsd,
+    standardUsdPerMillion: b.standard_usd_per_million,
+    flexEvents: input.movedEvents?.tier_down ?? 0,
+    s3Events: input.movedEvents?.offload ?? 0,
+  });
   const where = fleetDestination(b.default_action === 'offload' ? 'offload' : 'tier_down');
   lines.push(
     `Standard indexing this month: ${usd(spent)} of ${fmtAboutUsd(b.usd_monthly)} (${fmtEventCount(spent)} events through ${utcHour(dataThroughSec)}), ${Math.round(hoursLeft)} hours left.`,
@@ -348,9 +359,37 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     overBudget,
     rows,
     star,
+    heldLine,
     lines,
     warnings,
   };
+}
+
+/**
+ * Standard held at X, and what the Receiver moved off it this month, priced
+ * where it went: Flex at the list storage rate (compute unpriced, left out),
+ * S3 off the Datadog bill. Each also at the Standard rate it did not pay.
+ */
+export function ceilingReportLine(input: {
+  budgetUsd: number;
+  spentUsd: number;
+  standardUsdPerMillion: number;
+  flexEvents: number;
+  s3Events: number;
+}): string {
+  const p = DATADOG_FLEX_LIST_PRICING;
+  const std = (e: number): string => fmtAboutUsd((e / 1e6) * input.standardUsdPerMillion);
+  const parts: string[] = [];
+  if (input.flexEvents > 0) {
+    parts.push(
+      `${fmtEventCount(input.flexEvents)} events to Flex, about ${fmtAboutUsd((input.flexEvents / 1e6) * p.tier_storage_usd_per_million_events_month)} a month of Flex storage at ${fmtListRate(p.tier_storage_usd_per_million_events_month)} per million (Flex compute is unpriced and left out), ${std(input.flexEvents)} at the Standard rate`,
+    );
+  }
+  if (input.s3Events > 0) {
+    parts.push(`${fmtEventCount(input.s3Events)} events to S3, off the Datadog bill, ${std(input.s3Events)} at the Standard rate`);
+  }
+  const moved = parts.length > 0 ? `Moved this month: ${parts.join('; ')}.` : 'Nothing moved off Standard this month.';
+  return `Standard held at ${fmtAboutUsd(input.budgetUsd)} a month: ${fmtAboutUsd(input.spentUsd)} so far this month. ${moved}`;
 }
 
 export interface BudgetFiles {
@@ -386,6 +425,8 @@ export function renderBudgetFiles(plan: BudgetPlan): BudgetFiles {
 export function renderBudgetReport(plan: BudgetPlan, budget: DollarBudget, nowSec: number, extra: string[] = []): string {
   const out = [
     `# Budget run: ${new Date(nowSec * 1000).toISOString()}`,
+    '',
+    plan.heldLine,
     '',
     ...plan.lines.map((l) => `- ${l}`),
     ...extra.map((l) => `- ${l}`),
@@ -426,6 +467,8 @@ function sumPoints(series: DdPointSeries[], fromSec: number, toSec: number, keep
 export interface BudgetReads {
   usage: DdPointSeries[];
   receiverStandardEvents: number;
+  /** Lines the Receiver sent to Flex (tier_down) and S3 (offload) this month. */
+  movedEvents: { tier_down: number; offload: number };
   patterns: PatternRate[];
 }
 
@@ -446,7 +489,12 @@ export async function readBudgetInputs(
     q(creds, receiverRouteQuery(envId), start, nowSec),
     q(creds, patternEventsQuery(envId), from, nowSec),
   ]);
-  const receiverStandardEvents = sumPoints(routes, start, nowSec, (s) => !HELD_ROUTES.has((s.tags['routestate'] ?? '').toLowerCase()));
+  const route = (s: DdPointSeries): string => (s.tags['routestate'] ?? '').toLowerCase();
+  const receiverStandardEvents = sumPoints(routes, start, nowSec, (s) => !HELD_ROUTES.has(route(s)));
+  const movedEvents = {
+    tier_down: sumPoints(routes, start, nowSec, (s) => route(s) === 'tier_down'),
+    offload: sumPoints(routes, start, nowSec, (s) => route(s) === 'offload'),
+  };
   const patterns: PatternRate[] = pats.map((s) => ({
     container: s.tags['k8s_container'] ?? '',
     pattern: s.tags['tenx_hash'] ?? '',
@@ -454,7 +502,7 @@ export async function readBudgetInputs(
     severity: (s.tags['severity_level'] ?? '').toUpperCase(),
     eventsPerHour: sumPoints([s], from, nowSec) / Math.max(1, lookbackHours),
   }));
-  return { usage, receiverStandardEvents, patterns };
+  return { usage, receiverStandardEvents, movedEvents, patterns };
 }
 
 /**
