@@ -112,6 +112,12 @@ export interface DollarBudget {
   default_action: 'tier_down' | 'offload';
   /** Per-service destination for lines over the limit. */
   service_actions: Record<string, 'tier_down' | 'offload'>;
+  /**
+   * Dollars a month of Standard for a named service (the container), held
+   * month to date against its own number. The rest of the account is held
+   * to usd_monthly minus their sum.
+   */
+  service_budgets: Record<string, number>;
   /** Nodes each service's pods run on, when the run cannot discover them (gitops delivery). */
   nodes_by_container: Record<string, number>;
   /** Receivers in the fleet, for the `*` row, when the run cannot discover them. */
@@ -563,6 +569,19 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
       service_actions[svc] = a as 'tier_down' | 'offload';
     }
   }
+  const service_budgets: Record<string, number> = {};
+  const rawSb = red?.['service_budgets'];
+  if (rawSb !== undefined && (!rawSb || typeof rawSb !== 'object' || Array.isArray(rawSb))) {
+    throw new PolicyLoadError('service_budgets must map each service to dollars a month, e.g. payments: 4000.');
+  }
+  for (const [svc, v] of Object.entries((rawSb ?? {}) as Record<string, unknown>)) {
+    const n = positiveNumber(v);
+    if (n === undefined) throw new PolicyLoadError(`service_budgets.${svc} must be a positive number of dollars a month; got: ${String(v)}`);
+    service_budgets[svc] = n;
+  }
+  const exceptions = Array.isArray(red?.['exceptions']) ? (red['exceptions'] as unknown[]).filter((s): s is string => typeof s === 'string') : [];
+  const problem = serviceBudgetsProblem(service_budgets, usd, exceptions);
+  if (problem) throw new PolicyLoadError(problem);
   const nodes_total = red?.['nodes_total'] === undefined ? undefined : countMap({ nodes_total: red['nodes_total'] }, 'reduction').nodes_total;
   return {
     usd_monthly: usd,
@@ -571,7 +590,26 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
     keep_count: k,
     default_action: default_action as 'tier_down' | 'offload',
     service_actions,
+    service_budgets,
     nodes_by_container: countMap(red?.['nodes_by_container'], 'nodes_by_container'),
     ...(nodes_total !== undefined ? { nodes_total } : {}),
   };
+}
+
+/**
+ * Why a set of per-service budgets cannot be held, or undefined when it can:
+ * their sum must leave something of X for the rest of the account, and a
+ * service the policy never touches cannot be held to a number.
+ */
+export function serviceBudgetsProblem(budgets: Record<string, number>, usdMonthly: number, exceptions: readonly string[]): string | undefined {
+  const named = Object.keys(budgets);
+  const sum = named.reduce((a, s) => a + budgets[s], 0);
+  if (named.length > 0 && sum >= usdMonthly) {
+    return `service_budgets add up to ${sum} dollars a month, which leaves nothing of budget_usd_monthly (${usdMonthly}) for the rest of the account. Their sum must be under it.`;
+  }
+  const both = named.filter((s) => exceptions.includes(s));
+  if (both.length > 0) {
+    return `${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} in both service_budgets and exceptions: an exception is never touched, so it cannot be held to a number. Keep each service in one.`;
+  }
+  return undefined;
 }

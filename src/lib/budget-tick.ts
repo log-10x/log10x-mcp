@@ -1,21 +1,24 @@
 /**
- * The budget run: one tick of a Datadog Standard indexing budget held month
- * to date (handoff 4b.2, rulings 10 to 15).
+ * The budget run: one run of a Datadog Standard indexing budget held month
+ * to date. X is the whole account's Standard bill.
  *
  * Each run:
  *   1. reads what Standard indexing counted this month for the whole account
  *      (`datadog.estimated_usage.logs.ingested_events`, indexed events only,
  *      by index) and what the Receiver itself sent to Standard (its
- *      `routeState` series), so lines outside the Receiver are known;
- *   2. sets the Receiver's rate for the rest of the month to
- *      (X - spent - what lines outside the Receiver will add) / hours left;
+ *      `routeState` series, by container), so lines outside the Receiver are
+ *      known;
+ *   2. holds each service with its own number (`service_budgets`) to that
+ *      number, and sets the rate for the rest of the Receiver's services to
+ *      (X - their numbers - spent - what lines outside the Receiver will
+ *      add) / hours left;
  *   3. reads every statement's events an hour from the Receiver's series and
- *      gives the services that rate, noisiest statements held first;
+ *      gives each service its rate, noisiest statements held first;
  *   4. divides each service's limit and total by the nodes its pods run on
  *      (discovered on this run, or `nodes_by_container` in policy.yaml);
  *   5. writes caps.csv, actions.csv and totals.csv (a `*` row for every
- *      service without a row of its own, from what is left of X) and
- *      config-generation.csv, to the policy ConfigMap or the gitops repo.
+ *      service without a row of its own) and config-generation.csv, to the
+ *      policy ConfigMap or the gitops repo.
  *
  * Units are events: Datadog bills Standard per event, and the Receiver is
  * installed with `rateReceiverUnit events` (engine 1.1.146).
@@ -76,9 +79,9 @@ export function hourlyRate(points: Array<[number, number]>): number {
   return total / Math.max(1, (last + HOUR - first) / HOUR);
 }
 
-/** Lines the Receiver emitted, hourly, by where each went. */
+/** Lines the Receiver emitted, hourly, by where each went and by container. */
 export function receiverRouteQuery(envId?: string): string {
-  return `sum:${DD_EMITTED_EVENTS_DISTRIBUTION}{${scope(envId)}} by {routestate}.rollup(sum, 3600)`;
+  return `sum:${DD_EMITTED_EVENTS_DISTRIBUTION}{${scope(envId)}} by {routestate,k8s_container}.rollup(sum, 3600)`;
 }
 
 export type BudgetAction = 'tier_down' | 'offload' | 'pass';
@@ -130,6 +133,8 @@ export interface ServiceRow {
   total: number;
   /** Fleet events an hour from statements a mute protects. */
   protectedPerHour: number;
+  /** A service with its own number: dollars a month, spent so far, and whether it is used up. */
+  ownBudget?: { usdMonthly: number; spentUsd: number; exhausted: boolean };
 }
 
 export interface BudgetPlan {
@@ -208,6 +213,29 @@ function leftAlone(container: string, instances: number, eventsPerHour: number):
   };
 }
 
+function median(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const v = [...values].sort((a, b) => a - b);
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+/**
+ * Limits for a set of statements under an allowance (fleet events an hour):
+ * over it, the noisiest are held at the water level; under it, each keeps
+ * room to grow up to the fleet headroom.
+ */
+function holdStatements(rates: number[], allowance: number): { capPerHour: number; allowancePerHour: number } {
+  const rate = rates.reduce((a, r) => a + r, 0);
+  if (rate === 0) return { capPerHour: allowance, allowancePerHour: allowance };
+  if (rate > allowance) {
+    const level = waterLevel(rates, allowance);
+    return { capPerHour: level, allowancePerHour: rates.reduce((a, r) => a + Math.min(r, level), 0) };
+  }
+  const headroom = Math.min(FLEET_DEFAULT_HEADROOM, allowance / rate);
+  return { capPerHour: Math.max(...rates) * headroom, allowancePerHour: rate * headroom };
+}
+
 export function planBudget(input: BudgetInput): BudgetPlan {
   const b = input.budget;
   const { start, end } = monthBounds(input.nowSec);
@@ -236,23 +264,33 @@ export function planBudget(input: BudgetInput): BudgetPlan {
 
   // The Receiver's own Standard lines through the same hour the usage
   // metric reached, so its lag and the Receiver's do not skew the split.
-  const receiverStandardEvents = sumPoints(
-    input.routes,
-    start,
-    dataThroughSec,
-    (s) => !HELD_ROUTES.has((s.tags['routestate'] ?? '').toLowerCase()),
-  );
+  const toStandard = (s: DdPointSeries): boolean => !HELD_ROUTES.has((s.tags['routestate'] ?? '').toLowerCase());
+  const receiverStandardEvents = sumPoints(input.routes, start, dataThroughSec, toStandard);
   const outsideRaw = spent - receiverStandardEvents;
   const outside = Math.max(0, outsideRaw);
   const outsidePerHour = outside / elapsedHours;
   const outsideProjectedMonth = outside + outsidePerHour * hoursLeft;
-  const remaining = budgetEvents - spent - outsidePerHour * hoursLeft;
+
+  // Services with their own number, each held to it from its own Standard
+  // lines; the rest of the account is held to X minus their numbers.
+  const own = b.service_budgets ?? {};
+  const named = Object.keys(own).sort();
+  const namedSet = new Set(named);
+  const ownSpent: Record<string, number> = {};
+  for (const c of named) {
+    ownSpent[c] = sumPoints(input.routes, start, dataThroughSec, (s) => toStandard(s) && s.tags['k8s_container'] === c);
+  }
+  const namedUsd = named.reduce((a, c) => a + own[c], 0);
+  const poolUsd = b.usd_monthly - namedUsd;
+  const poolEvents = poolUsd / perEventUsd;
+  const poolSpent = Math.max(0, spent - named.reduce((a, c) => a + ownSpent[c], 0));
+  const remaining = poolEvents - poolSpent - outsidePerHour * hoursLeft;
   const exhausted = remaining <= 0;
   const allowance = exhausted ? 0 : remaining / hoursLeft;
 
   const exempt = new Set(input.exceptions);
   const inScope = (c: string): boolean =>
-    !exempt.has(c) && (input.targetServices.length === 0 || input.targetServices.includes(c));
+    !exempt.has(c) && !namedSet.has(c) && (input.targetServices.length === 0 || input.targetServices.includes(c));
 
   const byContainer = new Map<string, PatternRate[]>();
   for (const p of input.patterns) {
@@ -266,6 +304,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   let budgetedPerHour = 0;
   const budgetedRates: number[] = [];
   for (const [c, ps] of byContainer) {
+    if (namedSet.has(c)) continue;
     const sum = ps.reduce((a, p) => a + p.eventsPerHour, 0);
     if (inScope(c)) {
       budgetedPerHour += sum;
@@ -280,8 +319,13 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const headroom = budgetedPerHour > 0 ? Math.min(FLEET_DEFAULT_HEADROOM, forBudgeted / budgetedPerHour) : FLEET_DEFAULT_HEADROOM;
 
   const rows: ServiceRow[] = [];
+  const knownCaps: number[] = [];
+  const knownTotals: number[] = [];
   let kept = 0;
+  const protectedIn = (ps: PatternRate[]): number =>
+    ps.reduce((a, p) => a + (p.name && input.protectedPatterns?.has(p.name) ? p.eventsPerHour : 0), 0);
   for (const c of [...byContainer.keys()].sort()) {
+    if (namedSet.has(c)) continue;
     const ps = byContainer.get(c)!;
     const n = Math.max(1, input.instances[c] ?? 1);
     const rate = ps.reduce((a, p) => a + p.eventsPerHour, 0);
@@ -301,8 +345,28 @@ export function planBudget(input: BudgetInput): BudgetPlan {
       capPerHour = largest * headroom;
     }
     kept += allowancePerHour;
-    const protectedPerHour = ps.reduce((a, p) => a + (p.name && input.protectedPatterns?.has(p.name) ? p.eventsPerHour : 0), 0);
-    rows.push({ container: c, action, instances: n, eventsPerHour: rate, allowancePerHour, protectedPerHour, cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(allowancePerHour, n) });
+    knownCaps.push(capPerHour);
+    knownTotals.push(allowancePerHour);
+    rows.push({ container: c, action, instances: n, eventsPerHour: rate, allowancePerHour, protectedPerHour: protectedIn(ps), cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(allowancePerHour, n) });
+  }
+  for (const c of named) {
+    const ps = byContainer.get(c) ?? [];
+    const n = Math.max(1, input.instances[c] ?? 1);
+    const rates = ps.map((p) => p.eventsPerHour);
+    const left = own[c] / perEventUsd - ownSpent[c];
+    const ownExhausted = left <= 0;
+    const held = ownExhausted ? { capPerHour: 0, allowancePerHour: 0 } : holdStatements(rates, left / hoursLeft);
+    rows.push({
+      container: c,
+      action: b.service_actions[c] ?? b.default_action,
+      instances: n,
+      eventsPerHour: rates.reduce((a, r) => a + r, 0),
+      allowancePerHour: held.allowancePerHour,
+      protectedPerHour: protectedIn(ps),
+      cap: perWindowPerNode(held.capPerHour, n),
+      total: perWindowPerNode(held.allowancePerHour, n),
+      ownBudget: { usdMonthly: own[c], spentUsd: ownSpent[c] * perEventUsd, exhausted: ownExhausted },
+    });
   }
   // A service named in exceptions gets its own row even when it sent nothing
   // in the lookback, so the `*` row never holds it.
@@ -310,18 +374,31 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     if (!byContainer.has(c)) rows.push(leftAlone(c, Math.max(1, input.instances[c] ?? 1), 0));
   }
   rows.sort((a, b) => a.container.localeCompare(b.container));
-  const starPerHour = Math.max(0, forBudgeted - kept);
+
+  // A service the run has not seen gets the level the known services get
+  // and the median known service's total; under the budget, the larger of
+  // that and what is left over. Once X is spent it gets 1 line.
+  const leftover = Math.max(0, forBudgeted - kept);
+  const medianCap = median(knownCaps);
+  const medianTotal = median(knownTotals);
+  let starCapPerHour = leftover;
+  let starTotalPerHour = leftover;
+  if (!exhausted && medianCap !== undefined && medianTotal !== undefined) {
+    starCapPerHour = level !== undefined ? level : Math.max(leftover, medianCap);
+    starTotalPerHour = level !== undefined ? medianTotal : Math.max(leftover, medianTotal);
+  }
   const nodesTotal = Math.max(1, input.nodesTotal);
   const star = {
     action: b.default_action as BudgetAction,
     instances: nodesTotal,
-    cap: perWindowPerNode(starPerHour, nodesTotal),
-    total: perWindowPerNode(starPerHour, nodesTotal),
-    allowancePerHour: starPerHour,
+    cap: perWindowPerNode(starCapPerHour, nodesTotal),
+    total: perWindowPerNode(starTotalPerHour, nodesTotal),
+    allowancePerHour: starTotalPerHour,
   };
 
   const usd = (events: number): string => fmtAboutUsd(events * perEventUsd);
   const where = fleetDestination(b.default_action === 'offload' ? 'offload' : 'tier_down');
+  const services = named.length > 0 ? "The Receiver's other services" : "The Receiver's services";
   lines.push(
     `Standard indexing this month: ${usd(spent)} of ${fmtAboutUsd(b.usd_monthly)} (${fmtEventCount(spent)} events through ${utcHour(dataThroughSec)}), ${Math.round(hoursLeft)} hours left.`,
   );
@@ -331,29 +408,47 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     );
   }
   lines.push(
-    `Lines that do not pass the Receiver: ${fmtEventCount(outside)} events in Standard this month, about ${usd(outsideProjectedMonth)} by the month's end at this rate. The Receiver's services get the rest.`,
+    `Lines that do not pass the Receiver: ${fmtEventCount(outside)} events in Standard this month, about ${usd(outsideProjectedMonth)} by the month's end at this rate. ${services} get the rest${named.length > 0 ? ` of ${fmtAboutUsd(poolUsd)}` : ''}.`,
   );
-  if (outsideProjectedMonth >= 0.8 * budgetEvents) {
+  if (outsideProjectedMonth >= 0.8 * poolEvents) {
     warnings.push(
-      `Lines that do not pass the Receiver alone reach ${usd(outsideProjectedMonth)} of the ${fmtAboutUsd(b.usd_monthly)} budget by the month's end; the Receiver cannot hold those.`,
+      `Lines that do not pass the Receiver alone reach ${usd(outsideProjectedMonth)} of the ${fmtAboutUsd(poolUsd)} ${named.length > 0 ? 'left for the rest of the account' : 'budget'} by the month's end; the Receiver cannot hold those.`,
     );
   }
+  const sample = `every line past its ${ALWAYS_PASS_LINES}-line sample moves to ${where}, except up to ${b.keep_count} error lines per statement per node per window.`;
   if (exhausted) {
     lines.push(
-      `Standard has reached ${fmtAboutUsd(b.usd_monthly)} for this month. Until the month ends, every line past its ${ALWAYS_PASS_LINES}-line sample moves to ${where}, except up to ${b.keep_count} error lines per statement per node per window.`,
+      named.length > 0
+        ? `The rest of the account has reached its ${fmtAboutUsd(poolUsd)} for this month. Until the month ends, in every service without its own number, ${sample}`
+        : `Standard has reached ${fmtAboutUsd(b.usd_monthly)} for this month. Until the month ends, ${sample}`,
     );
   } else if (overBudget) {
     lines.push(
-      `The Receiver's services may send ${fmtEventCount(forBudgeted)} events an hour to Standard against ${fmtEventCount(budgetedPerHour)} now: each statement keeps up to ${fmtEventCount(level ?? 0)} an hour, and the noisiest move to ${where} first.`,
+      `${services} may send ${fmtEventCount(forBudgeted)} events an hour to Standard against ${fmtEventCount(budgetedPerHour)} now: each statement keeps up to ${fmtEventCount(level ?? 0)} an hour, and the noisiest move to ${where} first. ` +
+        (medianTotal !== undefined
+          ? `A service the run has not seen gets the same level and the median service's ${fmtEventCount(starTotalPerHour)} an hour until the next run, which takes any overshoot back from the rest of the month.`
+          : `A service the run has not seen gets the ${fmtEventCount(starTotalPerHour)} an hour left over.`),
     );
   } else {
     lines.push(
-      `The Receiver's services send ${fmtEventCount(budgetedPerHour)} events an hour, under the ${fmtEventCount(forBudgeted)} the budget leaves: each keeps room to grow ${Number(headroom.toFixed(2))}x, and a service without a row gets the ${fmtEventCount(starPerHour)} an hour left over.`,
+      `${services} send ${fmtEventCount(budgetedPerHour)} events an hour, under the ${fmtEventCount(forBudgeted)} the budget leaves, and each keeps room to grow ${Number(headroom.toFixed(2))}x. ` +
+        (medianTotal !== undefined
+          ? `A service the run has not seen gets the larger of the ${fmtEventCount(leftover)} an hour left over and the median service's limits, ${fmtEventCount(starTotalPerHour)} an hour in all, until the next run, which takes any overshoot back from the rest of the month.`
+          : `A service the run has not seen gets the ${fmtEventCount(leftover)} an hour left over.`),
     );
   }
   lines.push(
     `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'} share the \`*\` row. The division assumes a DaemonSet Receiver, one per node, each holding its node's share.`,
   );
+  for (const r of rows) {
+    if (!r.ownBudget) continue;
+    const o = r.ownBudget;
+    lines.push(
+      o.exhausted
+        ? `${r.container} has spent its own ${fmtAboutUsd(o.usdMonthly)} for this month (${fmtAboutUsd(o.spentUsd)} so far). Until the month ends, in ${r.container}, ${sample}`
+        : `${r.container} is held to its own ${fmtAboutUsd(o.usdMonthly)} a month: ${fmtAboutUsd(o.spentUsd)} spent so far, ${fmtEventCount(r.allowancePerHour)} events an hour for the rest of the month, a limit of ${r.cap} per statement and a total of ${r.total} per window per node.`,
+    );
+  }
   for (const r of rows) {
     if (r.action !== 'pass' && r.protectedPerHour > r.allowancePerHour) {
       warnings.push(
@@ -362,7 +457,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     }
   }
   for (const c of byContainer.keys()) {
-    if (inScope(c) && input.instances[c] === undefined) {
+    if ((inScope(c) || namedSet.has(c)) && input.instances[c] === undefined) {
       warnings.push(`No node count for ${c}: its limits are written for one Receiver.`);
     }
   }
@@ -429,7 +524,7 @@ export function renderBudgetReport(plan: BudgetPlan, budget: DollarBudget, nowSe
     `|---|---|---|---|---|---|---|`,
     ...plan.rows.map(
       (r) =>
-        `| ${r.container} | ${r.action === 'pass' ? 'left alone' : fleetDestination(r.action)} | ${r.instances} | ${fmtEventCount(r.eventsPerHour)} | ${fmtEventCount(r.allowancePerHour)} | ${r.cap} | ${r.total} |`,
+        `| ${r.container}${r.ownBudget ? ` (own ${fmtAboutUsd(r.ownBudget.usdMonthly)} a month)` : ''} | ${r.action === 'pass' ? 'left alone' : fleetDestination(r.action)} | ${r.instances} | ${fmtEventCount(r.eventsPerHour)} | ${fmtEventCount(r.allowancePerHour)} | ${r.cap} | ${r.total} |`,
     ),
     `| \`*\` (any other service) | ${fleetDestination(budget.default_action)} | ${plan.star.instances} | | ${fmtEventCount(plan.star.allowancePerHour)} | ${plan.star.cap} | ${plan.star.total} |`,
     '',

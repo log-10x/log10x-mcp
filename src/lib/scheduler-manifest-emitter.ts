@@ -13,6 +13,7 @@
 // ─── shared types ─────────────────────────────────────────────────────────────
 
 export type SchedulePreset =
+  | 'hourly'
   | 'daily-03utc'
   | 'every-6h'
   | 'every-12h'
@@ -28,8 +29,8 @@ export interface PolicyOptions {
   target_percent: number;
   /** Volume budget (GB/mo, thermostat). When set it replaces target_percent in policy.yaml. */
   budget_gb_monthly?: number;
-  /** Cron schedule. Either a preset name or a raw cron expression. */
-  schedule: SchedulePreset;
+  /** Cron schedule, a preset name or a raw cron expression. Default: hourly for a budget run, daily-03utc otherwise. */
+  schedule?: SchedulePreset;
   /** Which scheduler runtime to emit a manifest for. */
   scheduler: SchedulerKind;
   /** Path or URL to the customer gitops config repo. */
@@ -59,6 +60,8 @@ export interface PolicyOptions {
   standard_indexes?: string[];
   /** Error lines over a limit that pass per statement per node per window. Default 50. */
   keep_count?: number;
+  /** Dollars a month of Standard for a named service, held to its own number. */
+  service_budgets?: Record<string, number>;
   /** Nodes per service, for the gitops budget run (no cluster access). */
   nodes_by_container?: Record<string, number>;
   /** Name of the Secret (k8s) holding DD_API_KEY, DD_APP_KEY and DD_SITE. Default: log10x-datadog. */
@@ -75,6 +78,11 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
 
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
+/** The schedule a policy runs on: a budget run is hourly unless the caller names one. */
+export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly'>): SchedulePreset {
+  return opts.schedule ?? (opts.budget_usd_monthly !== undefined ? 'hourly' : 'daily-03utc');
+}
+
 /**
  * Resolve a schedule preset to a canonical cron expression (5-field,
  * UTC). Custom strings are returned as-is — validation of arbitrary
@@ -82,6 +90,7 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
  */
 export function resolveCronExpression(schedule: SchedulePreset): string {
   switch (schedule) {
+    case 'hourly':           return '0 * * * *';
     case 'daily-03utc':      return '0 3 * * *';
     case 'every-6h':         return '0 */6 * * *';
     case 'every-12h':        return '0 */12 * * *';
@@ -130,7 +139,7 @@ export function parseS3ConfigPlane(repo: string): { bucket: string; prefix: stri
  * streams. A future CLI flag `--policy policy.yaml` loads this file.
  */
 export function emitPolicyYaml(opts: PolicyOptions): string {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const targetServicesYaml =
     opts.target_services.length === 0
       ? '  # empty = all services\n  target_services: []\n'
@@ -160,7 +169,7 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     `  min_delta_pp: ${opts.min_delta_pp}`,
     ``,
     `schedule:`,
-    `  preset: ${yamlString(opts.schedule)}`,
+    `  preset: ${yamlString(scheduleOf(opts))}`,
     `  cron_utc: ${yamlString(cronExpr)}`,
     `  scheduler: ${yamlString(opts.scheduler)}`,
     ``,
@@ -193,6 +202,14 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
     `  # error lines over a limit that pass per statement per node per window`,
     `  keep_count: ${opts.keep_count ?? 50}`,
     `  default_action: tier_down`,
+    ...(Object.keys(opts.service_budgets ?? {}).length > 0
+      ? [
+          `  # dollars a month of Standard for a named service, held to its own number;`,
+          `  # the rest of the account is held to budget_usd_monthly minus their sum`,
+          `  service_budgets:`,
+          ...Object.entries(opts.service_budgets!).map(([c, usd]) => `    ${c}: ${usd}`),
+        ]
+      : []),
     ...(budgetDelivery(opts.scheduler) === 'gitops'
       ? nodes.length === 0
         ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
@@ -213,7 +230,7 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
  */
 export function emitK8sCronJob(opts: PolicyOptions): string {
   if (opts.budget_usd_monthly !== undefined) return emitK8sBudgetCronJob(opts);
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
   const secretName = opts.secret_name ?? 'log10x-secret';
   const policyYaml = emitPolicyYaml(opts);
@@ -295,7 +312,7 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
  * node:22-alpine needs no kubectl.
  */
 export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
   const ddSecret = opts.datadog_secret_name ?? 'log10x-datadog';
   const policyYaml = emitPolicyYaml(opts);
@@ -437,7 +454,7 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
  * write the cap CSV files in-place.
  */
 export function emitGitHubActions(opts: PolicyOptions): string {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   // GitHub Actions cron runs in UTC. Append a comment for schedules where
   // the preset name implies timezone awareness.
   const scheduleComment =
@@ -506,7 +523,7 @@ export function emitGitHubActions(opts: PolicyOptions): string {
  * local log file so the user can see the last run's output.
  */
 export function emitCrontab(opts: PolicyOptions): { crontab_line: string; wrapper_script: string } {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const wrapperPath = '/usr/local/bin/log10x-tick.sh';
 
   const crontab_line = [
@@ -553,7 +570,7 @@ export function emitCrontab(opts: PolicyOptions): { crontab_line: string; wrappe
  * `TENX_RECEIVE_MUTE_S3_URI` at that key.
  */
 export function emitEventBridge(opts: PolicyOptions): string {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const awsCron = toAwsCronExpression(cronExpr);
   const plane = parseS3ConfigPlane(opts.config_plane);
   const bucket = plane?.bucket ?? 'YOUR-CONFIG-BUCKET';
@@ -695,7 +712,7 @@ export function emitEventBridge(opts: PolicyOptions): string {
  *   - replicaTimeout 900 — the npx cold fetch plus clone needs headroom.
  */
 export function emitContainerAppsJob(opts: PolicyOptions): string {
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   const gitHost = opts.config_plane
     .replace(/^https?:\/\//, '')
     .replace(/\.git$/, '')
