@@ -489,7 +489,7 @@ export const POLICY_CONFIGMAP_NAME = 'log10x-action-intent';
 /**
  * Engine-policy pull env for the receiver container: activates the engine's
  * kubernetes ConfigMap lane (K8S_ENABLED, gated off by default engine-side)
- * and points the regulator's three lookup files at the pull driver's stable
+ * and points the regulator's lookup files at the pull driver's stable
  * destination `${java.io.tmpdir}/tenx/kubernetes/<ns>/<cm>/`.
  *
  * K8S_NAMESPACE comes from the downward API so the paths track the pod's
@@ -526,6 +526,8 @@ export function renderPolicyPullEnvLines(indent: string): string[] {
     `${i2}value: ${base}/actions.csv`,
     `${indent}- name: CONFIG_GENERATION_FILE`,
     `${i2}value: ${base}/config-generation.csv`,
+    `${indent}- name: TOTAL_LOOKUP_FILE`,
+    `${i2}value: ${base}/totals.csv`,
   ];
 }
 
@@ -562,6 +564,9 @@ data:
   actions.csv: |
     container,action
     tenx-seed,pass::install seed; replaced by log10x_configure_engine
+  totals.csv: |
+    container,total
+    tenx-seed,1::install seed; replaced by the budget run
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

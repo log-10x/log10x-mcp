@@ -97,7 +97,8 @@ test('Receiver values: held back before 1.1.141 with the reason, written from it
   assert.equal(early.fleetDefaultWritten, false);
   assert.equal(early.teamLabelWritten, false);
   assert.ok(early.notes[0].startsWith('The fleet default needs engine 1.1.141 or later, the first that reads rateReceiverDefaultAction; this plan installs 1.1.136'));
-  assert.ok(early.notes[1].startsWith('The team label needs engine 1.1.141 or later'));
+  assert.ok(early.notes[1].startsWith('The regulator values (no warm-up, no share guard, a 0 floor below ERROR) need engine 1.1.141 or later'));
+  assert.ok(early.notes[2].startsWith('The team label needs engine 1.1.141 or later'));
 
   const ready = receiverFleetValues({ datadog: true, fleetDefault: fd, teamLabel: 'app.kubernetes.io/part-of', engineVersion: '1.1.141' });
   assert.equal(ready.fleetDefaultWritten, true);
@@ -106,11 +107,13 @@ test('Receiver values: held back before 1.1.141 with the reason, written from it
   assert.deepEqual(ready.options[1], ['rateReceiverAbsoluteCap', '6000']);
   assert.deepEqual(ready.options.at(-1), ['k8sTeamLabel', 'app.kubernetes.io/part-of']);
   assert.deepEqual(ready.env, [['outputOffload', 'true']]);
-  assert.deepEqual(ready.notes, []);
+  assert.equal(ready.notes.length, 1);
+  assert.ok(ready.notes[0].startsWith('Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine 1.1.146'));
 
   const noCap = receiverFleetValues({ datadog: true, fleetDefault: { ...fd, capBytesPerWindowPerNode: 0 }, engineVersion: '1.1.141' });
   assert.equal(noCap.fleetDefaultWritten, false);
-  assert.deepEqual(noCap.notes, ['No limit was given, so the plan writes no fleet default.']);
+  assert.equal(noCap.notes[0], 'No limit was given, so the plan writes no fleet default.');
+  assert.equal(noCap.regulatorValuesWritten, true);
 
   const noLabel = receiverFleetValues({ datadog: false, engineVersion: '1.1.141' });
   assert.deepEqual(noLabel.options, []);

@@ -2299,6 +2299,15 @@ async function renderInstallPlan(
   }
   if (session.logDestination === 'datadog') {
     if (app === 'receiver') {
+      plan.notes.push(
+        ...fleetValues.notes.filter((n) => n.includes('regulator values') || n.includes('rateReceiverKeepCounts')),
+        ...(fleetValues.regulatorValuesWritten
+          ? ['The Receiver runs with no warm-up and no share guard, and every level below ERROR has a 0 floor, so a statement over its limit moves from its first window.']
+          : []),
+        ...(fleetValues.keepCountsWritten
+          ? ['Error lines over a limit pass at a fixed count per statement per node per window (`rateReceiverKeepCounts`); the rest take the service\'s action.']
+          : []),
+      );
       plan.fleetDefault = buildFleetDefaultStep({
         action: session.fleetDefault?.action,
         errorFloor: session.fleetDefault?.errorFloor,
