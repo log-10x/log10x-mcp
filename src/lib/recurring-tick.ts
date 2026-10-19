@@ -1086,7 +1086,7 @@ export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Pro
   const files = renderBudgetFiles(plan);
   const report = renderBudgetReport(plan, budget, nowSec);
   if (verbose) process.stderr.write(`[tenx-recur] ${plan.lines.join('\n[tenx-recur] ')}\n`);
-  const summary = plan.lines[plan.lines.length > 2 ? 2 : plan.lines.length - 1];
+  const summary = `${plan.heldLine} ${plan.lines[plan.lines.length > 2 ? 2 : plan.lines.length - 1]}`;
   const extra = { budget_report: report, budget_files: files };
 
   if (dryRun) {
