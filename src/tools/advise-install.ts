@@ -233,6 +233,10 @@ export const adviseInstallSchema = {
     })
     .optional()
     .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`). The Receiver values are written only on an engine release that reads `rateReceiverDefaultAction`.'),
+  regulator_unit: z
+    .enum(['bytes', 'events'])
+    .optional()
+    .describe('`events` when a budget run (log10x_setup_recurring with `budget_usd_monthly`) holds this Datadog Receiver: limits and totals count lines, as Datadog bills Standard. Written as `rateReceiverUnit events` on engine 1.1.146 or later. Default: bytes.'),
   k8s_team_label: z
     .string()
     .optional()
@@ -1116,6 +1120,7 @@ export async function executeAdviseInstall(
     namespace: args.namespace,
     logDestination: args.log_destination,
     teamLabel: args.k8s_team_label,
+    regulatorUnit: args.regulator_unit,
     fleetDefault: args.fleet_default
       ? {
           ...(prior?.fleetDefault ?? {}),
@@ -2268,6 +2273,7 @@ async function renderInstallPlan(
         }
       : {}),
     ...(session.teamLabel !== undefined ? { teamLabel: session.teamLabel } : {}),
+    ...(session.regulatorUnit !== undefined ? { unit: session.regulatorUnit } : {}),
     ...(app === 'receiver' ? {} : { engineVersion: '' }),
   });
 
@@ -2300,7 +2306,9 @@ async function renderInstallPlan(
   if (session.logDestination === 'datadog') {
     if (app === 'receiver') {
       plan.notes.push(
-        ...fleetValues.notes.filter((n) => n.includes('regulator values') || n.includes('rateReceiverKeepCounts')),
+        ...fleetValues.notes.filter(
+          (n) => n.includes('regulator values') || n.includes('rateReceiverKeepCounts') || n.includes('rateReceiverUnit') || n.includes('budget run'),
+        ),
         ...(fleetValues.regulatorValuesWritten
           ? ['The Receiver runs with no warm-up and no share guard, and every level below ERROR has a 0 floor, so a statement over its limit moves from its first window.']
           : []),

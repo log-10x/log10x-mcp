@@ -24,7 +24,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -39,6 +39,19 @@ import {
 import { parseActionIntent } from './action-intent-parser.js';
 import { parseCompactCsv } from './compact-csv-parser.js';
 import type { Action } from './cost.js';
+import {
+  discoverInstances,
+  planBudget,
+  protectedPatterns,
+  readBudgetInputs,
+  renderBudgetFiles,
+  renderBudgetReport,
+  type BudgetFiles,
+  type DdQuery,
+} from './budget-tick.js';
+import type { DatadogMetricsCreds } from './datadog-metrics-read.js';
+import { inClusterK8sApi, podNamespace, type K8sApi } from './k8s-in-cluster.js';
+import { POLICY_CONFIGMAP_NAME } from './advisor/reporter-forwarders.js';
 
 const execFileP = promisify(execFile);
 
@@ -53,6 +66,7 @@ export type TickStatus =
   | 'no_change'    // delta < min_delta_pp — no CSV written
   | 'applied'      // new CSVs committed to config plane
   | 'dry_run'      // would have applied but --dry-run was set
+  | 'read_failed'  // budget run: a Datadog or cluster read failed; the last files stay in force
   | 'error';       // fatal; message is set
 
 export interface PatternDecision {
@@ -88,6 +102,10 @@ export interface TickResult {
   delta_pp: number;
   /** Path to the appended run-history JSONL line (when not dry-run). */
   history_path?: string;
+  /** Budget run only: the report, in Markdown. */
+  budget_report?: string;
+  /** Budget run only: the files written, or that would be. */
+  budget_files?: BudgetFiles;
 }
 
 // ─── Prometheus row shape returned by a bytesPerPattern query ──────────────
@@ -520,19 +538,27 @@ async function commitToConfigPlane(
   opts: TickOptions,
   basis?: string
 ): Promise<void> {
+  const reducedCount = decisions.filter((d) => d.action !== 'pass').length;
+  const commitMsg = `chore(log10x): recurring tick, ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings${basis ? ` (${basis})` : ''}`;
+  await commitFiles(
+    repoPath,
+    policy,
+    ['pipelines/run/receive/compact/compact-cap.csv', 'pipelines/run/receive/rate/mutes.csv', 'data/action-intent.json'],
+    commitMsg,
+    `Automated recurring cost-reduction tick.\n\nReduced patterns: ${reducedCount}\nProjected savings: ~${projectedPct.toFixed(1)}%\n`,
+  );
+}
+
+async function commitFiles(
+  repoPath: string,
+  policy: Policy,
+  filesToAdd: string[],
+  commitMsg: string,
+  prBody: string,
+): Promise<void> {
   const strategy = policy.config_plane.commit_strategy ?? 'pr';
   const base = policy.config_plane.base_branch ?? 'main';
   const branchName = `log10x-recur-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
-
-  const reducedCount = decisions.filter((d) => d.action !== 'pass').length;
-  const commitMsg = `chore(log10x): recurring tick, ${reducedCount} patterns, ~${projectedPct.toFixed(1)}% projected savings${basis ? ` (${basis})` : ''}`;
-
-  // Stage the three changed paths.
-  const filesToAdd = [
-    'pipelines/run/receive/compact/compact-cap.csv',
-    'pipelines/run/receive/rate/mutes.csv',
-    'data/action-intent.json',
-  ];
 
   // git add
   await execFileP('git', ['-C', repoPath, 'add', ...filesToAdd], {
@@ -590,9 +616,7 @@ async function commitToConfigPlane(
           '--base', base,
           '--head', branchName,
           '--title', commitMsg,
-          '--body',
-          `Automated recurring cost-reduction tick.\n\n` +
-          `Reduced patterns: ${reducedCount}\nProjected savings: ~${projectedPct.toFixed(1)}%\n`,
+          '--body', prBody,
         ],
         { timeout: 30_000 }
       );
@@ -613,9 +637,7 @@ function appendHistory(result: TickResult): void {
     message: result.message,
   };
   try {
-    const line = JSON.stringify(entry) + '\n';
-    const { appendFileSync } = require('node:fs') as typeof import('node:fs');
-    appendFileSync(HISTORY_FILE, line, 'utf8');
+    appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n', 'utf8');
   } catch {
     // history append failure is non-fatal
   }
@@ -633,6 +655,7 @@ function appendHistory(result: TickResult): void {
  * @throws PromUnreachableError (exit code 2) when Prometheus cannot be reached.
  */
 export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  if (policy.budget_usd) return runBudgetTick(policy, opts);
   const { dryRun = false, verbose = false } = opts;
 
   // Resolve env ID — policy takes priority, then env var.
@@ -883,6 +906,147 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
   return result;
 }
 
+// ─── budget run ────────────────────────────────────────────────────────────
+
+/** Where the budget run's files sit in a gitops repo, beside the mute file. */
+export const BUDGET_FILE_DIR = 'pipelines/run/receive/rate';
+const BUDGET_FILE_NAMES = ['caps.csv', 'actions.csv', 'totals.csv', 'config-generation.csv'] as const;
+export const BUDGET_REPORT_KEY = 'budget-report.md';
+
+interface BudgetDeps {
+  creds?: DatadogMetricsCreds | null;
+  query?: DdQuery;
+  /** null: no cluster API (the run reports a read failure on configmap delivery). */
+  k8s?: K8sApi | null;
+  nowMs?: () => number;
+}
+
+let budgetDeps: BudgetDeps = {};
+
+/** Test seam: the Datadog reads, the cluster API and the clock for the budget run. */
+export function _setBudgetDeps(deps: BudgetDeps): void {
+  budgetDeps = deps;
+}
+
+/** Test seam: restore the ambient Datadog keys, in-cluster API and clock. */
+export function _resetBudgetDeps(): void {
+  budgetDeps = {};
+}
+
+function budgetResult(status: TickStatus, message: string, extra: Partial<TickResult> = {}): TickResult {
+  return { status, message, projected_savings_pct: 0, applied_changes: [], delta_patterns: 0, delta_pp: 0, ...extra };
+}
+
+/**
+ * One budget run (`reduction.budget_usd_monthly`). Reads month-to-date
+ * Standard usage and the Receiver's series from Datadog, discovers or reads
+ * the node counts, re-derives every row, and writes the four files to the
+ * policy ConfigMap or the gitops repo. On a failed read nothing is written.
+ */
+export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  const budget = policy.budget_usd!;
+  const { dryRun = false, verbose = false } = opts;
+  const deps = budgetDeps;
+  const nowSec = Math.floor((deps.nowMs ? deps.nowMs() : Date.now()) / 1000);
+  const delivery = policy.config_plane.delivery ?? 'gitops';
+  const envId = policy.config_plane.env_id || process.env.LOG10X_ENV_ID || undefined;
+  const k8s = deps.k8s === undefined ? inClusterK8sApi() : deps.k8s ?? undefined;
+  const keep = 'The files from the last run stay in force.';
+
+  const namespace = policy.config_plane.namespace ?? podNamespace() ?? 'log10x';
+  const cmName = policy.config_plane.configmap ?? POLICY_CONFIGMAP_NAME;
+  const repoPath = delivery === 'gitops' ? resolveRepoPath(policy.config_plane.repo) : '';
+  const dir = pathJoin(repoPath, ...BUDGET_FILE_DIR.split('/'));
+  let reads;
+  let nodes: { instances: Record<string, number>; nodesTotal: number };
+  let cm: { data: Record<string, string>; resourceVersion: string } | undefined;
+  let mutesCsv: string | undefined;
+  try {
+    reads = await readBudgetInputs(nowSec, lookbackHours(policy.lookback_window), envId, { creds: deps.creds, query: deps.query });
+    if (delivery === 'configmap') {
+      if (!k8s) throw new Error('no Kubernetes API in this process (KUBERNETES_SERVICE_HOST and the service-account token), so the node count cannot be discovered.');
+      nodes = await discoverInstances(k8s);
+      cm = await k8s.getConfigMap(namespace, cmName);
+      mutesCsv = cm.data['mutes.csv'];
+    } else {
+      const counts = budget.nodes_by_container;
+      const max = Object.values(counts).reduce((a, n) => Math.max(a, n), 1);
+      nodes = { instances: counts, nodesTotal: budget.nodes_total ?? max };
+      const mp = pathJoin(dir, 'mutes.csv');
+      mutesCsv = existsSync(mp) ? readFileSync(mp, 'utf8') : undefined;
+    }
+  } catch (err) {
+    const result = budgetResult('read_failed', `budget run read failed: ${err instanceof Error ? err.message : String(err)} ${keep}`);
+    appendHistory(result);
+    return result;
+  }
+
+  const plan = planBudget({
+    budget,
+    nowSec,
+    usage: reads.usage,
+    receiverStandardEvents: reads.receiverStandardEvents,
+    patterns: reads.patterns,
+    ...(mutesCsv !== undefined ? { protectedPatterns: protectedPatterns(mutesCsv, nowSec) } : {}),
+    instances: nodes.instances,
+    nodesTotal: nodes.nodesTotal,
+    instanceBasis: delivery === 'configmap' ? 'discovery' : 'policy',
+    exceptions: policy.exceptions,
+    targetServices: policy.target_services,
+  });
+  const files = renderBudgetFiles(plan);
+  const report = renderBudgetReport(plan, budget, nowSec);
+  if (verbose) process.stderr.write(`[tenx-recur] ${plan.lines.join('\n[tenx-recur] ')}\n`);
+  const summary = plan.lines[plan.lines.length > 2 ? 2 : plan.lines.length - 1];
+  const extra = { budget_report: report, budget_files: files };
+
+  if (dryRun) {
+    const result = budgetResult('dry_run', `dry-run: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
+
+  try {
+    if (delivery === 'configmap' && cm) {
+      if (BUDGET_FILE_NAMES.every((f) => cm!.data[f] === files[f])) {
+        const result = budgetResult('no_change', `no change: ${summary}`, extra);
+        appendHistory(result);
+        return result;
+      }
+      await k8s!.replaceConfigMap(namespace, cmName, { ...cm.data, ...files, [BUDGET_REPORT_KEY]: report }, cm.resourceVersion);
+    } else {
+      const same = BUDGET_FILE_NAMES.every((f) => {
+        const p = pathJoin(dir, f);
+        return existsSync(p) && readFileSync(p, 'utf8') === files[f];
+      });
+      if (same) {
+        const result = budgetResult('no_change', `no change: ${summary}`, extra);
+        appendHistory(result);
+        return result;
+      }
+      mkdirSync(dir, { recursive: true });
+      for (const f of BUDGET_FILE_NAMES) writeFileSync(pathJoin(dir, f), files[f]);
+      mkdirSync(pathJoin(repoPath, 'reports'), { recursive: true });
+      writeFileSync(pathJoin(repoPath, 'reports', 'latest.md'), report);
+      await commitFiles(
+        repoPath,
+        policy,
+        [...BUDGET_FILE_NAMES.map((f) => `${BUDGET_FILE_DIR}/${f}`), 'reports/latest.md'],
+        `chore(log10x): budget run, ${budget.usd_monthly} USD a month on Standard`,
+        report,
+      );
+    }
+  } catch (err) {
+    const result = budgetResult('error', `write failed: ${err instanceof Error ? err.message : String(err)} ${keep}`, extra);
+    appendHistory(result);
+    return result;
+  }
+
+  const result = budgetResult('applied', `applied: ${summary}`, { ...extra, history_path: HISTORY_FILE });
+  appendHistory(result);
+  return result;
+}
+
 // ─── repo path resolution ──────────────────────────────────────────────────
 
 /**
@@ -898,6 +1062,9 @@ function resolveRepoPath(repo: string): string {
   if (process.env.LOG10X_GITOPS_REPO_PATH) {
     return process.env.LOG10X_GITOPS_REPO_PATH;
   }
+  // An older manifest names the checkout in LOG10X_GITOPS_REPO; a local path there is the checkout.
+  const named = process.env.LOG10X_GITOPS_REPO;
+  if (named && existsSync(named)) return named;
   // S3 config plane — stage under a stable temp path; state is pulled from
   // and pushed to the prefix around the tick.
   if (isS3ConfigPlane(repo)) {

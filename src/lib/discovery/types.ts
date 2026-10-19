@@ -472,6 +472,8 @@ export interface WizardSession {
   fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number };
   /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */
   teamLabel?: string;
+  /** `events` when a budget run holds the install: `rateReceiverUnit events` from engine 1.1.146. */
+  regulatorUnit?: 'bytes' | 'events';
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

@@ -31,6 +31,8 @@ import {
   emitEventBridge,
   emitContainerAppsJob,
   resolveCronExpression,
+  BUDGET_SCHEDULERS,
+  budgetDelivery,
   type PolicyOptions,
   type SchedulePreset,
   type SchedulerKind,
@@ -106,6 +108,43 @@ export const setupRecurringSchema = {
         'policy.yaml (mutually exclusive). Dollar budgets are a one-shot answer via ' +
         'log10x_estimate_savings (budget_usd_monthly); the recurring tick is byte-denominated.'
     ),
+
+  budget_usd_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      'DATADOG STANDARD BUDGET: dollars a month of Standard indexing for the whole account, held month to date. ' +
+        'Each run reads what Standard counted this month (Datadog\'s estimated usage metric), subtracts lines that do not pass ' +
+        'the Receiver, gives the Receiver\'s services the rest for the hours left, and writes caps.csv, actions.csv and totals.csv ' +
+        '(with a `*` row for every other service), counted in events. Runs on scheduler k8s_cron (writes the policy ConfigMap in ' +
+        'the cluster, discovers node counts) or github_actions (commits the files for the engine\'s gitops pull, node counts from ' +
+        '`nodes_by_container`). Replaces target_percent and budget_gb_monthly. The Receiver must be installed with ' +
+        '`regulator_unit: "events"` on engine 1.1.146 or later.'
+    ),
+  standard_indexes: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('With budget_usd_monthly: the Datadog index names that bill as Standard. Omit to count every index.'),
+  standard_rate_per_million: z
+    .number()
+    .positive()
+    .optional()
+    .describe('With budget_usd_monthly: the account\'s Standard indexing rate, dollars per million events. Default: list, $1.70.'),
+  nodes_by_container: z
+    .record(z.string(), z.number().int().positive())
+    .optional()
+    .describe('With budget_usd_monthly on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
+  keep_count: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('With budget_usd_monthly: error lines over a limit that pass per statement per node per window. Default 50.'),
+  datadog_secret_name: z
+    .string()
+    .optional()
+    .describe('With budget_usd_monthly on k8s_cron: the Secret holding DD_API_KEY, DD_APP_KEY and optional DD_SITE. Default: log10x-datadog.'),
 
   /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
@@ -214,6 +253,12 @@ interface RecurringWizardSession {
   target_services?: string[];
   target_percent?: number;
   budget_gb_monthly?: number;
+  budget_usd_monthly?: number;
+  standard_indexes?: string[];
+  standard_rate_per_million?: number;
+  nodes_by_container?: Record<string, number>;
+  keep_count?: number;
+  datadog_secret_name?: string;
   schedule?: SchedulePreset;
   scheduler?: SchedulerKind;
   config_plane?: string;
@@ -253,6 +298,19 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
       'target_percent and budget_gb_monthly are mutually exclusive: a percent is a one-shot cut, a budget is a standing line. Pass one.'
     );
   }
+  if (args.budget_usd_monthly !== undefined) {
+    if (args.target_percent !== undefined || args.budget_gb_monthly !== undefined) {
+      throw new Error('budget_usd_monthly replaces target_percent and budget_gb_monthly: pass one goal.');
+    }
+    session.budget_usd_monthly = args.budget_usd_monthly;
+    delete session.target_percent;
+    delete session.budget_gb_monthly;
+  }
+  if (args.standard_indexes !== undefined) session.standard_indexes = args.standard_indexes;
+  if (args.standard_rate_per_million !== undefined) session.standard_rate_per_million = args.standard_rate_per_million;
+  if (args.nodes_by_container !== undefined) session.nodes_by_container = args.nodes_by_container;
+  if (args.keep_count !== undefined) session.keep_count = args.keep_count;
+  if (args.datadog_secret_name !== undefined) session.datadog_secret_name = args.datadog_secret_name;
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
   if (args.scheduler !== undefined) session.scheduler = args.scheduler as SchedulerKind;
   if (args.config_plane !== undefined) session.config_plane = args.config_plane;
@@ -304,7 +362,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.target_percent === undefined && session.budget_gb_monthly === undefined) {
+  if (session.target_percent === undefined && session.budget_gb_monthly === undefined && session.budget_usd_monthly === undefined) {
     return {
       kind: 'ask',
       question_id: 'target_percent',
@@ -316,6 +374,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'The per-pattern planner works backward from this target using current byte volumes.',
           'Example: `target_percent: 30`',
           'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead, each tick cuts only the overage.',
+          'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
@@ -361,6 +420,26 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         session
       ),
     };
+  }
+  if (session.budget_usd_monthly !== undefined && !BUDGET_SCHEDULERS.includes(session.scheduler)) {
+    return {
+      kind: 'ask',
+      question_id: 'scheduler',
+      markdown: buildQuestion(
+        'Q4',
+        'A Standard budget runs on k8s_cron or github_actions',
+        [
+          `\`${session.scheduler}\` runs the mute-list tick, which holds no budget.`,
+          '**k8s_cron**: the run inside the cluster writes the policy ConfigMap the Receiver reads and discovers the node count (the default).',
+          '**github_actions**: the run commits the files to the gitops repo for the engine\'s gitops pull; node counts come from `nodes_by_container`.',
+        ],
+        'scheduler',
+        session
+      ),
+    };
+  }
+  if (session.config_plane === undefined && session.budget_usd_monthly !== undefined && session.scheduler === 'k8s_cron') {
+    session.config_plane = '';
   }
   if (session.config_plane === undefined) {
     if (session.scheduler === 'eventbridge') {
@@ -478,6 +557,7 @@ function buildProgressLine(session: RecurringWizardSession): string {
     parts.push(`services=${session.target_services.length === 0 ? 'all' : session.target_services.join(',')}`);
   if (session.target_percent !== undefined) parts.push(`target=${session.target_percent}%`);
   if (session.budget_gb_monthly !== undefined) parts.push(`budget=${session.budget_gb_monthly}GB/mo`);
+  if (session.budget_usd_monthly !== undefined) parts.push(`standard_budget=$${session.budget_usd_monthly}/mo`);
   if (session.schedule !== undefined) parts.push(`schedule=${session.schedule}`);
   if (session.scheduler !== undefined) parts.push(`scheduler=${session.scheduler}`);
   if (session.config_plane !== undefined) parts.push(`repo=${session.config_plane}`);
@@ -497,14 +577,18 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Field            | Value |`,
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
-    session.budget_gb_monthly !== undefined
+    session.budget_usd_monthly !== undefined
+      ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |`
+      : session.budget_gb_monthly !== undefined
       ? `| Volume budget    | ${session.budget_gb_monthly} GB/mo (standing line) |`
       : `| Target savings   | ${session.target_percent ?? 30}% |`,
     `| Exceptions       | ${exc} |`,
     `| Min delta        | ${session.min_delta_pp ?? 2}pp |`,
     `| Schedule         | ${session.schedule ?? 'daily-03utc'} (${resolveCronExpression(session.schedule ?? 'daily-03utc')}) |`,
     `| Scheduler        | ${session.scheduler ?? 'k8s_cron'} |`,
-    `| Config repo      | ${session.config_plane ?? '(not set)'} |`,
+    session.budget_usd_monthly !== undefined && session.scheduler === 'k8s_cron'
+      ? `| Delivery         | policy ConfigMap log10x-action-intent in ${session.namespace ?? 'log10x'} |`
+      : `| Config repo      | ${session.config_plane || '(not set)'} |`,
   ].join('\n');
 }
 
@@ -524,6 +608,16 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
     target_services: session.target_services ?? [],
     target_percent: session.target_percent ?? 30,
     ...(session.budget_gb_monthly !== undefined ? { budget_gb_monthly: session.budget_gb_monthly } : {}),
+    ...(session.budget_usd_monthly !== undefined
+      ? {
+          budget_usd_monthly: session.budget_usd_monthly,
+          ...(session.standard_indexes !== undefined ? { standard_indexes: session.standard_indexes } : {}),
+          ...(session.standard_rate_per_million !== undefined ? { standard_rate_per_million: session.standard_rate_per_million } : {}),
+          ...(session.nodes_by_container !== undefined ? { nodes_by_container: session.nodes_by_container } : {}),
+          ...(session.keep_count !== undefined ? { keep_count: session.keep_count } : {}),
+          ...(session.datadog_secret_name !== undefined ? { datadog_secret_name: session.datadog_secret_name } : {}),
+        }
+      : {}),
     schedule: session.schedule ?? 'daily-03utc',
     scheduler: (session.scheduler ?? 'k8s_cron') as SchedulerKind,
     config_plane: session.config_plane ?? '',
@@ -538,6 +632,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
 function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOptions): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const cronExpr = resolveCronExpression(opts.schedule);
+  if (opts.budget_usd_monthly !== undefined) return buildBudgetApplyInstructions(opts, cronExpr);
 
   switch (scheduler) {
     case 'k8s_cron':
@@ -637,6 +732,43 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `   \`\`\``,
       ].join('\n');
   }
+}
+
+function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
+  const install =
+    'Install (or re-install) the Datadog Receiver with `log10x_advise_install` and `regulator_unit: "events"` on engine 1.1.146 or later: the run writes limits in events, and a Receiver counting bytes would read them as bytes.';
+  if (budgetDelivery(opts.scheduler) === 'configmap') {
+    const ns = opts.namespace ?? 'log10x';
+    const secret = opts.datadog_secret_name ?? 'log10x-datadog';
+    return [
+      `### Apply instructions: budget run, Kubernetes CronJob`,
+      ``,
+      `1. ${install}`,
+      `2. **Create the Datadog key Secret** in \`${ns}\`, the Receiver's namespace (the keys need read access to metrics):`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+      `   \`\`\``,
+      `3. **Apply the CronJob manifest** (policy, service account, RBAC, CronJob):`,
+      `   \`\`\`bash`,
+      `   kubectl apply -f log10x-cronjob.yaml`,
+      `   \`\`\``,
+      `4. Run it once now, so the \`*\` row is in events before the first schedule (\`${cronExpr}\` UTC):`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create job --from=cronjob/log10x-recurring log10x-first-run`,
+      `   kubectl -n ${ns} logs -l job-name=log10x-first-run`,
+      `   \`\`\``,
+      `5. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`.`,
+    ].join('\n');
+  }
+  return [
+    `### Apply instructions: budget run, GitHub Actions (gitops pull)`,
+    ``,
+    `1. ${install} Point its gitops pull at this repo; the pull keeps \`*.csv\`.`,
+    `2. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
+    `3. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
+    `4. **Add the secrets** \`DD_API_KEY\` and \`DD_APP_KEY\` (and \`DD_SITE\` when the org is not on datadoghq.com).`,
+    `5. Each run commits \`pipelines/run/receive/rate/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` (schedule \`${cronExpr}\` UTC).`,
+  ].join('\n');
 }
 
 function emitArtifacts(session: RecurringWizardSession): EmitResult {
@@ -846,7 +978,9 @@ function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult):
 function buildEmitHumanSummary(session: RecurringWizardSession, result: EmitResult): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const target =
-    session.budget_gb_monthly !== undefined
+    session.budget_usd_monthly !== undefined
+      ? `a $${session.budget_usd_monthly} a month Standard budget`
+      : session.budget_gb_monthly !== undefined
       ? `a ${session.budget_gb_monthly} GB/mo budget`
       : `${session.target_percent ?? 30}% savings`;
   const svcDesc =

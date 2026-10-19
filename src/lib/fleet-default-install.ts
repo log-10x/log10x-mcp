@@ -137,6 +137,8 @@ export interface ReceiverFleetValues {
   regulatorValuesWritten: boolean;
   /** True when `rateReceiverKeepCounts` is in `options`. */
   keepCountsWritten: boolean;
+  /** True when `rateReceiverUnit events` is in `options`. */
+  eventsUnitWritten: boolean;
   /** The engine release the gate read. */
   engineVersion?: string;
   /** One sentence per value held back, and why. */
@@ -159,6 +161,11 @@ export function receiverFleetValues(input: {
   keepCount?: number;
   /** True when any service sends its excess to S3, which sets the error floor on engines without keep counts. */
   anyOffload?: boolean;
+  /**
+   * `events` when the budget run holds this install: limits and totals count
+   * lines, not bytes (Datadog bills Standard per event). From engine 1.1.146.
+   */
+  unit?: 'bytes' | 'events';
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
@@ -170,6 +177,18 @@ export function receiverFleetValues(input: {
   if (input.datadog) options.push(['symbolMessageHashField', 'tenx_hash']);
   const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 
+  let eventsUnitWritten = false;
+  if (input.datadog && input.unit === 'events') {
+    if (ceiling) {
+      options.push(['rateReceiverUnit', 'events']);
+      eventsUnitWritten = true;
+    } else {
+      notes.push(
+        `Counting limits in lines (rateReceiverUnit events) needs engine ${CEILING_MIN_ENGINE} or later; ${installs}, so limits stay in bytes and the budget run must not hold this install.`,
+      );
+    }
+  }
+
   let fleetDefaultWritten = false;
   if (input.fleetDefault) {
     if (!(input.fleetDefault.capBytesPerWindowPerNode > 0)) {
@@ -180,7 +199,13 @@ export function receiverFleetValues(input: {
           `${installs}, so it writes none of the fleet default's values, and a service with no rule keeps every statement in Standard.`,
       );
     } else {
-      options.push(...fleetDefaultEngineOptions(input.fleetDefault, keepCount));
+      const fd = fleetDefaultEngineOptions(input.fleetDefault, keepCount);
+      // The fleet default's number is bytes; with limits in lines the budget
+      // run's `*` row sets it, so only its action is written.
+      options.push(...(eventsUnitWritten ? fd.filter(([k]) => k !== 'rateReceiverAbsoluteCap') : fd));
+      if (eventsUnitWritten) {
+        notes.push('Limits count lines, so the fleet default\'s byte limit is not written: the budget run\'s `*` row sets the limit for every service without a row. Run it once right after the install.');
+      }
       env.push(...FLEET_DEFAULT_ENGINE_ENV);
       fleetDefaultWritten = true;
     }
@@ -223,6 +248,7 @@ export function receiverFleetValues(input: {
     teamLabelWritten,
     regulatorValuesWritten,
     keepCountsWritten,
+    eventsUnitWritten,
     ...(engineVersion ? { engineVersion } : {}),
     notes,
   };

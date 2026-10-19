@@ -38,7 +38,12 @@
  *     env_id: <optional>
  */
 
+import { DATADOG_FLEX_LIST_PRICING } from './cost.js';
+
 // ─── public types ─────────────────────────────────────────────────────────────
+
+/** Datadog Standard indexing at list, 15-day retention, $ per million events. */
+export const DATADOG_STANDARD_LIST_USD_PER_MILLION = DATADOG_FLEX_LIST_PRICING.standard_index_usd_per_million_events;
 
 /**
  * Per-severity rules the tick applies. Compaction is not one of them: it is a
@@ -76,6 +81,39 @@ export interface ConfigPlane {
   commit_strategy?: 'pr' | 'direct_push';
   /** Branch to push to (direct_push) or base branch for the PR. Default: main. */
   base_branch?: string;
+  /**
+   * Budget policies only: where the run writes the Receiver's files.
+   *   'configmap' — the policy ConfigMap the Receiver reads (in-cluster CronJob).
+   *   'gitops'    — `repo`, for the engine's gitops pull.
+   */
+  delivery?: 'configmap' | 'gitops';
+  /** Namespace of the policy ConfigMap (configmap delivery). Default: the pod's namespace. */
+  namespace?: string;
+  /** Name of the policy ConfigMap (configmap delivery). Default: log10x-action-intent. */
+  configmap?: string;
+}
+
+/**
+ * A Datadog Standard indexing budget held month to date (the budget run).
+ * X is the whole account's Standard bill.
+ */
+export interface DollarBudget {
+  /** X: dollars a month of Standard indexing, the whole account. */
+  usd_monthly: number;
+  /** The account's Standard indexing rate, $ per million events. */
+  standard_usd_per_million: number;
+  /** Index names that bill as Standard. Empty: every index counts. */
+  standard_indexes: string[];
+  /** Error lines over a limit that pass per statement per node per window. */
+  keep_count: number;
+  /** Where a service's lines over its limit go when it names none. */
+  default_action: 'tier_down' | 'offload';
+  /** Per-service destination for lines over the limit. */
+  service_actions: Record<string, 'tier_down' | 'offload'>;
+  /** Nodes each service's pods run on, when the run cannot discover them (gitops delivery). */
+  nodes_by_container: Record<string, number>;
+  /** Receivers in the fleet, for the `*` row, when the run cannot discover them. */
+  nodes_total?: number;
 }
 
 export interface Policy {
@@ -93,6 +131,12 @@ export interface Policy {
    * only the overage — already under budget means every pattern passes.
    */
   budget_gb_monthly?: number;
+  /**
+   * DOLLAR BUDGET on Datadog Standard indexing, held month to date. When
+   * present the tick is the budget run (caps, actions, totals per service),
+   * not the mute-list tick.
+   */
+  budget_usd?: DollarBudget;
   /** Services the policy must never touch. */
   exceptions: string[];
   /**
@@ -298,7 +342,14 @@ export function parsePolicyYaml(text: string): Policy {
   // ── config_plane ────────────────────────────────────────────────────
   const cp = raw['config_plane'] as Record<string, unknown> | undefined;
   const repo = typeof cp?.['repo'] === 'string' ? cp['repo'].trim() : '';
-  if (!repo) {
+  const rawDelivery = typeof cp?.['delivery'] === 'string' ? cp['delivery'].trim() : '';
+  if (rawDelivery && rawDelivery !== 'configmap' && rawDelivery !== 'gitops') {
+    throw new PolicyLoadError(`config_plane.delivery must be configmap or gitops; got: ${rawDelivery}`);
+  }
+  const delivery = rawDelivery ? (rawDelivery as 'configmap' | 'gitops') : undefined;
+  const cmNamespace = typeof cp?.['namespace'] === 'string' ? cp['namespace'].trim() || undefined : undefined;
+  const cmName = typeof cp?.['configmap'] === 'string' ? cp['configmap'].trim() || undefined : undefined;
+  if (!repo && delivery !== 'configmap') {
     throw new PolicyLoadError(
       'policy.yaml is missing config_plane.repo: the tick needs a gitops repo or s3:// prefix to write CSVs'
     );
@@ -332,6 +383,15 @@ export function parsePolicyYaml(text: string): Policy {
     throw new PolicyLoadError(
       `budget_gb_monthly must be a positive number of GB per month; got: ${rawBudget}`
     );
+  }
+  const budget_usd = parseDollarBudget(red);
+  if (budget_usd && (budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+    throw new PolicyLoadError(
+      'reduction carries budget_usd_monthly with budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+    );
+  }
+  if (delivery === 'configmap' && !budget_usd) {
+    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly.');
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
@@ -418,6 +478,7 @@ export function parsePolicyYaml(text: string): Policy {
     target_services,
     target_percent,
     ...(budget_gb_monthly !== undefined ? { budget_gb_monthly } : {}),
+    ...(budget_usd ? { budget_usd } : {}),
     exceptions,
     min_delta_pp,
     lookback_window,
@@ -429,6 +490,79 @@ export function parsePolicyYaml(text: string): Policy {
       ...(env_id !== undefined ? { env_id } : {}),
       commit_strategy,
       ...(base_branch !== undefined ? { base_branch } : {}),
+      ...(budget_usd ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
+      ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
+      ...(cmName !== undefined ? { configmap: cmName } : {}),
     },
+  };
+}
+
+function positiveNumber(raw: unknown): number | undefined {
+  const v = typeof raw === 'string' ? parseFloat(raw) : typeof raw === 'number' ? raw : undefined;
+  return v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+function countMap(raw: unknown, field: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const n = positiveNumber(v);
+    if (n === undefined || !Number.isInteger(n)) {
+      throw new PolicyLoadError(`${field}.${k} must be a whole number of nodes above 0; got: ${String(v)}`);
+    }
+    out[k] = n;
+  }
+  return out;
+}
+
+const BUDGET_ACTIONS: ReadonlySet<string> = new Set(['tier_down', 'offload']);
+
+/** The dollar budget block of `reduction`, or undefined when the policy has none. */
+function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudget | undefined {
+  const raw = red?.['budget_usd_monthly'];
+  if (raw === undefined) return undefined;
+  const usd = positiveNumber(raw);
+  if (usd === undefined) {
+    throw new PolicyLoadError(`budget_usd_monthly must be a positive number of dollars a month; got: ${String(raw)}`);
+  }
+  const rawRate = red?.['standard_rate_per_million'];
+  const rate = rawRate === undefined ? DATADOG_STANDARD_LIST_USD_PER_MILLION : positiveNumber(rawRate);
+  if (rate === undefined) {
+    throw new PolicyLoadError(`standard_rate_per_million must be a positive number of dollars; got: ${String(rawRate)}`);
+  }
+  const rawIdx = red?.['standard_indexes'];
+  const standard_indexes = Array.isArray(rawIdx)
+    ? rawIdx.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim())
+    : [];
+  const rawK = red?.['keep_count'];
+  const k = rawK === undefined ? 50 : typeof rawK === 'string' ? Number(rawK) : typeof rawK === 'number' ? rawK : NaN;
+  if (!Number.isInteger(k) || k < 0) {
+    throw new PolicyLoadError(`keep_count must be a whole number of lines, 0 or more; got: ${String(rawK)}`);
+  }
+  const rawAction = red?.['default_action'];
+  const default_action = rawAction === undefined ? 'tier_down' : String(rawAction);
+  if (!BUDGET_ACTIONS.has(default_action)) {
+    throw new PolicyLoadError(`default_action must be tier_down or offload; got: ${default_action}`);
+  }
+  const service_actions: Record<string, 'tier_down' | 'offload'> = {};
+  const rawSa = red?.['service_actions'];
+  if (rawSa && typeof rawSa === 'object' && !Array.isArray(rawSa)) {
+    for (const [svc, a] of Object.entries(rawSa as Record<string, unknown>)) {
+      if (typeof a !== 'string' || !BUDGET_ACTIONS.has(a)) {
+        throw new PolicyLoadError(`service_actions.${svc} must be tier_down or offload; got: ${String(a)}`);
+      }
+      service_actions[svc] = a as 'tier_down' | 'offload';
+    }
+  }
+  const nodes_total = red?.['nodes_total'] === undefined ? undefined : countMap({ nodes_total: red['nodes_total'] }, 'reduction').nodes_total;
+  return {
+    usd_monthly: usd,
+    standard_usd_per_million: rate,
+    standard_indexes,
+    keep_count: k,
+    default_action: default_action as 'tier_down' | 'offload',
+    service_actions,
+    nodes_by_container: countMap(red?.['nodes_by_container'], 'nodes_by_container'),
+    ...(nodes_total !== undefined ? { nodes_total } : {}),
   };
 }

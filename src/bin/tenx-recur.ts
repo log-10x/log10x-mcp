@@ -8,7 +8,8 @@
  * Exit codes:
  *   0  success (applied) or no-op (delta below threshold)
  *   1  policy error (bad YAML, missing required field)
- *   2  Prometheus unreachable
+ *   2  Prometheus unreachable; on a budget policy, a Datadog or cluster
+ *      read failed and the last files stay in force
  *   3  commit failed (git / gh error)
  *
  * One invocation runs one tick.  The external scheduler (k8s CronJob,
@@ -94,7 +95,7 @@ function printUsage(): void {
       'Exit codes:',
       '  0  success (applied or no-op)',
       '  1  policy error',
-      '  2  Prometheus unreachable',
+      '  2  Prometheus unreachable, or a budget run read failed (last files kept)',
       '  3  commit failed',
       '',
     ].join('\n')
@@ -154,7 +155,7 @@ async function main(): Promise<void> {
 
   if (verbose) {
     printInfo(
-      `policy loaded: target=${policy.target_percent}% ` +
+      `policy loaded: ${policy.budget_usd ? `budget=$${policy.budget_usd.usd_monthly}/mo Standard (${policy.config_plane.delivery})` : `target=${policy.target_percent}%`} ` +
       `services=${policy.target_services.length === 0 ? 'all' : policy.target_services.join(',')} ` +
       `lookback=${policy.lookback_window} ` +
       `min_delta=${policy.min_delta_pp}pp ` +
@@ -179,6 +180,7 @@ async function main(): Promise<void> {
   }
 
   printRunSummary(result);
+  if (result.budget_report) process.stderr.write(result.budget_report + '\n');
 
   if (verbose) {
     const actionCounts: Record<string, number> = {};
@@ -193,6 +195,10 @@ async function main(): Promise<void> {
     );
   }
 
+  if (result.status === 'read_failed') {
+    printError(result.message);
+    process.exit(2);
+  }
   if (result.status === 'error') {
     printError(result.message);
     process.exit(3);

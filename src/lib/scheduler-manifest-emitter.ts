@@ -47,7 +47,31 @@ export interface PolicyOptions {
   namespace?: string;
   /** Name of the k8s Secret holding LOG10X_API_KEY (k8s_cron only). */
   secret_name?: string;
+  /**
+   * Datadog Standard indexing budget, dollars a month for the whole account.
+   * When set the tick is the budget run: k8s_cron writes the policy ConfigMap
+   * in the cluster, github_actions commits the files for the engine's gitops pull.
+   */
+  budget_usd_monthly?: number;
+  /** The account's Standard rate, $ per million events. Default: list. */
+  standard_rate_per_million?: number;
+  /** Index names that bill as Standard. */
+  standard_indexes?: string[];
+  /** Error lines over a limit that pass per statement per node per window. Default 50. */
+  keep_count?: number;
+  /** Nodes per service, for the gitops budget run (no cluster access). */
+  nodes_by_container?: Record<string, number>;
+  /** Name of the Secret (k8s) holding DD_API_KEY, DD_APP_KEY and DD_SITE. Default: log10x-datadog. */
+  datadog_secret_name?: string;
 }
+
+/** The budget run's delivery for a scheduler. */
+export function budgetDelivery(scheduler: SchedulerKind): 'configmap' | 'gitops' | undefined {
+  return scheduler === 'k8s_cron' ? 'configmap' : scheduler === 'github_actions' ? 'gitops' : undefined;
+}
+
+/** Schedulers that run the budget run; the others run the mute-list tick and hold no budget. */
+export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_actions'];
 
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
@@ -124,7 +148,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    ...(opts.budget_gb_monthly !== undefined
+    ...(opts.budget_usd_monthly !== undefined
+      ? budgetPolicyLines(opts)
+      : opts.budget_gb_monthly !== undefined
       ? [
           `  # standing volume line: cut only the overage each tick; under budget = all pass`,
           `  budget_gb_monthly: ${opts.budget_gb_monthly}`,
@@ -139,11 +165,38 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     `  scheduler: ${yamlString(opts.scheduler)}`,
     ``,
     `config_plane:`,
-    `  repo: ${yamlString(opts.config_plane)}`,
+    ...(opts.budget_usd_monthly !== undefined && budgetDelivery(opts.scheduler) === 'configmap'
+      ? [`  delivery: configmap`, `  namespace: ${yamlString(opts.namespace ?? 'log10x')}`]
+      : [
+          `  repo: ${yamlString(opts.config_plane)}`,
+          ...(opts.budget_usd_monthly !== undefined ? [`  delivery: gitops`] : []),
+        ]),
     ...(opts.env_id ? [`  env_id: ${yamlString(opts.env_id)}`] : []),
     ``,
   ];
   return lines.join('\n') + '\n';
+}
+
+function budgetPolicyLines(opts: PolicyOptions): string[] {
+  const idx = opts.standard_indexes ?? [];
+  const nodes = Object.entries(opts.nodes_by_container ?? {});
+  return [
+    `  # Datadog Standard indexing for the whole account, held month to date.`,
+    `  # Each run gives the Receiver's services what is left after lines that do not pass it.`,
+    `  budget_usd_monthly: ${opts.budget_usd_monthly}`,
+    ...(opts.standard_rate_per_million !== undefined ? [`  standard_rate_per_million: ${opts.standard_rate_per_million}`] : []),
+    ...(idx.length === 0
+      ? [`  # empty = every index counts; name the Standard indexes if any index is Flex only`, `  standard_indexes: []`]
+      : [`  standard_indexes:`, ...idx.map((i) => `    - ${yamlString(i)}`)]),
+    `  # error lines over a limit that pass per statement per node per window`,
+    `  keep_count: ${opts.keep_count ?? 50}`,
+    `  default_action: tier_down`,
+    ...(budgetDelivery(opts.scheduler) === 'gitops'
+      ? nodes.length === 0
+        ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
+        : [`  nodes_by_container:`, ...nodes.map(([c, n]) => `    ${c}: ${n}`)]
+      : []),
+  ];
 }
 
 // ─── k8s CronJob ──────────────────────────────────────────────────────────────
@@ -157,6 +210,7 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
  * (separated by `---`) so the user can `kubectl apply -f` the single file.
  */
 export function emitK8sCronJob(opts: PolicyOptions): string {
+  if (opts.budget_usd_monthly !== undefined) return emitK8sBudgetCronJob(opts);
   const cronExpr = resolveCronExpression(opts.schedule);
   const namespace = opts.namespace ?? 'log10x';
   const secretName = opts.secret_name ?? 'log10x-secret';
@@ -227,6 +281,146 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
   ].join('\n');
 }
 
+/**
+ * The budget run as a Kubernetes CronJob in the Receiver's namespace. It
+ * reads the Datadog keys from a Secret, discovers the node count from the
+ * API, and replaces the four files in the policy ConfigMap the Receiver
+ * reads. RBAC: get and update on that one ConfigMap, list on pods and nodes.
+ * The tick talks to the API from Node with the service-account token, so
+ * node:22-alpine needs no kubectl.
+ */
+export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
+  const cronExpr = resolveCronExpression(opts.schedule);
+  const namespace = opts.namespace ?? 'log10x';
+  const ddSecret = opts.datadog_secret_name ?? 'log10x-datadog';
+  const policyYaml = emitPolicyYaml(opts);
+  const sa = 'log10x-budget-run';
+  const ddEnv = (name: string, optional = false): string[] => [
+    `                - name: ${name}`,
+    `                  valueFrom:`,
+    `                    secretKeyRef:`,
+    `                      name: ${ddSecret}`,
+    `                      key: ${name}`,
+    ...(optional ? [`                      optional: true`] : []),
+  ];
+  return [
+    `# Log10x budget run: Kubernetes CronJob`,
+    `# Generated by log10x_setup_recurring.`,
+    `# Holds Datadog Standard indexing at ${opts.budget_usd_monthly} USD a month: each run writes`,
+    `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+    `# log10x-action-intent ConfigMap the Receiver reads.`,
+    `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+    `#   --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key> [--from-literal=DD_SITE=<site>]`,
+    `# Apply with: kubectl apply -f log10x-cronjob.yaml`,
+    `---`,
+    `apiVersion: v1`,
+    `kind: ConfigMap`,
+    `metadata:`,
+    `  name: log10x-policy`,
+    `  namespace: ${namespace}`,
+    `data:`,
+    `  policy.yaml: |`,
+    ...policyYaml.split('\n').map((l) => `    ${l}`),
+    `---`,
+    `apiVersion: v1`,
+    `kind: ServiceAccount`,
+    `metadata:`,
+    `  name: ${sa}`,
+    `  namespace: ${namespace}`,
+    `---`,
+    `apiVersion: rbac.authorization.k8s.io/v1`,
+    `kind: Role`,
+    `metadata:`,
+    `  name: ${sa}`,
+    `  namespace: ${namespace}`,
+    `rules:`,
+    `  - apiGroups: [""]`,
+    `    resources: ["configmaps"]`,
+    `    resourceNames: ["log10x-action-intent"]`,
+    `    verbs: ["get", "update"]`,
+    `---`,
+    `apiVersion: rbac.authorization.k8s.io/v1`,
+    `kind: RoleBinding`,
+    `metadata:`,
+    `  name: ${sa}`,
+    `  namespace: ${namespace}`,
+    `roleRef:`,
+    `  apiGroup: rbac.authorization.k8s.io`,
+    `  kind: Role`,
+    `  name: ${sa}`,
+    `subjects:`,
+    `  - kind: ServiceAccount`,
+    `    name: ${sa}`,
+    `    namespace: ${namespace}`,
+    `---`,
+    `apiVersion: rbac.authorization.k8s.io/v1`,
+    `kind: ClusterRole`,
+    `metadata:`,
+    `  name: ${sa}-nodes`,
+    `rules:`,
+    `  - apiGroups: [""]`,
+    `    resources: ["pods", "nodes"]`,
+    `    verbs: ["list"]`,
+    `---`,
+    `apiVersion: rbac.authorization.k8s.io/v1`,
+    `kind: ClusterRoleBinding`,
+    `metadata:`,
+    `  name: ${sa}-nodes`,
+    `roleRef:`,
+    `  apiGroup: rbac.authorization.k8s.io`,
+    `  kind: ClusterRole`,
+    `  name: ${sa}-nodes`,
+    `subjects:`,
+    `  - kind: ServiceAccount`,
+    `    name: ${sa}`,
+    `    namespace: ${namespace}`,
+    `---`,
+    `apiVersion: batch/v1`,
+    `kind: CronJob`,
+    `metadata:`,
+    `  name: log10x-recurring`,
+    `  namespace: ${namespace}`,
+    `  labels:`,
+    `    app: log10x-recurring`,
+    `spec:`,
+    `  schedule: ${yamlString(cronExpr)}`,
+    `  concurrencyPolicy: Forbid`,
+    `  successfulJobsHistoryLimit: 3`,
+    `  failedJobsHistoryLimit: 3`,
+    `  jobTemplate:`,
+    `    spec:`,
+    `      template:`,
+    `        spec:`,
+    `          serviceAccountName: ${sa}`,
+    `          restartPolicy: OnFailure`,
+    `          containers:`,
+    `            - name: log10x-tick`,
+    `              image: node:22-alpine`,
+    `              command: ["sh", "-c"]`,
+    `              args:`,
+    `                - |`,
+    `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
+    `              env:`,
+    ...ddEnv('DD_API_KEY'),
+    ...ddEnv('DD_APP_KEY'),
+    ...ddEnv('DD_SITE', true),
+    ...(opts.env_id
+      ? [
+          `                - name: LOG10X_ENV_ID`,
+          `                  value: ${yamlString(opts.env_id)}`,
+        ]
+      : []),
+    `              volumeMounts:`,
+    `                - name: policy`,
+    `                  mountPath: /config`,
+    `          volumes:`,
+    `            - name: policy`,
+    `              configMap:`,
+    `                name: log10x-policy`,
+    ``,
+  ].join('\n');
+}
+
 // ─── GitHub Actions workflow ───────────────────────────────────────────────────
 
 /**
@@ -277,9 +471,17 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     ``,
     `      - name: Run log10x tick`,
     `        env:`,
-    `          LOG10X_API_KEY: \${{ secrets.LOG10X_API_KEY }}`,
+    ...(opts.budget_usd_monthly !== undefined
+      ? [
+          `          DD_API_KEY: \${{ secrets.DD_API_KEY }}`,
+          `          DD_APP_KEY: \${{ secrets.DD_APP_KEY }}`,
+          `          DD_SITE: \${{ secrets.DD_SITE }}`,
+        ]
+      : [`          LOG10X_API_KEY: \${{ secrets.LOG10X_API_KEY }}`]),
     ...(opts.env_id ? [`          LOG10X_ENV_ID: ${opts.env_id}`] : []),
-    `          LOG10X_GITOPS_REPO: ${opts.config_plane}`,
+    `          # the checkout above is the config repo the tick writes and commits`,
+    `          LOG10X_GITOPS_REPO_PATH: \${{ github.workspace }}`,
+    `          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}`,
     `        run: |`,
     `          npx --yes --package=log10x-mcp@latest tenx-recur --policy policy.yaml`,
     ``,
@@ -316,7 +518,7 @@ export function emitCrontab(opts: PolicyOptions): { crontab_line: string; wrappe
     ``,
     `export LOG10X_API_KEY="\${LOG10X_API_KEY:-}"  # set in your environment or replace here`,
     ...(opts.env_id ? [`export LOG10X_ENV_ID="${opts.env_id}"`] : []),
-    `export LOG10X_GITOPS_REPO="${opts.config_plane}"`,
+    `export LOG10X_GITOPS_REPO_PATH="${opts.config_plane}"`,
     ``,
     `echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] log10x tick starting"`,
     `npx --yes --package=log10x-mcp@latest tenx-recur --policy "${opts.config_plane}/policy.yaml"`,
