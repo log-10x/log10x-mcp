@@ -1,10 +1,11 @@
 /**
- * Gate for handoff 4b.2: the budget run. A Datadog Standard budget held
- * month to date, every row re-derived on each run and divided by the node
- * count found on that run, written to the policy ConfigMap the Receiver
- * reads. Datadog and the Kubernetes API are stubs; no network.
- *
- * The gate: a run with a doubled node count halves the per-node limits.
+ * The budget run: a Datadog Standard budget held month to date, every row
+ * re-derived on each run and divided by the node count found on that run,
+ * written to the policy ConfigMap or the policy branch the Receiver reads.
+ * Covers the per-node division, month-to-date spend and lines outside the
+ * Receiver, the `*` row, protected statements, failed and refused reads, the
+ * git path, the hourly schedule and services with their own number.
+ * Datadog and the Kubernetes API are stubs; no network.
  */
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -151,7 +152,7 @@ afterEach(() => {
   tick._resetBackendLoader();
 });
 
-test('4b.2 gate: a run with a doubled node count halves the per-node limits and totals', async () => {
+test('gate: a run with a doubled node count halves the per-node limits and totals', async () => {
   const two = await run(2);
   const four = await run(4);
   assert.equal(two.writes.length, 1, 'the run writes the policy ConfigMap');
@@ -167,7 +168,7 @@ test('4b.2 gate: a run with a doubled node count halves the per-node limits and 
   }
 });
 
-test('4b.2: month to date, (X - spent - lines outside the Receiver) over the hours left, noisiest first', async () => {
+test('month to date, (X - spent - lines outside the Receiver) over the hours left, noisiest first', async () => {
   const { result, writes } = await run(2);
   assert.equal(result.status, 'applied');
   const w = writes[0];
@@ -197,7 +198,7 @@ test('4b.2: month to date, (X - spent - lines outside the Receiver) over the hou
   assert.ok(!('tenx-seed' in caps));
 });
 
-test('4b.2: under the budget each service keeps room to grow and the `*` row gets what is left', async () => {
+test('under the budget each service keeps room to grow and the `*` row gets what is left', async () => {
   const { writes } = await run(2, policy().replace('budget_usd_monthly: 20', 'budget_usd_monthly: 200'));
   const caps = rows(writes[0]['caps.csv']);
   const totals = rows(writes[0]['totals.csv']);
@@ -207,7 +208,7 @@ test('4b.2: under the budget each service keeps room to grow and the `*` row get
   assert.ok(totals['*'] > 1);
 });
 
-test('4b.2: once spent reaches X, every line past its sample moves for the rest of the month', async () => {
+test('once spent reaches X, every line past its sample moves for the rest of the month', async () => {
   const { result, writes } = await run(2, policy().replace('budget_usd_monthly: 20', 'budget_usd_monthly: 5'));
   const caps = rows(writes[0]['caps.csv']);
   const totals = rows(writes[0]['totals.csv']);
@@ -216,7 +217,7 @@ test('4b.2: once spent reaches X, every line past its sample moves for the rest 
   assert.match(result.budget_report ?? '', /Standard has reached \$5 for this month\. Until the month ends, every line past its 5-line sample moves to Flex, except up to 50 error lines/);
 });
 
-test('4b.2: a failed Datadog read writes nothing, keeps the last files and says so', async () => {
+test('a failed Datadog read writes nothing, keeps the last files and says so', async () => {
   const writes: Array<Record<string, string>> = [];
   seams._setBudgetDeps?.({
     creds: { site: 'datadoghq.com', apiKey: 'k', appKey: 'a' },
@@ -232,7 +233,7 @@ test('4b.2: a failed Datadog read writes nothing, keeps the last files and says 
   assert.equal(writes.length, 0);
 });
 
-test('4b.2: missing Datadog keys are a read failure, not a run on stale numbers', async () => {
+test('missing Datadog keys are a read failure, not a run on stale numbers', async () => {
   const writes: Array<Record<string, string>> = [];
   seams._setBudgetDeps?.({ creds: null, k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
   const result = await tick.runTick(parsePolicyYaml(policy()));
@@ -241,7 +242,7 @@ test('4b.2: missing Datadog keys are a read failure, not a run on stale numbers'
   assert.equal(writes.length, 0);
 });
 
-test('4b.2: exceptions are left alone and lines outside the Receiver near X are warned about', async () => {
+test('exceptions are left alone and lines outside the Receiver near X are warned about', async () => {
   const text = policy()
     .replace('  exceptions: []', '  exceptions:\n    - payments')
     .replace('budget_usd_monthly: 20', 'budget_usd_monthly: 2');
@@ -254,7 +255,7 @@ test('4b.2: exceptions are left alone and lines outside the Receiver near X are 
   assert.match(result.budget_report ?? '', /Warning: Lines that do not pass the Receiver alone reach/);
 });
 
-test('4b.2: gitops delivery divides by nodes_by_container and states it', async () => {
+test('gitops delivery divides by nodes_by_container and states it', async () => {
   const text = policy('  nodes_by_container:\n    checkout: 4\n    payments: 4')
     .replace('  delivery: configmap\n', '  delivery: gitops\n');
   mkdirSync(join(repo, 'log10x', 'policy'), { recursive: true });
@@ -268,7 +269,7 @@ test('4b.2: gitops delivery divides by nodes_by_container and states it', async 
   rmSync(join(repo, 'log10x'), { recursive: true, force: true });
 });
 
-test('4b.2: the run history is appended (no require in an ES module)', async () => {
+test('the run history is appended (no require in an ES module)', async () => {
   const before = existsSync(join(tmpdir(), 'log10x-recur-history.jsonl'))
     ? readFileSync(join(tmpdir(), 'log10x-recur-history.jsonl'), 'utf8').length
     : 0;
@@ -277,7 +278,7 @@ test('4b.2: the run history is appended (no require in an ES module)', async () 
   assert.ok(after > before);
 });
 
-test('4b.2 (ruling 16): the report says when statements a mute protects alone exceed a service total', async () => {
+test('the report says when statements a mute protects alone exceed a service total', async () => {
   const writes: Array<Record<string, string>> = [];
   const until = NOW + 86_400;
   seams._setBudgetDeps?.({
@@ -697,12 +698,24 @@ test('hourly gate: a budget policy with no schedule runs hourly in the CronJob a
   assert.match(plain, /- cron: "0 3 \* \* \*"/);
 });
 
-/** checkout and payments each send their own Standard lines: 6,000 and 2,000 an hour. */
-function byContainerStub(calls: string[]) {
+/**
+ * Datadog's usage counts checkout 7,000 and payments 3,000 an hour in Standard
+ * (payments tagged `ddPayments`); the Receiver sent 6,000 and 2,000 of them, so
+ * each has 1,000 an hour that never passed it.
+ */
+function byServiceStub(calls: string[], ddPayments = 'payments') {
   const base = datadogStub(calls);
   return async (c: unknown, q: string, from: number, to: number): Promise<Series[]> => {
+    calls.push(q);
+    if (q.includes('datadog.estimated_usage.logs.ingested_events')) {
+      return [
+        hourly({ service: 'checkout', datadog_index: 'main' }, OCT1, NOW, 7_000),
+        hourly({ service: ddPayments, datadog_index: 'main' }, OCT1, NOW, 3_000),
+        hourly({ service: ddPayments, datadog_index: 'tenx-offload' }, OCT1, NOW, 40_000),
+        hourly({ service: ddPayments, datadog_index: 'flex-only' }, OCT1, NOW, 50_000),
+      ];
+    }
     if (q.includes('emitted_events_summaryVolume')) {
-      calls.push(q);
       return [
         hourly({ routestate: 'pass', k8s_container: 'checkout' }, OCT1, NOW, 6_000),
         hourly({ routestate: 'pass', k8s_container: 'payments' }, OCT1, NOW, 2_000),
@@ -714,44 +727,58 @@ function byContainerStub(calls: string[]) {
   };
 }
 
-async function runOwn(text: string) {
+async function runOwn(text: string, ddPayments?: string) {
   const writes: Array<Record<string, string>> = [];
   const calls: string[] = [];
-  seams._setBudgetDeps?.({ creds, query: byContainerStub(calls), k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
+  seams._setBudgetDeps?.({ creds, query: byServiceStub(calls, ddPayments), k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
   const result = await tick.runTick(parsePolicyYaml(text));
   return { result, writes, calls };
 }
 
-test('service_budgets gate: a named service is held to its own number, the rest of the account to X minus it', async () => {
+test('service_budgets gate: a named service is held to its own number from Datadog\'s usage count, the rest of the account to X minus it', async () => {
   const { result, writes, calls } = await runOwn(policy('  service_budgets:\n    payments: 4'));
   assert.equal(result.status, 'applied', result.message);
   const caps = rows(writes[0]['caps.csv']);
   const totals = rows(writes[0]['totals.csv']);
-  // payments: $4 is 2,352,941 events; it sent 348 x 2,000 to Standard so far, so it
-  // may send the rest over 396 hours, about 4,184 an hour against 5,000 now.
-  const ownRate = (4 / 1.7e-6 - 348 * 2_000) / 396;
+  // payments: $4 is 2,352,941 events. Datadog counted 348 x 3,000 under service:payments
+  // (Flex and unnamed indexes left out), 1,000 an hour of it outside the Receiver, which
+  // keeps counting for the 396 hours left: about 2,305 an hour against 5,000 now.
+  const ownRate = (4 / 1.7e-6 - 348 * 3_000 - 1_000 * 396) / 396;
   assert.equal(caps.payments, Math.floor(ownRate / 15 / 2));
+  assert.equal(caps.payments, 76);
   assert.equal(totals.payments, Math.floor(ownRate / 15 / 2));
-  // The rest: $16 less what the account spent outside payments (348 x 8,000) and
-  // what lines outside the Receiver add (2,000 an hour), over 396 hours, for checkout.
-  const rest = (16 / 1.7e-6 - 348 * 8_000 - 2_000 * 396) / 396;
+  // The rest: $16 less the account's spend outside payments (348 x 7,000), whose lines
+  // outside the Receiver are that less checkout's 6,000 an hour, 1,000 an hour.
+  const rest = (16 / 1.7e-6 - 348 * 7_000 - 1_000 * 396) / 396;
   assert.equal(caps.checkout, Math.floor((rest - 1_000) / 15 / 2));
   assert.equal(totals.checkout, Math.floor(rest / 15 / 2));
-  // Held through the month: what each spent plus its rate for the hours left is its number.
-  assert.ok(Math.abs(348 * 2_000 + ownRate * 396 - 4 / 1.7e-6) < 1);
-  assert.ok(Math.abs(348 * 8_000 + 2_000 * 396 + rest * 396 - 16 / 1.7e-6) < 1);
+  // Held through the month: spent, plus lines outside the Receiver and the rate for the hours left, is the number.
+  assert.ok(Math.abs(348 * 3_000 + (1_000 + ownRate) * 396 - 4 / 1.7e-6) < 1);
+  assert.ok(Math.abs(348 * 7_000 + (1_000 + rest) * 396 - 16 / 1.7e-6) < 1);
   const report = result.budget_report ?? '';
-  assert.match(report, /payments is held to its own \$4 a month: \$1\.2 spent so far, 4,184 events an hour for the rest of the month, a limit of 139 per statement and a total of 139 per window per node\./);
+  assert.match(report, /payments is held to its own \$4 a month: \$1\.8 spent so far by Datadog's usage count for service:payments, 2,305 events an hour for the rest of the month, a limit of 76 per statement and a total of 76 per window per node\./);
   assert.match(report, /\| payments \(own \$4 a month\) \|/);
+  assert.match(report, /Lines that do not pass the Receiver, outside the services with their own number: 348,000 events/);
   assert.match(report, /The Receiver's other services get the rest of \$16\./);
-  // Each service's Standard lines come from the Receiver's emitted series, by container.
+  assert.doesNotMatch(report, /no Standard series for service:/);
   assert.ok(calls.some((q) => /log10x\.emitted_events_summaryVolume\{tenx_env:env-1\} by \{routestate,k8s_container\}\.rollup\(sum, 3600\)/.test(q)), calls.join('\n'));
 
   // A named service that has spent its number gets 1 line, like a spent account.
   const spent = await runOwn(policy('  service_budgets:\n    payments: 1'));
   assert.equal(rows(spent.writes[0]['caps.csv']).payments, 1);
   assert.equal(rows(spent.writes[0]['totals.csv']).payments, 1);
-  assert.match(spent.result.budget_report ?? '', /payments has spent its own \$1 for this month \(\$1\.2 so far\)\. Until the month ends, in payments, every line past its 5-line sample moves to Flex/);
+  assert.match(spent.result.budget_report ?? '', /payments has spent its own \$1 for this month \(\$1\.8 so far\)\. Until the month ends, in payments, every line past its 5-line sample moves to Flex/);
+});
+
+test('service_budgets gate: Datadog\'s service name can differ from the container; a mismatch is warned about', async () => {
+  const mapped = await runOwn(policy('  service_budgets:\n    payments:\n      usd: 4\n      datadog_service: payments-api'), 'payments-api');
+  assert.equal(rows(mapped.writes[0]['caps.csv']).payments, 76);
+  assert.match(mapped.result.budget_report ?? '', /for service:payments-api/);
+  const missed = await runOwn(policy('  service_budgets:\n    payments: 4'), 'payments-api');
+  assert.match(
+    missed.result.budget_report ?? '',
+    /Warning: Datadog's usage metric has no Standard series for service:payments, while the Receiver sees the container payments: its spend reads as 0 and counts in the rest of the account\. Set service_budgets\.payments\.datadog_service/,
+  );
 });
 
 test('service_budgets gate: a sum at or over X is refused, and so is a named service in exceptions', async () => {
@@ -762,23 +789,92 @@ test('service_budgets gate: a sum at or over X is refused, and so is a named ser
     /payments is in both service_budgets and exceptions/,
   );
   assert.throws(() => parsePolicyYaml(policy('  service_budgets:\n    payments: -4')), /service_budgets\.payments must be a positive number/);
-  assert.deepEqual(parsePolicyYaml(policy('  service_budgets:\n    payments: 4')).budget_usd?.service_budgets, { payments: 4 });
+  assert.deepEqual(parsePolicyYaml(policy('  service_budgets:\n    payments: 4')).budget_usd?.service_budgets, { payments: { usd: 4, datadog_service: 'payments' } });
   const { executeSetupRecurring } = await import('../src/tools/setup-recurring.js');
   await assert.rejects(
-    executeSetupRecurring({ budget_usd_monthly: 20_000, service_budgets: { payments: 20_000 } } as never),
+    executeSetupRecurring({ target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'k8s_cron', namespace: 'logging', service_budgets: { payments: 20_000 } } as never),
     /add up to 20000 dollars a month/,
   );
 });
 
-test('service_budgets: log10x_setup_recurring writes them to policy.yaml', async () => {
+test('service_budgets gate: without budget_usd_monthly it is refused by the loader, and by the wizard once every answer is in', async () => {
+  const noBudget = policy('  service_budgets:\n    payments: 4').replace('  budget_usd_monthly: 20\n', '  target_percent: 30\n').replace('  delivery: configmap\n', '');
+  assert.throws(() => parsePolicyYaml(noBudget), /service_budgets needs budget_usd_monthly/);
+  const { executeSetupRecurring } = await import('../src/tools/setup-recurring.js');
+  // Arriving before the budget is fine.
+  const first = await executeSetupRecurring({ service_budgets: { payments: 4_000 } } as never);
+  const sid = (first as unknown as { data: { session_id: string } }).data.session_id;
+  const done = await executeSetupRecurring({ session_id: sid, target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'k8s_cron', namespace: 'logging', confirm: true } as never);
+  assert.equal((done as unknown as { data: { mode: string } }).data.mode, 'emit');
+  await assert.rejects(
+    executeSetupRecurring({ target_services: [], target_percent: 30, schedule: 'daily-03utc', scheduler: 'crontab', config_plane: '/srv/x', service_budgets: { payments: 4_000 }, confirm: true } as never),
+    /service_budgets needs budget_usd_monthly/,
+  );
+});
+
+test('service_budgets: log10x_setup_recurring writes them to policy.yaml, both forms', async () => {
   const { executeSetupRecurring } = await import('../src/tools/setup-recurring.js');
   const r = await executeSetupRecurring({
     target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'k8s_cron', namespace: 'logging',
-    service_budgets: { payments: 4_000 }, confirm: true,
+    service_budgets: { payments: 4_000, checkout: { usd: 2_000, datadog_service: 'checkout-api' } }, confirm: true,
   } as never);
   const data = (r as unknown as { data: Record<string, string> }).data;
   assert.equal(data.mode, 'emit', data.markdown);
-  assert.match(data.policy_yaml, /\n  service_budgets:\n    payments: 4000\n/);
-  assert.deepEqual(parsePolicyYaml(data.policy_yaml).budget_usd?.service_budgets, { payments: 4_000 });
-  assert.match(data.markdown, /\| Own numbers      \| payments \$4000 a month \|/);
+  assert.match(data.policy_yaml, /\n  service_budgets:\n    payments: 4000\n    checkout:\n      usd: 2000\n      datadog_service: "?checkout-api"?\n/);
+  assert.deepEqual(parsePolicyYaml(data.policy_yaml).budget_usd?.service_budgets, {
+    payments: { usd: 4_000, datadog_service: 'payments' },
+    checkout: { usd: 2_000, datadog_service: 'checkout-api' },
+  });
+  assert.match(data.markdown, /\| Own numbers      \| payments \$4000, checkout \$2000 a month \|/);
+});
+
+test('new-service gate: the `*` row is divided by the median known service\'s nodes, not every Receiver', async () => {
+  const { planBudget } = await import('../src/lib/budget-tick.js');
+  const p = parsePolicyYaml(policy());
+  const plan = planBudget({
+    budget: p.budget_usd!,
+    nowSec: NOW,
+    usage: [hourly({ service: 'checkout', datadog_index: 'main' }, OCT1, NOW, 10_000)],
+    routes: [hourly({ routestate: 'pass' }, OCT1, NOW, 8_000)],
+    patterns: [
+      { container: 'checkout', pattern: 'a', severity: 'INFO', eventsPerHour: 30_000 },
+      { container: 'checkout', pattern: 'b', severity: 'ERROR', eventsPerHour: 1_000 },
+      { container: 'payments', pattern: 'c', severity: 'INFO', eventsPerHour: 5_000 },
+    ],
+    // Both services run on 2 of the 6 Receivers' nodes.
+    instances: { checkout: 2, payments: 2 },
+    nodesTotal: 6,
+    instanceBasis: 'policy',
+    exceptions: [],
+    targetServices: [],
+  });
+  const checkout = plan.rows.find((r) => r.container === 'checkout')!;
+  assert.equal(plan.star.instances, 2);
+  assert.equal(plan.star.cap, checkout.cap);
+  assert.equal(plan.star.cap, 430);
+  assert.match(plan.lines.join('\n'), /6 Receivers\. The `\*` row is divided by 2 nodes, the median known service's count\./);
+});
+
+test('tag casing gate: route series without a routestate key write nothing and are a read failure', async () => {
+  const writes: Array<Record<string, string>> = [];
+  const base = datadogStub([]);
+  const camel = async (c: unknown, q: string, from: number, to: number) => {
+    if (q.includes('emitted_events')) return [hourly({ routeState: 'pass', k8s_container: 'checkout' }, OCT1, NOW, 8_000)];
+    return base(c, q, from, to);
+  };
+  seams._setBudgetDeps?.({ creds, query: camel, k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
+  const r = await tick.runTick(parsePolicyYaml(policy()));
+  assert.equal(r.status, 'read_failed');
+  assert.match(r.message, /without a routestate tag \(tags: k8s_container, routeState\)[^\n]*The files from the last run stay in force\./);
+  assert.equal(writes.length, 0);
+});
+
+test('hourly: the GitHub Actions apply steps say what hourly costs in Actions runs and how to slow it', async () => {
+  const { executeSetupRecurring } = await import('../src/tools/setup-recurring.js');
+  const go = async (extra: Record<string, unknown>) =>
+    (await executeSetupRecurring({ target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'github_actions', config_plane: 'https://github.com/acme/log10x-config', confirm: true, ...extra } as never)) as unknown as { data: Record<string, string> };
+  const hourlyRun = await go({});
+  assert.match(hourlyRun.data.apply_instructions, /Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass `schedule: "every-6h"` or a cron expression such as `"0 \*\/3 \* \* \*"`\./);
+  const slow = await go({ schedule: 'every-6h' });
+  assert.doesNotMatch(slow.data.apply_instructions, /720 runs/);
 });

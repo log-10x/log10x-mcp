@@ -134,7 +134,7 @@ export interface ServiceRow {
   /** Fleet events an hour from statements a mute protects. */
   protectedPerHour: number;
   /** A service with its own number: dollars a month, spent so far, and whether it is used up. */
-  ownBudget?: { usdMonthly: number; spentUsd: number; exhausted: boolean };
+  ownBudget?: { usdMonthly: number; spentUsd: number; exhausted: boolean; datadogService: string };
 }
 
 export interface BudgetPlan {
@@ -247,14 +247,17 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const standard = new Set(b.standard_indexes);
   let spent = 0;
   let lastPoint = -1;
+  const spentByService = new Map<string, number>();
   for (const s of input.usage) {
     const idx = s.tags['datadog_index'] ?? '';
     // The Flex index the MCP creates for tier_down never bills as Standard.
     if (idx === DATADOG_FLEX_INDEX_NAME) continue;
     if (standard.size > 0 && !standard.has(idx)) continue;
+    const svc = s.tags['service'] ?? '';
     for (const [ts, v] of s.points) {
       if (ts < start || ts >= end) continue;
       spent += v;
+      spentByService.set(svc, (spentByService.get(svc) ?? 0) + v);
       if (ts > lastPoint) lastPoint = ts;
     }
   }
@@ -265,25 +268,32 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   // The Receiver's own Standard lines through the same hour the usage
   // metric reached, so its lag and the Receiver's do not skew the split.
   const toStandard = (s: DdPointSeries): boolean => !HELD_ROUTES.has((s.tags['routestate'] ?? '').toLowerCase());
-  const receiverStandardEvents = sumPoints(input.routes, start, dataThroughSec, toStandard);
-  const outsideRaw = spent - receiverStandardEvents;
-  const outside = Math.max(0, outsideRaw);
-  const outsidePerHour = outside / elapsedHours;
-  const outsideProjectedMonth = outside + outsidePerHour * hoursLeft;
+  const receiverStandardOf = (c: string): number =>
+    sumPoints(input.routes, start, dataThroughSec, (s) => toStandard(s) && s.tags['k8s_container'] === c);
 
-  // Services with their own number, each held to it from its own Standard
-  // lines; the rest of the account is held to X minus their numbers.
+  // A named service spends what Datadog's usage metric counts under its
+  // service tag, its lines outside the Receiver included. The rest of the
+  // account: spent = account spent - named spent; outside = that - the
+  // Receiver's Standard lines from containers without a number.
   const own = b.service_budgets ?? {};
   const named = Object.keys(own).sort();
   const namedSet = new Set(named);
   const ownSpent: Record<string, number> = {};
+  const ownReceiver: Record<string, number> = {};
   for (const c of named) {
-    ownSpent[c] = sumPoints(input.routes, start, dataThroughSec, (s) => toStandard(s) && s.tags['k8s_container'] === c);
+    ownSpent[c] = spentByService.get(own[c].datadog_service) ?? 0;
+    ownReceiver[c] = receiverStandardOf(c);
   }
-  const namedUsd = named.reduce((a, c) => a + own[c], 0);
+  const namedUsd = named.reduce((a, c) => a + own[c].usd, 0);
   const poolUsd = b.usd_monthly - namedUsd;
   const poolEvents = poolUsd / perEventUsd;
   const poolSpent = Math.max(0, spent - named.reduce((a, c) => a + ownSpent[c], 0));
+  const receiverStandardEvents =
+    sumPoints(input.routes, start, dataThroughSec, toStandard) - named.reduce((a, c) => a + ownReceiver[c], 0);
+  const outsideRaw = poolSpent - receiverStandardEvents;
+  const outside = Math.max(0, outsideRaw);
+  const outsidePerHour = outside / elapsedHours;
+  const outsideProjectedMonth = outside + outsidePerHour * hoursLeft;
   const remaining = poolEvents - poolSpent - outsidePerHour * hoursLeft;
   const exhausted = remaining <= 0;
   const allowance = exhausted ? 0 : remaining / hoursLeft;
@@ -321,6 +331,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const rows: ServiceRow[] = [];
   const knownCaps: number[] = [];
   const knownTotals: number[] = [];
+  const knownNodes: number[] = [];
   let kept = 0;
   const protectedIn = (ps: PatternRate[]): number =>
     ps.reduce((a, p) => a + (p.name && input.protectedPatterns?.has(p.name) ? p.eventsPerHour : 0), 0);
@@ -347,13 +358,15 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     kept += allowancePerHour;
     knownCaps.push(capPerHour);
     knownTotals.push(allowancePerHour);
+    knownNodes.push(n);
     rows.push({ container: c, action, instances: n, eventsPerHour: rate, allowancePerHour, protectedPerHour: protectedIn(ps), cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(allowancePerHour, n) });
   }
   for (const c of named) {
     const ps = byContainer.get(c) ?? [];
     const n = Math.max(1, input.instances[c] ?? 1);
     const rates = ps.map((p) => p.eventsPerHour);
-    const left = own[c] / perEventUsd - ownSpent[c];
+    const ownOutsidePerHour = Math.max(0, ownSpent[c] - ownReceiver[c]) / elapsedHours;
+    const left = own[c].usd / perEventUsd - ownSpent[c] - ownOutsidePerHour * hoursLeft;
     const ownExhausted = left <= 0;
     const held = ownExhausted ? { capPerHour: 0, allowancePerHour: 0 } : holdStatements(rates, left / hoursLeft);
     rows.push({
@@ -365,8 +378,13 @@ export function planBudget(input: BudgetInput): BudgetPlan {
       protectedPerHour: protectedIn(ps),
       cap: perWindowPerNode(held.capPerHour, n),
       total: perWindowPerNode(held.allowancePerHour, n),
-      ownBudget: { usdMonthly: own[c], spentUsd: ownSpent[c] * perEventUsd, exhausted: ownExhausted },
+      ownBudget: { usdMonthly: own[c].usd, spentUsd: ownSpent[c] * perEventUsd, exhausted: ownExhausted, datadogService: own[c].datadog_service },
     });
+    if (!spentByService.has(own[c].datadog_service) && (ownReceiver[c] > 0 || ps.length > 0)) {
+      warnings.push(
+        `Datadog's usage metric has no Standard series for service:${own[c].datadog_service}, while the Receiver sees the container ${c}: its spend reads as 0 and counts in the rest of the account. Set service_budgets.${c}.datadog_service to the service name Datadog uses.`,
+      );
+    }
   }
   // A service named in exceptions gets its own row even when it sent nothing
   // in the lookback, so the `*` row never holds it.
@@ -387,12 +405,15 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     starCapPerHour = level !== undefined ? level : Math.max(leftover, medianCap);
     starTotalPerHour = level !== undefined ? medianTotal : Math.max(leftover, medianTotal);
   }
+  // Divided like a known service: by the median known service's nodes.
   const nodesTotal = Math.max(1, input.nodesTotal);
+  const medianNodes = median(knownNodes);
+  const starNodes = medianNodes !== undefined ? Math.max(1, Math.round(medianNodes)) : nodesTotal;
   const star = {
     action: b.default_action as BudgetAction,
-    instances: nodesTotal,
-    cap: perWindowPerNode(starCapPerHour, nodesTotal),
-    total: perWindowPerNode(starTotalPerHour, nodesTotal),
+    instances: starNodes,
+    cap: perWindowPerNode(starCapPerHour, starNodes),
+    total: perWindowPerNode(starTotalPerHour, starNodes),
     allowancePerHour: starTotalPerHour,
   };
 
@@ -404,11 +425,11 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   );
   if (outsideRaw < 0) {
     warnings.push(
-      `The Receiver's own count of lines sent to Standard (${fmtEventCount(receiverStandardEvents)}) is above Datadog's usage count (${fmtEventCount(spent)}) through ${utcHour(dataThroughSec)}, so lines that do not pass the Receiver are taken as 0.`,
+      `The Receiver's own count of lines sent to Standard (${fmtEventCount(receiverStandardEvents)}) is above Datadog's usage count (${fmtEventCount(poolSpent)}) through ${utcHour(dataThroughSec)}, so lines that do not pass the Receiver are taken as 0.`,
     );
   }
   lines.push(
-    `Lines that do not pass the Receiver: ${fmtEventCount(outside)} events in Standard this month, about ${usd(outsideProjectedMonth)} by the month's end at this rate. ${services} get the rest${named.length > 0 ? ` of ${fmtAboutUsd(poolUsd)}` : ''}.`,
+    `Lines that do not pass the Receiver${named.length > 0 ? ', outside the services with their own number' : ''}: ${fmtEventCount(outside)} events in Standard this month, about ${usd(outsideProjectedMonth)} by the month's end at this rate. ${services} get the rest${named.length > 0 ? ` of ${fmtAboutUsd(poolUsd)}` : ''}.`,
   );
   if (outsideProjectedMonth >= 0.8 * poolEvents) {
     warnings.push(
@@ -438,7 +459,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     );
   }
   lines.push(
-    `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'} share the \`*\` row. The division assumes a DaemonSet Receiver, one per node, each holding its node's share.`,
+    `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'}. ${medianNodes !== undefined ? `The \`*\` row is divided by ${starNodes} node${starNodes === 1 ? '' : 's'}, the median known service's count.` : `The \`*\` row is divided by all of them.`} The division assumes a DaemonSet Receiver, one per node, each holding its node's share.`,
   );
   for (const r of rows) {
     if (!r.ownBudget) continue;
@@ -446,7 +467,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     lines.push(
       o.exhausted
         ? `${r.container} has spent its own ${fmtAboutUsd(o.usdMonthly)} for this month (${fmtAboutUsd(o.spentUsd)} so far). Until the month ends, in ${r.container}, ${sample}`
-        : `${r.container} is held to its own ${fmtAboutUsd(o.usdMonthly)} a month: ${fmtAboutUsd(o.spentUsd)} spent so far, ${fmtEventCount(r.allowancePerHour)} events an hour for the rest of the month, a limit of ${r.cap} per statement and a total of ${r.total} per window per node.`,
+        : `${r.container} is held to its own ${fmtAboutUsd(o.usdMonthly)} a month: ${fmtAboutUsd(o.spentUsd)} spent so far by Datadog's usage count for service:${o.datadogService}, ${fmtEventCount(r.allowancePerHour)} events an hour for the rest of the month, a limit of ${r.cap} per statement and a total of ${r.total} per window per node.`,
     );
   }
   for (const r of rows) {
@@ -575,6 +596,13 @@ export async function readBudgetInputs(
     q(creds, receiverRouteQuery(envId), start, nowSec),
     q(creds, patternEventsQuery(envId), from, nowSec),
   ]);
+  // Without the key every line would read as Standard.
+  if (routes.length > 0 && !routes.some((s) => 'routestate' in s.tags)) {
+    const keys = [...new Set(routes.flatMap((s) => Object.keys(s.tags)))].sort();
+    throw new Error(
+      `the Receiver's emitted series came back without a routestate tag (tags: ${keys.join(', ') || 'none'}), so the run cannot tell its Standard lines from the ones it moved.`,
+    );
+  }
   const patterns: PatternRate[] = pats.map((s) => ({
     container: s.tags['k8s_container'] ?? '',
     pattern: s.tags['tenx_hash'] ?? '',
