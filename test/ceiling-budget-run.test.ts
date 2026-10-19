@@ -878,3 +878,23 @@ test('hourly: the GitHub Actions apply steps say what hourly costs in Actions ru
   const slow = await go({ schedule: 'every-6h' });
   assert.doesNotMatch(slow.data.apply_instructions, /720 runs/);
 });
+
+test('service_budgets gate: two named services reading the same Datadog service are refused', async () => {
+  assert.throws(
+    () => parsePolicyYaml(policy('  service_budgets:\n    payments: 4\n    payments-worker:\n      usd: 2\n      datadog_service: payments')),
+    /payments and payments-worker in service_budgets both read Datadog's spend for service:payments/,
+  );
+  assert.throws(
+    () => parsePolicyYaml(policy('  service_budgets:\n    a:\n      usd: 2\n      datadog_service: shared\n    b:\n      usd: 2\n      datadog_service: shared')),
+    /a and b in service_budgets both read Datadog's spend for service:shared/,
+  );
+  const { executeSetupRecurring } = await import('../src/tools/setup-recurring.js');
+  // Arriving is fine; the wizard refuses once every answer is in.
+  const first = await executeSetupRecurring({ service_budgets: { payments: 4_000, 'payments-worker': { usd: 2_000, datadog_service: 'payments' } } } as never);
+  assert.equal((first as unknown as { data: { mode: string } }).data.mode, 'next_question');
+  const sid = (first as unknown as { data: { session_id: string } }).data.session_id;
+  await assert.rejects(
+    executeSetupRecurring({ session_id: sid, target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'k8s_cron', namespace: 'logging', confirm: true } as never),
+    /payments and payments-worker in service_budgets both read Datadog's spend for service:payments/,
+  );
+});
