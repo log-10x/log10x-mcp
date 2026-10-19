@@ -82,10 +82,13 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * on the forwarder output, an exact first burst (E82) and PostgreSQL context
  * lines joined to their error (E84). 1.1.145: a line's timestamp templates
  * no longer depend on the lines before it, so the same line gets the same
- * template hash on every node (E85). Pinned by digest.
+ * template hash on every node (E85). 1.1.146: the Receiver's rate regulator
+ * reads service totals, keep counts for error lines, an events unit and `*`
+ * rows, and pulls its policy files from a git branch; Datadog metrics post as
+ * distributions. Pinned by digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.145@sha256:aec232a2f7d9da8277a529ea9d844267f8c6f10bb241f088c1fbe774b8b9949e';
+  'log10x/edge-10x:1.1.146@sha256:4d7be22e5e91ffe344ec9878b45063d21a9c2eb4909799a6d5a7f456db5f0c3a';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
