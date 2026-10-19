@@ -233,6 +233,16 @@ export const adviseInstallSchema = {
     })
     .optional()
     .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`). The Receiver values are written only on an engine release that reads `rateReceiverDefaultAction`.'),
+  keep_count: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('Datadog Receiver: error lines over a limit that still pass, per statement per node per 4-minute window (`rateReceiverKeepCounts`, one entry each for ERROR, CRITICAL and FATAL), on engine 1.1.146 or later. Default 50.'),
+  service_actions: z
+    .record(z.string(), z.enum(['tier_down', 'offload']))
+    .optional()
+    .describe('Datadog Receiver: where each service\'s lines over its limit go, as the POC report or log10x_configure_engine planned them. Any `offload` keeps half of the error lines over a limit in Standard on engines before 1.1.146 (S3 has no monitors).'),
   k8s_team_label: z
     .string()
     .optional()
@@ -1116,6 +1126,8 @@ export async function executeAdviseInstall(
     namespace: args.namespace,
     logDestination: args.log_destination,
     teamLabel: args.k8s_team_label,
+    keepCount: args.keep_count,
+    serviceActions: args.service_actions,
     fleetDefault: args.fleet_default
       ? {
           ...(prior?.fleetDefault ?? {}),
@@ -2268,6 +2280,9 @@ async function renderInstallPlan(
         }
       : {}),
     ...(session.teamLabel !== undefined ? { teamLabel: session.teamLabel } : {}),
+    ...(session.keepCount !== undefined ? { keepCount: session.keepCount } : {}),
+    anyOffload:
+      session.fleetDefault?.action === 'offload' || Object.values(session.serviceActions ?? {}).includes('offload'),
     ...(app === 'receiver' ? {} : { engineVersion: '' }),
   });
 
@@ -2299,6 +2314,15 @@ async function renderInstallPlan(
   }
   if (session.logDestination === 'datadog') {
     if (app === 'receiver') {
+      plan.notes.push(
+        ...fleetValues.notes.filter((n) => n.includes('regulator values') || n.includes('rateReceiverKeepCounts')),
+        ...(fleetValues.regulatorValuesWritten
+          ? ['The Receiver runs with no warm-up and no share guard, and every level below ERROR has a 0 floor, so a statement over its limit moves from its first window.']
+          : []),
+        ...(fleetValues.keepCountsWritten
+          ? ['Error lines over a limit pass at a fixed count per statement per node per window (`rateReceiverKeepCounts`); the rest take the service\'s action.']
+          : []),
+      );
       plan.fleetDefault = buildFleetDefaultStep({
         action: session.fleetDefault?.action,
         errorFloor: session.fleetDefault?.errorFloor,

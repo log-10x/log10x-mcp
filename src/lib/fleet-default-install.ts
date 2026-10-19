@@ -15,9 +15,17 @@ import { defaultErrorFloor, type FleetDefaultAction } from './fleet-default.js';
 // First engine release whose receiver declares rateReceiverDefaultAction and k8sTeamLabel.
 export const FLEET_DEFAULT_MIN_ENGINE = '1.1.141';
 
+// First engine release whose receiver declares rateReceiverKeepCounts,
+// rateReceiverUnit and rateReceiverTotalLookupFile.
+export const CEILING_MIN_ENGINE = '1.1.146';
+
+/** Error lines over a limit that still pass, per statement per node per window. */
+export const KEEP_COUNT_DEFAULT = 50;
+
 /** Levels the receiver config's floor list names; each is written so none falls back to the config's value. */
 export const SEVERITY_FLOOR_LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL', 'FATAL'] as const;
-const ERROR_CLASS: ReadonlySet<string> = new Set(['ERROR', 'CRITICAL', 'FATAL']);
+export const ERROR_CLASS_LEVELS = ['ERROR', 'CRITICAL', 'FATAL'] as const;
+const ERROR_CLASS: ReadonlySet<string> = new Set(ERROR_CLASS_LEVELS);
 
 export function versionAtLeast(version: string, min: string): boolean {
   const a = version.split('.').map(Number);
@@ -45,6 +53,10 @@ export function engineReadsFleetDefault(version: string | undefined): boolean {
   return !!version && /^\d+(\.\d+){1,3}$/.test(version) && versionAtLeast(version, FLEET_DEFAULT_MIN_ENGINE);
 }
 
+export function engineReadsCeiling(version: string | undefined): boolean {
+  return !!version && /^\d+(\.\d+){1,3}$/.test(version) && versionAtLeast(version, CEILING_MIN_ENGINE);
+}
+
 export interface FleetDefaultInstall {
   /** Bytes per reset window per node, from `fleetDefaultNumber`. */
   capBytesPerWindowPerNode: number;
@@ -58,24 +70,40 @@ function num(v: number): string {
 }
 
 /**
- * The fleet default's options, in launch order. The floor list repeats its
- * option once per level (doc.log10x.com/config/cli, "List Arguments"). Every
- * level is named, so the outcome is the same whether the command line adds to
- * the config's list or replaces it: the engine builds the floor map with a
- * put per entry (`EventMapFunctionFactory.map`), so the last value of a
- * level wins. `rateReceiverMinRetentionThreshold 0` makes a 0 floor hold even
- * where the receiver script reads a 0 floor as unset.
+ * The regulator values every Datadog Receiver install writes, in launch
+ * order: no warm-up, no share guard, the always-pass sample, and a 0 floor
+ * on every non-error level. The floor list repeats its option once per level
+ * (doc.log10x.com/config/cli, "List Arguments"). Every level is named, so the
+ * outcome is the same whether the command line adds to the config's list or
+ * replaces it: the engine builds the floor map with a put per entry
+ * (`EventMapFunctionFactory.map`), so the last value of a level wins.
+ * `rateReceiverMinRetentionThreshold 0` makes a 0 floor hold even where the
+ * receiver script reads a 0 floor as unset.
+ *
+ * With `keepCount` (engines that declare `rateReceiverKeepCounts`), the error
+ * levels pass that many lines over the limit per statement per node per
+ * window, and their share floor is 0; without it they keep `errorFloor`.
  */
-export function fleetDefaultEngineOptions(fd: FleetDefaultInstall): Array<[string, string]> {
-  const f = Math.min(1, Math.max(0, fd.errorFloor ?? defaultErrorFloor(fd.action)));
+export function regulatorEngineOptions(opts: { errorFloor: number; keepCount?: number }): Array<[string, string]> {
+  const f = Math.min(1, Math.max(0, Number.isFinite(opts.errorFloor) ? opts.errorFloor : 0));
+  const k = opts.keepCount !== undefined ? Math.max(0, Math.round(opts.keepCount)) : undefined;
+  const errorFloor = k !== undefined ? 0 : f;
   return [
-    ['rateReceiverAbsoluteCap', String(Math.max(1, Math.round(fd.capBytesPerWindowPerNode)))],
-    ['rateReceiverDefaultAction', fd.action],
     ['rateReceiverMinSharePercent', '0'],
     ['rateReceiverWarmupMs', '0'],
     ['rateReceiverBaselineCount', String(ALWAYS_PASS_LINES)],
     ['rateReceiverMinRetentionThreshold', '0'],
-    ...SEVERITY_FLOOR_LEVELS.map((l): [string, string] => ['rateReceiverSeverityFloors', `${l}=${ERROR_CLASS.has(l) ? num(f) : '0'}`]),
+    ...SEVERITY_FLOOR_LEVELS.map((l): [string, string] => ['rateReceiverSeverityFloors', `${l}=${ERROR_CLASS.has(l) ? num(errorFloor) : '0'}`]),
+    ...(k !== undefined ? ERROR_CLASS_LEVELS.map((l): [string, string] => ['rateReceiverKeepCounts', `${l}=${k}`]) : []),
+  ];
+}
+
+/** The fleet default's options, in launch order: its limit and action, then the regulator values. */
+export function fleetDefaultEngineOptions(fd: FleetDefaultInstall, keepCount?: number): Array<[string, string]> {
+  return [
+    ['rateReceiverAbsoluteCap', String(Math.max(1, Math.round(fd.capBytesPerWindowPerNode)))],
+    ['rateReceiverDefaultAction', fd.action],
+    ...regulatorEngineOptions({ errorFloor: fd.errorFloor ?? defaultErrorFloor(fd.action), keepCount }),
   ];
 }
 
@@ -105,6 +133,14 @@ export interface ReceiverFleetValues {
   fleetDefaultWritten: boolean;
   /** True when `k8sTeamLabel` is in `options`. */
   teamLabelWritten: boolean;
+  /** True when the regulator values (no warm-up, no share guard, 0 non-error floors) are in `options`. */
+  regulatorValuesWritten: boolean;
+  /** True when `rateReceiverKeepCounts` is in `options`. */
+  keepCountsWritten: boolean;
+  /** The count written in `rateReceiverKeepCounts`, when written. */
+  keepCount?: number;
+  /** The share floor written on the error levels. */
+  errorFloor?: number;
   /** The engine release the gate read. */
   engineVersion?: string;
   /** One sentence per value held back, and why. */
@@ -112,25 +148,31 @@ export interface ReceiverFleetValues {
 }
 
 /**
- * Everything a Receiver install adds for a Datadog fleet default and a team
- * label. `symbolMessageHashField tenx_hash` ships on every Datadog Receiver,
- * since index filters and monitors select a statement by `@tenx_hash`.
- * The fleet default and the team label ship only on an engine that declares
- * their options: an undeclared option fails the launch.
+ * Everything a Receiver install adds for Datadog: `symbolMessageHashField
+ * tenx_hash` (index filters and monitors select a statement by `@tenx_hash`),
+ * the regulator values, the error keep count, the fleet default and the team
+ * label. Each ships only on an engine that declares its options: an
+ * undeclared option fails the launch.
  */
 export function receiverFleetValues(input: {
   datadog: boolean;
   fleetDefault?: FleetDefaultInstall;
   teamLabel?: string;
   engineVersion?: string;
+  /** Error lines over a limit that pass per statement per node per window. Default 50. */
+  keepCount?: number;
+  /** True when any service sends its excess to S3, which sets the error floor on engines without keep counts. */
+  anyOffload?: boolean;
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
+  const ceiling = engineReadsCeiling(engineVersion);
   const installs = engineVersion ? `this plan installs ${engineVersion}` : 'this plan installs an engine whose version is not pinned';
   const options: Array<[string, string]> = [];
   const env: Array<[string, string]> = [];
   const notes: string[] = [];
   if (input.datadog) options.push(['symbolMessageHashField', 'tenx_hash']);
+  const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 
   let fleetDefaultWritten = false;
   if (input.fleetDefault) {
@@ -142,10 +184,36 @@ export function receiverFleetValues(input: {
           `${installs}, so it writes none of the fleet default's values, and a service with no rule keeps every statement in Standard.`,
       );
     } else {
-      options.push(...fleetDefaultEngineOptions(input.fleetDefault));
+      const fd = {
+        ...input.fleetDefault,
+        errorFloor:
+          input.fleetDefault.errorFloor ??
+          defaultErrorFloor(input.anyOffload || input.fleetDefault.action === 'offload' ? 'offload' : 'tier_down'),
+      };
+      options.push(...fleetDefaultEngineOptions(fd, keepCount));
       env.push(...FLEET_DEFAULT_ENGINE_ENV);
       fleetDefaultWritten = true;
     }
+  }
+
+  let regulatorValuesWritten = fleetDefaultWritten;
+  if (input.datadog && !fleetDefaultWritten) {
+    if (!ready) {
+      notes.push(
+        `The regulator values (no warm-up, no share guard, a 0 floor below ERROR) need engine ${FLEET_DEFAULT_MIN_ENGINE} or later; ${installs}, so the receiver config's values apply.`,
+      );
+    } else {
+      options.push(...regulatorEngineOptions({ errorFloor: input.anyOffload ? defaultErrorFloor('offload') : defaultErrorFloor('tier_down'), keepCount }));
+      regulatorValuesWritten = true;
+    }
+  }
+  const keepCountsWritten = regulatorValuesWritten && keepCount !== undefined;
+  const floorEntry = options.find(([k, v]) => k === 'rateReceiverSeverityFloors' && v.startsWith('ERROR='));
+  const errorFloor = floorEntry ? Number(floorEntry[1].slice('ERROR='.length)) : undefined;
+  if (input.datadog && regulatorValuesWritten && keepCount === undefined) {
+    notes.push(
+      `Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine ${CEILING_MIN_ENGINE}; ${installs}, so they pass at the error floor's share instead.`,
+    );
   }
 
   let teamLabelWritten = false;
@@ -160,5 +228,16 @@ export function receiverFleetValues(input: {
       teamLabelWritten = true;
     }
   }
-  return { options, env, fleetDefaultWritten, teamLabelWritten, ...(engineVersion ? { engineVersion } : {}), notes };
+  return {
+    options,
+    env,
+    fleetDefaultWritten,
+    teamLabelWritten,
+    regulatorValuesWritten,
+    keepCountsWritten,
+    ...(keepCountsWritten ? { keepCount } : {}),
+    ...(errorFloor !== undefined ? { errorFloor } : {}),
+    ...(engineVersion ? { engineVersion } : {}),
+    notes,
+  };
 }
