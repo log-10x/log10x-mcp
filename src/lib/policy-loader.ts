@@ -632,6 +632,16 @@ export function serviceBudgetsProblem(
   if (named.length > 0 && sum >= usdMonthly) {
     return `service_budgets add up to ${sum} dollars a month, which leaves nothing of budget_usd_monthly (${usdMonthly}) for the rest of the account. Their sum must be under it.`;
   }
+  const byDatadogName = new Map<string, string[]>();
+  for (const c of named) {
+    const b = budgets[c];
+    const dd = (typeof b === 'number' ? '' : b.datadog_service?.trim() ?? '') || c;
+    byDatadogName.set(dd, [...(byDatadogName.get(dd) ?? []), c]);
+  }
+  const shared = [...byDatadogName].find(([, cs]) => cs.length > 1);
+  if (shared) {
+    return `${shared[1].join(' and ')} in service_budgets both read Datadog's spend for service:${shared[0]}, so each would be charged the other's lines. Give each its own datadog_service.`;
+  }
   const both = named.filter((s) => exceptions.includes(s));
   if (both.length > 0) {
     return `${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} in both service_budgets and exceptions: an exception is never touched, so it cannot be held to a number. Keep each service in one.`;
