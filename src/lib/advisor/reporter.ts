@@ -39,6 +39,9 @@ import {
   STANDALONE_SPEC,
   POLICY_CONFIGMAP_NAME,
   renderPolicyConfigMapManifest,
+  renderPolicyGitSeedCommands,
+  POLICY_GIT_DIR,
+  type PolicyGitDelivery,
   type OutputDestination,
   type ForwarderSpec,
 } from './reporter-forwarders.js';
@@ -107,6 +110,8 @@ export interface ReporterAdviseArgs {
    */
   engineOptions?: Array<[string, string]>;
   engineEnv?: Array<[string, string]>;
+  /** Receiver only: pull the policy files from git (GH_ENABLED) instead of the ConfigMap. */
+  policyGit?: PolicyGitDelivery;
   /** Host for non-mock destinations (ES endpoint, Splunk HEC host, etc.). */
   outputHost?: string;
   /** Splunk HEC token if destination=splunk. */
@@ -540,7 +545,7 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic: JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
-      { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
+      { name: 'GH_FILES_ENABLED', value: 'true', required: true, note: 'switch for the GitHub puller of the files `paths` lists (GH_ENABLED instead pulls the regulator policy folder `log10x/policy/`, which this repo does not carry)' },
       { name: 'GH_REPO', value: 'your-org/your-config-repo', required: true, note: 'owner/name of the GitOps config repo (forked from log-10x/config recommended)' },
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },
@@ -733,6 +738,8 @@ function buildInstallSteps(opts: {
   /** Receiver only: engine options after the app, and env on the engine container. */
   engineOptions?: Array<[string, string]>;
   engineEnv?: Array<[string, string]>;
+  /** Receiver only: pull the policy files from git (GH_ENABLED) instead of the ConfigMap. */
+  policyGit?: PolicyGitDelivery;
 }): PlanStep[] {
   const {
     spec,
@@ -809,14 +816,24 @@ function buildInstallSteps(opts: {
   // missing ConfigMap aborts startup, and its lookup loader refuses a
   // rows-less CSV — so the seed carries one no-op `tenx-seed` row per file.
   // The seed regulates nothing; log10x_configure_engine merges the real
-  // policy over it.
-  if (app === 'receiver') {
+  // policy over it. Its `regulator-unit` key records the unit the Receiver
+  // counts in, which the budget run checks before it writes a limit.
+  const seedUnit = (opts.engineOptions ?? []).some(([k, v]) => k === 'rateReceiverUnit' && v === 'events') ? 'events' : 'bytes';
+  if (app === 'receiver' && opts.policyGit) {
+    const g = opts.policyGit;
+    steps.push({
+      title: 'Seed the policy files on the pulled branch',
+      rationale:
+        `The Receiver pulls \`${POLICY_GIT_DIR}/*.csv\` from \`${g.repo}\` branch \`${g.branch}\` (GH_ENABLED). Its first pull stops on a missing folder and a sync refreshes only files that pull found, so this commits all four files (caps, actions, totals, config-generation), each with a no-op row, before the pod starts, and records the unit it counts in. Files already on the branch are kept. The budget run commits its rows to this branch directly. The Receiver reads GH_TOKEN from the Secret \`${g.tokenSecretName}\`.`,
+      commands: [renderPolicyGitSeedCommands(g, seedUnit)],
+    });
+  } else if (app === 'receiver') {
     steps.push({
       title: 'Seed the engine-policy ConfigMap',
       rationale:
         `The receiver reads its byte caps (caps.csv) and per-service actions (actions.csv) from the \`${POLICY_CONFIGMAP_NAME}\` ConfigMap via the engine's kubernetes pull lane. This seeds it with a no-op policy so the pod boots policy-ready (a missing ConfigMap aborts the engine launch by design), and grants every ServiceAccount in \`${namespace}\` read access to this one ConfigMap. \`log10x_configure_engine\` writes the real policy here later.`,
       commands: [
-        `cat <<'POLICY_EOF' | kubectl apply -f -\n${renderPolicyConfigMapManifest(namespace).trimEnd()}\nPOLICY_EOF`,
+        `cat <<'POLICY_EOF' | kubectl apply -f -\n${renderPolicyConfigMapManifest(namespace, seedUnit).trimEnd()}\nPOLICY_EOF`,
       ],
     });
   }
@@ -840,7 +857,7 @@ function buildInstallSteps(opts: {
       backendCredentials,
       airgapped,
       installMode,
-      ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv } : {}),
+      ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv, policyGit: opts.policyGit } : {}),
     }),
     language: 'yaml' as const,
   };
@@ -858,7 +875,7 @@ function buildInstallSteps(opts: {
         licenseSecretName,
         licenseSecretKey,
         builtinLicense,
-        ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv } : {}),
+        ...(app === 'receiver' ? { engineOptions: opts.engineOptions, engineEnv: opts.engineEnv, policyGit: opts.policyGit } : {}),
       })
     : [];
   const allFiles = [valuesPlanFile, ...extraFiles];

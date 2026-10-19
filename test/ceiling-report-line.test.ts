@@ -57,20 +57,27 @@ function datadogStub(calls: string[]) {
   };
 }
 
-function clusterStub(nodes: number, writes: Array<Record<string, string>>) {
+/**
+ * `nodes` nodes run a Receiver pod (fluent-bit, whose env names the policy
+ * ConfigMap) and both services. One more node runs checkout but no Receiver:
+ * it enforces nothing and must not count.
+ */
+function clusterStub(nodes: number, writes: Array<Record<string, string>>, extra: Record<string, string> = {}) {
   const names = Array.from({ length: nodes }, (_, i) => `node-${i}`);
+  const receivers = names.map((n) => ({ nodeName: n, containers: ['fluent-bit', 'tenx'], policyConfigMaps: ['log10x-action-intent'] }));
+  const apps = [
+    ...names.flatMap((n) => [
+      { nodeName: n, containers: ['checkout'] },
+      { nodeName: n, containers: ['payments'] },
+    ]),
+    { nodeName: 'node-without-receiver', containers: ['checkout'] },
+  ];
   return {
-    async listRunningPods() {
-      return names.flatMap((n) => [
-        { nodeName: n, containers: ['checkout'] },
-        { nodeName: n, containers: ['payments'] },
-      ]);
-    },
-    async countNodes() {
-      return nodes;
+    async listRunningPods(namespace?: string) {
+      return namespace === 'logging' ? receivers : [...receivers, ...apps, { nodeName: 'node-without-receiver', containers: ['other'] }];
     },
     async getConfigMap() {
-      return { data: { 'caps.csv': 'container,cap\ntenx-seed,1::install seed\n' }, resourceVersion: '7' };
+      return { data: { 'caps.csv': 'container,cap\ntenx-seed,1::install seed\n', 'regulator-unit': 'events', ...extra }, resourceVersion: '7' };
     },
     async replaceConfigMap(_ns: string, _name: string, data: Record<string, string>) {
       writes.push(data);

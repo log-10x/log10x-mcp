@@ -57,3 +57,93 @@ test('4b.1 gate: the seed ConfigMap carries totals.csv and the Receiver env poin
   const env = renderPolicyPullEnvLines('  ').join('\n');
   assert.match(env, /- name: TOTAL_LOOKUP_FILE\n    value: \/tmp\/tenx\/kubernetes\/\$\(K8S_NAMESPACE\)\/log10x-action-intent\/totals\.csv/);
 });
+
+// ── Review fixes: offload error floor wired from the plan, K at install, K wording ──
+
+async function plan(extra: Record<string, unknown>, id: string): Promise<string> {
+  const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
+  const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
+  const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
+  putSnapshot({
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    snapshotId: id,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    kubectl: {
+      available: true,
+      namespaces: ['logging'],
+      probedNamespaces: ['logging'],
+      forwarders: [
+        { kind: 'fluentbit', namespace: 'logging', workloadKind: 'DaemonSet', workloadName: 'fluent-bit', image: 'cr.fluentbit.io/fluent/fluent-bit:3.1.0', containerName: 'fluent-bit', labels: {}, readyReplicas: 3 },
+      ],
+      helmReleases: [],
+      log10xApps: [],
+      storageClasses: [],
+      ingressClasses: [],
+      serviceAccountIrsa: [],
+      backendAgents: [],
+    },
+    aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
+    recommendations: { suggestedNamespace: 'logging', alreadyInstalled: {} },
+    probeLog: [],
+  } as never);
+  const out = await executeAdviseInstall(
+    {
+      snapshot_id: id,
+      app: 'receiver',
+      forwarder: 'fluentbit',
+      backends: ['prometheus'],
+      backend_credentials: { prometheus: { secretName: 'prom-creds' } },
+      airgapped: false,
+      license_source: 'builtin',
+      log_destination: 'datadog',
+      ...extra,
+    } as never,
+    {} as never,
+  );
+  return String((out.data as Record<string, unknown>).markdown);
+}
+
+test('review 7 gate: a plan where a service offloads keeps half the error lines on the pinned engine', async () => {
+  // Pinned 1.1.145: no keep counts, so the 10-13 floor applies (0.5 when anything goes to S3).
+  const md = await plan({ service_actions: { checkout: 'tier_down', payments: 'offload' } }, 'snap-offload-floor');
+  assert.ok(md.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0.5"'), 'ERROR=0.5 written');
+  const tier = await plan({ service_actions: { checkout: 'tier_down' } }, 'snap-tier-floor');
+  assert.ok(tier.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0"'));
+  // A tier_down fleet default with an offloaded service keeps the offload floor too.
+  const rv = receiverFleetValues({ datadog: true, engineVersion: '1.1.145', anyOffload: true, fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'tier_down' } });
+  assert.ok(values(rv.options, 'rateReceiverSeverityFloors').includes('ERROR=0.5'));
+});
+
+test('review 8 gate: advise_install takes keep_count, written as three entries', async () => {
+  const { adviseInstallSchema } = await import('../src/tools/advise-install.js');
+  assert.ok('keep_count' in adviseInstallSchema, 'keep_count is in the schema');
+  const md = await plan({ keep_count: 20 }, 'snap-keep-count');
+  // Pinned 1.1.145 holds it back and says why.
+  assert.ok(!md.includes('rateReceiverKeepCounts"'));
+  assert.ok(md.includes('Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine 1.1.146'));
+  const ready = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', keepCount: 0 });
+  assert.deepEqual(values(ready.options, 'rateReceiverKeepCounts'), ['ERROR=0', 'CRITICAL=0', 'FATAL=0'], 'never an empty list');
+});
+
+test('review 9 gate: on 1.1.146 the fleet default step says the K count, not a share', async () => {
+  const { buildFleetDefaultStep } = await import('../src/lib/advisor/fleet-default-step.js');
+  const rv = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'offload' } });
+  const step = buildFleetDefaultStep({ action: 'offload', receiverValues: rv, capGiven: true });
+  const text = JSON.stringify(step);
+  assert.match(text, /the first 50 lines of each error statement on each node in every 4-minute window/);
+  assert.doesNotMatch(text, /half of the rest/);
+  // On the pinned engine, the share floor's wording stays.
+  const old = receiverFleetValues({ datadog: true, engineVersion: '1.1.145', fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'offload' } });
+  assert.match(JSON.stringify(buildFleetDefaultStep({ action: 'offload', receiverValues: old, capGiven: true })), /half of the rest/);
+});
+
+test('review 9: configure_engine engine_options are what the install writes on the pinned engine', async () => {
+  const { fleetDefaultFromRows } = await import('../src/tools/configure-engine.js');
+  const { resolveEnforcingInstances } = await import('../src/lib/enforcing-instances.js');
+  const rows = [{ container: 'payments', action: 'pass', cap_bytes_per_window: 3000, pattern: 'ledger', current_bytes_30d: 1, events_monthly: 1 }];
+  const fd = fleetDefaultFromRows(rows as never, resolveEnforcingInstances(['payments'], { nodesByContainer: { payments: 1 } }), { action: 'offload' }, 'datadog' as never);
+  const install = receiverFleetValues({ datadog: true, fleetDefault: { capBytesPerWindowPerNode: fd.cap_bytes_per_window_per_node!, action: 'offload' } });
+  const fromInstall = install.options.filter(([k]) => k !== 'symbolMessageHashField');
+  assert.deepEqual(fd.engine_options, fromInstall);
+});

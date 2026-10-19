@@ -331,6 +331,7 @@ type QuestionId =
   | 'schedule'
   | 'scheduler'
   | 'config_plane'
+  | 'standard_indexes'
   | 'exceptions'
   | 'confirm';
 
@@ -434,6 +435,23 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           '**github_actions**: the run commits the files to the gitops repo for the engine\'s gitops pull; node counts come from `nodes_by_container`.',
         ],
         'scheduler',
+        session
+      ),
+    };
+  }
+  if (session.budget_usd_monthly !== undefined && !(session.standard_indexes && session.standard_indexes.length > 0)) {
+    return {
+      kind: 'ask',
+      question_id: 'standard_indexes',
+      markdown: buildQuestion(
+        'Q4b',
+        'Which Datadog indexes bill as Standard?',
+        [
+          'Datadog\'s usage metric counts every index and does not separate Flex from Standard, so the run counts only the indexes named here.',
+          'The Flex index the install creates for `@routeState:tier_down` (`tenx-offload`) never counts.',
+          'Example: `standard_indexes: ["main"]`',
+        ],
+        'standard_indexes',
         session
       ),
     };
@@ -736,7 +754,7 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
 
 function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
   const install =
-    'Install (or re-install) the Datadog Receiver with `log10x_advise_install` and `regulator_unit: "events"` on engine 1.1.146 or later: the run writes limits in events, and a Receiver counting bytes would read them as bytes.';
+    'Install (or re-install) the Datadog Receiver with `log10x_advise_install` on engine 1.1.146 or later, where it counts events by default and records that in the policy ConfigMap (`regulator-unit`). The run writes limits in events and refuses, writing nothing, when the Receiver is not recorded as counting events.';
   if (budgetDelivery(opts.scheduler) === 'configmap') {
     const ns = opts.namespace ?? 'log10x';
     const secret = opts.datadog_secret_name ?? 'log10x-datadog';
@@ -763,11 +781,11 @@ function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): st
   return [
     `### Apply instructions: budget run, GitHub Actions (gitops pull)`,
     ``,
-    `1. ${install} Point its gitops pull at this repo; the pull keeps \`*.csv\`.`,
+    `1. ${install} Pass \`policy_git: { repo: "<owner/name>" }\` so the Receiver pulls \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN); the plan seeds the four files and \`log10x/policy/regulator-unit\` there before the Receiver starts, and the run checks that unit before it writes a limit.`,
     `2. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
     `3. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
     `4. **Add the secrets** \`DD_API_KEY\` and \`DD_APP_KEY\` (and \`DD_SITE\` when the org is not on datadoghq.com).`,
-    `5. Each run commits \`pipelines/run/receive/rate/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` (schedule \`${cronExpr}\` UTC).`,
+    `5. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch, never a PR, since nothing would merge it (schedule \`${cronExpr}\` UTC).`,
   ].join('\n');
 }
 

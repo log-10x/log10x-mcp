@@ -32,6 +32,7 @@ import { DATADOG_FLEX_LIST_PRICING, fmtEventCount, fmtListRate } from './cost.js
 import { FLEET_DEFAULT_HEADROOM, fleetDestination } from './fleet-default.js';
 import type { DollarBudget } from './policy-loader.js';
 import type { K8sApi } from './k8s-in-cluster.js';
+import { DATADOG_FLEX_INDEX_NAME } from './offload-recipes.js';
 
 const HOUR = 3600;
 
@@ -50,9 +51,14 @@ function scope(envId: string | undefined): string {
   return envId ? `tenx_env:${envId}` : '*';
 }
 
-/** Every statement's events, hourly, by hash, container and level. */
-export function patternEventsQuery(envId?: string): string {
-  return `sum:${DD_ALL_EVENTS_DISTRIBUTION}{${scope(envId)}} by {tenx_hash,message_pattern,k8s_container,severity_level}.rollup(sum, 3600)`;
+/**
+ * Every statement's events over the lookback, by hash, name, container and
+ * level, as one point per series (`rollup(sum, <lookback>)`): Datadog caps a
+ * series at 1,500 points (docs.datadoghq.com/dashboards/functions/rollup/),
+ * and one point keeps the response as small as the group count allows.
+ */
+export function patternEventsQuery(envId: string | undefined, lookbackSec: number): string {
+  return `sum:${DD_ALL_EVENTS_DISTRIBUTION}{${scope(envId)}} by {tenx_hash,message_pattern,k8s_container,severity_level}.rollup(sum, ${Math.max(3600, Math.round(lookbackSec))})`;
 }
 
 /** Lines the Receiver emitted, hourly, by where each went. */
@@ -76,8 +82,8 @@ export interface BudgetInput {
   nowSec: number;
   /** Indexed events this month, by service and datadog_index. */
   usage: DdPointSeries[];
-  /** Events the Receiver sent to Standard this month (route not tier_down or offload). */
-  receiverStandardEvents: number;
+  /** The Receiver's emitted lines this month, hourly, by routestate. */
+  routes: DdPointSeries[];
   /** Every statement's events an hour over the lookback. */
   patterns: PatternRate[];
   /** Nodes each container's pods run on. */
@@ -93,7 +99,7 @@ export interface BudgetInput {
    * count toward their service's total, so the other lines give way first.
    */
   protectedPatterns?: ReadonlySet<string>;
-  /** Lines the Receiver moved off Standard this month, by route. */
+  /** Lines the Receiver moved off Standard this month, by route; default from `routes` through the last usage hour. */
   movedEvents?: { tier_down: number; offload: number };
 }
 
@@ -204,6 +210,8 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   let lastPoint = -1;
   for (const s of input.usage) {
     const idx = s.tags['datadog_index'] ?? '';
+    // The Flex index the MCP creates for tier_down never bills as Standard.
+    if (idx === DATADOG_FLEX_INDEX_NAME) continue;
     if (standard.size > 0 && !standard.has(idx)) continue;
     for (const [ts, v] of s.points) {
       if (ts < start || ts >= end) continue;
@@ -215,7 +223,16 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const hoursLeft = Math.max(1 / 60, (end - dataThroughSec) / HOUR);
   const elapsedHours = Math.max(1, (dataThroughSec - start) / HOUR);
 
-  const outside = Math.max(0, spent - input.receiverStandardEvents);
+  // The Receiver's own Standard lines through the same hour the usage
+  // metric reached, so its lag and the Receiver's do not skew the split.
+  const receiverStandardEvents = sumPoints(
+    input.routes,
+    start,
+    dataThroughSec,
+    (s) => !HELD_ROUTES.has((s.tags['routestate'] ?? '').toLowerCase()),
+  );
+  const outsideRaw = spent - receiverStandardEvents;
+  const outside = Math.max(0, outsideRaw);
   const outsidePerHour = outside / elapsedHours;
   const outsideProjectedMonth = outside + outsidePerHour * hoursLeft;
   const remaining = budgetEvents - spent - outsidePerHour * hoursLeft;
@@ -297,15 +314,17 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     budgetUsd: b.usd_monthly,
     spentUsd: spent * perEventUsd,
     standardUsdPerMillion: b.standard_usd_per_million,
-    flexEvents: input.movedEvents?.tier_down ?? 0,
-    s3Events: input.movedEvents?.offload ?? 0,
+    flexEvents: input.movedEvents?.tier_down ?? sumPoints(input.routes, start, dataThroughSec, (s) => (s.tags['routestate'] ?? '').toLowerCase() === 'tier_down'),
+    s3Events: input.movedEvents?.offload ?? sumPoints(input.routes, start, dataThroughSec, (s) => (s.tags['routestate'] ?? '').toLowerCase() === 'offload'),
   });
   const where = fleetDestination(b.default_action === 'offload' ? 'offload' : 'tier_down');
   lines.push(
     `Standard indexing this month: ${usd(spent)} of ${fmtAboutUsd(b.usd_monthly)} (${fmtEventCount(spent)} events through ${utcHour(dataThroughSec)}), ${Math.round(hoursLeft)} hours left.`,
   );
-  if (standard.size === 0) {
-    warnings.push('No standard_indexes in policy.yaml, so every index counts toward the budget. Name the Standard indexes if the account has a Flex-only index.');
+  if (outsideRaw < 0) {
+    warnings.push(
+      `The Receiver's own count of lines sent to Standard (${fmtEventCount(receiverStandardEvents)}) is above Datadog's usage count (${fmtEventCount(spent)}) through ${utcHour(dataThroughSec)}, so lines that do not pass the Receiver are taken as 0.`,
+    );
   }
   lines.push(
     `Lines that do not pass the Receiver: ${fmtEventCount(outside)} events in Standard this month, about ${usd(outsideProjectedMonth)} by the month's end at this rate. The Receiver's services get the rest.`,
@@ -329,7 +348,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     );
   }
   lines.push(
-    `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'} share the \`*\` row.`,
+    `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'} share the \`*\` row. The division assumes a DaemonSet Receiver, one per node, each holding its node's share.`,
   );
   for (const r of rows) {
     if (r.action !== 'pass' && r.protectedPerHour > r.allowancePerHour) {
@@ -466,9 +485,7 @@ function sumPoints(series: DdPointSeries[], fromSec: number, toSec: number, keep
 
 export interface BudgetReads {
   usage: DdPointSeries[];
-  receiverStandardEvents: number;
-  /** Lines the Receiver sent to Flex (tier_down) and S3 (offload) this month. */
-  movedEvents: { tier_down: number; offload: number };
+  routes: DdPointSeries[];
   patterns: PatternRate[];
 }
 
@@ -487,14 +504,8 @@ export async function readBudgetInputs(
   const [usage, routes, pats] = await Promise.all([
     q(creds, STANDARD_USAGE_QUERY, start, nowSec),
     q(creds, receiverRouteQuery(envId), start, nowSec),
-    q(creds, patternEventsQuery(envId), from, nowSec),
+    q(creds, patternEventsQuery(envId, lookbackHours * HOUR), from, nowSec),
   ]);
-  const route = (s: DdPointSeries): string => (s.tags['routestate'] ?? '').toLowerCase();
-  const receiverStandardEvents = sumPoints(routes, start, nowSec, (s) => !HELD_ROUTES.has(route(s)));
-  const movedEvents = {
-    tier_down: sumPoints(routes, start, nowSec, (s) => route(s) === 'tier_down'),
-    offload: sumPoints(routes, start, nowSec, (s) => route(s) === 'offload'),
-  };
   const patterns: PatternRate[] = pats.map((s) => ({
     container: s.tags['k8s_container'] ?? '',
     pattern: s.tags['tenx_hash'] ?? '',
@@ -502,7 +513,7 @@ export async function readBudgetInputs(
     severity: (s.tags['severity_level'] ?? '').toUpperCase(),
     eventsPerHour: sumPoints([s], from, nowSec) / Math.max(1, lookbackHours),
   }));
-  return { usage, receiverStandardEvents, movedEvents, patterns };
+  return { usage, routes, patterns };
 }
 
 /**
@@ -523,8 +534,24 @@ export function protectedPatterns(mutesCsv: string | undefined, nowSec: number):
   return out;
 }
 
-/** Node counts from the cluster: nodes per container from running pods, and the node total. */
-export async function discoverInstances(k8s: K8sApi): Promise<{ instances: Record<string, number>; nodesTotal: number }> {
-  const [pods, nodes] = await Promise.all([k8s.listRunningPods(), k8s.countNodes()]);
-  return { instances: nodesPerContainerFromPods(pods), nodesTotal: nodes };
+/**
+ * Node counts from the cluster, for a DaemonSet Receiver: the Receiver's
+ * nodes are those running a pod in its namespace whose env names the policy
+ * ConfigMap (`K8S_CONFIGMAP`, written on every Receiver install); a service's
+ * count is the distinct nodes running both it and a Receiver.
+ */
+export async function discoverInstances(
+  k8s: K8sApi,
+  namespace: string,
+  configMap: string,
+): Promise<{ instances: Record<string, number>; nodesTotal: number }> {
+  const [receivers, all] = await Promise.all([k8s.listRunningPods(namespace), k8s.listRunningPods()]);
+  const receiverNodes = new Set(
+    receivers.filter((p) => p.nodeName && (p.policyConfigMaps ?? []).includes(configMap)).map((p) => p.nodeName as string),
+  );
+  if (receiverNodes.size === 0) {
+    throw new Error(`no running pod in ${namespace} names the ConfigMap ${configMap} in K8S_CONFIGMAP, so no Receiver was found to divide the limits by.`);
+  }
+  const onReceiverNodes = all.filter((p) => p.nodeName && receiverNodes.has(p.nodeName));
+  return { instances: nodesPerContainerFromPods(onReceiverNodes), nodesTotal: receiverNodes.size };
 }

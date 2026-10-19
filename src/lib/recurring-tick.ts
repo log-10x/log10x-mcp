@@ -51,7 +51,7 @@ import {
 } from './budget-tick.js';
 import type { DatadogMetricsCreds } from './datadog-metrics-read.js';
 import { inClusterK8sApi, podNamespace, type K8sApi } from './k8s-in-cluster.js';
-import { POLICY_CONFIGMAP_NAME } from './advisor/reporter-forwarders.js';
+import { POLICY_CONFIGMAP_NAME, POLICY_GIT_BRANCH_DEFAULT, POLICY_GIT_DIR, REGULATOR_UNIT_KEY } from './advisor/reporter-forwarders.js';
 
 const execFileP = promisify(execFile);
 
@@ -67,6 +67,7 @@ export type TickStatus =
   | 'applied'      // new CSVs committed to config plane
   | 'dry_run'      // would have applied but --dry-run was set
   | 'read_failed'  // budget run: a Datadog or cluster read failed; the last files stay in force
+  | 'refused'      // budget run: the Receiver is not recorded as counting events; nothing written
   | 'error';       // fatal; message is set
 
 export interface PatternDecision {
@@ -908,10 +909,12 @@ export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<T
 
 // ─── budget run ────────────────────────────────────────────────────────────
 
-/** Where the budget run's files sit in a gitops repo, beside the mute file. */
-export const BUDGET_FILE_DIR = 'pipelines/run/receive/rate';
+/** Where the budget run's files sit on the policy branch: the folder the engine's git pull reads (GH_ENABLED). */
+export const BUDGET_FILE_DIR = POLICY_GIT_DIR;
 const BUDGET_FILE_NAMES = ['caps.csv', 'actions.csv', 'totals.csv', 'config-generation.csv'] as const;
 export const BUDGET_REPORT_KEY = 'budget-report.md';
+/** The branch the engine's gitops pull reads the budget run's files from (GH_BRANCH). */
+export const POLICY_BRANCH_DEFAULT = POLICY_GIT_BRANCH_DEFAULT;
 
 interface BudgetDeps {
   creds?: DatadogMetricsCreds | null;
@@ -938,10 +941,75 @@ function budgetResult(status: TickStatus, message: string, extra: Partial<TickRe
 }
 
 /**
+ * The unit the Receiver counts in, as its install recorded it: the
+ * `regulator-unit` key of the policy ConfigMap (seeded by log10x_advise_install),
+ * or the `regulator-unit` file beside the policy files in the gitops repo.
+ * The budget run writes limits in events and refuses anything else.
+ */
+function unitRefusal(unit: string | undefined, where: string): string | undefined {
+  if ((unit ?? '').trim() === 'events') return undefined;
+  return (
+    `The budget run writes limits in events, and ${where} does not say the Receiver counts events ` +
+    `(found ${unit === undefined ? 'nothing' : `"${unit.trim()}"`}). A Receiver counting bytes would read every limit as bytes. ` +
+    'Re-install the Receiver with log10x_advise_install (engine 1.1.146 or later, regulator_unit "events", the default for Datadog), ' +
+    'which records the unit, then run again. Nothing was written.'
+  );
+}
+
+async function git(repoPath: string, args: string[], timeout = 30_000): Promise<string> {
+  const { stdout } = await execFileP('git', ['-C', repoPath, ...args], { timeout });
+  return stdout;
+}
+
+/** A file on the remote policy branch, or undefined when the branch or the file is absent. */
+async function readPolicyBranchFile(repoPath: string, branch: string, rel: string): Promise<string | undefined> {
+  try {
+    return await git(repoPath, ['show', `refs/remotes/origin/${branch}:${rel}`]);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Commit the files DIRECTLY to the policy branch the engine's gitops pull
+ * reads, never a PR: nothing would merge it. Works in a temporary worktree so
+ * the checkout the scheduler made is left as it was.
+ */
+async function commitToPolicyBranch(repoPath: string, branch: string, files: Record<string, string>, message: string): Promise<void> {
+  const tmp = pathJoin(tmpdir(), `log10x-policy-${process.pid}-${Date.now()}`);
+  let hasRemote = true;
+  try {
+    await git(repoPath, ['rev-parse', '--verify', `refs/remotes/origin/${branch}`]);
+  } catch {
+    hasRemote = false;
+  }
+  await git(repoPath, ['worktree', 'add', '-B', branch, tmp, hasRemote ? `refs/remotes/origin/${branch}` : 'HEAD']);
+  try {
+    for (const [rel, body] of Object.entries(files)) {
+      const p = pathJoin(tmp, ...rel.split('/'));
+      mkdirSync(pathJoin(p, '..'), { recursive: true });
+      writeFileSync(p, body);
+    }
+    await git(tmp, ['add', ...Object.keys(files)]);
+    try {
+      await git(tmp, ['diff', '--cached', '--quiet']);
+      return;
+    } catch {
+      // staged changes: commit them
+    }
+    await git(tmp, ['commit', '-m', message]);
+    await git(tmp, ['push', 'origin', `${branch}:${branch}`]);
+  } finally {
+    await git(repoPath, ['worktree', 'remove', '--force', tmp]).catch(() => undefined);
+  }
+}
+
+/**
  * One budget run (`reduction.budget_usd_monthly`). Reads month-to-date
  * Standard usage and the Receiver's series from Datadog, discovers or reads
  * the node counts, re-derives every row, and writes the four files to the
- * policy ConfigMap or the gitops repo. On a failed read nothing is written.
+ * policy ConfigMap or the gitops policy branch. On a failed read nothing is
+ * written; on a Receiver not recorded as counting events nothing is written.
  */
 export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
   const budget = policy.budget_usd!;
@@ -955,28 +1023,47 @@ export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Pro
 
   const namespace = policy.config_plane.namespace ?? podNamespace() ?? 'log10x';
   const cmName = policy.config_plane.configmap ?? POLICY_CONFIGMAP_NAME;
+  const branch = policy.config_plane.policy_branch ?? POLICY_BRANCH_DEFAULT;
   const repoPath = delivery === 'gitops' ? resolveRepoPath(policy.config_plane.repo) : '';
-  const dir = pathJoin(repoPath, ...BUDGET_FILE_DIR.split('/'));
+  const rel = (f: string): string => `${BUDGET_FILE_DIR}/${f}`;
   let reads;
   let nodes: { instances: Record<string, number>; nodesTotal: number };
   let cm: { data: Record<string, string>; resourceVersion: string } | undefined;
   let mutesCsv: string | undefined;
+  let unit: string | undefined;
+  const current: Record<string, string | undefined> = {};
   try {
     reads = await readBudgetInputs(nowSec, lookbackHours(policy.lookback_window), envId, { creds: deps.creds, query: deps.query });
     if (delivery === 'configmap') {
       if (!k8s) throw new Error('no Kubernetes API in this process (KUBERNETES_SERVICE_HOST and the service-account token), so the node count cannot be discovered.');
-      nodes = await discoverInstances(k8s);
+      nodes = await discoverInstances(k8s, namespace, cmName);
       cm = await k8s.getConfigMap(namespace, cmName);
       mutesCsv = cm.data['mutes.csv'];
+      unit = cm.data[REGULATOR_UNIT_KEY];
+      for (const f of BUDGET_FILE_NAMES) current[f] = cm.data[f];
     } else {
       const counts = budget.nodes_by_container;
       const max = Object.values(counts).reduce((a, n) => Math.max(a, n), 1);
       nodes = { instances: counts, nodesTotal: budget.nodes_total ?? max };
-      const mp = pathJoin(dir, 'mutes.csv');
-      mutesCsv = existsSync(mp) ? readFileSync(mp, 'utf8') : undefined;
+      await git(repoPath, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]).catch(() => undefined);
+      mutesCsv = await readPolicyBranchFile(repoPath, branch, rel('mutes.csv'));
+      const local = pathJoin(repoPath, ...rel(REGULATOR_UNIT_KEY).split('/'));
+      unit = (await readPolicyBranchFile(repoPath, branch, rel(REGULATOR_UNIT_KEY))) ?? (existsSync(local) ? readFileSync(local, 'utf8') : undefined);
+      for (const f of BUDGET_FILE_NAMES) current[f] = await readPolicyBranchFile(repoPath, branch, rel(f));
     }
   } catch (err) {
     const result = budgetResult('read_failed', `budget run read failed: ${err instanceof Error ? err.message : String(err)} ${keep}`);
+    appendHistory(result);
+    return result;
+  }
+  const refusal = unitRefusal(
+    unit,
+    delivery === 'configmap'
+      ? `the ConfigMap ${namespace}/${cmName} (key ${REGULATOR_UNIT_KEY})`
+      : `the gitops repo (${rel(REGULATOR_UNIT_KEY)} on ${branch} or the checkout)`,
+  );
+  if (refusal) {
+    const result = budgetResult('refused', refusal);
     appendHistory(result);
     return result;
   }
@@ -985,8 +1072,7 @@ export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Pro
     budget,
     nowSec,
     usage: reads.usage,
-    receiverStandardEvents: reads.receiverStandardEvents,
-    movedEvents: reads.movedEvents,
+    routes: reads.routes,
     patterns: reads.patterns,
     ...(mutesCsv !== undefined ? { protectedPatterns: protectedPatterns(mutesCsv, nowSec) } : {}),
     instances: nodes.instances,
@@ -1006,35 +1092,21 @@ export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Pro
     appendHistory(result);
     return result;
   }
+  if (BUDGET_FILE_NAMES.every((f) => current[f] === files[f])) {
+    const result = budgetResult('no_change', `no change: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
 
   try {
     if (delivery === 'configmap' && cm) {
-      if (BUDGET_FILE_NAMES.every((f) => cm!.data[f] === files[f])) {
-        const result = budgetResult('no_change', `no change: ${summary}`, extra);
-        appendHistory(result);
-        return result;
-      }
       await k8s!.replaceConfigMap(namespace, cmName, { ...cm.data, ...files, [BUDGET_REPORT_KEY]: report }, cm.resourceVersion);
     } else {
-      const same = BUDGET_FILE_NAMES.every((f) => {
-        const p = pathJoin(dir, f);
-        return existsSync(p) && readFileSync(p, 'utf8') === files[f];
-      });
-      if (same) {
-        const result = budgetResult('no_change', `no change: ${summary}`, extra);
-        appendHistory(result);
-        return result;
-      }
-      mkdirSync(dir, { recursive: true });
-      for (const f of BUDGET_FILE_NAMES) writeFileSync(pathJoin(dir, f), files[f]);
-      mkdirSync(pathJoin(repoPath, 'reports'), { recursive: true });
-      writeFileSync(pathJoin(repoPath, 'reports', 'latest.md'), report);
-      await commitFiles(
+      await commitToPolicyBranch(
         repoPath,
-        policy,
-        [...BUDGET_FILE_NAMES.map((f) => `${BUDGET_FILE_DIR}/${f}`), 'reports/latest.md'],
+        branch,
+        { ...Object.fromEntries(BUDGET_FILE_NAMES.map((f) => [rel(f), files[f]])), 'reports/latest.md': report },
         `chore(log10x): budget run, ${budget.usd_monthly} USD a month on Standard`,
-        report,
       );
     }
   } catch (err) {

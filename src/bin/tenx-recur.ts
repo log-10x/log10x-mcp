@@ -11,6 +11,7 @@
  *   2  Prometheus unreachable; on a budget policy, a Datadog or cluster
  *      read failed and the last files stay in force
  *   3  commit failed (git / gh error)
+ *   4  budget run refused: the Receiver is not recorded as counting events
  *
  * One invocation runs one tick.  The external scheduler (k8s CronJob,
  * GitHub Actions, crontab) is responsible for calling this on schedule.
@@ -97,6 +98,7 @@ function printUsage(): void {
       '  1  policy error',
       '  2  Prometheus unreachable, or a budget run read failed (last files kept)',
       '  3  commit failed',
+      '  4  budget run refused (the Receiver does not count events; re-install)',
       '',
     ].join('\n')
   );
@@ -195,6 +197,10 @@ async function main(): Promise<void> {
     );
   }
 
+  if (result.status === 'refused') {
+    printError(result.message);
+    process.exit(4);
+  }
   if (result.status === 'read_failed') {
     printError(result.message);
     process.exit(2);

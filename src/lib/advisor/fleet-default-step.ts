@@ -95,9 +95,14 @@ export function buildFleetDefaultStep(input: FleetDefaultStepInput = {}): FleetD
     `The POC report gives each service it measured a rule of its own. The fleet default covers every other service: ` +
     `a statement above the fleet limit goes to ${dest}. The limit is the fleet line of the POC report, in lines a day.`;
   const alwaysPass = alwaysPassSentence(ALWAYS_PASS_LINES);
-  const errorMonitors =
-    `The fleet default holds error statements too. ${errorMonitorVisibility(action, errorFloor, ALWAYS_PASS_LINES)}`;
   const rv = input.receiverValues;
+  const errorMonitors =
+    `The fleet default holds error statements too. ${errorMonitorVisibility(
+      action,
+      rv?.errorFloor ?? errorFloor,
+      ALWAYS_PASS_LINES,
+      rv?.keepCountsWritten ? rv.keepCount : undefined,
+    )}`;
   const written = !!rv?.fleetDefaultWritten;
   const receiver = written
     ? 'The plan writes these Receiver options after the app in the values above, where a later value wins over the ' +

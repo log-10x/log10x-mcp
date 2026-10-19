@@ -469,11 +469,17 @@ export interface WizardSession {
    */
   logDestination?: 'datadog';
   /** The fleet default's route and error share, when the caller set them. */
-  fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number };
+  fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number; capEventsPerWindowPerNode?: number };
   /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */
   teamLabel?: string;
   /** `events` when a budget run holds the install: `rateReceiverUnit events` from engine 1.1.146. */
   regulatorUnit?: 'bytes' | 'events';
+  /** Error lines over a limit that pass per statement per node per window (rateReceiverKeepCounts). */
+  keepCount?: number;
+  /** Per-service destination for lines over the limit, as the plan set it. */
+  serviceActions?: Record<string, 'tier_down' | 'offload'>;
+  /** Pull the policy files from git instead of the ConfigMap. */
+  policyGit?: { repo: string; branch: string; tokenSecretName: string };
   /** Last-updated timestamp for diagnostics. */
   updatedAt: string;
 }

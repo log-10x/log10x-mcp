@@ -169,7 +169,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
       ? [`  delivery: configmap`, `  namespace: ${yamlString(opts.namespace ?? 'log10x')}`]
       : [
           `  repo: ${yamlString(opts.config_plane)}`,
-          ...(opts.budget_usd_monthly !== undefined ? [`  delivery: gitops`] : []),
+          ...(opts.budget_usd_monthly !== undefined
+            ? [`  delivery: gitops`, `  # the run commits straight to this branch; the engine's gitops pull reads it (GH_BRANCH)`, `  policy_branch: log10x-policy`]
+            : []),
         ]),
     ...(opts.env_id ? [`  env_id: ${yamlString(opts.env_id)}`] : []),
     ``,
@@ -185,9 +187,9 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
     `  # Each run gives the Receiver's services what is left after lines that do not pass it.`,
     `  budget_usd_monthly: ${opts.budget_usd_monthly}`,
     ...(opts.standard_rate_per_million !== undefined ? [`  standard_rate_per_million: ${opts.standard_rate_per_million}`] : []),
-    ...(idx.length === 0
-      ? [`  # empty = every index counts; name the Standard indexes if any index is Flex only`, `  standard_indexes: []`]
-      : [`  standard_indexes:`, ...idx.map((i) => `    - ${yamlString(i)}`)]),
+    `  # the Datadog indexes that bill as Standard (required; the Flex index tenx-offload never counts)`,
+    `  standard_indexes:`,
+    ...(idx.length === 0 ? [`    - main  # replace with your Standard index names`] : idx.map((i) => `    - ${yamlString(i)}`)),
     `  # error lines over a limit that pass per statement per node per window`,
     `  keep_count: ${opts.keep_count ?? 50}`,
     `  default_action: tier_down`,
@@ -268,8 +270,10 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
           `                  value: ${yamlString(opts.env_id)}`,
         ]
       : []),
-    `                - name: LOG10X_GITOPS_REPO`,
-    `                  value: ${yamlString(opts.config_plane)}`,
+    `                # No LOG10X_GITOPS_REPO_PATH: this Job has no checkout of ${opts.config_plane}.`,
+    `                # The mute-list tick writes into a local clone and commits with git (and gh for a PR),`,
+    `                # which node:22-alpine does not carry; use github_actions or crontab for a git config`,
+    `                # plane. A budget policy on this scheduler writes the policy ConfigMap and needs none.`,
     `              volumeMounts:`,
     `                - name: policy`,
     `                  mountPath: /config`,
@@ -284,8 +288,9 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
 /**
  * The budget run as a Kubernetes CronJob in the Receiver's namespace. It
  * reads the Datadog keys from a Secret, discovers the node count from the
- * API, and replaces the four files in the policy ConfigMap the Receiver
- * reads. RBAC: get and update on that one ConfigMap, list on pods and nodes.
+ * API (the nodes where the Receiver's own pods run), and replaces the four
+ * files in the policy ConfigMap the Receiver reads. RBAC: get and update on
+ * that one ConfigMap, list on pods.
  * The tick talks to the API from Node with the service-account token, so
  * node:22-alpine needs no kubectl.
  */
@@ -359,7 +364,7 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `  name: ${sa}-nodes`,
     `rules:`,
     `  - apiGroups: [""]`,
-    `    resources: ["pods", "nodes"]`,
+    `    resources: ["pods"]`,
     `    verbs: ["list"]`,
     `---`,
     `apiVersion: rbac.authorization.k8s.io/v1`,
