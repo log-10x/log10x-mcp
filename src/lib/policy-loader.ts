@@ -91,6 +91,8 @@ export interface ConfigPlane {
   namespace?: string;
   /** Name of the policy ConfigMap (configmap delivery). Default: log10x-action-intent. */
   configmap?: string;
+  /** Gitops delivery: the branch the run commits to directly and the engine pulls. Default: log10x-policy. */
+  policy_branch?: string;
 }
 
 /**
@@ -349,6 +351,7 @@ export function parsePolicyYaml(text: string): Policy {
   const delivery = rawDelivery ? (rawDelivery as 'configmap' | 'gitops') : undefined;
   const cmNamespace = typeof cp?.['namespace'] === 'string' ? cp['namespace'].trim() || undefined : undefined;
   const cmName = typeof cp?.['configmap'] === 'string' ? cp['configmap'].trim() || undefined : undefined;
+  const policyBranch = typeof cp?.['policy_branch'] === 'string' ? cp['policy_branch'].trim() || undefined : undefined;
   if (!repo && delivery !== 'configmap') {
     throw new PolicyLoadError(
       'policy.yaml is missing config_plane.repo: the tick needs a gitops repo or s3:// prefix to write CSVs'
@@ -493,6 +496,7 @@ export function parsePolicyYaml(text: string): Policy {
       ...(budget_usd ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
       ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
       ...(cmName !== undefined ? { configmap: cmName } : {}),
+      ...(policyBranch !== undefined ? { policy_branch: policyBranch } : {}),
     },
   };
 }
@@ -534,6 +538,11 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
   const standard_indexes = Array.isArray(rawIdx)
     ? rawIdx.filter((s): s is string => typeof s === 'string' && s.trim() !== '').map((s) => s.trim())
     : [];
+  if (standard_indexes.length === 0) {
+    throw new PolicyLoadError(
+      'budget_usd_monthly needs standard_indexes: the Datadog index names that bill as Standard. Datadog\'s usage metric does not separate Flex from Standard, so without them Flex lines would count as spend.'
+    );
+  }
   const rawK = red?.['keep_count'];
   const k = rawK === undefined ? 50 : typeof rawK === 'string' ? Number(rawK) : typeof rawK === 'number' ? rawK : NaN;
   if (!Number.isInteger(k) || k < 0) {

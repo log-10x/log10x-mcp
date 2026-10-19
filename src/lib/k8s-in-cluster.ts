@@ -6,8 +6,8 @@
  * token and CA, so the image needs no kubectl.
  *
  * RBAC the CronJob manifest grants (scheduler-manifest-emitter.ts):
- * `list` on pods and nodes cluster-wide, `get` and `update` on the one
- * ConfigMap by name.
+ * `list` on pods cluster-wide, `get` and `update` on the one ConfigMap by
+ * name.
  */
 
 import { readFileSync } from 'node:fs';
@@ -18,6 +18,8 @@ const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
 export interface PodPlacement {
   nodeName?: string;
   containers?: string[];
+  /** Values of `K8S_CONFIGMAP` in the pod's container env: a Receiver names its policy ConfigMap there. */
+  policyConfigMaps?: string[];
 }
 
 export interface ConfigMapState {
@@ -26,8 +28,8 @@ export interface ConfigMapState {
 }
 
 export interface K8sApi {
-  listRunningPods(): Promise<PodPlacement[]>;
-  countNodes(): Promise<number>;
+  /** Running pods, cluster-wide or in one namespace. */
+  listRunningPods(namespace?: string): Promise<PodPlacement[]>;
   getConfigMap(namespace: string, name: string): Promise<ConfigMapState>;
   /** Replace the ConfigMap's data, failing on a concurrent write (resourceVersion). */
   replaceConfigMap(namespace: string, name: string, data: Record<string, string>, resourceVersion: string): Promise<void>;
@@ -97,19 +99,19 @@ export function inClusterK8sApi(env: NodeJS.ProcessEnv = process.env): K8sApi | 
     });
 
   return {
-    async listRunningPods() {
-      const r = await call<{ items?: Array<{ spec?: { nodeName?: string; containers?: Array<{ name?: string }> } }> }>(
-        'GET',
-        '/api/v1/pods?fieldSelector=status.phase%3DRunning',
-      );
+    async listRunningPods(namespace?: string) {
+      const base = namespace ? `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods` : '/api/v1/pods';
+      const r = await call<{
+        items?: Array<{ spec?: { nodeName?: string; containers?: Array<{ name?: string; env?: Array<{ name?: string; value?: string }> }> } }>;
+      }>('GET', `${base}?fieldSelector=status.phase%3DRunning`);
       return (r.items ?? []).map((p) => ({
         nodeName: p.spec?.nodeName,
         containers: (p.spec?.containers ?? []).map((c) => c.name ?? '').filter(Boolean),
+        policyConfigMaps: (p.spec?.containers ?? [])
+          .flatMap((c) => c.env ?? [])
+          .filter((e) => e.name === 'K8S_CONFIGMAP' && !!e.value)
+          .map((e) => e.value as string),
       }));
-    },
-    async countNodes() {
-      const r = await call<{ items?: unknown[] }>('GET', '/api/v1/nodes');
-      return (r.items ?? []).length;
     },
     async getConfigMap(namespace, name) {
       const r = await call<{ data?: Record<string, string>; metadata?: { resourceVersion?: string } }>(

@@ -230,13 +230,26 @@ export const adviseInstallSchema = {
         .positive()
         .optional()
         .describe('The limit in the engine\'s unit, as `log10x_configure_engine` or `log10x_poc_from_local` with `fleet_default` returns it (`fleet_default.cap_bytes_per_window_per_node`). Without it the plan writes no fleet default.'),
+      cap_events_per_window_per_node: z
+        .number()
+        .positive()
+        .optional()
+        .describe('The same limit in lines per window per node (`fleet_default.cap_events_per_window_per_node` from `log10x_configure_engine`). Written instead of the byte limit when the Receiver counts events (Datadog on engine 1.1.146 or later).'),
     })
     .optional()
     .describe('The fleet default for a Datadog Receiver plan (with `log_destination: "datadog"`). The Receiver values are written only on an engine release that reads `rateReceiverDefaultAction`.'),
   regulator_unit: z
     .enum(['bytes', 'events'])
     .optional()
-    .describe('`events` when a budget run (log10x_setup_recurring with `budget_usd_monthly`) holds this Datadog Receiver: limits and totals count lines, as Datadog bills Standard. Written as `rateReceiverUnit events` on engine 1.1.146 or later. Default: bytes.'),
+    .describe('What a Datadog Receiver\'s limits and totals count. `events` (the default on engine 1.1.146 or later, as Datadog bills Standard per event) is written as `rateReceiverUnit events` and recorded in the policy ConfigMap, where the budget run checks it. `bytes` keeps byte limits for log10x_configure_engine plans.'),
+  policy_git: z
+    .object({
+      repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name').describe('The policy repo on GitHub, owner/name (GH_REPO).'),
+      branch: z.string().min(1).optional().describe('The dedicated branch the Receiver pulls and the budget run commits to (GH_BRANCH). Default: log10x-policy.'),
+      token_secret: z.string().min(1).optional().describe('The Secret holding GH_TOKEN for the Receiver. Default: log10x-policy-git.'),
+    })
+    .optional()
+    .describe('Receiver: pull the policy files (caps, actions, totals, config-generation) from `log10x/policy/` on a git branch with GH_ENABLED, instead of the policy ConfigMap. For buyers who cannot run the budget run in the cluster: its GitHub Actions run commits to that branch. The plan seeds the four files on the branch before the Receiver starts.'),
   keep_count: z
     .number()
     .int()
@@ -1132,6 +1145,9 @@ export async function executeAdviseInstall(
     teamLabel: args.k8s_team_label,
     regulatorUnit: args.regulator_unit,
     keepCount: args.keep_count,
+    policyGit: args.policy_git
+      ? { repo: args.policy_git.repo, branch: args.policy_git.branch ?? 'log10x-policy', tokenSecretName: args.policy_git.token_secret ?? 'log10x-policy-git' }
+      : undefined,
     serviceActions: args.service_actions,
     fleetDefault: args.fleet_default
       ? {
@@ -1140,6 +1156,9 @@ export async function executeAdviseInstall(
           ...(args.fleet_default.error_floor !== undefined ? { errorFloor: args.fleet_default.error_floor } : {}),
           ...(args.fleet_default.cap_bytes_per_window_per_node !== undefined
             ? { capBytesPerWindowPerNode: args.fleet_default.cap_bytes_per_window_per_node }
+            : {}),
+          ...(args.fleet_default.cap_events_per_window_per_node !== undefined
+            ? { capEventsPerWindowPerNode: args.fleet_default.cap_events_per_window_per_node }
             : {}),
         }
       : undefined,
@@ -2279,6 +2298,9 @@ async function renderInstallPlan(
       ? {
           fleetDefault: {
             capBytesPerWindowPerNode: session.fleetDefault.capBytesPerWindowPerNode ?? 0,
+            ...(session.fleetDefault.capEventsPerWindowPerNode !== undefined
+              ? { capEventsPerWindowPerNode: session.fleetDefault.capEventsPerWindowPerNode }
+              : {}),
             action: session.fleetDefault.action ?? 'tier_down',
             ...(session.fleetDefault.errorFloor !== undefined ? { errorFloor: session.fleetDefault.errorFloor } : {}),
           },
@@ -2310,7 +2332,7 @@ async function renderInstallPlan(
     skipInstall: action === 'verify' || action === 'teardown',
     skipVerify: action === 'install' || action === 'teardown',
     skipTeardown: action === 'install' || action === 'verify',
-    ...(app === 'receiver' ? { engineOptions: fleetValues.options, engineEnv: fleetValues.env } : {}),
+    ...(app === 'receiver' ? { engineOptions: fleetValues.options, engineEnv: fleetValues.env, ...(session.policyGit ? { policyGit: session.policyGit } : {}) } : {}),
   });
   if (session.teamLabel !== undefined) {
     plan.notes.push(

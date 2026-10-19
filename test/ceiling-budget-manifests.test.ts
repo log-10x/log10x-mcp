@@ -38,7 +38,7 @@ test('budget CronJob: service account, RBAC on the one ConfigMap, pods and nodes
   const m = emitK8sCronJob(budget);
   assert.match(m, /kind: ServiceAccount\nmetadata:\n  name: log10x-budget-run\n  namespace: logging/);
   assert.match(m, /resources: \["configmaps"\]\n    resourceNames: \["log10x-action-intent"\]\n    verbs: \["get", "update"\]/);
-  assert.match(m, /kind: ClusterRole\n[\s\S]*resources: \["pods", "nodes"\]\n    verbs: \["list"\]/);
+  assert.match(m, /kind: ClusterRole\n[\s\S]*resources: \["pods"\]\n    verbs: \["list"\]/);
   assert.match(m, /serviceAccountName: log10x-budget-run/);
   assert.match(m, /- name: DD_API_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: log10x-datadog\n\s+key: DD_API_KEY/);
   assert.match(m, /- name: DD_APP_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: log10x-datadog\n\s+key: DD_APP_KEY/);
@@ -84,15 +84,17 @@ test('wizard: a Standard budget on a scheduler that cannot hold it is asked to m
   assert.equal((r as any).data.question_id, 'scheduler');
   assert.match((r as any).data.markdown, /holds no budget/);
   r = await executeSetupRecurring({ session_id, scheduler: 'k8s_cron', namespace: 'logging', confirm: true });
+  assert.equal((r as any).data.question_id, 'standard_indexes', 'the Standard indexes are required');
+  r = await executeSetupRecurring({ session_id, standard_indexes: ['main'] });
   assert.equal((r as any).data.mode, 'emit');
   assert.match((r as any).data.scheduler_manifest, /serviceAccountName: log10x-budget-run/);
-  assert.match((r as any).data.apply_instructions, /regulator_unit: "events"/);
+  assert.match((r as any).data.apply_instructions, /counts events by default and records that in the policy ConfigMap \(`regulator-unit`\)/);
   assert.match((r as any).data.policy_yaml, /budget_usd_monthly: 20000/);
 });
 
-test('install: limits in events from 1.1.146 only; the byte fleet limit is left to the `*` row', () => {
+test('install: a Datadog Receiver counts events by default from 1.1.146 only; a byte fleet limit is never written as lines', () => {
   const fd = { capBytesPerWindowPerNode: 6000, action: 'tier_down' as const };
-  const ready = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', unit: 'events', fleetDefault: fd });
+  const ready = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', fleetDefault: fd });
   assert.ok(ready.options.some(([k, v]) => k === 'rateReceiverUnit' && v === 'events'));
   assert.ok(!ready.options.some(([k]) => k === 'rateReceiverAbsoluteCap'));
   assert.ok(ready.options.some(([k, v]) => k === 'rateReceiverDefaultAction' && v === 'tier_down'));
@@ -100,6 +102,21 @@ test('install: limits in events from 1.1.146 only; the byte fleet limit is left 
   assert.ok(!early.options.some(([k]) => k === 'rateReceiverUnit'));
   assert.ok(early.options.some(([k]) => k === 'rateReceiverAbsoluteCap'));
   assert.ok(early.notes.some((n) => n.includes('the budget run must not hold this install')));
-  const bytes = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', fleetDefault: fd });
+  const bytes = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', unit: 'bytes', fleetDefault: fd });
   assert.ok(!bytes.options.some(([k]) => k === 'rateReceiverUnit'));
+  assert.ok(bytes.options.some(([k, v]) => k === 'rateReceiverAbsoluteCap' && v === '6000'));
+  assert.ok(!receiverFleetValues({ datadog: false, engineVersion: '1.1.146' }).options.some(([k]) => k === 'rateReceiverUnit'));
+});
+
+test('review 5 gate: the mute-list CronJob no longer names the repo URL as if it were a checkout', () => {
+  const m = emitK8sCronJob({ ...base, scheduler: 'k8s_cron' });
+  assert.doesNotMatch(m, /name: LOG10X_GITOPS_REPO\n/);
+  assert.match(m, /# No LOG10X_GITOPS_REPO_PATH: this Job has no checkout of https:\/\/github\.com\/acme\/log10x-config\./);
+});
+
+test('review 2: the gitops budget policy names its Standard indexes and the policy branch', () => {
+  const y = emitPolicyYaml({ ...budget, scheduler: 'github_actions', nodes_by_container: { checkout: 3 } } as PolicyOptions);
+  const p = parsePolicyYaml(y);
+  assert.deepEqual(p.budget_usd?.standard_indexes, ['main']);
+  assert.equal(p.config_plane.policy_branch, 'log10x-policy');
 });

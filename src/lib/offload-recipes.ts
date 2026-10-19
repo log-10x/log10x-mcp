@@ -888,6 +888,9 @@ export interface SiemTierRecipe {
   note: string;
 }
 
+/** The Flex-only index the Datadog recipe creates for `@routeState:tier_down`. */
+export const DATADOG_FLEX_INDEX_NAME = 'tenx-offload';
+
 /** Datadog: route `@routeState:tier_down` to a Flex-only index (cheaper queryable
  * tier) instead of the premium Standard index. In-platform Terraform. */
 export function datadogFlexRecipe(opts: { flexRetentionDays?: number } = {}): SiemTierRecipe {
@@ -905,7 +908,7 @@ export function datadogFlexRecipe(opts: { flexRetentionDays?: number } = {}): Si
 }
 
 resource "datadog_logs_index" "tenx_offload_flex" {
-  name = "tenx-offload"
+  name = "${DATADOG_FLEX_INDEX_NAME}"
 
   filter {
     query = "@routeState:tier_down"   # the slice 10x marked for the cheaper tier
