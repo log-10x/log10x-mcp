@@ -150,13 +150,11 @@ import {
   type ServiceLimit,
 } from '../lib/report/user-units.js';
 import { defaultErrorFloor, fleetDefaultNumber, FLEET_DEFAULT_HEADROOM, type KeptCell } from '../lib/fleet-default.js';
+import { REGULATOR_UNIT_KEY } from '../lib/advisor/reporter-forwarders.js';
 import {
   FLEET_DEFAULT_ENGINE_ENV,
   FLEET_DEFAULT_MIN_ENGINE,
-  KEEP_COUNT_DEFAULT,
-  engineReadsCeiling,
-  fleetDefaultEngineOptions,
-  manifestEngineVersion,
+  receiverFleetValues,
 } from '../lib/fleet-default-install.js';
 import { medianInstances } from '../lib/enforcing-instances.js';
 import { placeServiceCap, marginSentence, type ServiceCapPlacement } from '../lib/service-cap.js';
@@ -574,6 +572,8 @@ export type ConfigureEngineArgs = z.infer<typeof schemaObj>;
 
 // ─── output types ─────────────────────────────────────────────────────
 export interface ConfigureFleetDefault extends FleetDefaultReport {
+  /** The limit in lines per window per node, from the baseline statement's bytes per line, for a Receiver that counts events. */
+  cap_events_per_window_per_node?: number;
   /** The Receiver options after the app, in order, when computed. */
   engine_options?: Array<[string, string]>;
   /** Env vars on the Receiver container. */
@@ -3777,6 +3777,10 @@ export function fleetDefaultFromRows(
     num.baseline.avgBytesPerLine !== undefined
       ? linesPerDayFromCap(num.capBytesPerWindowPerNode, median.median, num.baseline.avgBytesPerLine)
       : undefined;
+  const capEvents =
+    num.baseline.avgBytesPerLine !== undefined && num.baseline.avgBytesPerLine > 0
+      ? Math.max(1, Math.round(num.capBytesPerWindowPerNode / num.baseline.avgBytesPerLine))
+      : undefined;
   const sentence =
     limitLinesPerDay !== undefined
       ? fleetSentence(destination, { limitLinesPerDay, action })
@@ -3787,6 +3791,7 @@ export function fleetDefaultFromRows(
     error_floor: errorFloor,
     headroom: num.headroom,
     cap_bytes_per_window_per_node: num.capBytesPerWindowPerNode,
+    ...(capEvents !== undefined ? { cap_events_per_window_per_node: capEvents } : {}),
     baseline_bytes_per_window_per_node: num.baselineBytesPerWindowPerNode,
     ...(num.baseline.statement ? { baseline_statement: num.baseline.statement } : {}),
     baseline_container: num.baseline.container,
@@ -3794,12 +3799,17 @@ export function fleetDefaultFromRows(
     nodes_for_lines: median.median,
     containers_with_known_nodes: median.known,
     sentence,
-    // What log10x_advise_install writes on the engine this release pins: the
-    // error keep count from 1.1.146, the share floor before it.
-    engine_options: fleetDefaultEngineOptions(
-      { capBytesPerWindowPerNode: num.capBytesPerWindowPerNode, action, errorFloor },
-      engineReadsCeiling(manifestEngineVersion()) ? KEEP_COUNT_DEFAULT : undefined,
-    ),
+    // What log10x_advise_install writes from these numbers on the engine this
+    // release pins, the Datadog hash field aside.
+    engine_options: receiverFleetValues({
+      datadog: destination === 'datadog',
+      fleetDefault: {
+        capBytesPerWindowPerNode: num.capBytesPerWindowPerNode,
+        ...(capEvents !== undefined ? { capEventsPerWindowPerNode: capEvents } : {}),
+        action,
+        errorFloor,
+      },
+    }).options.filter(([k]) => k !== 'symbolMessageHashField'),
     engine_env: [...FLEET_DEFAULT_ENGINE_ENV],
     min_engine: FLEET_DEFAULT_MIN_ENGINE,
     install_note:
@@ -4121,6 +4131,16 @@ async function applyViaKubectlConfigMap(
   // MERGE, don't replace. Read the existing ConfigMap so other services' cap
   // and action rows AND any unrelated keys survive.
   const existingData = await readConfigMapData(configMapName, namespace);
+  // This tool writes caps in bytes. A Receiver whose install recorded that it
+  // counts events would read each byte cap as a line count.
+  if ((existingData[REGULATOR_UNIT_KEY] ?? '').trim() === 'events') {
+    return {
+      ok: false,
+      error:
+        `The ConfigMap ${namespace}/${configMapName} records that the Receiver counts events (${REGULATOR_UNIT_KEY}), and these caps are bytes, so nothing was written. ` +
+        'Hold it with the budget run (log10x_setup_recurring with budget_usd_monthly), or re-install with regulator_unit "bytes".',
+    };
+  }
   const data: Record<string, string> = { ...existingData };
   data['caps.csv'] = mergeCapsRows(existingData['caps.csv'], capCsv);
   if (siblings?.actionsCsv) {

@@ -60,6 +60,8 @@ export function engineReadsCeiling(version: string | undefined): boolean {
 export interface FleetDefaultInstall {
   /** Bytes per reset window per node, from `fleetDefaultNumber`. */
   capBytesPerWindowPerNode: number;
+  /** The same limit in lines per reset window per node, for a Receiver that counts events. */
+  capEventsPerWindowPerNode?: number;
   action: FleetDefaultAction;
   /** Share of ERROR and CRITICAL lines above the limit kept in Standard. Default by action. */
   errorFloor?: number;
@@ -137,6 +139,8 @@ export interface ReceiverFleetValues {
   regulatorValuesWritten: boolean;
   /** True when `rateReceiverKeepCounts` is in `options`. */
   keepCountsWritten: boolean;
+  /** True when `rateReceiverUnit events` is in `options`. */
+  eventsUnitWritten: boolean;
   /** The count written in `rateReceiverKeepCounts`, when written. */
   keepCount?: number;
   /** The share floor written on the error levels. */
@@ -163,6 +167,12 @@ export function receiverFleetValues(input: {
   keepCount?: number;
   /** True when any service sends its excess to S3, which sets the error floor on engines without keep counts. */
   anyOffload?: boolean;
+  /**
+   * `events`: limits and totals count lines, not bytes (Datadog bills
+   * Standard per event). Default `events` for a Datadog Receiver on engine
+   * 1.1.146 or later, `bytes` otherwise.
+   */
+  unit?: 'bytes' | 'events';
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
@@ -174,6 +184,21 @@ export function receiverFleetValues(input: {
   if (input.datadog) options.push(['symbolMessageHashField', 'tenx_hash']);
   const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 
+  // Datadog bills Standard per event, so a Datadog Receiver on an engine that
+  // reads rateReceiverUnit counts events unless the caller asks for bytes.
+  const unit = input.unit ?? (input.datadog && ceiling ? 'events' : 'bytes');
+  let eventsUnitWritten = false;
+  if (input.datadog && unit === 'events') {
+    if (ceiling) {
+      options.push(['rateReceiverUnit', 'events']);
+      eventsUnitWritten = true;
+    } else {
+      notes.push(
+        `Counting limits in lines (rateReceiverUnit events) needs engine ${CEILING_MIN_ENGINE} or later; ${installs}, so limits stay in bytes and the budget run must not hold this install.`,
+      );
+    }
+  }
+
   let fleetDefaultWritten = false;
   if (input.fleetDefault) {
     if (!(input.fleetDefault.capBytesPerWindowPerNode > 0)) {
@@ -184,13 +209,28 @@ export function receiverFleetValues(input: {
           `${installs}, so it writes none of the fleet default's values, and a service with no rule keeps every statement in Standard.`,
       );
     } else {
-      const fd = {
-        ...input.fleetDefault,
-        errorFloor:
-          input.fleetDefault.errorFloor ??
-          defaultErrorFloor(input.anyOffload || input.fleetDefault.action === 'offload' ? 'offload' : 'tier_down'),
-      };
-      options.push(...fleetDefaultEngineOptions(fd, keepCount));
+      const fd = fleetDefaultEngineOptions(
+        {
+          ...input.fleetDefault,
+          errorFloor:
+            input.fleetDefault.errorFloor ??
+            defaultErrorFloor(input.anyOffload || input.fleetDefault.action === 'offload' ? 'offload' : 'tier_down'),
+        },
+        keepCount,
+      );
+      // With limits in lines the fleet limit is written in lines when the
+      // caller has that number; a byte number is never written as lines.
+      const events = input.fleetDefault.capEventsPerWindowPerNode;
+      if (!eventsUnitWritten) {
+        options.push(...fd);
+      } else if (events !== undefined && events > 0) {
+        options.push(...fd.map(([k, v]): [string, string] => (k === 'rateReceiverAbsoluteCap' ? [k, String(Math.max(1, Math.round(events)))] : [k, v])));
+      } else {
+        options.push(...fd.filter(([k]) => k !== 'rateReceiverAbsoluteCap'));
+        notes.push(
+          'Limits count lines and the fleet default came in bytes only, so no fleet limit is written: pass `fleet_default.cap_events_per_window_per_node` (log10x_configure_engine returns it), or let the budget run\'s `*` row set it.',
+        );
+      }
       env.push(...FLEET_DEFAULT_ENGINE_ENV);
       fleetDefaultWritten = true;
     }
@@ -235,6 +275,7 @@ export function receiverFleetValues(input: {
     teamLabelWritten,
     regulatorValuesWritten,
     keepCountsWritten,
+    eventsUnitWritten,
     ...(keepCountsWritten ? { keepCount } : {}),
     ...(errorFloor !== undefined ? { errorFloor } : {}),
     ...(engineVersion ? { engineVersion } : {}),

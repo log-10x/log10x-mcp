@@ -141,12 +141,30 @@ test('review 9 gate: on 1.1.146 the fleet default step says the K count, not a s
   assert.match(JSON.stringify(buildFleetDefaultStep({ action: 'offload', receiverValues: old, capGiven: true })), /half of the rest/);
 });
 
-test('review 9: configure_engine engine_options are what the install writes on the pinned engine', async () => {
+test('configure_engine engine_options are what the install writes on the pinned engine from the numbers it returns', async () => {
   const { fleetDefaultFromRows } = await import('../src/tools/configure-engine.js');
   const { resolveEnforcingInstances } = await import('../src/lib/enforcing-instances.js');
-  const rows = [{ container: 'payments', action: 'pass', cap_bytes_per_window: 3000, pattern: 'ledger', current_bytes_30d: 1, events_monthly: 1 }];
-  const fd = fleetDefaultFromRows(rows as never, resolveEnforcingInstances(['payments'], { nodesByContainer: { payments: 1 } }), { action: 'offload' }, 'datadog' as never);
-  const install = receiverFleetValues({ datadog: true, fleetDefault: { capBytesPerWindowPerNode: fd.cap_bytes_per_window_per_node!, action: 'offload' } });
-  const fromInstall = install.options.filter(([k]) => k !== 'symbolMessageHashField');
-  assert.deepEqual(fd.engine_options, fromInstall);
+  const instances = resolveEnforcingInstances(['payments'], { nodesByContainer: { payments: 1 } });
+  const install = (fd: { cap_bytes_per_window_per_node?: number; cap_events_per_window_per_node?: number }) =>
+    receiverFleetValues({
+      datadog: true,
+      fleetDefault: {
+        capBytesPerWindowPerNode: fd.cap_bytes_per_window_per_node!,
+        ...(fd.cap_events_per_window_per_node !== undefined ? { capEventsPerWindowPerNode: fd.cap_events_per_window_per_node } : {}),
+        action: 'offload',
+      },
+    }).options.filter(([k]) => k !== 'symbolMessageHashField');
+  // 3,000 bytes per window at 100 bytes a line: the limit in lines is 60 (headroom 2).
+  const rows = [{ container: 'payments', action: 'pass', cap_bytes_per_window: 3000, pattern: 'ledger', current_bytes_30d: 100, events_monthly: 1 }];
+  const fd = fleetDefaultFromRows(rows as never, instances, { action: 'offload' }, 'datadog' as never);
+  assert.equal(fd.cap_events_per_window_per_node, 60);
+  assert.deepEqual(fd.engine_options, install(fd));
+  // On 1.1.146 a Datadog Receiver counts events: the unit is written and the limit is in lines.
+  assert.ok(fd.engine_options!.some(([k, v]) => k === 'rateReceiverUnit' && v === 'events'));
+  assert.deepEqual(fd.engine_options!.find(([k]) => k === 'rateReceiverAbsoluteCap'), ['rateReceiverAbsoluteCap', '60']);
+  // Rows with no line count: no byte number is written as lines, as at install.
+  const bytesOnly = fleetDefaultFromRows([{ ...rows[0], events_monthly: 0 }] as never, instances, { action: 'offload' }, 'datadog' as never);
+  assert.equal(bytesOnly.cap_events_per_window_per_node, undefined);
+  assert.deepEqual(bytesOnly.engine_options, install(bytesOnly));
+  assert.ok(!bytesOnly.engine_options!.some(([k]) => k === 'rateReceiverAbsoluteCap'));
 });
