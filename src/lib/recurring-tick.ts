@@ -24,7 +24,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -976,7 +976,8 @@ async function readPolicyBranchFile(repoPath: string, branch: string, rel: strin
  * the checkout the scheduler made is left as it was.
  */
 async function commitToPolicyBranch(repoPath: string, branch: string, files: Record<string, string>, message: string): Promise<void> {
-  const tmp = pathJoin(tmpdir(), `log10x-policy-${process.pid}-${Date.now()}`);
+  const scratch = mkdtempSync(pathJoin(tmpdir(), 'log10x-policy-'));
+  const tmp = pathJoin(scratch, 'worktree');
   let hasRemote = true;
   try {
     await git(repoPath, ['rev-parse', '--verify', `refs/remotes/origin/${branch}`]);
@@ -1001,6 +1002,7 @@ async function commitToPolicyBranch(repoPath: string, branch: string, files: Rec
     await git(tmp, ['push', 'origin', `${branch}:${branch}`]);
   } finally {
     await git(repoPath, ['worktree', 'remove', '--force', tmp]).catch(() => undefined);
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 
