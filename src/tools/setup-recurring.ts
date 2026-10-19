@@ -31,6 +31,7 @@ import {
   emitEventBridge,
   emitContainerAppsJob,
   resolveCronExpression,
+  scheduleOf,
   BUDGET_SCHEDULERS,
   budgetDelivery,
   type PolicyOptions,
@@ -38,12 +39,14 @@ import {
   type SchedulerKind,
 } from '../lib/scheduler-manifest-emitter.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
+import { serviceBudgetsProblem } from '../lib/policy-loader.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
 const TOOL_NAME = 'log10x_setup_recurring';
 
 const SCHEDULE_PRESETS = [
+  'hourly',
   'daily-03utc',
   'every-6h',
   'every-12h',
@@ -135,6 +138,14 @@ export const setupRecurringSchema = {
     .record(z.string(), z.number().int().positive())
     .optional()
     .describe('With budget_usd_monthly on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
+  service_budgets: z
+    .record(z.string().min(1), z.number().positive())
+    .optional()
+    .describe(
+      'With budget_usd_monthly: dollars a month of Standard for a named service (the container), e.g. {"payments": 4000}. ' +
+        'Each run holds that service month to date against its own number, from the Receiver\'s own count of its Standard lines, ' +
+        'and holds the rest of the account to budget_usd_monthly minus their sum. The sum must be under budget_usd_monthly, and a service in exceptions cannot have one.'
+    ),
   keep_count: z
     .number()
     .int()
@@ -154,7 +165,7 @@ export const setupRecurringSchema = {
     .union([z.enum(SCHEDULE_PRESETS), z.string().regex(/^[\d*,\-\/\s]+$/, 'cron expression')])
     .optional()
     .describe(
-      'Tick schedule. Presets: daily-03utc (default), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
+      'Tick schedule. Presets: hourly (the default for budget_usd_monthly), daily-03utc (the default otherwise), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
     ),
 
   /**
@@ -257,6 +268,7 @@ interface RecurringWizardSession {
   standard_indexes?: string[];
   standard_rate_per_million?: number;
   nodes_by_container?: Record<string, number>;
+  service_budgets?: Record<string, number>;
   keep_count?: number;
   datadog_secret_name?: string;
   schedule?: SchedulePreset;
@@ -309,6 +321,7 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
   if (args.standard_indexes !== undefined) session.standard_indexes = args.standard_indexes;
   if (args.standard_rate_per_million !== undefined) session.standard_rate_per_million = args.standard_rate_per_million;
   if (args.nodes_by_container !== undefined) session.nodes_by_container = args.nodes_by_container;
+  if (args.service_budgets !== undefined) session.service_budgets = args.service_budgets;
   if (args.keep_count !== undefined) session.keep_count = args.keep_count;
   if (args.datadog_secret_name !== undefined) session.datadog_secret_name = args.datadog_secret_name;
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
@@ -320,6 +333,11 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
   if (args.namespace !== undefined) session.namespace = args.namespace;
   if (args.secret_name !== undefined) session.secret_name = args.secret_name;
   if (args.confirm === true) session.confirmed = true;
+  if (session.service_budgets && Object.keys(session.service_budgets).length > 0) {
+    if (session.budget_usd_monthly === undefined) throw new Error('service_budgets needs budget_usd_monthly: each named number is part of it.');
+    const problem = serviceBudgetsProblem(session.service_budgets, session.budget_usd_monthly, session.exceptions ?? []);
+    if (problem) throw new Error(problem);
+  }
   session.created_at = Date.now(); // refresh TTL on each answer
 }
 
@@ -382,7 +400,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.schedule === undefined) {
+  if (session.schedule === undefined && session.budget_usd_monthly === undefined) {
     return {
       kind: 'ask',
       question_id: 'schedule',
@@ -391,6 +409,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'How often should the tick run?',
         [
           '**daily-03utc** (default): once a day at 03:00 UTC',
+          '**hourly**: at the top of every hour',
           '**every-6h**: four times a day',
           '**every-12h**: twice a day',
           '**every-24h-localtz**: daily (UTC proxy; note: scheduler runtime is UTC)',
@@ -596,13 +615,16 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
     session.budget_usd_monthly !== undefined
-      ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |`
+      ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |` +
+        (session.service_budgets && Object.keys(session.service_budgets).length > 0
+          ? `\n| Own numbers      | ${Object.entries(session.service_budgets).map(([c, v]) => `${c} $${v}`).join(', ')} a month |`
+          : '')
       : session.budget_gb_monthly !== undefined
       ? `| Volume budget    | ${session.budget_gb_monthly} GB/mo (standing line) |`
       : `| Target savings   | ${session.target_percent ?? 30}% |`,
     `| Exceptions       | ${exc} |`,
     `| Min delta        | ${session.min_delta_pp ?? 2}pp |`,
-    `| Schedule         | ${session.schedule ?? 'daily-03utc'} (${resolveCronExpression(session.schedule ?? 'daily-03utc')}) |`,
+    `| Schedule         | ${scheduleOf(session)} (${resolveCronExpression(scheduleOf(session))}) |`,
     `| Scheduler        | ${session.scheduler ?? 'k8s_cron'} |`,
     session.budget_usd_monthly !== undefined && session.scheduler === 'k8s_cron'
       ? `| Delivery         | policy ConfigMap log10x-action-intent in ${session.namespace ?? 'log10x'} |`
@@ -632,11 +654,12 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
           ...(session.standard_indexes !== undefined ? { standard_indexes: session.standard_indexes } : {}),
           ...(session.standard_rate_per_million !== undefined ? { standard_rate_per_million: session.standard_rate_per_million } : {}),
           ...(session.nodes_by_container !== undefined ? { nodes_by_container: session.nodes_by_container } : {}),
+          ...(session.service_budgets !== undefined ? { service_budgets: session.service_budgets } : {}),
           ...(session.keep_count !== undefined ? { keep_count: session.keep_count } : {}),
           ...(session.datadog_secret_name !== undefined ? { datadog_secret_name: session.datadog_secret_name } : {}),
         }
       : {}),
-    schedule: session.schedule ?? 'daily-03utc',
+    schedule: scheduleOf(session),
     scheduler: (session.scheduler ?? 'k8s_cron') as SchedulerKind,
     config_plane: session.config_plane ?? '',
     exceptions: session.exceptions ?? [],
@@ -649,7 +672,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
 
 function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOptions): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   if (opts.budget_usd_monthly !== undefined) return buildBudgetApplyInstructions(opts, cronExpr);
 
   switch (scheduler) {
@@ -949,7 +972,7 @@ export async function executeSetupRecurring(args: SetupRecurringArgs): Promise<S
 
 function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult): string {
   const opts = buildPolicyOptions(session);
-  const cronExpr = resolveCronExpression(opts.schedule);
+  const cronExpr = resolveCronExpression(scheduleOf(opts));
   return [
     `## Recurring cost-reduction policy: artifacts ready`,
     ``,
