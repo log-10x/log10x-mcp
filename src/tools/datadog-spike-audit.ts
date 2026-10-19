@@ -11,6 +11,7 @@ import {
   BASELINE_DAYS,
   SPIKE_MULTIPLIER,
   buildSpikeAudit,
+  budgetScopeWords,
   renderSpikeAuditMarkdown,
 } from '../lib/datadog-spike-audit.js';
 import { FLEET_DEFAULT_HEADROOM } from '../lib/fleet-default.js';
@@ -68,6 +69,15 @@ export const datadogSpikeAuditSchema = {
     .describe('The fleet default\'s multiplier on a service\'s largest hour outside its spikes. Default 2.'),
   limit: z.number().int().min(1).max(50).default(10).describe('Services listed, by spike cost. Default 10.'),
   site: z.string().optional().describe('Datadog site (e.g. `us5.datadoghq.com`). Defaults to DD_SITE, then `datadoghq.com`.'),
+  budget_usd_monthly: z
+    .number()
+    .positive()
+    .optional()
+    .describe('X, a monthly Standard indexing budget for the whole account in dollars. Adds how far over it the account went in each month and each service\'s share of the overage.'),
+  standard_indexes: z
+    .array(z.string().min(1))
+    .optional()
+    .describe('With budget_usd_monthly: the index names that bill as Standard. Omit to count every index.'),
 };
 
 export interface DatadogSpikeAuditArgs {
@@ -79,6 +89,8 @@ export interface DatadogSpikeAuditArgs {
   headroom?: number;
   limit?: number;
   site?: string;
+  budget_usd_monthly?: number;
+  standard_indexes?: string[];
 }
 
 export interface SpikeAuditDeps {
@@ -156,6 +168,8 @@ export async function executeDatadogSpikeAudit(args: DatadogSpikeAuditArgs, deps
       headroom: args.headroom ?? FLEET_DEFAULT_HEADROOM,
       ...(args.standard_rate_per_million !== undefined ? { standardUsdPerMillion: args.standard_rate_per_million } : {}),
       ...(args.ingestion_rate_per_gb !== undefined ? { ingestionUsdPerGb: args.ingestion_rate_per_gb } : {}),
+      ...(args.budget_usd_monthly !== undefined ? { budgetUsdMonthly: args.budget_usd_monthly } : {}),
+      ...(args.standard_indexes !== undefined ? { standardIndexes: args.standard_indexes } : {}),
     },
   );
   const markdown = renderSpikeAuditMarkdown(audit, {
@@ -165,10 +179,17 @@ export async function executeDatadogSpikeAudit(args: DatadogSpikeAuditArgs, deps
   });
   const t = audit.totals;
   const noSignal = audit.servicesScanned === 0;
+  const b = audit.budget;
+  const overLine = b
+    ? b.monthsOver > 0
+      ? ` Against ${fmtAboutUsd(b.usdMonthly)} a month, ${budgetScopeWords(b)} went over in ${b.monthsOver} of ${b.months.length} months, by about ${fmtAboutUsd(b.overUsd)} by the usage metrics${b.services[0] ? `, ${Math.round(b.services[0].share * 100)}% of it from ${b.services[0].service}` : ''}.`
+      : ` Against ${fmtAboutUsd(b.usdMonthly)} a month, ${budgetScopeWords(b)} stayed under in every month by the usage metrics.`
+    : '';
   const headline = noSignal
     ? `No Datadog log usage series at ${creds.site} over the last ${lookbackDays} days.`
     : `${t.spikes} log spikes in ${audit.services.length} of ${audit.servicesScanned} services over ${Number(audit.judgedDays.toFixed(1))} days: ` +
-      `${fmtAboutUsd(t.usd)}, about ${fmtAboutUsd(t.usdPerYear)} a year; a fleet default would have held ${fmtAboutUsd(t.heldUsd)} of it at most.`;
+      `${fmtAboutUsd(t.usd)}, about ${fmtAboutUsd(t.usdPerYear)} a year; a fleet default would have held ${fmtAboutUsd(t.heldUsd)} of it at most.` +
+      overLine;
   const payload = { ...audit, site: creds.site, queries: { events: EVENTS_QUERY, bytes: BYTES_QUERY } };
   const rateSupplied = args.standard_rate_per_million !== undefined || args.ingestion_rate_per_gb !== undefined;
 
