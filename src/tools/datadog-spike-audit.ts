@@ -11,6 +11,7 @@ import {
   BASELINE_DAYS,
   SPIKE_MULTIPLIER,
   buildSpikeAudit,
+  budgetScopeWords,
   renderSpikeAuditMarkdown,
 } from '../lib/datadog-spike-audit.js';
 import { FLEET_DEFAULT_HEADROOM } from '../lib/fleet-default.js';
@@ -181,8 +182,8 @@ export async function executeDatadogSpikeAudit(args: DatadogSpikeAuditArgs, deps
   const b = audit.budget;
   const overLine = b
     ? b.monthsOver > 0
-      ? ` Against ${fmtAboutUsd(b.usdMonthly)} a month, Standard went over in ${b.monthsOver} of ${b.months.length} months, by ${fmtAboutUsd(b.overUsd)} in all${b.services[0] ? `, ${Math.round(b.services[0].share * 100)}% of it from ${b.services[0].service}` : ''}.`
-      : ` Standard stayed under ${fmtAboutUsd(b.usdMonthly)} a month in every month.`
+      ? ` Against ${fmtAboutUsd(b.usdMonthly)} a month, ${budgetScopeWords(b)} went over in ${b.monthsOver} of ${b.months.length} months, by about ${fmtAboutUsd(b.overUsd)} by the usage metrics${b.services[0] ? `, ${Math.round(b.services[0].share * 100)}% of it from ${b.services[0].service}` : ''}.`
+      : ` Against ${fmtAboutUsd(b.usdMonthly)} a month, ${budgetScopeWords(b)} stayed under in every month by the usage metrics.`
     : '';
   const headline = noSignal
     ? `No Datadog log usage series at ${creds.site} over the last ${lookbackDays} days.`

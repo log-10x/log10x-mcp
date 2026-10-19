@@ -47,6 +47,8 @@ export interface BudgetMonth {
   overUsd: number;
   /** True when the window holds only part of the month. */
   partial: boolean;
+  /** X for this month: prorated by the hours inside the window when the month is partial. */
+  budgetUsd: number;
   /** The hour Standard crossed X, when it did. */
   crossedIso?: string;
 }
@@ -153,7 +155,8 @@ function monthKey(sec: number): string {
  * indexed events in order, and once the month's running total passes X every
  * later line is past the budget. A service's overage is its share of those
  * lines (the crossing hour split by each service's events in it), so the
- * services' overages add up to the month's.
+ * services' overages add up to the month's. A month only partly inside the
+ * window is held to X prorated by its hours inside the window.
  */
 export function budgetOverage(
   input: SpikeAuditInput,
@@ -175,6 +178,7 @@ export function budgetOverage(
   const months: BudgetMonth[] = [];
   let cur: BudgetMonth | undefined;
   let running = 0;
+  let monthBudgetEvents = budgetEvents;
   for (let i = 0; i < n; i++) {
     const sec = (h0 + i) * HOUR;
     const key = monthKey(sec);
@@ -182,16 +186,19 @@ export function budgetOverage(
       const d = new Date(sec * 1000);
       const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000;
       const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000;
-      cur = { month: key, events: 0, usd: 0, overEvents: 0, overUsd: 0, partial: input.fromSec > start || input.toSec < end };
+      const share = (Math.min(end, input.toSec) - Math.max(start, input.fromSec)) / (end - start);
+      const partial = share < 1;
+      monthBudgetEvents = budgetEvents * Math.min(1, Math.max(0, share));
+      cur = { month: key, events: 0, usd: 0, overEvents: 0, overUsd: 0, partial, budgetUsd: (monthBudgetEvents / 1e6) * rate };
       months.push(cur);
       running = 0;
     }
     let hour = 0;
     for (const k of names) hour += events.get(k)![i];
     if (hour <= 0) continue;
-    const pastBefore = Math.max(0, running - budgetEvents);
+    const pastBefore = Math.max(0, running - monthBudgetEvents);
     running += hour;
-    const pastNow = Math.max(0, running - budgetEvents);
+    const pastNow = Math.max(0, running - monthBudgetEvents);
     const past = pastNow - pastBefore;
     if (past > 0) {
       if (!cur.crossedIso) cur.crossedIso = new Date(sec * 1000).toISOString();
@@ -342,23 +349,33 @@ export function buildSpikeAudit(input: SpikeAuditInput, opts: SpikeAuditOptions 
 
 const n0 = (v: number): string => Math.round(v).toLocaleString('en-US');
 
+/** What the budget figures cover, in words. */
+export function budgetScopeWords(b: BudgetOverage): string {
+  return b.standardIndexes.length > 0
+    ? `Standard indexing on ${b.standardIndexes.join(', ')}`
+    : 'indexed events on every index, Flex included (pass standard_indexes for Standard alone)';
+}
+
 function renderBudgetOverage(b: BudgetOverage): string[] {
   const L: string[] = [];
-  const scope = b.standardIndexes.length > 0 ? `the indexes ${b.standardIndexes.join(', ')}` : 'every index';
+  const scope = budgetScopeWords(b);
   L.push(`### Against a budget of ${fmtAboutUsd(b.usdMonthly)} a month`);
   L.push('');
   L.push(
-    b.monthsOver === 0
-      ? `Standard indexing (${scope}) stayed under ${fmtAboutUsd(b.usdMonthly)} in every month of the window.`
-      : `Standard indexing (${scope}) went over ${fmtAboutUsd(b.usdMonthly)} in ${b.monthsOver} of ${b.months.length} months, ` +
-          `by ${fmtEventCount(b.overEvents)} events, ${fmtAboutUsd(b.overUsd)} in all. Without a ceiling that was paid; held at the budget it would have landed in Flex or S3.`,
+    (b.monthsOver === 0
+      ? `By the account's usage metrics, ${scope} stayed under the budget in every month of the window.`
+      : `By the account's usage metrics, ${scope} went over the budget in ${b.monthsOver} of ${b.months.length} months, ` +
+          `by about ${fmtEventCount(b.overEvents)} events, about ${fmtAboutUsd(b.overUsd)} at the rate above.`) +
+      ' This is an estimate: Datadog\'s estimated usage differs from billable usage. A ceiling at the budget would have moved most of those lines ' +
+      'to Flex or S3, but it does not hold error lines up to K per statement per node per window, the first lines of each statement in every window, ' +
+      'or lines that do not pass the Receiver.',
   );
   L.push('');
-  L.push('| Month | Standard events | Cost | Over the budget | Crossed it (UTC) |');
-  L.push('|---|---:|---:|---:|---|');
+  L.push('| Month | Events | Cost | Budget | Over the budget | Crossed it (UTC) |');
+  L.push('|---|---:|---:|---:|---:|---|');
   for (const m of b.months) {
     L.push(
-      `| ${m.month}${m.partial ? ' (part)' : ''} | ${n0(m.events)} | ${usd(m.usd)} | ${m.overEvents > 0 ? `${n0(m.overEvents)}, ${usd(m.overUsd)}` : 'no'} | ${m.crossedIso ? m.crossedIso.slice(0, 13).replace('T', ' ') + ':00' : ''} |`,
+      `| ${m.month}${m.partial ? ' (part)' : ''} | ${n0(m.events)} | ${usd(m.usd)} | ${usd(m.budgetUsd)}${m.partial ? ', prorated' : ''} | ${m.overEvents > 0 ? `${n0(m.overEvents)}, ${usd(m.overUsd)}` : 'no'} | ${m.crossedIso ? m.crossedIso.slice(0, 13).replace('T', ' ') + ':00' : ''} |`,
     );
   }
   if (b.services.length > 0) {
@@ -371,7 +388,7 @@ function renderBudgetOverage(b: BudgetOverage): string[] {
   }
   if (b.months.some((m) => m.partial)) {
     L.push('');
-    L.push('A month marked (part) counts only the days inside the window, so its overage can be larger in the meter.');
+    L.push('A month marked (part) is only partly inside the window; its budget is prorated by the hours inside it.');
   }
   return L;
 }
