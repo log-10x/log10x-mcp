@@ -39,7 +39,7 @@ import {
   type SchedulerKind,
 } from '../lib/scheduler-manifest-emitter.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
-import { serviceBudgetsProblem } from '../lib/policy-loader.js';
+import { serviceBudgetsProblem, serviceBudgetUsd, type ServiceBudgetInput } from '../lib/policy-loader.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -139,11 +139,15 @@ export const setupRecurringSchema = {
     .optional()
     .describe('With budget_usd_monthly on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
   service_budgets: z
-    .record(z.string().min(1), z.number().positive())
+    .record(
+      z.string().min(1),
+      z.union([z.number().positive(), z.object({ usd: z.number().positive(), datadog_service: z.string().min(1).optional() })]),
+    )
     .optional()
     .describe(
-      'With budget_usd_monthly: dollars a month of Standard for a named service (the container), e.g. {"payments": 4000}. ' +
-        'Each run holds that service month to date against its own number, from the Receiver\'s own count of its Standard lines, ' +
+      'With budget_usd_monthly: dollars a month of Standard for a named service (the container), e.g. {"payments": 4000}, or ' +
+        '{"payments": {"usd": 4000, "datadog_service": "payments-api"}} when Datadog tags it with another service name. ' +
+        'Each run holds that service month to date against its own number, from Datadog\'s usage count under that service tag, ' +
         'and holds the rest of the account to budget_usd_monthly minus their sum. The sum must be under budget_usd_monthly, and a service in exceptions cannot have one.'
     ),
   keep_count: z
@@ -268,7 +272,7 @@ interface RecurringWizardSession {
   standard_indexes?: string[];
   standard_rate_per_million?: number;
   nodes_by_container?: Record<string, number>;
-  service_budgets?: Record<string, number>;
+  service_budgets?: Record<string, ServiceBudgetInput>;
   keep_count?: number;
   datadog_secret_name?: string;
   schedule?: SchedulePreset;
@@ -333,11 +337,6 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
   if (args.namespace !== undefined) session.namespace = args.namespace;
   if (args.secret_name !== undefined) session.secret_name = args.secret_name;
   if (args.confirm === true) session.confirmed = true;
-  if (session.service_budgets && Object.keys(session.service_budgets).length > 0) {
-    if (session.budget_usd_monthly === undefined) throw new Error('service_budgets needs budget_usd_monthly: each named number is part of it.');
-    const problem = serviceBudgetsProblem(session.service_budgets, session.budget_usd_monthly, session.exceptions ?? []);
-    if (problem) throw new Error(problem);
-  }
   session.created_at = Date.now(); // refresh TTL on each answer
 }
 
@@ -550,6 +549,9 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
+  // Checked once every answer is in, so the order they arrive in does not matter.
+  const problem = serviceBudgetsProblem(session.service_budgets ?? {}, session.budget_usd_monthly, session.exceptions ?? []);
+  if (problem) throw new Error(problem);
   if (!session.confirmed) {
     const summary = buildConfigSummary(session);
     return {
@@ -617,7 +619,7 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     session.budget_usd_monthly !== undefined
       ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |` +
         (session.service_budgets && Object.keys(session.service_budgets).length > 0
-          ? `\n| Own numbers      | ${Object.entries(session.service_budgets).map(([c, v]) => `${c} $${v}`).join(', ')} a month |`
+          ? `\n| Own numbers      | ${Object.entries(session.service_budgets).map(([c, v]) => `${c} $${serviceBudgetUsd(v)}`).join(', ')} a month |`
           : '')
       : session.budget_gb_monthly !== undefined
       ? `| Volume budget    | ${session.budget_gb_monthly} GB/mo (standing line) |`
@@ -809,6 +811,9 @@ function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): st
     `3. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
     `4. **Add the secrets** \`DD_API_KEY\` and \`DD_APP_KEY\` (and \`DD_SITE\` when the org is not on datadoghq.com).`,
     `5. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch, never a PR, since nothing would merge it (schedule \`${cronExpr}\` UTC).`,
+    ...(cronExpr === resolveCronExpression('hourly')
+      ? [`6. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
+      : []),
   ].join('\n');
 }
 

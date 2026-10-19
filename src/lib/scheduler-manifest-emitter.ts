@@ -60,8 +60,8 @@ export interface PolicyOptions {
   standard_indexes?: string[];
   /** Error lines over a limit that pass per statement per node per window. Default 50. */
   keep_count?: number;
-  /** Dollars a month of Standard for a named service, held to its own number. */
-  service_budgets?: Record<string, number>;
+  /** Dollars a month of Standard for a named service, held to its own number; the object form names Datadog's service tag. */
+  service_budgets?: Record<string, number | { usd: number; datadog_service?: string }>;
   /** Nodes per service, for the gitops budget run (no cluster access). */
   nodes_by_container?: Record<string, number>;
   /** Name of the Secret (k8s) holding DD_API_KEY, DD_APP_KEY and DD_SITE. Default: log10x-datadog. */
@@ -205,9 +205,15 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
     ...(Object.keys(opts.service_budgets ?? {}).length > 0
       ? [
           `  # dollars a month of Standard for a named service, held to its own number;`,
-          `  # the rest of the account is held to budget_usd_monthly minus their sum`,
+          `  # the rest of the account is held to budget_usd_monthly minus their sum.`,
+          `  # Spend is Datadog's usage count under the service tag, the container name`,
+          `  # unless datadog_service names it.`,
           `  service_budgets:`,
-          ...Object.entries(opts.service_budgets!).map(([c, usd]) => `    ${c}: ${usd}`),
+          ...Object.entries(opts.service_budgets!).flatMap(([c, v]) =>
+            typeof v === 'number' || !v.datadog_service || v.datadog_service === c
+              ? [`    ${c}: ${typeof v === 'number' ? v : v.usd}`]
+              : [`    ${c}:`, `      usd: ${v.usd}`, `      datadog_service: ${yamlString(v.datadog_service)}`],
+          ),
         ]
       : []),
     ...(budgetDelivery(opts.scheduler) === 'gitops'

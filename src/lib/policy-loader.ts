@@ -117,12 +117,22 @@ export interface DollarBudget {
    * month to date against its own number. The rest of the account is held
    * to usd_monthly minus their sum.
    */
-  service_budgets: Record<string, number>;
+  service_budgets: Record<string, ServiceBudget>;
   /** Nodes each service's pods run on, when the run cannot discover them (gitops delivery). */
   nodes_by_container: Record<string, number>;
   /** Receivers in the fleet, for the `*` row, when the run cannot discover them. */
   nodes_total?: number;
 }
+
+/** A named service's own number, and the `service` tag Datadog's usage metric carries for it. */
+export interface ServiceBudget {
+  usd: number;
+  /** Default: the container name. */
+  datadog_service: string;
+}
+
+/** As written: `payments: 4000`, or `payments: {usd: 4000, datadog_service: payments-api}`. */
+export type ServiceBudgetInput = number | { usd: number; datadog_service?: string };
 
 export interface Policy {
   schema_version: string;
@@ -530,7 +540,12 @@ const BUDGET_ACTIONS: ReadonlySet<string> = new Set(['tier_down', 'offload']);
 /** The dollar budget block of `reduction`, or undefined when the policy has none. */
 function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudget | undefined {
   const raw = red?.['budget_usd_monthly'];
-  if (raw === undefined) return undefined;
+  if (raw === undefined) {
+    if (red?.['service_budgets'] !== undefined) {
+      throw new PolicyLoadError('service_budgets needs budget_usd_monthly: each named number is part of the account\'s Standard budget.');
+    }
+    return undefined;
+  }
   const usd = positiveNumber(raw);
   if (usd === undefined) {
     throw new PolicyLoadError(`budget_usd_monthly must be a positive number of dollars a month; got: ${String(raw)}`);
@@ -569,15 +584,19 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
       service_actions[svc] = a as 'tier_down' | 'offload';
     }
   }
-  const service_budgets: Record<string, number> = {};
+  const service_budgets: Record<string, ServiceBudget> = {};
   const rawSb = red?.['service_budgets'];
   if (rawSb !== undefined && (!rawSb || typeof rawSb !== 'object' || Array.isArray(rawSb))) {
     throw new PolicyLoadError('service_budgets must map each service to dollars a month, e.g. payments: 4000.');
   }
   for (const [svc, v] of Object.entries((rawSb ?? {}) as Record<string, unknown>)) {
-    const n = positiveNumber(v);
-    if (n === undefined) throw new PolicyLoadError(`service_budgets.${svc} must be a positive number of dollars a month; got: ${String(v)}`);
-    service_budgets[svc] = n;
+    const obj = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+    const n = positiveNumber(obj ? obj['usd'] : v);
+    if (n === undefined) {
+      throw new PolicyLoadError(`service_budgets.${svc} must be a positive number of dollars a month; got: ${String(obj ? obj['usd'] : v)}`);
+    }
+    const dd = obj && typeof obj['datadog_service'] === 'string' ? obj['datadog_service'].trim() : '';
+    service_budgets[svc] = { usd: n, datadog_service: dd || svc };
   }
   const exceptions = Array.isArray(red?.['exceptions']) ? (red['exceptions'] as unknown[]).filter((s): s is string => typeof s === 'string') : [];
   const problem = serviceBudgetsProblem(service_budgets, usd, exceptions);
@@ -601,9 +620,15 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
  * their sum must leave something of X for the rest of the account, and a
  * service the policy never touches cannot be held to a number.
  */
-export function serviceBudgetsProblem(budgets: Record<string, number>, usdMonthly: number, exceptions: readonly string[]): string | undefined {
+export function serviceBudgetsProblem(
+  budgets: Record<string, ServiceBudgetInput | ServiceBudget>,
+  usdMonthly: number | undefined,
+  exceptions: readonly string[],
+): string | undefined {
   const named = Object.keys(budgets);
-  const sum = named.reduce((a, s) => a + budgets[s], 0);
+  if (named.length === 0) return undefined;
+  if (usdMonthly === undefined) return 'service_budgets needs budget_usd_monthly: each named number is part of the account\'s Standard budget.';
+  const sum = named.reduce((a, s) => a + serviceBudgetUsd(budgets[s]), 0);
   if (named.length > 0 && sum >= usdMonthly) {
     return `service_budgets add up to ${sum} dollars a month, which leaves nothing of budget_usd_monthly (${usdMonthly}) for the rest of the account. Their sum must be under it.`;
   }
@@ -612,4 +637,8 @@ export function serviceBudgetsProblem(budgets: Record<string, number>, usdMonthl
     return `${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} in both service_budgets and exceptions: an exception is never touched, so it cannot be held to a number. Keep each service in one.`;
   }
   return undefined;
+}
+
+export function serviceBudgetUsd(b: ServiceBudgetInput | ServiceBudget): number {
+  return typeof b === 'number' ? b : b.usd;
 }
