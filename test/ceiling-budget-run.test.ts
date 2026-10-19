@@ -49,6 +49,19 @@ function datadogStub(calls: string[]) {
       ];
     }
     if (q.includes('all_events_summaryVolume')) {
+      // As Datadog answers a rollup: buckets of the query's interval, aligned
+      // to the interval, so the first starts at or before \`from\`.
+      const n = Number(/rollup\(sum, (\d+)\)/.exec(q)?.[1] ?? 3600);
+      const aligned = (tags: Record<string, string>, perHour: number): Series => {
+        const points: Array<[number, number]> = [];
+        for (let t = Math.floor(from / n) * n; t < to; t += n) points.push([t, (perHour * n) / H]);
+        return { tags, points };
+      };
+      return [
+        aligned({ tenx_hash: 'a', message_pattern: 'big_one', k8s_container: 'checkout', severity_level: 'INFO' }, 30_000),
+        aligned({ tenx_hash: 'b', k8s_container: 'checkout', severity_level: 'ERROR' }, 1_000),
+        aligned({ tenx_hash: 'c', k8s_container: 'payments', severity_level: 'INFO' }, 5_000),
+      ];
       return [
         hourly({ tenx_hash: 'a', message_pattern: 'big_one', k8s_container: 'checkout', severity_level: 'INFO' }, from, to, 30_000),
         hourly({ tenx_hash: 'b', k8s_container: 'checkout', severity_level: 'ERROR' }, from, to, 1_000),
@@ -380,11 +393,11 @@ test('review 4 gate: spend and the Receiver\'s own count end at the same hour; a
   assert.match(r2.budget_report ?? '', /Warning: The Receiver's own count of lines sent to Standard \(4\.2 million\) is above Datadog's usage count \(3\.5 million\)[^\n]*taken as 0\./);
 });
 
-test('review 6: the statement query asks one point per series over the lookback', async () => {
+test('review 6: the statement query is hourly, inside the 1,500-point limit', async () => {
   const calls: string[] = [];
   seams._setBudgetDeps?.({ creds, query: datadogStub(calls), k8s: clusterStub(2, []), nowMs: () => NOW * 1000 });
   await tick.runTick(parsePolicyYaml(policy()));
-  assert.ok(calls.some((q) => /log10x\.all_events_summaryVolume\{tenx_env:env-1\} by \{tenx_hash,message_pattern,k8s_container,severity_level\}\.rollup\(sum, 86400\)/.test(q)), calls.join('\n'));
+  assert.ok(calls.some((q) => /log10x\.all_events_summaryVolume\{tenx_env:env-1\} by \{tenx_hash,message_pattern,k8s_container,severity_level\}\.rollup\(sum, 3600\)/.test(q)), calls.join('\n'));
 });
 
 test('git path: gitops delivery commits straight to the log10x-policy branch, never a PR', async () => {
@@ -462,21 +475,33 @@ test('git path gate: the install pulls log10x/policy from the branch with GH_* a
     recommendations: { suggestedNamespace: 'logging', alreadyInstalled: {} },
     probeLog: [],
   } as never);
-  const out = await executeAdviseInstall(
-    {
-      snapshot_id: 'snap-policy-git',
-      app: 'receiver',
-      forwarder: 'fluentbit',
-      backends: ['prometheus'],
-      backend_credentials: { prometheus: { secretName: 'prom-creds' } },
-      airgapped: false,
-      license_source: 'builtin',
-      log_destination: 'datadog',
-      policy_git: { repo: 'acme/log10x-config' },
-    } as never,
-    {} as never,
-  );
-  const md = String((out.data as Record<string, unknown>).markdown);
+  // The plan builder as advise_install calls it for an engine that reads the
+  // git lane (1.1.146): the pinned 1.1.145 refuses policy_git (re-review 2).
+  const { buildReporterPlan } = await import('../src/lib/advisor/reporter.js');
+  const { getSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
+  const { receiverFleetValues } = await import('../src/lib/fleet-default-install.js');
+  const values = receiverFleetValues({ datadog: true, engineVersion: '1.1.146' });
+  const plan = await buildReporterPlan({
+    snapshot: getSnapshot('snap-policy-git') as never,
+    app: 'receiver',
+    forwarder: 'fluentbit',
+    builtinLicense: true,
+    destination: 'mock',
+    backends: ['prometheus'],
+    backendCredentials: { prometheus: { secretName: 'prom-creds' } },
+    airgapped: false,
+    engineOptions: values.options,
+    engineEnv: values.env,
+    policyGit: { repo: 'acme/log10x-config', branch: 'log10x-policy', tokenSecretName: 'log10x-policy-git' },
+  } as never);
+  const strings: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') strings.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  walk(plan);
+  const md = strings.join('\n');
   assert.match(md, /- name: GH_ENABLED\n\s+value: "true"/);
   assert.match(md, /- name: GH_REPO\n\s+value: "acme\/log10x-config"/);
   assert.match(md, /- name: GH_BRANCH\n\s+value: "log10x-policy"/);
@@ -488,10 +513,14 @@ test('git path gate: the install pulls log10x/policy from the branch with GH_* a
   for (const f of ['caps.csv', 'actions.csv', 'totals.csv', 'config-generation.csv']) {
     assert.ok(md.includes(`[ -f log10x/policy/${f} ] || printf`), `seeds ${f}`);
   }
-  assert.match(md, /git push --quiet origin log10x-policy/);
+  assert.match(md, /git -c "http\.https:\/\/github\.com\/\.extraheader=\$AUTH" push --quiet origin log10x-policy/);
+  // The token never lands in a remote URL or a file, and the clone is removed.
+  assert.doesNotMatch(md, /x-access-token:\$\{GH_TOKEN\}@/);
+  assert.match(md, /trap 'rm -rf "\$SEED"' EXIT/);
   assert.doesNotMatch(md, /Seed the engine-policy ConfigMap/);
-  // The seed step comes before the Helm values step.
+  // The seed step comes before the Helm values step, and the seed records events.
   assert.ok(md.indexOf('Seed the policy files on the pulled branch') < md.indexOf('Write Helm values'));
+  assert.match(md, /printf 'events\\n' > log10x\/policy\/regulator-unit/);
 
   // The cluster path never sets GH_ENABLED: with both lanes on, the policy files would come from git.
   putSnapshot({
@@ -533,6 +562,63 @@ test('git path gate: the install pulls log10x/policy from the branch with GH_* a
   const cmd = String((cluster.data as Record<string, unknown>).markdown);
   assert.match(cmd, /- name: K8S_ENABLED/);
   assert.doesNotMatch(cmd, /- name: GH_ENABLED/);
-  // The compact recipe now names GH_FILES_ENABLED, so it no longer asks for a policy folder.
-  assert.match(cmd, /GH_FILES_ENABLED/);
+});
+
+test('re-review 3 gate: statement rates survive buckets aligned before the window', async () => {
+  const { hourlyRate } = await import('../src/lib/budget-tick.js');
+  // A run at 12:37 with a 24-hour lookback: the first hourly bucket starts at 12:00 the day before.
+  const from = NOW + 37 * 60 - 24 * H;
+  const pts: Array<[number, number]> = [];
+  for (let t = Math.floor(from / H) * H; t < from + 24 * H; t += H) pts.push([t, 1_000]);
+  assert.equal(hourlyRate(pts), 1_000);
+  // A run off the hour reads the same limits as one on it.
+  const writes: Array<Record<string, string>> = [];
+  seams._setBudgetDeps?.({ creds, query: datadogStub([]), k8s: clusterStub(2, writes), nowMs: () => (NOW + 37 * 60) * 1000 });
+  await tick.runTick(parsePolicyYaml(policy()));
+  assert.ok(rows(writes[0]['caps.csv']).checkout > 1, 'statements are not read as 0 an hour');
+  assert.ok(rows(writes[0]['totals.csv']).payments > 1);
+});
+
+test('re-review 1 gate: the files-lane switch follows the engine', async () => {
+  const { buildCompactReceiverGitopsExplainer, gitopsFilesSwitch } = await import('../src/lib/advisor/reporter.js');
+  const { azureStreamsRecipe } = await import('../src/lib/offload-recipes.js');
+  assert.equal(gitopsFilesSwitch('1.1.145'), 'GH_ENABLED');
+  assert.equal(gitopsFilesSwitch('1.1.146'), 'GH_FILES_ENABLED');
+  const names = (v: string) => buildCompactReceiverGitopsExplainer({ optimize: false, engineVersion: v }).envVars.map((e) => e.name);
+  assert.ok(names('1.1.145').includes('GH_ENABLED') && !names('1.1.145').includes('GH_FILES_ENABLED'));
+  assert.ok(names('1.1.146').includes('GH_FILES_ENABLED') && !names('1.1.146').includes('GH_ENABLED'));
+  const body = (v: string) => JSON.stringify(azureStreamsRecipe({ engineVersion: v }));
+  assert.match(body('1.1.145'), /\\nGH_ENABLED=true/);
+  assert.match(body('1.1.146'), /\\nGH_FILES_ENABLED=true/);
+  assert.doesNotMatch(body('1.1.146'), /\\nGH_ENABLED=true/);
+});
+
+test('re-review 2 gate: policy_git below 1.1.146 is refused with a note; the Receiver reads the ConfigMap', async () => {
+  const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
+  const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
+  const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
+  const { manifestEngineVersion } = await import('../src/lib/fleet-default-install.js');
+  assert.equal(manifestEngineVersion(), '1.1.145');
+  putSnapshot({
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    snapshotId: 'snap-policy-git-old',
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    kubectl: {
+      available: true, namespaces: ['logging'], probedNamespaces: ['logging'],
+      forwarders: [{ kind: 'fluentbit', namespace: 'logging', workloadKind: 'DaemonSet', workloadName: 'fluent-bit', image: 'cr.fluentbit.io/fluent/fluent-bit:3.1.0', containerName: 'fluent-bit', labels: {}, readyReplicas: 3 }],
+      helmReleases: [], log10xApps: [], storageClasses: [], ingressClasses: [], serviceAccountIrsa: [], backendAgents: [],
+    },
+    aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
+    recommendations: { suggestedNamespace: 'logging', alreadyInstalled: {} },
+    probeLog: [],
+  } as never);
+  const out = await executeAdviseInstall(
+    { snapshot_id: 'snap-policy-git-old', app: 'receiver', forwarder: 'fluentbit', backends: ['prometheus'], backend_credentials: { prometheus: { secretName: 'prom-creds' } }, airgapped: false, license_source: 'builtin', log_destination: 'datadog', policy_git: { repo: 'acme/log10x-config' } } as never,
+    {} as never,
+  );
+  const md = String((out.data as Record<string, unknown>).markdown);
+  assert.doesNotMatch(md, /- name: GH_ENABLED/);
+  assert.match(md, /- name: K8S_ENABLED/);
+  assert.match(md, /The git path for the policy files \(policy_git\) needs engine 1\.1\.146 or later/);
 });

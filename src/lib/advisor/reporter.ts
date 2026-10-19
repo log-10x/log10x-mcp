@@ -30,6 +30,7 @@ import type {
   BackendCredentialConfig,
 } from '../discovery/types.js';
 import type { AdvisePlan, PlanStep, VerifyProbe, PreflightCheck, GitopsExplainer } from './types.js';
+import { engineReadsCeiling, manifestEngineVersion } from '../fleet-default-install.js';
 import {
   compactionSupport,
   EXPANDER_PREREQUISITE_GENERAL,
@@ -465,7 +466,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
     blockers,
     gitopsExplainer:
       app === 'receiver' && blockers.length === 0
-        ? buildCompactReceiverGitopsExplainer({ optimize: args.optimize === true })
+        ? buildCompactReceiverGitopsExplainer({ optimize: args.optimize === true, engineVersion: manifestEngineVersion() })
         : undefined,
   };
 }
@@ -525,7 +526,17 @@ function detectExistingHelmRelease(
   return undefined;
 }
 
-function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): GitopsExplainer {
+/**
+ * The switch for the engine's pull of the files `paths` lists: GH_FILES_ENABLED
+ * from 1.1.146 (where GH_ENABLED pulls the regulator policy folder
+ * log10x/policy/ instead), GH_ENABLED before it.
+ */
+export function gitopsFilesSwitch(engineVersion: string | undefined): 'GH_FILES_ENABLED' | 'GH_ENABLED' {
+  return engineReadsCeiling(engineVersion) ? 'GH_FILES_ENABLED' : 'GH_ENABLED';
+}
+
+export function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean; engineVersion?: string }): GitopsExplainer {
+  const filesSwitch = gitopsFilesSwitch(opts.engineVersion);
   return {
     headline:
       'Compaction is a per-source switch: the chart `optimize` flag makes the sidecar emit `encode()` for every event it sees, smaller on a destination whose 10x expander is installed (see the prerequisite below; run log10x_measure_compaction for the ratio on the real stream). The compactReceiver cap file is the exception list under that switch: with compactReceiverDefault true, a CSV keyed by the pattern name lists the patterns to keep as full text. Wire GitOps once and edit the list as PRs; the engine hot-reloads the CSV without a pod restart.',
@@ -545,7 +556,9 @@ function buildCompactReceiverGitopsExplainer(opts: { optimize: boolean }): Gitop
       { path: 'pipelines/run/receive/compact/compact-object-cap.js', comment: 'predicate logic: JS change → pipeline restart (rarely needed; CSV covers most cases)' },
     ],
     envVars: [
-      { name: 'GH_FILES_ENABLED', value: 'true', required: true, note: 'switch for the GitHub puller of the files `paths` lists (GH_ENABLED instead pulls the regulator policy folder `log10x/policy/`, which this repo does not carry)' },
+      filesSwitch === 'GH_FILES_ENABLED'
+        ? { name: 'GH_FILES_ENABLED', value: 'true', required: true, note: 'switch for the GitHub puller of the files `paths` lists (on this engine GH_ENABLED pulls the regulator policy folder `log10x/policy/` instead, which this repo does not carry)' }
+        : { name: 'GH_ENABLED', value: 'true', required: true, note: 'master switch for the GitHub puller' },
       { name: 'GH_REPO', value: 'your-org/your-config-repo', required: true, note: 'owner/name of the GitOps config repo (forked from log-10x/config recommended)' },
       { name: 'GH_TOKEN', value: '<github PAT>', required: true, note: 'PAT with Contents: Read scope; store as a k8s Secret + reference via valueFrom' },
       { name: 'GH_BRANCH', value: 'main', required: false, note: 'branch to pull from' },

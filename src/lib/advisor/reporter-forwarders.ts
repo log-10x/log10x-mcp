@@ -522,24 +522,29 @@ export interface PolicyGitDelivery {
 export function renderPolicyGitSeedCommands(git: PolicyGitDelivery, unit: 'bytes' | 'events'): string {
   const dir = POLICY_GIT_DIR;
   const seed: Array<[string, string]> = [
-    ['caps.csv', 'container,cap\ntenx-seed,1::install seed'],
-    ['actions.csv', 'container,action\ntenx-seed,pass::install seed'],
-    ['totals.csv', 'container,total\ntenx-seed,1::install seed'],
-    ['config-generation.csv', 'key,value\ngeneration,seed'],
+    ['caps.csv', 'container,cap\\ntenx-seed,1::install seed'],
+    ['actions.csv', 'container,action\\ntenx-seed,pass::install seed'],
+    ['totals.csv', 'container,total\\ntenx-seed,1::install seed'],
+    ['config-generation.csv', 'key,value\\ngeneration,seed'],
   ];
+  // The token travels as a per-command header, never in a remote URL or a
+  // git config file, and the clone is removed on exit.
+  const auth = '-c "http.https://github.com/.extraheader=$AUTH"';
   return [
     `# needs GH_TOKEN exported: a PAT with Contents write on ${git.repo}`,
     `set -euo pipefail`,
+    `AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\\n')"`,
     `SEED=$(mktemp -d)`,
-    `git clone --quiet "https://x-access-token:\${GH_TOKEN}@github.com/${git.repo}.git" "$SEED"`,
+    `trap 'rm -rf "$SEED"' EXIT`,
+    `git ${auth} clone --quiet "https://github.com/${git.repo}.git" "$SEED"`,
     `cd "$SEED"`,
-    `if git ls-remote --exit-code --heads origin ${git.branch} >/dev/null; then git checkout --quiet ${git.branch}; else git checkout --quiet -b ${git.branch}; fi`,
+    `if git ${auth} ls-remote --exit-code --heads origin ${git.branch} >/dev/null; then git ${auth} fetch --quiet origin ${git.branch} && git checkout --quiet -B ${git.branch} FETCH_HEAD; else git checkout --quiet -b ${git.branch}; fi`,
     `mkdir -p ${dir}`,
-    ...seed.map(([f, body]) => `[ -f ${dir}/${f} ] || printf '${body}\n' > ${dir}/${f}`),
-    `printf '${unit}\n' > ${dir}/${REGULATOR_UNIT_KEY}`,
+    ...seed.map(([f, body]) => `[ -f ${dir}/${f} ] || printf '${body}\\n' > ${dir}/${f}`),
+    `printf '${unit}\\n' > ${dir}/${REGULATOR_UNIT_KEY}`,
     `git add ${dir}`,
     `git -c user.name=log10x-install -c user.email=install@log10x.com commit --quiet -m "log10x: seed the policy files" || true`,
-    `git push --quiet origin ${git.branch}`,
+    `git ${auth} push --quiet origin ${git.branch}`,
   ].join('\n');
 }
 
