@@ -535,13 +535,19 @@ function countMap(raw: unknown, field: string): Record<string, number> {
   return out;
 }
 
+/** True when `service_budgets` names at least one service; an empty map names none. */
+function hasNamedServices(raw: unknown): boolean {
+  if (raw === undefined || raw === '' || raw === '{}') return false;
+  return !(raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length === 0);
+}
+
 const BUDGET_ACTIONS: ReadonlySet<string> = new Set(['tier_down', 'offload']);
 
 /** The dollar budget block of `reduction`, or undefined when the policy has none. */
 function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudget | undefined {
   const raw = red?.['budget_usd_monthly'];
   if (raw === undefined) {
-    if (red?.['service_budgets'] !== undefined) {
+    if (hasNamedServices(red?.['service_budgets'])) {
       throw new PolicyLoadError('service_budgets needs budget_usd_monthly: each named number is part of the account\'s Standard budget.');
     }
     return undefined;
@@ -585,7 +591,7 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
     }
   }
   const service_budgets: Record<string, ServiceBudget> = {};
-  const rawSb = red?.['service_budgets'];
+  const rawSb = red?.['service_budgets'] === '{}' ? {} : red?.['service_budgets'];
   if (rawSb !== undefined && (!rawSb || typeof rawSb !== 'object' || Array.isArray(rawSb))) {
     throw new PolicyLoadError('service_budgets must map each service to dollars a month, e.g. payments: 4000.');
   }
@@ -595,8 +601,11 @@ function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudg
     if (n === undefined) {
       throw new PolicyLoadError(`service_budgets.${svc} must be a positive number of dollars a month; got: ${String(obj ? obj['usd'] : v)}`);
     }
-    const dd = obj && typeof obj['datadog_service'] === 'string' ? obj['datadog_service'].trim() : '';
-    service_budgets[svc] = { usd: n, datadog_service: dd || svc };
+    const rawDd = obj?.['datadog_service'];
+    if (rawDd !== undefined && (typeof rawDd !== 'string' || rawDd.trim() === '')) {
+      throw new PolicyLoadError(`service_budgets.${svc}.datadog_service must be the service name Datadog tags it with; got: ${JSON.stringify(rawDd)}`);
+    }
+    service_budgets[svc] = { usd: n, datadog_service: typeof rawDd === 'string' ? rawDd.trim() : svc };
   }
   const exceptions = Array.isArray(red?.['exceptions']) ? (red['exceptions'] as unknown[]).filter((s): s is string => typeof s === 'string') : [];
   const problem = serviceBudgetsProblem(service_budgets, usd, exceptions);

@@ -275,18 +275,31 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const receiverStandardOf = (c: string): number =>
     sumPoints(input.routes, start, dataThroughSec, (s) => toStandard(s) && s.tags['k8s_container'] === c);
 
+  const byContainer = new Map<string, PatternRate[]>();
+  for (const p of input.patterns) {
+    if (!p.container || !(p.eventsPerHour > 0)) continue;
+    const list = byContainer.get(p.container) ?? [];
+    list.push(p);
+    byContainer.set(p.container, list);
+  }
+  const receiverSees = (c: string): boolean =>
+    byContainer.has(c) || input.routes.some((s) => s.tags['k8s_container'] === c && s.points.length > 0);
+
   // A named service spends what Datadog's usage metric counts under its
-  // service tag, its lines outside the Receiver included. The rest of the
-  // account: spent = account spent - named spent; outside = that - the
-  // Receiver's Standard lines from containers without a number.
+  // service tag, its lines outside the Receiver included; with no series
+  // under that name, the Receiver's own count. The rest of the account:
+  // spent = account spent - named spent; outside = that - the Receiver's
+  // Standard lines from containers without a number.
   const own = b.service_budgets ?? {};
   const named = Object.keys(own).sort();
   const namedSet = new Set(named);
   const ownSpent: Record<string, number> = {};
   const ownReceiver: Record<string, number> = {};
+  const metered: Record<string, boolean> = {};
   for (const c of named) {
-    ownSpent[c] = spentByService.get(own[c].datadog_service) ?? 0;
     ownReceiver[c] = receiverStandardOf(c);
+    metered[c] = spentByService.has(own[c].datadog_service);
+    ownSpent[c] = metered[c] ? spentByService.get(own[c].datadog_service)! : ownReceiver[c];
   }
   const namedUsd = named.reduce((a, c) => a + own[c].usd, 0);
   const poolUsd = b.usd_monthly - namedUsd;
@@ -305,14 +318,6 @@ export function planBudget(input: BudgetInput): BudgetPlan {
   const exempt = new Set(input.exceptions);
   const inScope = (c: string): boolean =>
     !exempt.has(c) && !namedSet.has(c) && (input.targetServices.length === 0 || input.targetServices.includes(c));
-
-  const byContainer = new Map<string, PatternRate[]>();
-  for (const p of input.patterns) {
-    if (!p.container || !(p.eventsPerHour > 0)) continue;
-    const list = byContainer.get(p.container) ?? [];
-    list.push(p);
-    byContainer.set(p.container, list);
-  }
 
   let exemptPerHour = 0;
   let budgetedPerHour = 0;
@@ -362,7 +367,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     kept += allowancePerHour;
     knownCaps.push(capPerHour);
     knownTotals.push(allowancePerHour);
-    knownNodes.push(n);
+    if (input.instances[c] !== undefined) knownNodes.push(n);
     rows.push({ container: c, action, instances: n, eventsPerHour: rate, allowancePerHour, protectedPerHour: protectedIn(ps), cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(allowancePerHour, n) });
   }
   for (const c of named) {
@@ -384,9 +389,24 @@ export function planBudget(input: BudgetInput): BudgetPlan {
       total: perWindowPerNode(held.allowancePerHour, n),
       ownBudget: { usdMonthly: own[c].usd, spentUsd: ownSpent[c] * perEventUsd, exhausted: ownExhausted, datadogService: own[c].datadog_service },
     });
-    if (!spentByService.has(own[c].datadog_service) && (ownReceiver[c] > 0 || ps.length > 0)) {
+    const dd = own[c].datadog_service;
+    const seen = receiverSees(c);
+    if (!metered[c] && seen) {
       warnings.push(
-        `Datadog's usage metric has no Standard series for service:${own[c].datadog_service}, while the Receiver sees the container ${c}: its spend reads as 0 and counts in the rest of the account. Set service_budgets.${c}.datadog_service to the service name Datadog uses.`,
+        `Datadog's usage metric has no Standard series for service:${dd}, the name service_budgets gives the container ${c}. Its spend is taken from the Receiver's own count, which leaves out its lines outside the Receiver and the statements past the Receiver's top series, so it can run over its number. Set service_budgets.${c}.datadog_service to the service name Datadog uses.`,
+      );
+    } else if (!metered[c]) {
+      warnings.push(
+        `Neither Datadog's usage metric (service:${dd}) nor the Receiver (container ${c}) has any lines for ${c} this month. Check both names in service_budgets.${c}.`,
+      );
+    } else if (!seen) {
+      warnings.push(
+        `The Receiver does not see ${c}: no lines or statements under that container. Datadog counts ${fmtAboutUsd(ownSpent[c] * perEventUsd)} under service:${dd} this month, and its ${fmtAboutUsd(own[c].usd)} cannot be held.`,
+      );
+    }
+    if (dd !== c && !namedSet.has(dd) && receiverSees(dd)) {
+      warnings.push(
+        `service_budgets.${c}.datadog_service is ${dd}, which is also a container the Receiver sees without its own number: Datadog's usage under service:${dd} is charged to ${c}, while the Receiver's lines from the container ${dd} count in the rest of the account.`,
       );
     }
   }
@@ -473,7 +493,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; ${nodesTotal} Receiver${nodesTotal === 1 ? '' : 's'}. ${medianNodes !== undefined ? `The \`*\` row is divided by ${starNodes} node${starNodes === 1 ? '' : 's'}, the median known service's count.` : `The \`*\` row is divided by all of them.`} The division assumes a DaemonSet Receiver, one per node, each holding its node's share.`,
   );
   for (const r of rows) {
-    if (!r.ownBudget) continue;
+    if (!r.ownBudget || !receiverSees(r.container)) continue;
     const o = r.ownBudget;
     lines.push(
       o.exhausted
@@ -637,11 +657,12 @@ export async function readBudgetInputs(
     q(creds, receiverRouteQuery(envId), start, nowSec),
     q(creds, patternEventsQuery(envId), from, nowSec),
   ]);
-  // Without the key every line would read as Standard.
-  if (routes.length > 0 && !routes.some((s) => 'routestate' in s.tags)) {
-    const keys = [...new Set(routes.flatMap((s) => Object.keys(s.tags)))].sort();
+  // A series grouped without the routestate tag would read as Standard.
+  const untagged = routes.filter((s) => !('routestate' in s.tags));
+  if (untagged.length > 0) {
+    const keys = [...new Set(untagged.flatMap((s) => Object.keys(s.tags)))].sort();
     throw new Error(
-      `the Receiver's emitted series came back without a routestate tag (tags: ${keys.join(', ') || 'none'}), so the run cannot tell its Standard lines from the ones it moved.`,
+      `${untagged.length} of the Receiver's ${routes.length} emitted series came back without a routestate tag (tags: ${keys.join(', ') || 'none'}), so the run cannot tell its Standard lines from the ones it moved.`,
     );
   }
   const patterns: PatternRate[] = pats.map((s) => ({

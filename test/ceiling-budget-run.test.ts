@@ -774,11 +774,6 @@ test('service_budgets gate: Datadog\'s service name can differ from the containe
   const mapped = await runOwn(policy('  service_budgets:\n    payments:\n      usd: 4\n      datadog_service: payments-api'), 'payments-api');
   assert.equal(rows(mapped.writes[0]['caps.csv']).payments, 76);
   assert.match(mapped.result.budget_report ?? '', /for service:payments-api/);
-  const missed = await runOwn(policy('  service_budgets:\n    payments: 4'), 'payments-api');
-  assert.match(
-    missed.result.budget_report ?? '',
-    /Warning: Datadog's usage metric has no Standard series for service:payments, while the Receiver sees the container payments: its spend reads as 0 and counts in the rest of the account\. Set service_budgets\.payments\.datadog_service/,
-  );
 });
 
 test('service_budgets gate: a sum at or over X is refused, and so is a named service in exceptions', async () => {
@@ -855,17 +850,20 @@ test('new-service gate: the `*` row is divided by the median known service\'s no
   assert.match(plan.lines.join('\n'), /6 Receivers\. The `\*` row is divided by 2 nodes, the median known service's count\./);
 });
 
-test('tag casing gate: route series without a routestate key write nothing and are a read failure', async () => {
+test('route guard gate: a route series grouped without the routestate tag writes nothing and is a read failure', async () => {
   const writes: Array<Record<string, string>> = [];
   const base = datadogStub([]);
-  const camel = async (c: unknown, q: string, from: number, to: number) => {
-    if (q.includes('emitted_events')) return [hourly({ routeState: 'pass', k8s_container: 'checkout' }, OCT1, NOW, 8_000)];
+  // One series carries the tag, one does not: the untagged one would read as Standard.
+  const partly = async (c: unknown, q: string, from: number, to: number) => {
+    if (q.includes('emitted_events')) {
+      return [hourly({ routestate: 'pass', k8s_container: 'checkout' }, OCT1, NOW, 8_000), hourly({ k8s_container: 'payments' }, OCT1, NOW, 2_000)];
+    }
     return base(c, q, from, to);
   };
-  seams._setBudgetDeps?.({ creds, query: camel, k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
+  seams._setBudgetDeps?.({ creds, query: partly, k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
   const r = await tick.runTick(parsePolicyYaml(policy()));
   assert.equal(r.status, 'read_failed');
-  assert.match(r.message, /without a routestate tag \(tags: k8s_container, routeState\)[^\n]*The files from the last run stay in force\./);
+  assert.match(r.message, /1 of the Receiver's 2 emitted series came back without a routestate tag \(tags: k8s_container\)[^\n]*The files from the last run stay in force\./);
   assert.equal(writes.length, 0);
 });
 
@@ -897,4 +895,90 @@ test('service_budgets gate: two named services reading the same Datadog service 
     executeSetupRecurring({ session_id: sid, target_services: [], budget_usd_monthly: 20_000, standard_indexes: ['main'], scheduler: 'k8s_cron', namespace: 'logging', confirm: true } as never),
     /payments and payments-worker in service_budgets both read Datadog's spend for service:payments/,
   );
+});
+
+/** byServiceStub plus Datadog usage under extra service names. */
+function withUsage(extra: Array<[string, number]>, ddPayments = 'payments') {
+  const calls: string[] = [];
+  const base = byServiceStub(calls, ddPayments);
+  return async (c: unknown, q: string, from: number, to: number): Promise<Series[]> => {
+    const out = await base(c, q, from, to);
+    if (q.includes('estimated_usage')) for (const [svc, v] of extra) out.push(hourly({ service: svc, datadog_index: 'main' }, OCT1, NOW, v));
+    return out;
+  };
+}
+
+async function runWith(text: string, query: ReturnType<typeof withUsage>) {
+  const writes: Array<Record<string, string>> = [];
+  seams._setBudgetDeps?.({ creds, query, k8s: clusterStub(2, writes), nowMs: () => NOW * 1000 });
+  const result = await tick.runTick(parsePolicyYaml(text));
+  return { result, writes, report: result.budget_report ?? '' };
+}
+
+test('service_budgets gate: a named service the Receiver never sees is warned about, never said to move', async () => {
+  const { report } = await runWith(policy('  service_budgets:\n    payments: 4\n    ghost: 1'), withUsage([['ghost', 3_000]]));
+  assert.match(report, /Warning: The Receiver does not see ghost: no lines or statements under that container\. Datadog counts \$1\.8 under service:ghost this month, and its \$1 cannot be held\./);
+  assert.doesNotMatch(report, /ghost has spent its own|in ghost, every line|ghost is held to its own/);
+});
+
+test('service_budgets gate: on a Datadog name mismatch the Receiver\'s count is the spend, taken out of the rest once', async () => {
+  const { writes, report } = await runWith(policy('  service_budgets:\n    payments: 4\n    nowhere: 1'), withUsage([], 'payments-api'));
+  const caps = rows(writes[0]['caps.csv']);
+  // payments: the Receiver's 348 x 2,000, with nothing outside it projected.
+  const ownRate = (4 / 1.7e-6 - 348 * 2_000) / 396;
+  assert.equal(caps.payments, Math.floor(ownRate / 15 / 2));
+  assert.equal(caps.payments, 139);
+  // The rest: $15 less 348 x (10,000 - 2,000), with 2,000 an hour outside the Receiver
+  // (8,000 less checkout's 6,000): payments' Receiver lines are not counted twice.
+  const rest = (15 / 1.7e-6 - 348 * 8_000 - 2_000 * 396) / 396;
+  assert.equal(caps.checkout, Math.floor((rest - 1_000) / 15 / 2));
+  assert.match(report, /Warning: Datadog's usage metric has no Standard series for service:payments, the name service_budgets gives the container payments\. Its spend is taken from the Receiver's own count, which leaves out its lines outside the Receiver and the statements past the Receiver's top series, so it can run over its number\. Set service_budgets\.payments\.datadog_service/);
+  assert.match(report, /Warning: Neither Datadog's usage metric \(service:nowhere\) nor the Receiver \(container nowhere\) has any lines for nowhere this month\./);
+});
+
+test('service_budgets gate: a datadog_service that is also an unnamed container the Receiver sees is warned about', async () => {
+  const { report } = await runWith(policy('  service_budgets:\n    payments:\n      usd: 4\n      datadog_service: checkout'), withUsage([]));
+  assert.match(report, /Warning: service_budgets\.payments\.datadog_service is checkout, which is also a container the Receiver sees without its own number: Datadog's usage under service:checkout is charged to payments, while the Receiver's lines from the container checkout count in the rest of the account\./);
+});
+
+test('new-service gate: the `*` median counts only services with a real node count', async () => {
+  const { planBudget } = await import('../src/lib/budget-tick.js');
+  const p = parsePolicyYaml(policy());
+  const plan = (instances: Record<string, number>) =>
+    planBudget({
+      budget: p.budget_usd!,
+      nowSec: NOW,
+      usage: [hourly({ service: 'checkout', datadog_index: 'main' }, OCT1, NOW, 10_000)],
+      routes: [hourly({ routestate: 'pass' }, OCT1, NOW, 8_000)],
+      patterns: [
+        { container: 'checkout', pattern: 'a', severity: 'INFO', eventsPerHour: 30_000 },
+        { container: 'payments', pattern: 'c', severity: 'INFO', eventsPerHour: 5_000 },
+      ],
+      instances,
+      nodesTotal: 6,
+      instanceBasis: 'policy',
+      exceptions: [],
+      targetServices: [],
+    });
+  // payments has no count (written for one Receiver); the median is checkout's 4.
+  assert.equal(plan({ checkout: 4 }).star.instances, 4);
+  // No count at all: every Receiver.
+  assert.equal(plan({}).star.instances, 6);
+});
+
+test('service_budgets gate: an empty map is not refused next to another goal; a datadog_service that is not a name is', async () => {
+  const gb = (sb: string) =>
+    policy(sb).replace('  budget_usd_monthly: 20\n', '  budget_gb_monthly: 100\n').replace('  standard_indexes:\n    - main\n', '').replace('  delivery: configmap\n', '');
+  assert.equal(parsePolicyYaml(gb('  service_budgets:')).budget_gb_monthly, 100);
+  assert.equal(parsePolicyYaml(gb('  service_budgets: {}')).budget_gb_monthly, 100);
+  assert.throws(() => parsePolicyYaml(gb('  service_budgets:\n    payments: 4')), /service_budgets needs budget_usd_monthly/);
+  assert.throws(
+    () => parsePolicyYaml(policy('  service_budgets:\n    payments:\n      usd: 4\n      datadog_service: ""')),
+    /service_budgets\.payments\.datadog_service must be the service name Datadog tags it with; got: ""/,
+  );
+  assert.throws(
+    () => parsePolicyYaml(policy('  service_budgets:\n    payments:\n      usd: 4\n      datadog_service:\n        - a')),
+    /service_budgets\.payments\.datadog_service must be the service name/,
+  );
+  assert.deepEqual(parsePolicyYaml(policy('  service_budgets: {}')).budget_usd?.service_budgets, {});
 });
