@@ -594,12 +594,15 @@ test('re-review 1 gate: the files-lane switch follows the engine', async () => {
   assert.doesNotMatch(body('1.1.146'), /\\nGH_ENABLED=true/);
 });
 
-test('re-review 2 gate: policy_git below 1.1.146 is refused with a note; the Receiver reads the ConfigMap', async () => {
+test('policy_git: the pinned 1.1.146 writes the git lane; below 1.1.146 the gate refuses it', async () => {
   const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
   const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
   const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
-  const { manifestEngineVersion } = await import('../src/lib/fleet-default-install.js');
-  assert.equal(manifestEngineVersion(), '1.1.145');
+  const { manifestEngineVersion, engineReadsCeiling } = await import('../src/lib/fleet-default-install.js');
+  assert.equal(manifestEngineVersion(), '1.1.146');
+  // advise_install takes policy_git only where engineReadsCeiling holds for the pinned engine.
+  assert.equal(engineReadsCeiling('1.1.145'), false);
+  assert.equal(engineReadsCeiling('1.1.146'), true);
   putSnapshot({
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     snapshotId: 'snap-policy-git-old',
@@ -619,9 +622,9 @@ test('re-review 2 gate: policy_git below 1.1.146 is refused with a note; the Rec
     {} as never,
   );
   const md = String((out.data as Record<string, unknown>).markdown);
-  assert.doesNotMatch(md, /- name: GH_ENABLED/);
-  assert.match(md, /- name: K8S_ENABLED/);
-  assert.match(md, /The git path for the policy files \(policy_git\) needs engine 1\.1\.146 or later/);
+  assert.match(md, /- name: GH_ENABLED\n\s+value: "true"/);
+  assert.match(md, /- name: GH_REPO\n\s+value: "acme\/log10x-config"/);
+  assert.doesNotMatch(md, /The git path for the policy files \(policy_git\) needs engine/);
 });
 
 // ── New services and hourly runs; services with their own number ────────────

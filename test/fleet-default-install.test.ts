@@ -253,7 +253,7 @@ test('configure_engine: the fleet default from the rows, per node, in lines a da
     fd.sentence,
     'Any service not listed: a statement above 28,800 lines a day goes to Flex. Up to 1,800 lines a day of every statement always reach Standard on each node.',
   );
-  assert.deepEqual(fd.engine_options![1], ['rateReceiverDefaultAction', 'tier_down']);
+  assert.deepEqual(fd.engine_options!.find(([k]) => k === 'rateReceiverDefaultAction'), ['rateReceiverDefaultAction', 'tier_down']);
   assert.deepEqual(fd.engine_env, [['outputOffload', 'true']]);
   assert.ok(fd.install_note.includes('fleet_default.cap_bytes_per_window_per_node 6000, on engine 1.1.141 or later'));
 
@@ -284,7 +284,7 @@ test('the POC plan path: the fleet default from the capture\'s kept statements',
   assert.equal(none.computed, false);
 });
 
-test('advise_install: with the limit given, the plan pinned below 1.1.141 holds the values back and says so', async () => {
+test('advise_install: with the limit given, the pinned engine writes the fleet values; below 1.1.141 they are held back and the plan says so', async () => {
   const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
   const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
   const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
@@ -323,6 +323,8 @@ test('advise_install: with the limit given, the plan pinned below 1.1.141 holds 
       log_destination: 'datadog',
       fleet_default: { action: 'tier_down', cap_bytes_per_window_per_node: 6000 },
       k8s_team_label: 'team',
+      // Bytes, so the byte limit is written as given; the events form is checked below.
+      regulator_unit: 'bytes',
     },
     {} as never,
   );
@@ -348,4 +350,13 @@ test('advise_install: with the limit given, the plan pinned below 1.1.141 holds 
   assert.ok(md.includes('- "symbolMessageHashField"\n      - "tenx_hash"'));
   const fd = data.fleet_default as Record<string, unknown>;
   assert.equal(fd.receiver_values_written, engineReadsFleetDefault(pinned));
+  // Below 1.1.141 none of the fleet values are written, and the notes say why.
+  const early = receiverFleetValues({ datadog: true, engineVersion: '1.1.140', teamLabel: 'team', fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'tier_down' } });
+  assert.ok(!early.options.some(([k]) => k === 'rateReceiverDefaultAction' || k === 'rateReceiverAbsoluteCap' || k === 'k8sTeamLabel'));
+  assert.ok(early.notes.some((n) => n.includes('The fleet default needs engine 1.1.141 or later, the first that reads rateReceiverDefaultAction; this plan installs 1.1.140')));
+  assert.ok(early.notes.some((n) => n.startsWith('The team label needs engine 1.1.141 or later')));
+  // Counting events on 1.1.146, the limit is written in lines when given in lines.
+  const events = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', fleetDefault: { capBytesPerWindowPerNode: 6000, capEventsPerWindowPerNode: 40, action: 'tier_down' } });
+  assert.ok(events.options.some(([k, v]) => k === 'rateReceiverUnit' && v === 'events'));
+  assert.ok(events.options.some(([k, v]) => k === 'rateReceiverAbsoluteCap' && v === '40'));
 });
