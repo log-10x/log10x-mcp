@@ -104,24 +104,27 @@ async function plan(extra: Record<string, unknown>, id: string): Promise<string>
   return String((out.data as Record<string, unknown>).markdown);
 }
 
-test('review 7 gate: a plan where a service offloads keeps half the error lines on the pinned engine', async () => {
-  // Pinned 1.1.145: no keep counts, so the 10-13 floor applies (0.5 when anything goes to S3).
+test('review 7 gate: a plan where a service offloads keeps the error count on the pinned engine, half the error lines before 1.1.146', async () => {
+  // Pinned 1.1.146: error lines pass by keep count, so every floor is 0 whatever the action.
   const md = await plan({ service_actions: { checkout: 'tier_down', payments: 'offload' } }, 'snap-offload-floor');
-  assert.ok(md.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0.5"'), 'ERROR=0.5 written');
-  const tier = await plan({ service_actions: { checkout: 'tier_down' } }, 'snap-tier-floor');
-  assert.ok(tier.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0"'));
-  // A tier_down fleet default with an offloaded service keeps the offload floor too.
+  assert.ok(md.includes('- "rateReceiverKeepCounts"\n      - "ERROR=50"'), 'keep counts written');
+  assert.ok(md.includes('- "rateReceiverSeverityFloors"\n      - "ERROR=0"'), 'ERROR floor 0 with keep counts');
+  // Before 1.1.146 there are no keep counts, so the floor is 0.5 when anything goes to S3.
   const rv = receiverFleetValues({ datadog: true, engineVersion: '1.1.145', anyOffload: true, fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'tier_down' } });
   assert.ok(values(rv.options, 'rateReceiverSeverityFloors').includes('ERROR=0.5'));
+  const tier = receiverFleetValues({ datadog: true, engineVersion: '1.1.145', fleetDefault: { capBytesPerWindowPerNode: 6000, action: 'tier_down' } });
+  assert.ok(values(tier.options, 'rateReceiverSeverityFloors').includes('ERROR=0'));
 });
 
 test('review 8 gate: advise_install takes keep_count, written as three entries', async () => {
   const { adviseInstallSchema } = await import('../src/tools/advise-install.js');
   assert.ok('keep_count' in adviseInstallSchema, 'keep_count is in the schema');
   const md = await plan({ keep_count: 20 }, 'snap-keep-count');
-  // Pinned 1.1.145 holds it back and says why.
-  assert.ok(!md.includes('rateReceiverKeepCounts"'));
-  assert.ok(md.includes('Error lines over a limit pass at a fixed count (rateReceiverKeepCounts) from engine 1.1.146'));
+  const kc = md.slice(md.indexOf('"rateReceiverKeepCounts"'), md.indexOf('"rateReceiverKeepCounts"') + 160);
+  assert.ok(md.indexOf('"rateReceiverKeepCounts"') >= 0 && kc.includes('ERROR=20') && kc.includes('CRITICAL=20') && kc.includes('FATAL=20'), `three entries at the given count: ${kc}`);
+  // Before 1.1.146 the count is held back.
+  const early = receiverFleetValues({ datadog: true, engineVersion: '1.1.145', keepCount: 20 });
+  assert.deepEqual(values(early.options, 'rateReceiverKeepCounts'), []);
   const ready = receiverFleetValues({ datadog: true, engineVersion: '1.1.146', keepCount: 0 });
   assert.deepEqual(values(ready.options, 'rateReceiverKeepCounts'), ['ERROR=0', 'CRITICAL=0', 'FATAL=0'], 'never an empty list');
 });
@@ -138,12 +141,30 @@ test('review 9 gate: on 1.1.146 the fleet default step says the K count, not a s
   assert.match(JSON.stringify(buildFleetDefaultStep({ action: 'offload', receiverValues: old, capGiven: true })), /half of the rest/);
 });
 
-test('review 9: configure_engine engine_options are what the install writes on the pinned engine', async () => {
+test('configure_engine engine_options are what the install writes on the pinned engine from the numbers it returns', async () => {
   const { fleetDefaultFromRows } = await import('../src/tools/configure-engine.js');
   const { resolveEnforcingInstances } = await import('../src/lib/enforcing-instances.js');
-  const rows = [{ container: 'payments', action: 'pass', cap_bytes_per_window: 3000, pattern: 'ledger', current_bytes_30d: 1, events_monthly: 1 }];
-  const fd = fleetDefaultFromRows(rows as never, resolveEnforcingInstances(['payments'], { nodesByContainer: { payments: 1 } }), { action: 'offload' }, 'datadog' as never);
-  const install = receiverFleetValues({ datadog: true, fleetDefault: { capBytesPerWindowPerNode: fd.cap_bytes_per_window_per_node!, action: 'offload' } });
-  const fromInstall = install.options.filter(([k]) => k !== 'symbolMessageHashField');
-  assert.deepEqual(fd.engine_options, fromInstall);
+  const instances = resolveEnforcingInstances(['payments'], { nodesByContainer: { payments: 1 } });
+  const install = (fd: { cap_bytes_per_window_per_node?: number; cap_events_per_window_per_node?: number }) =>
+    receiverFleetValues({
+      datadog: true,
+      fleetDefault: {
+        capBytesPerWindowPerNode: fd.cap_bytes_per_window_per_node!,
+        ...(fd.cap_events_per_window_per_node !== undefined ? { capEventsPerWindowPerNode: fd.cap_events_per_window_per_node } : {}),
+        action: 'offload',
+      },
+    }).options.filter(([k]) => k !== 'symbolMessageHashField');
+  // 3,000 bytes per window at 100 bytes a line: the limit in lines is 60 (headroom 2).
+  const rows = [{ container: 'payments', action: 'pass', cap_bytes_per_window: 3000, pattern: 'ledger', current_bytes_30d: 100, events_monthly: 1 }];
+  const fd = fleetDefaultFromRows(rows as never, instances, { action: 'offload' }, 'datadog' as never);
+  assert.equal(fd.cap_events_per_window_per_node, 60);
+  assert.deepEqual(fd.engine_options, install(fd));
+  // On 1.1.146 a Datadog Receiver counts events: the unit is written and the limit is in lines.
+  assert.ok(fd.engine_options!.some(([k, v]) => k === 'rateReceiverUnit' && v === 'events'));
+  assert.deepEqual(fd.engine_options!.find(([k]) => k === 'rateReceiverAbsoluteCap'), ['rateReceiverAbsoluteCap', '60']);
+  // Rows with no line count: no byte number is written as lines, as at install.
+  const bytesOnly = fleetDefaultFromRows([{ ...rows[0], events_monthly: 0 }] as never, instances, { action: 'offload' }, 'datadog' as never);
+  assert.equal(bytesOnly.cap_events_per_window_per_node, undefined);
+  assert.deepEqual(bytesOnly.engine_options, install(bytesOnly));
+  assert.ok(!bytesOnly.engine_options!.some(([k]) => k === 'rateReceiverAbsoluteCap'));
 });

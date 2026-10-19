@@ -154,10 +154,7 @@ import { REGULATOR_UNIT_KEY } from '../lib/advisor/reporter-forwarders.js';
 import {
   FLEET_DEFAULT_ENGINE_ENV,
   FLEET_DEFAULT_MIN_ENGINE,
-  KEEP_COUNT_DEFAULT,
-  engineReadsCeiling,
-  fleetDefaultEngineOptions,
-  manifestEngineVersion,
+  receiverFleetValues,
 } from '../lib/fleet-default-install.js';
 import { medianInstances } from '../lib/enforcing-instances.js';
 import { placeServiceCap, marginSentence, type ServiceCapPlacement } from '../lib/service-cap.js';
@@ -3780,6 +3777,10 @@ export function fleetDefaultFromRows(
     num.baseline.avgBytesPerLine !== undefined
       ? linesPerDayFromCap(num.capBytesPerWindowPerNode, median.median, num.baseline.avgBytesPerLine)
       : undefined;
+  const capEvents =
+    num.baseline.avgBytesPerLine !== undefined && num.baseline.avgBytesPerLine > 0
+      ? Math.max(1, Math.round(num.capBytesPerWindowPerNode / num.baseline.avgBytesPerLine))
+      : undefined;
   const sentence =
     limitLinesPerDay !== undefined
       ? fleetSentence(destination, { limitLinesPerDay, action })
@@ -3790,9 +3791,7 @@ export function fleetDefaultFromRows(
     error_floor: errorFloor,
     headroom: num.headroom,
     cap_bytes_per_window_per_node: num.capBytesPerWindowPerNode,
-    ...(num.baseline.avgBytesPerLine !== undefined && num.baseline.avgBytesPerLine > 0
-      ? { cap_events_per_window_per_node: Math.max(1, Math.round(num.capBytesPerWindowPerNode / num.baseline.avgBytesPerLine)) }
-      : {}),
+    ...(capEvents !== undefined ? { cap_events_per_window_per_node: capEvents } : {}),
     baseline_bytes_per_window_per_node: num.baselineBytesPerWindowPerNode,
     ...(num.baseline.statement ? { baseline_statement: num.baseline.statement } : {}),
     baseline_container: num.baseline.container,
@@ -3800,12 +3799,17 @@ export function fleetDefaultFromRows(
     nodes_for_lines: median.median,
     containers_with_known_nodes: median.known,
     sentence,
-    // What log10x_advise_install writes on the engine this release pins: the
-    // error keep count from 1.1.146, the share floor before it.
-    engine_options: fleetDefaultEngineOptions(
-      { capBytesPerWindowPerNode: num.capBytesPerWindowPerNode, action, errorFloor },
-      engineReadsCeiling(manifestEngineVersion()) ? KEEP_COUNT_DEFAULT : undefined,
-    ),
+    // What log10x_advise_install writes from these numbers on the engine this
+    // release pins, the Datadog hash field aside.
+    engine_options: receiverFleetValues({
+      datadog: destination === 'datadog',
+      fleetDefault: {
+        capBytesPerWindowPerNode: num.capBytesPerWindowPerNode,
+        ...(capEvents !== undefined ? { capEventsPerWindowPerNode: capEvents } : {}),
+        action,
+        errorFloor,
+      },
+    }).options.filter(([k]) => k !== 'symbolMessageHashField'),
     engine_env: [...FLEET_DEFAULT_ENGINE_ENV],
     min_engine: FLEET_DEFAULT_MIN_ENGINE,
     install_note:
