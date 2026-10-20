@@ -313,13 +313,14 @@ function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
     // person on this boot has installed nothing, and the one ask that works
     // before anything is deployed is a POC over their own logs. The label
     // carries the property that earns the click; the tool runs the engine
-    // locally and nothing is sent out.
+    // locally and no log line leaves the machine (the engine's evaluation
+    // licence is fetched once from the log10x gateway).
     ...(pocLaneOpen()
       ? [
           {
             action: 'run_poc',
             label:
-              'Run a cost POC on your own logs (runs locally, nothing sent out; takes a target like "cut 30%")',
+              'Run a cost POC on your own logs (runs locally, no log line leaves this machine; takes a target like "cut 30%")',
             applicable: true,
             routes_to: 'log10x_poc_from_local',
           } satisfies ActionMenuItem,

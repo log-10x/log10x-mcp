@@ -629,7 +629,7 @@ function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string 
     lines.push(
       `This boot attached read-only to the public demo dataset because no API key was set.`,
       `The POC tools ARE registered in this boot: a cost POC on the user's own logs runs`,
-      `via \`log10x_poc_from_local\` with nothing sent out.`,
+      `via \`log10x_poc_from_local\`, with no log line leaving the machine.`,
       ``,
       `For the user's own environment: sign in (\`log10x_signin_start\`) or set \`LOG10X_API_KEY\`.`,
       `For a pure prospect boot with no demo attach: set \`LOG10X_DEMO_FALLBACK=off\` and restart.`
