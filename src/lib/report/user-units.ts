@@ -72,6 +72,22 @@ export function routeVerb(siem: string | null, action: Action): string {
   }
 }
 
+/**
+ * Where tier_down sends a statement's lines over its limit. tier_down keeps
+ * them in the SIEM, on its cheaper tier; offload is the action that sends
+ * lines to the account's own bucket.
+ */
+export function tierDownTarget(siem: string | null): { short: string; stays: string } {
+  if (siem === 'datadog') return { short: 'Flex Logs', stays: 'Flex Logs, where they stay searchable in Datadog' };
+  if (siem === 'cloudwatch') {
+    return { short: 'Infrequent Access', stays: 'the Infrequent Access log class, where they stay in CloudWatch Logs' };
+  }
+  const name = tierName(siem);
+  return name
+    ? { short: name, stays: `${name}, where they stay in the SIEM` }
+    : { short: 'the cheaper tier', stays: "the SIEM's cheaper tier, where they stay in the SIEM" };
+}
+
 /** Where kept lines land, as a noun. */
 export function keptNoun(siem: string | null): string {
   return siem === 'datadog' || siem === 'cloudwatch' ? 'Standard' : 'the ingest path';

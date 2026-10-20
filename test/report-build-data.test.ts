@@ -203,3 +203,18 @@ test('windowLabel wording', () => {
   assert.equal(windowLabel(1, 'file'), 'this log sample');
   assert.equal(windowLabel(6, 'file'), 'this log sample');
 });
+
+test('tier_down says the lines stay in the SIEM on its cheaper tier, never in a bucket', () => {
+  for (const [siem, label, short, stays] of [
+    ['datadog', 'Datadog', 'Flex Logs', 'stay searchable in Datadog'],
+    ['cloudwatch', 'CloudWatch', 'Infrequent Access', 'stay in CloudWatch Logs'],
+  ] as const) {
+    const { data } = build(1, { siem, siemLabel: label });
+    const tier = data.actions.find((a) => a.kind === 'tier_down');
+    assert.ok(tier, `${siem}: expected a tier_down action`);
+    assert.match(tier!.title, new RegExp(`to ${short}$`));
+    assert.match(tier!.note!, new RegExp(stays));
+    const text = JSON.stringify(data);
+    assert.doesNotMatch(text, /own bucket|retrievable on demand|retrievable tier/, `${siem}: tier_down described as offload`);
+  }
+});

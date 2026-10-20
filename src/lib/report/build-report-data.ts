@@ -39,16 +39,7 @@ import {
 } from './report-data.js';
 import { perInstanceCap, instancesFor, describeInstances, medianInstances, type EnforcingInstances } from '../enforcing-instances.js';
 import { placeServiceCap, marginSentence } from '../service-cap.js';
-import {
-  csvReason,
-  keptNoun,
-  fleetSentence,
-  flexAddedSentence,
-  linesPerDayFromCap,
-  serviceLimitSentence,
-  serviceLimitsFromPatterns,
-  type FleetLimit,
-} from './user-units.js';
+import { csvReason, keptNoun, fleetSentence, flexAddedSentence, linesPerDayFromCap, serviceLimitSentence, serviceLimitsFromPatterns, type FleetLimit, tierDownTarget } from './user-units.js';
 import {
   dependencyLinesForFleetDefault,
   dependencyLinesForService,
@@ -452,11 +443,11 @@ export function buildReportData(
     actionsCsv = files.actionsCsv;
     actions.push({
       kind: 'tier_down',
-      title: `Route ${label} statements to the retrievable tier`,
+      title: `Route ${label} statements to ${tierDownTarget(opts.siem).short}`,
       note:
         `${fmtCount(reducible.length)} low-severity statement${reducible.length === 1 ? '' : 's'} ` +
-        `carry ${fmtBytes(impact)} this window. They keep landing in your own bucket, retrievable on demand; ` +
-        `they stop landing on the ingest path. Nothing is deleted.`,
+        `carry ${fmtBytes(impact)} this window. Their lines over each limit go to ${tierDownTarget(opts.siem).stays}; ` +
+        `${keptNoun(opts.siem)} stops counting them. Nothing is deleted.`,
       impactBytes: impact,
       evidence: faces,
       ...(reducible.length > MAX_FACES_PER_ACTION
@@ -578,7 +569,7 @@ export function buildReportData(
   const tierIdx = actions.findIndex((a) => a.kind === 'tier_down');
   if (tierIdx >= 0) {
     keptSentences.push(
-      `Statements routed by action ${tierIdx + 1} land in your own bucket and come back on demand with their statement identifier as the query key.`,
+      `Lines routed by action ${tierIdx + 1} go to ${tierDownTarget(opts.siem).stays}.`,
     );
   }
 
@@ -749,7 +740,7 @@ function buildVerifyChecks(
   checks.push({
     id: 'tier_delivery',
     state: 'not_configured',
-    label: 'retrievable tier delivery',
+    label: 'cheaper-tier delivery',
     detail: 'not configured in this window',
     ...(tierIdx >= 0 ? { enabledByAction: tierIdx + 1 } : {}),
   });
