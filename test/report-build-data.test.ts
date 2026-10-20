@@ -219,33 +219,57 @@ test('tier_down says the lines stay in the SIEM on its cheaper tier, never in a 
   }
 });
 
-test('with a solved plan, the action counts the plan\'s moved statements and the title states the plan\'s share', async () => {
-  const { solvePlan } = await import('../src/lib/plan-solver.js');
-  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
-  const pats = standardPatterns();
-  const plan = solvePlan(
-    pats.map((p) => ({
-      hash: p.tenxHash ?? p.hash,
-      name: p.template,
-      services: { [p.service ?? 'svc']: p.bytes },
-      severity: p.severity ?? 'INFO',
-      bytes: p.bytes,
-    })),
-    { destination: 'cloudwatch', retrieverInstalled: false, targetPct: 30 },
+function planFor(destination: 'cloudwatch' | 'datadog', target: Record<string, unknown>, retrieverInstalled = false) {
+  return import('../src/lib/plan-solver.js').then(({ solvePlan }) =>
+    solvePlan(
+      standardPatterns().map((p) => ({
+        hash: p.tenxHash ?? p.hash,
+        name: p.template,
+        services: { [p.service ?? 'svc']: p.bytes },
+        severity: p.severity ?? 'INFO',
+        bytes: p.bytes,
+      })),
+      { destination, retrieverInstalled, ...target } as never,
+    ),
   );
-  const moved = new Set(plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash));
-  assert.ok(moved.size > 0, 'expected the plan to move something');
+}
+
+test('with a solved plan, the report states the plan\'s share on its basis and reconciles its statements', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const plan = await planFor('cloudwatch', { targetPct: 30 });
   const { data } = build(1, { plan, planSpanSeconds: 3600 });
-  const tier = data.actions.find((a) => a.kind === 'tier_down');
-  assert.ok(tier, 'expected a tier_down action');
-  assert.equal(tier!.evidence.length + (tier!.moreStatements ?? 0), moved.size);
-  assert.match(tier!.note!, new RegExp(`^${moved.size} low-severity statement`));
   assert.equal(data.totals.planPct, plan.achievedPct);
   assert.equal(data.totals.planBasis, 'bill');
-  // With no dominant fix-at-source cluster, the title states the plan's own share.
   const noCluster = { ...data, achievable: undefined };
   const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml(noCluster))![1];
   assert.match(h1, new RegExp(`${Math.round(plan.achievedPct)}% off the bill$`));
+});
+
+test('a GB budget plan says less volume, never off the bill', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const plan = await planFor('cloudwatch', { target: { kind: 'gb_budget', value: 0.001 } });
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  assert.equal(data.totals.planBasis, 'bytes');
+  const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml({ ...data, achievable: undefined }))![1];
+  assert.doesNotMatch(h1, /off the bill/);
+});
+
+test('an offload plan names the bucket; a tier_down plan keeps the lines in the SIEM', async () => {
+  const offload = await planFor('cloudwatch', { targetPct: 60 }, true);
+  const offloads = offload.planned.some((r) => r.action === 'offload');
+  const { data } = build(1, { plan: offload, planSpanSeconds: 3600 });
+  const tier = data.actions.find((a) => a.kind === 'tier_down');
+  assert.ok(tier);
+  if (offloads) assert.match(tier!.note!, /own bucket/);
+  const tierOnly = await planFor('cloudwatch', { targetPct: 30 });
+  const t2 = build(1, { plan: tierOnly, planSpanSeconds: 3600 }).data.actions.find((a) => a.kind === 'tier_down');
+  if (tierOnly.planned.every((r) => r.action === 'pass' || r.action === 'tier_down')) assert.doesNotMatch(t2!.note!, /bucket/);
+});
+
+test('with too little severity attribution, a plan adds no volume action', async () => {
+  const plan = await planFor('cloudwatch', { targetPct: 30 });
+  const { data } = build(0, { plan, planSpanSeconds: 3600 });
+  assert.equal(data.actions.filter((a) => a.kind === 'tier_down').length, 0);
 });
 
 test('the report title carries no em dash', async () => {

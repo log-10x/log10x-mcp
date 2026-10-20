@@ -480,7 +480,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
           ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
           : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
-    ? `POC from ${inner.source}: non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% of the bytes across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}): the candidates a plan can compact, tier down or offload. No plan is made without a target; pass target_percent_reduction or a budget. At list prices and default rates this volume costs ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)} a day across vendors.`
+    ? `POC from ${inner.source}: non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_expected ?? 0)}% of the bytes across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}): the candidates a plan can compact, tier down or offload. No plan is made without a target; pass target_percent_reduction or a budget. At list prices and default rates this volume costs ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)} a day across vendors.`
     : inner.source === 'file'
       ? 'POC from files: no log lines pulled. Check the paths / glob patterns.'
       : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
@@ -516,7 +516,7 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
   const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Non-error, high-frequency statements carry ${lo}-${hi}% of the bytes: the candidates a plan can compact, tier down or offload. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_expected ?? 0)}% of the bytes: the candidates a plan can compact, tier down or offload. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
   const withRoundTrip = inner.round_trip ? `${base} ${describeRoundTrip(inner.round_trip)}` : base;
   if (inner.report_path) {
     return `${withRoundTrip} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
@@ -1260,19 +1260,21 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       };
     } else {
       // No engine files this run. A previous run's files in this directory
-      // would read as this run's plan, so they go.
+      // would read as this run's plan; they may also be a plan the user means
+      // to apply, so they stay, and the run says what they are.
       const stale: string[] = [];
       for (const name of [CAPS_FILE_NAME, ACTIONS_FILE_NAME]) {
-        const path = nodePath.resolve(process.cwd(), name);
         try {
-          await fs.rm(path);
-          stale.push(name);
+          const st = await fs.stat(nodePath.resolve(process.cwd(), name));
+          stale.push(`${name} (written ${st.mtime.toISOString()})`);
         } catch {
-          // not there: nothing to remove
+          // not there
         }
       }
       if (stale.length > 0) {
-        sample.notes.push(`removed ${stale.join(' and ')} left by a previous run: this run makes no engine files`);
+        const note = `This run writes no engine files. ${stale.join(' and ')} in this directory ${stale.length === 1 ? 'is' : 'are'} from a previous run, not this one.`;
+        sample.notes.push(note);
+        lines.push('', `_${note}_`);
       }
     }
   } catch (e) {

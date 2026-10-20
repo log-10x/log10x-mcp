@@ -151,19 +151,6 @@ export function compilerInstallHintForPlatform(): InstallHint {
  * user who lands here for `log10x_compile` is not left installing the one
  * flavor that cannot serve them.
  */
-/**
- * The no-engine answer in two sentences, for a tool result an agent reads:
- * what to install, and that nothing needs setting afterwards. The full
- * guide (tenxAvailabilityHint) is for logs and the CLI.
- */
-export function tenxAvailabilityShortHint(): string {
-  const local = installHintForPlatform();
-  return (
-    'No 10x engine is available on this host. Start Docker (the MCP then runs the engine image itself, ' +
-    `nothing to set) or install the engine with \`${local.command}\`, then run this tool again.`
-  );
-}
-
 export function tenxAvailabilityHint(): string {
   const local = installHintForPlatform();
   const compiler = compilerInstallHintForPlatform();
@@ -184,3 +171,20 @@ export function tenxAvailabilityHint(): string {
     `For compile / link specifically, install the compiler flavor instead: ${compiler.command}`,
   ].join('\n');
 }
+
+/**
+ * The no-engine answer in two sentences, for a tool result an agent reads:
+ * what to install, and that nothing needs setting afterwards. The full
+ * guide (tenxAvailabilityHint) is for logs and the CLI.
+ */
+export function tenxAvailabilityShortHint(): string {
+  const local = installHintForPlatform();
+  const install = /^see /i.test(local.command)
+    ? `install the engine (${local.docsUrl})`
+    : `install the engine with \`${local.command}\``;
+  if ((process.env.LOG10X_TENX_MODE || '').trim().toLowerCase() === 'local') {
+    return `No 10x engine is available on this host, and LOG10X_TENX_MODE=local rules out Docker: ${install}, then run this tool again.`;
+  }
+  return `No 10x engine is available on this host. Start Docker (the MCP then runs the engine image itself, nothing to set) or ${install}, then run this tool again.`;
+}
+

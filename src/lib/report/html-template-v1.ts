@@ -199,7 +199,11 @@ export function renderReportHtml(data: ReportData): string {
   const addrPct = d.achievable ? Math.round(d.achievable.totalPct) : pct;
   const planShare =
     d.totals.planPct !== undefined
-      ? `${Math.round(d.totals.planPct)}% ${d.totals.planBasis === 'standard_index_volume' ? 'out of the Standard index' : 'off the bill'}`
+      ? `${Math.round(d.totals.planPct)}% ${
+          d.totals.planBasis === 'standard_index_volume' ? 'out of the Standard index'
+          : d.totals.planBasis === 'bytes' ? 'less volume'
+          : 'off the bill'
+        }`
       : null;
   const h1 =
     volumeActions > 0 && planShare && !d.achievable

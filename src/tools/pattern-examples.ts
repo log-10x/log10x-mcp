@@ -45,6 +45,7 @@ import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
 import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
+import { DevCliNotInstalledError } from '../lib/dev-cli.js';
 
 /**
  * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
@@ -768,7 +769,9 @@ async function executePatternExamplesInner(
     return graceful('Pattern Examples: pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
       '',
-      tenxAvailabilityShortHint(),
+      e instanceof DevCliNotInstalledError
+        ? tenxAvailabilityShortHint()
+        : 'The engine is installed but the run failed: the message above says why. log10x_doctor checks the engine and its licence.',
     ]);
   }
 

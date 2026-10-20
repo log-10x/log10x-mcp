@@ -88,6 +88,31 @@ export function tierDownTarget(siem: string | null): { short: string; stays: str
     : { short: 'the cheaper tier', stays: "the SIEM's cheaper tier, where they stay in the SIEM" };
 }
 
+/**
+ * Where a set of actions sends lines over their limits: the short name for a
+ * title, and the clause for a sentence ("go to ..."). tier_down stays in the
+ * SIEM, offload goes to the account's own bucket, compact stays in the SIEM in
+ * compact form; a mix names each.
+ */
+export function routeTarget(actions: ReadonlySet<string>, siem: string | null): { short: string; clause: string } {
+  const parts: Array<{ short: string; clause: string }> = [];
+  if (actions.has('tier_down')) {
+    const t = tierDownTarget(siem);
+    parts.push({ short: t.short, clause: `go to ${t.stays}` });
+  }
+  if (actions.has('offload')) {
+    parts.push({ short: 'the offload bucket', clause: "go to the account's own bucket, where the Retriever reads them back on demand" });
+  }
+  if (actions.has('compact')) {
+    parts.push({ short: 'compact form', clause: 'are compacted and stay in the SIEM' });
+  }
+  if (parts.length === 0) {
+    const t = tierDownTarget(siem);
+    return { short: t.short, clause: `go to ${t.stays}` };
+  }
+  return { short: parts.map((p) => p.short).join(' and '), clause: parts.map((p) => p.clause).join('; others ') };
+}
+
 /** Where kept lines land, as a noun. */
 export function keptNoun(siem: string | null): string {
   return siem === 'datadog' || siem === 'cloudwatch' ? 'Standard' : 'the ingest path';

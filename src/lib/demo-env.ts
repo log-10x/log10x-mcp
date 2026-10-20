@@ -46,6 +46,15 @@ export function isDemoFallbackActive(): boolean {
 }
 
 /**
+ * True while this process still reads the public demo dataset: the boot fell
+ * back to it and the demo key is still the one in use. A sign-in during the
+ * session replaces the key, so this turns false; the boot flag does not.
+ */
+export function demoDatasetInUse(): boolean {
+  return isDemoFallbackActive() && process.env.LOG10X_API_KEY === DEMO_ENV.apiKey;
+}
+
+/**
  * Tools that must NOT register against the shared public demo account.
  * UX guardrail, not a security boundary (the key is public either way):
  * an agent in demo mode should never mutate account/env/engine state that

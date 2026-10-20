@@ -90,7 +90,8 @@ export async function listLogsPage(
   });
   if (!res.ok) {
     const body = (await res.text().catch(() => '')).slice(0, 300);
-    const retryAfter = Number(res.headers.get('retry-after'));
+    // Datadog's rate limits answer with X-RateLimit-Reset (seconds until reset); Retry-After when present.
+    const retryAfter = Number(res.headers.get('retry-after') ?? res.headers.get('x-ratelimit-reset'));
     throw new DatadogHttpError(
       res.status,
       `Datadog Logs API ${res.status}: ${body}`,

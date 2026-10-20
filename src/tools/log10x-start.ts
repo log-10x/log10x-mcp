@@ -26,7 +26,7 @@
 
 import { z } from 'zod';
 import { resolveSiemLens, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
-import { isDemoFallbackActive } from '../lib/demo-env.js';
+import { demoDatasetInUse } from '../lib/demo-env.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
@@ -462,7 +462,7 @@ function renderVerbatim(args: {
   intent: 'cost' | 'forensic' | 'install' | 'orient';
   lens?: SiemLensResolution;
 }): string {
-  const tierLine = isDemoFallbackActive()
+  const tierLine = demoDatasetInUse()
     ? 'Nothing installed in your environment. The tools below read the public demo dataset, which a 10x Receiver produces.'
     : {
     dev: 'Dev CLI: local binary only. No pipeline infrastructure detected.',
@@ -499,7 +499,7 @@ function renderVerbatim(args: {
       ? `SIEM credentials detected: \`${args.siemDetected}\`.`
       : 'No SIEM credentials detected: dependency_check will return paste-ready commands instead of executed scans.';
 
-  const demoLine = isDemoFallbackActive()
+  const demoLine = demoDatasetInUse()
     ? `_Demo dataset (read-only): the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
     : null;
 
@@ -645,7 +645,7 @@ export async function executeLog10xStart(
   const menu = buildActionMenu(caps, tier);
   // On the demo dataset the probes see the public pipeline, not the user's:
   // the journey is the user's, so it starts at the beginning.
-  const phases = isDemoFallbackActive()
+  const phases = demoDatasetInUse()
     ? buildJourneyPhases('dev', {
         ...caps,
         cost_attribution_available: false,
@@ -675,7 +675,7 @@ export async function executeLog10xStart(
 
   const envelope: Log10xStartEnvelope = {
     tier,
-    ...(isDemoFallbackActive() ? { demo_dataset: true } : {}),
+    ...(demoDatasetInUse() ? { demo_dataset: true } : {}),
     siem_detected: siemDetected,
     capability_summary: caps,
     action_menu: menu,
@@ -687,7 +687,7 @@ export async function executeLog10xStart(
     ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}${isDemoFallbackActive() ? 'Demo dataset; nothing installed in the user\'s environment.' : `Tier "${tier}".`} ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}${demoDatasetInUse() ? 'Demo dataset; nothing installed in the user\'s environment.' : `Tier "${tier}".`} ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

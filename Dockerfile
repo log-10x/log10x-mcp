@@ -41,6 +41,9 @@ ENV LOG10X_MCP_BUILD_SHA=$GIT_SHA
 ENV LOG10X_MCP_BUILD_TIME=$BUILD_TIME
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
+# The chart renderer is an optional peer, not installed by default; the hosted
+# server renders the include_chart PNGs, so it installs them here.
+RUN npm install --no-save --omit=dev chart.js@^4.5.1 chartjs-node-canvas@^5.0.0 && npm cache clean --force
 # build/ includes build/vendor (copied above); default-manifest.json + package.json
 # are resolved via findUpwards() from build/lib at runtime.
 COPY --from=build /app/build ./build

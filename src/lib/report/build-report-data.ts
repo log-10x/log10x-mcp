@@ -39,7 +39,7 @@ import {
 } from './report-data.js';
 import { perInstanceCap, instancesFor, describeInstances, medianInstances, type EnforcingInstances } from '../enforcing-instances.js';
 import { placeServiceCap, marginSentence } from '../service-cap.js';
-import { csvReason, keptNoun, fleetSentence, flexAddedSentence, linesPerDayFromCap, serviceLimitSentence, serviceLimitsFromPatterns, type FleetLimit, tierDownTarget } from './user-units.js';
+import { csvReason, keptNoun, fleetSentence, flexAddedSentence, linesPerDayFromCap, serviceLimitSentence, serviceLimitsFromPatterns, type FleetLimit, routeTarget } from './user-units.js';
 import {
   dependencyLinesForFleetDefault,
   dependencyLinesForService,
@@ -319,23 +319,20 @@ export function buildReportData(
   let actionsCsv: string | null = null;
   let unattributedPlanned = 0;
   let fleetDefault: FleetDefaultReport | undefined;
-  // With a solved plan, the action is the plan's: the statements it moves,
-  // counted by the identity the plan keys on, largest first. Without one, the
-  // window's own reducible statements.
-  const planMovedHashes = opts.plan
-    ? new Set(opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash))
-    : null;
-  const acted = planMovedHashes
-    ? enriched.patterns
-        .filter((p) => planMovedHashes.has(p.tenxHash ?? p.hash))
-        .sort((a, b) => b.bytes - a.bytes)
-    : reducible;
-  const actedStatements = planMovedHashes ? planMovedHashes.size : reducible.length;
-  if (acted.length > 0) {
-    const impact = acted.reduce((s, p) => s + p.bytes, 0);
-    const faces = acted.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
-    const services = countByService(acted);
+  if (reducible.length > 0) {
+    const impact = reducible.reduce((s, p) => s + p.bytes, 0);
+    const faces = reducible.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
+    const services = countByService(reducible);
     const label = serviceLabel(services);
+    // Where the plan, or this window's statements, send their lines: the
+    // engine files carry the plan's own actions.
+    const routeActions = new Set<string>(
+      opts.plan
+        ? opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.action)
+        : reducible.map((p) => p.poc.refinedAction),
+    );
+    const route = routeTarget(routeActions, opts.siem);
+    const planMoved = opts.plan ? opts.plan.planned.filter((r) => r.action !== 'pass') : null;
     // The engine's files, one row per container. From the solved plan when
     // there is one; otherwise from this window's reducible patterns, with a
     // tier_down cap at the largest pattern the container keeps.
@@ -455,15 +452,20 @@ export function buildReportData(
     actionsCsv = files.actionsCsv;
     actions.push({
       kind: 'tier_down',
-      title: `Route ${label} statements to ${tierDownTarget(opts.siem).short}`,
+      title: `Route ${label} statements to ${route.short}`,
       note:
-        `${fmtCount(actedStatements)} low-severity statement${actedStatements === 1 ? '' : 's'} ` +
-        `carry ${fmtBytes(impact)} this window. Their lines over each limit go to ${tierDownTarget(opts.siem).stays}; ` +
-        `${keptNoun(opts.siem)} stops counting them. Nothing is deleted.`,
+        `${fmtCount(reducible.length)} low-severity statement${reducible.length === 1 ? '' : 's'} ` +
+        `carry ${fmtBytes(impact)} this window. Their lines over each limit ${route.clause}; ` +
+        `${keptNoun(opts.siem)} stops counting them. Nothing is deleted.` +
+        (planMoved && planMoved.length !== reducible.length
+          ? ` The engine files below carry the whole plan: ${fmtCount(planMoved.length)} statement${planMoved.length === 1 ? '' : 's'} ` +
+            `across ${fmtCount(Object.keys(opts.plan!.containerCaps ?? {}).length)} container${Object.keys(opts.plan!.containerCaps ?? {}).length === 1 ? '' : 's'}; ` +
+            `these are the largest in this window.`
+          : ''),
       impactBytes: impact,
       evidence: faces,
-      ...(actedStatements > faces.length
-        ? { moreStatements: actedStatements - faces.length }
+      ...(reducible.length > MAX_FACES_PER_ACTION
+        ? { moreStatements: reducible.length - MAX_FACES_PER_ACTION }
         : {}),
       change: {
         commentLines: [
@@ -581,7 +583,14 @@ export function buildReportData(
   const tierIdx = actions.findIndex((a) => a.kind === 'tier_down');
   if (tierIdx >= 0) {
     keptSentences.push(
-      `Lines routed by action ${tierIdx + 1} go to ${tierDownTarget(opts.siem).stays}.`,
+      `Lines routed by action ${tierIdx + 1} ${routeTarget(
+        new Set<string>(
+          opts.plan
+            ? opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.action)
+            : reducible.map((p) => p.poc.refinedAction),
+        ),
+        opts.siem,
+      ).clause}.`,
     );
   }
 
@@ -604,7 +613,13 @@ export function buildReportData(
     totals: {
       removableBytes,
       removablePct,
-      ...(opts.plan ? { planPct: opts.plan.achievedPct, planBasis: opts.plan.percentBasis } : {}),
+      ...(opts.plan
+        ? {
+            planPct: opts.plan.achievedPct,
+            planBasis:
+              opts.plan.target.kind === 'gb_budget' ? 'bytes' : opts.plan.percentBasis,
+          }
+        : {}),
     },
     verdict,
     actions,
@@ -691,7 +706,7 @@ function buildVerdict(
   }
   actions.forEach((a, i) => {
     if (a.kind === 'tier_down') {
-      sentences.push(`Action ${i + 1} routes low-severity statements off the ingest path; nothing is deleted.`);
+      sentences.push(`Action ${i + 1} routes low-severity statements to ${a.title.replace(/^Route .* statements to /, '')}; nothing is deleted.`);
     } else if (a.kind === 'cap') {
       sentences.push(`Action ${i + 1} caps that volume at the engine.`);
     } else {
