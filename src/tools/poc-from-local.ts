@@ -512,8 +512,6 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
       : `POC from kubectl pulled 0 log lines across the requested window. Either no pods matched the namespace + pod filter, or kubectl is not reachable. Confirm the namespace and re-run with a wider window or pod selector.`;
   }
   const srcNoun = inner.source === 'file' ? 'file' : 'pod';
-  const lo = Math.round(inner.daily_pct_reduction_low ?? 0);
-  const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
   const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_expected ?? 0)}% of the bytes: the candidates a plan can compact, tier down or offload. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
@@ -1266,7 +1264,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
       for (const name of [CAPS_FILE_NAME, ACTIONS_FILE_NAME]) {
         try {
           const st = await fs.stat(nodePath.resolve(process.cwd(), name));
-          stale.push(`${name} (written ${st.mtime.toISOString()})`);
+          stale.push(`${name} (written ${st.mtime.toISOString().replace('T', ' ').slice(0, 16)} UTC)`);
         } catch {
           // not there
         }

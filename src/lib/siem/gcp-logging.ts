@@ -186,7 +186,11 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
   try {
     // Use google-auth-library via @google-cloud/logging's auth so we get
     // the same ADC/SA flow without pulling in an extra package.
-    const { GoogleAuth } = await import('google-auth-library');
+    const { GoogleAuth } = await importOptionalPeer<typeof import('google-auth-library')>(
+      'google-auth-library',
+      'GCP Cloud Logging',
+      ['@google-cloud/logging'],
+    );
     const auth = new GoogleAuth({
       scopes: ['https://www.googleapis.com/auth/monitoring.read'],
     });

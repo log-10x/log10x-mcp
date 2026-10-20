@@ -16,7 +16,7 @@
 import {
   runDevCli,
   runDevCliFileOutput,
-  DevCliNotInstalledError,
+  DevCliNotInstalledError, DockerNotAvailableError,
   verifyRoundTrip,
   stripEncodedAnchors,
   type RoundTripResult,
@@ -542,7 +542,7 @@ export async function extractPatterns(
         roundTrip = await roundTripOf(text, local, Boolean(opts.chunkParallel && opts.useFileOutput));
       }
     } catch (e) {
-      if (e instanceof DevCliNotInstalledError) throw e;
+      if (e instanceof DevCliNotInstalledError || e instanceof DockerNotAvailableError) throw e;
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
     }
   }

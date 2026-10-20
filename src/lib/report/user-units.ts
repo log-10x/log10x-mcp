@@ -89,28 +89,40 @@ export function tierDownTarget(siem: string | null): { short: string; stays: str
 }
 
 /**
- * Where a set of actions sends lines over their limits: the short name for a
- * title, and the clause for a sentence ("go to ..."). tier_down stays in the
- * SIEM, offload goes to the account's own bucket, compact stays in the SIEM in
- * compact form; a mix names each.
+ * Where a set of actions sends lines over their limits: a short name for a
+ * title, a clause for a sentence, whether the lines leave the index the bill
+ * counts (tier_down, offload, drop), and whether every line is kept
+ * (sample and drop are not). tier_down stays in the SIEM on its cheaper tier,
+ * offload goes to the account's own bucket, compact stays in the SIEM in
+ * compact form.
  */
-export function routeTarget(actions: ReadonlySet<string>, siem: string | null): { short: string; clause: string } {
-  const parts: Array<{ short: string; clause: string }> = [];
+export function routeTarget(
+  actions: ReadonlySet<string>,
+  siem: string | null,
+): { short: string; clause: string; leavesIndex: boolean; lossless: boolean } {
+  const routes: Array<{ short: string; phrase: string }> = [];
   if (actions.has('tier_down')) {
     const t = tierDownTarget(siem);
-    parts.push({ short: t.short, clause: `go to ${t.stays}` });
+    routes.push({ short: t.short, phrase: t.stays });
   }
   if (actions.has('offload')) {
-    parts.push({ short: 'the offload bucket', clause: "go to the account's own bucket, where the Retriever reads them back on demand" });
+    routes.push({ short: 'the offload bucket', phrase: "the account's own bucket, where the Retriever reads them back on demand" });
   }
-  if (actions.has('compact')) {
-    parts.push({ short: 'compact form', clause: 'are compacted and stay in the SIEM' });
-  }
-  if (parts.length === 0) {
+  if (actions.has('compact')) routes.push({ short: 'compact form', phrase: 'compact form, still in the SIEM' });
+  if (actions.has('sample')) routes.push({ short: 'sampling', phrase: 'sampling, which keeps a share and drops the rest' });
+  if (actions.has('drop')) routes.push({ short: 'drop', phrase: 'drop, which deletes them' });
+  if (routes.length === 0) {
     const t = tierDownTarget(siem);
-    return { short: t.short, clause: `go to ${t.stays}` };
+    routes.push({ short: t.short, phrase: t.stays });
   }
-  return { short: parts.map((p) => p.short).join(' and '), clause: parts.map((p) => p.clause).join('; others ') };
+  const join = (xs: string[]) => (xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const clause =
+    routes.length === 1
+      ? `go to ${routes[0].phrase}`
+      : `go, by container, to ${routes.map((r) => r.phrase).join('; or to ')}`;
+  const leavesIndex = actions.size === 0 || actions.has('tier_down') || actions.has('offload') || actions.has('drop') || actions.has('sample');
+  const lossless = !actions.has('sample') && !actions.has('drop');
+  return { short: join(routes.map((r) => r.short)), clause, leavesIndex, lossless };
 }
 
 /** Where kept lines land, as a noun. */

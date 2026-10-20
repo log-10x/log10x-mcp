@@ -245,7 +245,7 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
       source: 'Azure Usage table (7d avg, billable only)',
     };
   } catch (e) {
-    return { errorNote: `Azure volume detection failed: ${(e as Error).message.slice(0, 200)}` };
+    return { errorNote: `Azure volume detection failed: ${(e as Error).message}` };
   }
 }
 

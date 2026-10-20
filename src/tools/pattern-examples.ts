@@ -45,7 +45,7 @@ import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
 import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
-import { DevCliNotInstalledError } from '../lib/dev-cli.js';
+import { DevCliNotInstalledError, DockerNotAvailableError } from '../lib/dev-cli.js';
 
 /**
  * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
@@ -771,7 +771,9 @@ async function executePatternExamplesInner(
       '',
       e instanceof DevCliNotInstalledError
         ? tenxAvailabilityShortHint()
-        : 'The engine is installed but the run failed: the message above says why. log10x_doctor checks the engine and its licence.',
+        : e instanceof DockerNotAvailableError
+        ? 'Docker is the selected engine runner but is not running: start Docker and run this tool again.'
+        : 'The engine ran and failed: the message above says why. log10x_doctor checks the engine and its licence.',
     ]);
   }
 

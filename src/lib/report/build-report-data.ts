@@ -455,9 +455,10 @@ export function buildReportData(
       title: `Route ${label} statements to ${route.short}`,
       note:
         `${fmtCount(reducible.length)} low-severity statement${reducible.length === 1 ? '' : 's'} ` +
-        `carry ${fmtBytes(impact)} this window. Their lines over each limit ${route.clause}; ` +
-        `${keptNoun(opts.siem)} stops counting them. Nothing is deleted.` +
-        (planMoved && planMoved.length !== reducible.length
+        `carry ${fmtBytes(impact)} this window. Their lines over each limit ${route.clause}` +
+        (route.leavesIndex ? `; ${keptNoun(opts.siem)} stops counting them.` : '.') +
+        (route.lossless ? ' Nothing is deleted.' : ' Sampled and dropped lines are not kept.') +
+        (planMoved && planMoved.length > 0 && planMoved.length !== reducible.length
           ? ` The engine files below carry the whole plan: ${fmtCount(planMoved.length)} statement${planMoved.length === 1 ? '' : 's'} ` +
             `across ${fmtCount(Object.keys(opts.plan!.containerCaps ?? {}).length)} container${Object.keys(opts.plan!.containerCaps ?? {}).length === 1 ? '' : 's'}; ` +
             `these are the largest in this window.`
@@ -706,7 +707,10 @@ function buildVerdict(
   }
   actions.forEach((a, i) => {
     if (a.kind === 'tier_down') {
-      sentences.push(`Action ${i + 1} routes low-severity statements to ${a.title.replace(/^Route .* statements to /, '')}; nothing is deleted.`);
+      sentences.push(
+        `Action ${i + 1} routes low-severity statements to ${a.title.replace(/^Route .* statements to /, '')}` +
+          (a.note?.includes('are not kept') ? '; sampled and dropped lines are not kept.' : '; nothing is deleted.'),
+      );
     } else if (a.kind === 'cap') {
       sentences.push(`Action ${i + 1} caps that volume at the engine.`);
     } else {

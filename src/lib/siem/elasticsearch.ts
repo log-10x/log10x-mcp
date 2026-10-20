@@ -6,7 +6,14 @@
  * and basic auth.
  */
 
-import { Client } from '@elastic/elasticsearch';
+import type * as ElasticSdk from '@elastic/elasticsearch';
+import { importOptionalPeer } from '../optional-peer.js';
+
+/** The Elasticsearch client, loaded on first use: it is an optional peer. */
+async function elasticClient(): Promise<typeof ElasticSdk.Client> {
+  const mod = await importOptionalPeer<typeof ElasticSdk>('@elastic/elasticsearch', 'Elasticsearch', ['@elastic/elasticsearch']);
+  return mod.Client;
+}
 
 import type {
   SiemConnector,
@@ -98,6 +105,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     };
   }
 
+  const Client = await elasticClient();
   const client = new Client({
     node: conn.url,
     // Only pass auth when configured; xpack.security.enabled=false clusters
@@ -238,6 +246,12 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
 async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<VolumeDetectionResult> {
   const conn = getConn();
   if (!conn) return { errorNote: 'Elasticsearch: ELASTIC_URL not set' };
+  let Client: typeof ElasticSdk.Client;
+  try {
+    Client = await elasticClient();
+  } catch (e) {
+    return { errorNote: `Elasticsearch volume detection unavailable: ${(e as Error).message}` };
+  }
   const client = new Client({
     node: conn.url,
     ...(conn.apiKey

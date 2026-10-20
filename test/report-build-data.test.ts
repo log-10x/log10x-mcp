@@ -278,3 +278,11 @@ test('the report title carries no em dash', async () => {
   const title = /<title>(.*?)<\/title>/s.exec(renderReportHtml(data))![1];
   assert.doesNotMatch(title, /&mdash;|—/);
 });
+
+test('a plan that moves nothing prints no reconciling sentence', async () => {
+  const plan = await planFor('cloudwatch', { target: { kind: 'gb_budget', value: 1000 } });
+  assert.equal(plan.planned.filter((r) => r.action !== 'pass').length, 0);
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  const tier = data.actions.find((a) => a.kind === 'tier_down');
+  if (tier) assert.doesNotMatch(tier.note!, /whole plan/);
+});

@@ -19,10 +19,17 @@ export async function importOptionalPeer<T>(specifier: string, feature: string, 
   try {
     return (await import(specifier)) as T;
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    const err = e as NodeJS.ErrnoException;
+    const notFound = err.code === 'ERR_MODULE_NOT_FOUND' || err.code === 'MODULE_NOT_FOUND';
+    // Node uses the same code for a missing internal file of an installed
+    // package; only a message naming the package itself means it is absent.
+    if (notFound && new RegExp(`(Cannot find (package|module) ')${specifier.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}'`).test(err.message)) {
       throw new OptionalPeerMissingError(feature, packages);
     }
-    throw e;
+    throw new Error(
+      `${feature}: ${specifier} is installed but failed to load (${err.message}). ` +
+        `A partly installed npx cache does this; remove the log10x-mcp entry under ~/.npm/_npx and start the server again.`,
+      { cause: e },
+    );
   }
 }
