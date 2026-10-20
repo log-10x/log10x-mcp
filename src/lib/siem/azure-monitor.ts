@@ -13,8 +13,18 @@
  * connector; querying one returns a failure, not rows.
  */
 
-import { LogsQueryClient, LogsQueryResultStatus } from '@azure/monitor-query';
-import { DefaultAzureCredential } from '@azure/identity';
+import type * as MonitorQuery from '@azure/monitor-query';
+import type * as AzureIdentity from '@azure/identity';
+import { importOptionalPeer } from '../optional-peer.js';
+
+const AZURE_PACKAGES = ['@azure/monitor-query', '@azure/identity'];
+
+/** The Azure SDKs, loaded on first use: they are optional peers. */
+async function azure(): Promise<{ query: typeof MonitorQuery; identity: typeof AzureIdentity }> {
+  const query = await importOptionalPeer<typeof MonitorQuery>('@azure/monitor-query', 'Azure Monitor', AZURE_PACKAGES);
+  const identity = await importOptionalPeer<typeof AzureIdentity>('@azure/identity', 'Azure Monitor', AZURE_PACKAGES);
+  return { query, identity };
+}
 
 import type {
   SiemConnector,
@@ -76,7 +86,9 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     };
   }
 
-  const client = new LogsQueryClient(new DefaultAzureCredential());
+  const { query, identity } = await azure();
+  const { LogsQueryResultStatus } = query;
+  const client = new query.LogsQueryClient(new identity.DefaultAzureCredential());
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
   const windowSec = Math.max(60, Math.floor(windowMs / 1000));
@@ -205,7 +217,8 @@ async function detectDailyVolumeGb(opts: VolumeDetectionOptions): Promise<Volume
   const workspaceId = opts.scope || process.env.AZURE_LOG_ANALYTICS_WORKSPACE_ID;
   if (!workspaceId) return { errorNote: 'Azure: AZURE_LOG_ANALYTICS_WORKSPACE_ID not set' };
   try {
-    const client = new LogsQueryClient(new DefaultAzureCredential());
+    const { query, identity } = await azure();
+    const client = new query.LogsQueryClient(new identity.DefaultAzureCredential());
     const kql = `Usage
 | where TimeGenerated > ago(7d)
 | where IsBillable == true

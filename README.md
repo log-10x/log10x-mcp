@@ -58,6 +58,8 @@ Full setup walkthrough: https://doc.log10x.com/apps/mcp/
 
 Chart images (`include_chart` on `log10x_top_patterns` and `log10x_pattern_trend`) need `chart.js` and `chartjs-node-canvas`, optional peers that are not installed with the package; without them charts render as text.
 
+Azure Monitor and GCP Cloud Logging connectors, and the Azure App Configuration and GCP Secret Manager config stores, also use optional SDKs that keep the default install small. Add them when the server starts, for example `npx -y -p log10x-mcp -p @azure/monitor-query -p @azure/identity log10x-mcp`; the connector names the packages it needs if they are missing.
+
 ## Credentials
 
 Account-scoped tools need a Log10x API key. Two ways to get one:

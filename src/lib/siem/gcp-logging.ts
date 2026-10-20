@@ -9,7 +9,8 @@
  * The connector appends a timestamp constraint automatically.
  */
 
-import { Logging } from '@google-cloud/logging';
+import type * as GcpLogging from '@google-cloud/logging';
+import { importOptionalPeer } from '../optional-peer.js';
 
 import type {
   SiemConnector,
@@ -73,6 +74,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     };
   }
 
+  const { Logging } = await importOptionalPeer<typeof GcpLogging>('@google-cloud/logging', 'GCP Cloud Logging', ['@google-cloud/logging']);
   const logging = new Logging({ projectId });
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
