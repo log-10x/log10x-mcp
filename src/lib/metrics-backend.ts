@@ -795,13 +795,13 @@ class DatadogBackend implements MetricsBackend {
 
   async listLabels(): Promise<string[]> {
     // Datadog doesn't expose a Prom-compatible label-enumeration API.
-    // We emit a synthetic list derived from `all_events_summaryBytes`
+    // We emit a synthetic list derived from `log10x.all_events_summaryBytes`
     // tags. This is best-effort; callers that absolutely need the full
     // label universe should query a known metric and inspect the tag
     // dimensions on the response.
     const now = Math.floor(Date.now() / 1000);
     const url = new URL('/api/v1/query', this.endpoint);
-    url.searchParams.set('query', 'sum:all_events_summaryBytes{*}');
+    url.searchParams.set('query', 'sum:log10x.all_events_summaryBytes{*}');
     url.searchParams.set('from', String(now - 900));
     url.searchParams.set('to', String(now));
     const res = await ddJsonFetch(url, this.headers);
@@ -819,7 +819,7 @@ class DatadogBackend implements MetricsBackend {
     // Use group-by to enumerate distinct values for a label.
     const now = Math.floor(Date.now() / 1000);
     const url = new URL('/api/v1/query', this.endpoint);
-    url.searchParams.set('query', `min:all_events_summaryBytes{*} by {${label}}`);
+    url.searchParams.set('query', `min:log10x.all_events_summaryBytes{*} by {${label}}`);
     url.searchParams.set('from', String(now - 900));
     url.searchParams.set('to', String(now));
     const res = await ddJsonFetch(url, this.headers);

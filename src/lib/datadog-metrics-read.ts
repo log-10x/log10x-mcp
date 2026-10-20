@@ -2,10 +2,13 @@
  * Read-only access to the per-pattern series the engine's Datadog metric
  * output publishes (`pipelines/run/output/metric/datadog/config.yaml`).
  *
- * Names. The output posts Micrometer step counters named
- * `<aggregator>_<counterField>`: `emitted_events_summaryVolume` (lines that
- * left the Receiver, any route except drop) and `emitted_events_summaryBytes`,
- * plus the `all_events_*` pair. Datadog keeps the name as posted.
+ * Names. The output posts each counter as Datadog distribution points named
+ * `log10x.<aggregator>_<counterField>`: `log10x.emitted_events_summaryVolume`
+ * (lines that left the Receiver, any route except drop) and
+ * `log10x.emitted_events_summaryBytes`, plus the `log10x.all_events_*` pair.
+ * Datadog merges the points every node sends for a tag set, so
+ * `sum:<name>{...}.as_count()` is the fleet's exact total; count series with
+ * no host tag would keep one point per second and lose the rest.
  *
  * Tags. The output's `tagFields` are message_pattern, tenx_hash,
  * tenx_user_service, severity_level, routeState, k8s_container and
@@ -23,8 +26,8 @@
 
 import { backendJsonFetch } from './backend-fetch.js';
 
-export const DD_VOLUME_METRIC = 'emitted_events_summaryVolume';
-export const DD_BYTES_METRIC = 'emitted_events_summaryBytes';
+export const DD_VOLUME_METRIC = 'log10x.emitted_events_summaryVolume';
+export const DD_BYTES_METRIC = 'log10x.emitted_events_summaryBytes';
 
 export const DD_TAGS = {
   pattern: 'message_pattern',
