@@ -197,8 +197,14 @@ export function renderReportHtml(data: ReportData): string {
   // of it is the customer fixing their source, not 10x removing it — the
   // breakdown strip below the hero splits the two.
   const addrPct = d.achievable ? Math.round(d.achievable.totalPct) : pct;
+  const planShare =
+    d.totals.planPct !== undefined
+      ? `${Math.round(d.totals.planPct)}% ${d.totals.planBasis === 'standard_index_volume' ? 'out of the Standard index' : 'off the bill'}`
+      : null;
   const h1 =
-    volumeActions > 0 && d.achievable
+    volumeActions > 0 && planShare && !d.achievable
+      ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${planShare}`
+      : volumeActions > 0 && d.achievable
       ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${addrPct}% addressable`
       : volumeActions > 0
         ? `${subject}, ${d.actions.length} change${d.actions.length === 1 ? '' : 's'}, ${pct}% less volume`

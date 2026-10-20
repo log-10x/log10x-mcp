@@ -319,10 +319,22 @@ export function buildReportData(
   let actionsCsv: string | null = null;
   let unattributedPlanned = 0;
   let fleetDefault: FleetDefaultReport | undefined;
-  if (reducible.length > 0) {
-    const impact = reducible.reduce((s, p) => s + p.bytes, 0);
-    const faces = reducible.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
-    const services = countByService(reducible);
+  // With a solved plan, the action is the plan's: the statements it moves,
+  // counted by the identity the plan keys on, largest first. Without one, the
+  // window's own reducible statements.
+  const planMovedHashes = opts.plan
+    ? new Set(opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash))
+    : null;
+  const acted = planMovedHashes
+    ? enriched.patterns
+        .filter((p) => planMovedHashes.has(p.tenxHash ?? p.hash))
+        .sort((a, b) => b.bytes - a.bytes)
+    : reducible;
+  const actedStatements = planMovedHashes ? planMovedHashes.size : reducible.length;
+  if (acted.length > 0) {
+    const impact = acted.reduce((s, p) => s + p.bytes, 0);
+    const faces = acted.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
+    const services = countByService(acted);
     const label = serviceLabel(services);
     // The engine's files, one row per container. From the solved plan when
     // there is one; otherwise from this window's reducible patterns, with a
@@ -445,13 +457,13 @@ export function buildReportData(
       kind: 'tier_down',
       title: `Route ${label} statements to ${tierDownTarget(opts.siem).short}`,
       note:
-        `${fmtCount(reducible.length)} low-severity statement${reducible.length === 1 ? '' : 's'} ` +
+        `${fmtCount(actedStatements)} low-severity statement${actedStatements === 1 ? '' : 's'} ` +
         `carry ${fmtBytes(impact)} this window. Their lines over each limit go to ${tierDownTarget(opts.siem).stays}; ` +
         `${keptNoun(opts.siem)} stops counting them. Nothing is deleted.`,
       impactBytes: impact,
       evidence: faces,
-      ...(reducible.length > MAX_FACES_PER_ACTION
-        ? { moreStatements: reducible.length - MAX_FACES_PER_ACTION }
+      ...(actedStatements > faces.length
+        ? { moreStatements: actedStatements - faces.length }
         : {}),
       change: {
         commentLines: [
@@ -545,7 +557,7 @@ export function buildReportData(
         }
       : undefined;
 
-  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage, dominantIsFailure);
+  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage, dominantIsFailure, dominantCluster?.members.length);
 
   // ── Verify panel ──
   const verify = buildVerifyChecks(input, enriched, severitySufficient, actions);
@@ -589,7 +601,11 @@ export function buildReportData(
       statements: extraction.patterns.length,
       ingestedBytes: extraction.totalBytes,
     },
-    totals: { removableBytes, removablePct },
+    totals: {
+      removableBytes,
+      removablePct,
+      ...(opts.plan ? { planPct: opts.plan.achievedPct, planBasis: opts.plan.percentBasis } : {}),
+    },
     verdict,
     actions,
     expected: {
@@ -639,6 +655,8 @@ function buildVerdict(
   severitySufficient: boolean,
   severityCoverage: number,
   dominantIsFailure = false,
+  /** Statements the dominant cluster's action lists; the verdict states the same count. */
+  dominantMembers?: number,
 ): ReportData['verdict'] {
   const sentences: string[] = [];
   let headline: string;
@@ -655,9 +673,10 @@ function buildVerdict(
     const noun = dominantIsFailure ? 'repeating failure' : 'repeated output';
     const verb = dominantIsFailure ? 'report the same failure' : 'emit the same output';
     headline = `${pct}% of this window is one ${noun}: ${headLine}`;
-    sentences.push(
-      `${fmtCount(cluster.members.length)} statements in ${cluster.service} ${verb} on every occurrence.`,
-    );
+    const listed = dominantMembers ?? cluster.members.length;
+    const where =
+      cluster.service && cluster.service !== '(unattributed)' ? ` in ${cluster.service}` : ' with no service name';
+    sentences.push(`${fmtCount(listed)} statements${where} ${verb} on every occurrence.`);
   } else if (actions.length > 0) {
     const covered = actions.reduce((s, a) => s + a.evidence.length + (a.moreStatements ?? 0), 0);
     headline = `${fmtCount(covered)} statements carry the removable volume in this window`;

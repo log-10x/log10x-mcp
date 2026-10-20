@@ -218,3 +218,32 @@ test('tier_down says the lines stay in the SIEM on its cheaper tier, never in a 
     assert.doesNotMatch(text, /own bucket|retrievable on demand|retrievable tier/, `${siem}: tier_down described as offload`);
   }
 });
+
+test('with a solved plan, the action counts the plan\'s moved statements and the title states the plan\'s share', async () => {
+  const { solvePlan } = await import('../src/lib/plan-solver.js');
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const pats = standardPatterns();
+  const plan = solvePlan(
+    pats.map((p) => ({
+      hash: p.tenxHash ?? p.hash,
+      name: p.template,
+      services: { [p.service ?? 'svc']: p.bytes },
+      severity: p.severity ?? 'INFO',
+      bytes: p.bytes,
+    })),
+    { destination: 'cloudwatch', retrieverInstalled: false, targetPct: 30 },
+  );
+  const moved = new Set(plan.planned.filter((r) => r.action !== 'pass').map((r) => r.hash));
+  assert.ok(moved.size > 0, 'expected the plan to move something');
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  const tier = data.actions.find((a) => a.kind === 'tier_down');
+  assert.ok(tier, 'expected a tier_down action');
+  assert.equal(tier!.evidence.length + (tier!.moreStatements ?? 0), moved.size);
+  assert.match(tier!.note!, new RegExp(`^${moved.size} low-severity statement`));
+  assert.equal(data.totals.planPct, plan.achievedPct);
+  assert.equal(data.totals.planBasis, 'bill');
+  // With no dominant fix-at-source cluster, the title states the plan's own share.
+  const noCluster = { ...data, achievable: undefined };
+  const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml(noCluster))![1];
+  assert.match(h1, new RegExp(`${Math.round(plan.achievedPct)}% off the bill$`));
+});

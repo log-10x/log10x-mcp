@@ -153,6 +153,9 @@ export interface ReportData {
     removableBytes: number;
     /** 0..100 */
     removablePct: number;
+    /** With a solved plan: the share the plan reaches (0..100), on its own basis, the figure the tool headline states. */
+    planPct?: number;
+    planBasis?: 'bill' | 'standard_index_volume';
   };
   /** Full addressable volume this window, split by who acts on it. Present
    *  only when a dominant fix-at-source cluster sits beside the lossless
