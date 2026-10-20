@@ -158,8 +158,8 @@ export function tenxAvailabilityHint(): string {
     'Tenx is not available. Two ways to get it:',
     '',
     '  1. Docker (recommended: no host install, updates via `docker pull`):',
-    '     Install Docker Desktop (https://www.docker.com/products/docker-desktop/)',
-    '     and set LOG10X_TENX_MODE=docker.',
+    '     Install and start Docker Desktop (https://www.docker.com/products/docker-desktop/).',
+    '     With no local install, the MCP finds Docker and runs the engine image itself.',
     '',
     `  2. Local install (${process.platform}), installs the \`${local.flavor}\` flavor:`,
     `     ${local.command}`,
@@ -171,3 +171,20 @@ export function tenxAvailabilityHint(): string {
     `For compile / link specifically, install the compiler flavor instead: ${compiler.command}`,
   ].join('\n');
 }
+
+/**
+ * The no-engine answer in two sentences, for a tool result an agent reads:
+ * what to install, and that nothing needs setting afterwards. The full
+ * guide (tenxAvailabilityHint) is for logs and the CLI.
+ */
+export function tenxAvailabilityShortHint(): string {
+  const local = installHintForPlatform();
+  const install = /^see /i.test(local.command)
+    ? `install the engine (${local.docsUrl})`
+    : `install the engine with \`${local.command}\``;
+  if ((process.env.LOG10X_TENX_MODE || '').trim().toLowerCase() === 'local') {
+    return `No 10x engine is available on this host, and LOG10X_TENX_MODE=local rules out Docker: ${install}, then run this tool again.`;
+  }
+  return `No 10x engine is available on this host. Start Docker (the MCP then runs the engine image itself, nothing to set) or ${install}, then run this tool again.`;
+}
+

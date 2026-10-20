@@ -44,6 +44,8 @@ import { queryInstant } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
+import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
+import { DevCliNotInstalledError, DockerNotAvailableError } from '../lib/dev-cli.js';
 
 /**
  * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
@@ -767,7 +769,11 @@ async function executePatternExamplesInner(
     return graceful('Pattern Examples: pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
       '',
-      'Verify tenx is installed (`brew install log-10x/tap/log10x`) or set `LOG10X_TENX_MODE=docker`.',
+      e instanceof DevCliNotInstalledError
+        ? tenxAvailabilityShortHint()
+        : e instanceof DockerNotAvailableError
+        ? 'Docker is the selected engine runner but is not running: start Docker and run this tool again.'
+        : 'The engine ran and failed: the message above says why. log10x_doctor checks the engine and its licence.',
     ]);
   }
 

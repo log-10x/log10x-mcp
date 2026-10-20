@@ -26,7 +26,7 @@
 
 import { z } from 'zod';
 import { resolveSiemLens, SIEM_LENS_ENUM, type SiemLensResolution } from '../lib/siem/lens.js';
-import { isDemoFallbackActive } from '../lib/demo-env.js';
+import { demoDatasetInUse } from '../lib/demo-env.js';
 import { queryInstant } from '../lib/api.js';
 import { resolveRetriever } from '../lib/retriever-api.js';
 import { discoverAvailable } from '../lib/siem/index.js';
@@ -114,7 +114,10 @@ export interface MustAskUser {
 }
 
 export interface Log10xStartEnvelope {
+  /** The tier the probes found. On the demo dataset it is the public pipeline's, not the user's (see demo_dataset). */
   tier: Tier;
+  /** True when this boot reads the public demo dataset: nothing is installed in the user's environment. */
+  demo_dataset?: boolean;
   siem_detected: string | null;
   capability_summary: CapabilitySummary;
   action_menu: ActionMenuItem[];
@@ -313,13 +316,14 @@ function buildTierMenu(caps: CapabilitySummary, tier: Tier): ActionMenuItem[] {
     // person on this boot has installed nothing, and the one ask that works
     // before anything is deployed is a POC over their own logs. The label
     // carries the property that earns the click; the tool runs the engine
-    // locally and nothing is sent out.
+    // locally and no log line leaves the machine (the engine's evaluation
+    // licence is fetched once from the log10x gateway).
     ...(pocLaneOpen()
       ? [
           {
             action: 'run_poc',
             label:
-              'Run a cost POC on your own logs (runs locally, nothing sent out; takes a target like "cut 30%")',
+              'Run a cost POC on your own logs (runs locally, no log line leaves this machine; takes a target like "cut 30%")',
             applicable: true,
             routes_to: 'log10x_poc_from_local',
           } satisfies ActionMenuItem,
@@ -450,6 +454,8 @@ function buildJourneyPhases(tier: Tier, caps: CapabilitySummary): JourneyPhase[]
 
 /** Render the must_render_verbatim markdown. */
 function renderVerbatim(args: {
+  /** Reading the public demo dataset rather than the user's environment. Defaults to false. */
+  demo?: boolean;
   tier: Tier;
   siemDetected: string | null;
   caps: CapabilitySummary;
@@ -458,7 +464,9 @@ function renderVerbatim(args: {
   intent: 'cost' | 'forensic' | 'install' | 'orient';
   lens?: SiemLensResolution;
 }): string {
-  const tierLine = {
+  const tierLine = args.demo === true
+    ? 'Nothing installed in your environment. The tools below read the public demo dataset, which a 10x Receiver produces.'
+    : {
     dev: 'Dev CLI: local binary only. No pipeline infrastructure detected.',
     reporter: 'Reporter: cost attribution metrics flowing; in-path actions not yet wired.',
     receiver: 'Receiver: in-path; compaction per source (the sidecar\'s optimize flag), sample / drop per pattern as cap-CSV plans.',
@@ -493,7 +501,7 @@ function renderVerbatim(args: {
       ? `SIEM credentials detected: \`${args.siemDetected}\`.`
       : 'No SIEM credentials detected: dependency_check will return paste-ready commands instead of executed scans.';
 
-  const demoLine = isDemoFallbackActive()
+  const demoLine = args.demo === true
     ? `_Demo dataset (read-only): the public 10x pipeline, same data as the website console. Sign in to connect your own environment._`
     : null;
 
@@ -584,9 +592,13 @@ export async function executeLog10xStart(
   // loadEnvironments() here would see the demo key mode-detect injected and
   // conclude the session is configured when the gate says otherwise.
   let env: EnvConfig | undefined;
+  // Reading the public demo dataset: the keyless boot's demo key is still the
+  // one in use, or the environments fell back to the demo (after a sign-out).
+  let demo = demoDatasetInUse();
   try {
     const loaded = await loadEnvironments();
     env = pickDefaultEnv(loaded);
+    demo = demo || loaded.isDemoMode;
   } catch {
     env = undefined;
   }
@@ -637,9 +649,20 @@ export async function executeLog10xStart(
   });
 
   const menu = buildActionMenu(caps, tier);
-  const phases = buildJourneyPhases(tier, caps);
+  // On the demo dataset the probes see the public pipeline, not the user's:
+  // the journey is the user's, so it starts at the beginning.
+  const phases = demo
+    ? buildJourneyPhases('dev', {
+        ...caps,
+        cost_attribution_available: false,
+        siem_query_available: false,
+        compact_installable: false,
+        forensic_query_available: false,
+      })
+    : buildJourneyPhases(tier, caps);
   const lensRes: SiemLensResolution = resolveSiemLens(args.siem_lens, siemDetected);
   const mustRenderVerbatim = renderVerbatim({
+    demo,
     tier,
     siemDetected,
     caps,
@@ -659,6 +682,7 @@ export async function executeLog10xStart(
 
   const envelope: Log10xStartEnvelope = {
     tier,
+    ...(demo ? { demo_dataset: true } : {}),
     siem_detected: siemDetected,
     capability_summary: caps,
     action_menu: menu,
@@ -670,7 +694,7 @@ export async function executeLog10xStart(
     ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}${demo ? 'Demo dataset; nothing installed in the user\'s environment.' : `Tier "${tier}".`} ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

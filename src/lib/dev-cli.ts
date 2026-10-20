@@ -571,6 +571,13 @@ async function runAppsMcpFileViaDocker(
  * the `LOG10X_MCP_OUTPUT_DIR` empty-path crash.
  */
 export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> {
+  // Find the engine before the license: resolving the license can mint a demo
+  // one with a call to the log10x gateway, and a host with no engine has no
+  // use for it.
+  const mode = await resolveTenxMode();
+  if (mode === 'local' && !(await isBinaryOnPath(process.env.LOG10X_TENX_PATH || 'tenx'))) {
+    throw new DevCliNotInstalledError();
+  }
   // Guard: require a real API key before running. Covers both local and docker
   // mode — docker still needs the key injected as TENX_API_KEY so the engine
   // can validate it (FIX 68-residual). Throw DevCliConfigMissingError so the
@@ -587,7 +594,6 @@ export async function runDevCliStdin(rawLogText: string): Promise<DevCliResult> 
     process.env.TENX_LICENSE_KEY = engineCreds.licenseKey;
   }
 
-  const mode = await resolveTenxMode();
   const started = Date.now();
   let cliVersion: string | undefined;
   let stdout: string;

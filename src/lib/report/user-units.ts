@@ -72,6 +72,59 @@ export function routeVerb(siem: string | null, action: Action): string {
   }
 }
 
+/**
+ * Where tier_down sends a statement's lines over its limit. tier_down keeps
+ * them in the SIEM, on its cheaper tier; offload is the action that sends
+ * lines to the account's own bucket.
+ */
+export function tierDownTarget(siem: string | null): { short: string; stays: string } {
+  if (siem === 'datadog') return { short: 'Flex Logs', stays: 'Flex Logs, where they stay searchable in Datadog' };
+  if (siem === 'cloudwatch') {
+    return { short: 'Infrequent Access', stays: 'the Infrequent Access log class, where they stay in CloudWatch Logs' };
+  }
+  const name = tierName(siem);
+  return name
+    ? { short: name, stays: `${name}, where they stay in the SIEM` }
+    : { short: 'the cheaper tier', stays: "the SIEM's cheaper tier, where they stay in the SIEM" };
+}
+
+/**
+ * Where a set of actions sends lines over their limits: a short name for a
+ * title, a clause for a sentence, whether the lines leave the index the bill
+ * counts (tier_down, offload, drop), and whether every line is kept
+ * (sample and drop are not). tier_down stays in the SIEM on its cheaper tier,
+ * offload goes to the account's own bucket, compact stays in the SIEM in
+ * compact form.
+ */
+export function routeTarget(
+  actions: ReadonlySet<string>,
+  siem: string | null,
+): { short: string; clause: string; leavesIndex: boolean; lossless: boolean } {
+  const routes: Array<{ short: string; phrase: string }> = [];
+  if (actions.has('tier_down')) {
+    const t = tierDownTarget(siem);
+    routes.push({ short: t.short, phrase: t.stays });
+  }
+  if (actions.has('offload')) {
+    routes.push({ short: 'the offload bucket', phrase: "the account's own bucket, where the Retriever reads them back on demand" });
+  }
+  if (actions.has('compact')) routes.push({ short: 'compact form', phrase: 'compact form, still in the SIEM' });
+  if (actions.has('sample')) routes.push({ short: 'sampling', phrase: 'sampling, which keeps a share and drops the rest' });
+  if (actions.has('drop')) routes.push({ short: 'drop', phrase: 'drop, which deletes them' });
+  if (routes.length === 0) {
+    const t = tierDownTarget(siem);
+    routes.push({ short: t.short, phrase: t.stays });
+  }
+  const join = (xs: string[]) => (xs.length <= 2 ? xs.join(' and ') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+  const clause =
+    routes.length === 1
+      ? `go to ${routes[0].phrase}`
+      : `go, by container, to ${routes.map((r) => r.phrase).join('; or to ')}`;
+  const leavesIndex = actions.size === 0 || actions.has('tier_down') || actions.has('offload') || actions.has('drop') || actions.has('sample');
+  const lossless = !actions.has('sample') && !actions.has('drop');
+  return { short: join(routes.map((r) => r.short)), clause, leavesIndex, lossless };
+}
+
 /** Where kept lines land, as a noun. */
 export function keptNoun(siem: string | null): string {
   return siem === 'datadog' || siem === 'cloudwatch' ? 'Standard' : 'the ingest path';

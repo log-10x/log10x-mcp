@@ -63,7 +63,7 @@ export const EXPORT_PLAN_FOLLOW_UPS: ReadonlyArray<{ id: string; displayName: st
   { id: 'sumo', displayName: 'Sumo Logic' },
 ];
 
-/** Default target, deliberately identical to `log10x_poc_from_siem`'s. */
+/** Default target, deliberately identical to `log10x_poc_from_siem_submit`'s. */
 export const DEFAULT_TARGET_EVENT_COUNT = 1_000_000;
 
 /** Where the emitted scripts write, relative to the user's working directory. */

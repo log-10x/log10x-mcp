@@ -1600,7 +1600,7 @@ async function isTenxAvailable(binary: string): Promise<{ ok: boolean; version?:
 }
 
 /**
- * SIEM-discovery probe for log10x_poc_from_siem.
+ * SIEM-discovery probe for log10x_poc_from_siem_submit.
  *
  * Iterates every registered SIEM connector's `discoverCredentials()` and
  * reports which are reachable. Shows one status line per SIEM so users
@@ -1616,7 +1616,7 @@ async function addSiemDiscoveryCheck(globalChecks: DoctorCheck[]): Promise<void>
         name: 'siem_discovery',
         status: 'warn',
         message:
-          `No SIEM credentials detected for log10x_poc_from_siem (probed ${results.length} connectors). ` +
+          `No SIEM credentials detected for log10x_poc_from_siem_submit (probed ${results.length} connectors). ` +
           `Set credentials for any of: cloudwatch (AWS_*), datadog (DD_API_KEY + DD_APP_KEY), sumo (SUMO_ACCESS_ID + SUMO_ACCESS_KEY + SUMO_ENDPOINT), ` +
           `gcp-logging (GOOGLE_APPLICATION_CREDENTIALS), elasticsearch (ELASTIC_URL + ELASTIC_API_KEY), azure-monitor (AZURE_LOG_ANALYTICS_WORKSPACE_ID + az login), ` +
           `splunk (SPLUNK_HOST + SPLUNK_TOKEN), or clickhouse (CLICKHOUSE_URL + CLICKHOUSE_USER + CLICKHOUSE_PASSWORD).`,

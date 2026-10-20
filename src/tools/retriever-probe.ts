@@ -294,9 +294,9 @@ function buildHeadline(r: ProbeResult, callerProvidedTargetHash: boolean): strin
     // indexed data is still queryable.
     if (failed === 'offload_bucket_has_recent_data') {
       return (
-        `Long-term log archiving has stalled: no new logs have landed in cold storage recently ` +
+        `Offload has stalled: no new events have landed in the offload bucket recently ` +
         `(${passedCount} of ${totalCount} health checks passed; the failed one was the new-arrivals check). ` +
-        `What this means: searching events from BEFORE the stall still works, but events FROM NOW are not being archived for later retrieval. ` +
+        `What this means: searching events from BEFORE the stall still works, but events FROM NOW are not being stored for later retrieval. ` +
         (remedy ? `Likely cause: ${remedy} ` : '') +
         `Try log10x_advise_retriever for setup guidance.`
       );

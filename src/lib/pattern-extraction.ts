@@ -1,7 +1,7 @@
 /**
  * Shared pattern-extraction lib — run a batch of events through the engine.
  *
- * Used by log10x_resolve_batch and log10x_poc_from_siem. Both tools feed
+ * Used by log10x_resolve_batch and log10x_poc_from_siem_submit. Both tools feed
  * raw log lines through this and get back a structured list of per-pattern
  * records with aggregated counts, bytes, severity, service, and sample
  * event bodies.
@@ -16,7 +16,7 @@
 import {
   runDevCli,
   runDevCliFileOutput,
-  DevCliNotInstalledError,
+  DevCliNotInstalledError, DockerNotAvailableError,
   verifyRoundTrip,
   stripEncodedAnchors,
   type RoundTripResult,
@@ -542,7 +542,7 @@ export async function extractPatterns(
         roundTrip = await roundTripOf(text, local, Boolean(opts.chunkParallel && opts.useFileOutput));
       }
     } catch (e) {
-      if (e instanceof DevCliNotInstalledError) throw e;
+      if (e instanceof DevCliNotInstalledError || e instanceof DockerNotAvailableError) throw e;
       throw new Error(`Local tenx CLI run failed: ${(e as Error).message}`);
     }
   }

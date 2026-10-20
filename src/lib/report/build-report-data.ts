@@ -39,16 +39,7 @@ import {
 } from './report-data.js';
 import { perInstanceCap, instancesFor, describeInstances, medianInstances, type EnforcingInstances } from '../enforcing-instances.js';
 import { placeServiceCap, marginSentence } from '../service-cap.js';
-import {
-  csvReason,
-  keptNoun,
-  fleetSentence,
-  flexAddedSentence,
-  linesPerDayFromCap,
-  serviceLimitSentence,
-  serviceLimitsFromPatterns,
-  type FleetLimit,
-} from './user-units.js';
+import { csvReason, keptNoun, fleetSentence, flexAddedSentence, linesPerDayFromCap, serviceLimitSentence, serviceLimitsFromPatterns, type FleetLimit, routeTarget } from './user-units.js';
 import {
   dependencyLinesForFleetDefault,
   dependencyLinesForService,
@@ -333,6 +324,15 @@ export function buildReportData(
     const faces = reducible.slice(0, MAX_FACES_PER_ACTION).map((p) => buildFace(p));
     const services = countByService(reducible);
     const label = serviceLabel(services);
+    // Where the plan, or this window's statements, send their lines: the
+    // engine files carry the plan's own actions.
+    const routeActions = new Set<string>(
+      opts.plan
+        ? opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.action)
+        : reducible.map((p) => p.poc.refinedAction),
+    );
+    const route = routeTarget(routeActions, opts.siem);
+    const planMoved = opts.plan ? opts.plan.planned.filter((r) => r.action !== 'pass') : null;
     // The engine's files, one row per container. From the solved plan when
     // there is one; otherwise from this window's reducible patterns, with a
     // tier_down cap at the largest pattern the container keeps.
@@ -452,11 +452,17 @@ export function buildReportData(
     actionsCsv = files.actionsCsv;
     actions.push({
       kind: 'tier_down',
-      title: `Route ${label} statements to the retrievable tier`,
+      title: `Route ${label} statements to ${route.short}`,
       note:
         `${fmtCount(reducible.length)} low-severity statement${reducible.length === 1 ? '' : 's'} ` +
-        `carry ${fmtBytes(impact)} this window. They keep landing in your own bucket, retrievable on demand; ` +
-        `they stop landing on the ingest path. Nothing is deleted.`,
+        `carry ${fmtBytes(impact)} this window. Their lines over each limit ${route.clause}` +
+        (route.leavesIndex ? `; ${keptNoun(opts.siem)} stops counting them.` : '.') +
+        (route.lossless ? ' Nothing is deleted.' : ' Sampled and dropped lines are not kept.') +
+        (planMoved && planMoved.length > 0 && planMoved.length !== reducible.length
+          ? ` The engine files below carry the whole plan: ${fmtCount(planMoved.length)} statement${planMoved.length === 1 ? '' : 's'} ` +
+            `across ${fmtCount(Object.keys(opts.plan!.containerCaps ?? {}).length)} container${Object.keys(opts.plan!.containerCaps ?? {}).length === 1 ? '' : 's'}; ` +
+            `these are the largest in this window.`
+          : ''),
       impactBytes: impact,
       evidence: faces,
       ...(reducible.length > MAX_FACES_PER_ACTION
@@ -554,7 +560,7 @@ export function buildReportData(
         }
       : undefined;
 
-  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage, dominantIsFailure);
+  const verdict = buildVerdict(actions, dominantCluster?.cluster ?? null, dominantShare, severitySufficient, extraction.severityCoverage, dominantIsFailure, dominantCluster?.members.length);
 
   // ── Verify panel ──
   const verify = buildVerifyChecks(input, enriched, severitySufficient, actions);
@@ -578,7 +584,14 @@ export function buildReportData(
   const tierIdx = actions.findIndex((a) => a.kind === 'tier_down');
   if (tierIdx >= 0) {
     keptSentences.push(
-      `Statements routed by action ${tierIdx + 1} land in your own bucket and come back on demand with their statement identifier as the query key.`,
+      `Lines routed by action ${tierIdx + 1} ${routeTarget(
+        new Set<string>(
+          opts.plan
+            ? opts.plan.planned.filter((r) => r.action !== 'pass').map((r) => r.action)
+            : reducible.map((p) => p.poc.refinedAction),
+        ),
+        opts.siem,
+      ).clause}.`,
     );
   }
 
@@ -598,7 +611,17 @@ export function buildReportData(
       statements: extraction.patterns.length,
       ingestedBytes: extraction.totalBytes,
     },
-    totals: { removableBytes, removablePct },
+    totals: {
+      removableBytes,
+      removablePct,
+      ...(opts.plan
+        ? {
+            planPct: opts.plan.achievedPct,
+            planBasis:
+              opts.plan.target.kind === 'gb_budget' ? 'bytes' : opts.plan.percentBasis,
+          }
+        : {}),
+    },
     verdict,
     actions,
     expected: {
@@ -648,6 +671,8 @@ function buildVerdict(
   severitySufficient: boolean,
   severityCoverage: number,
   dominantIsFailure = false,
+  /** Statements the dominant cluster's action lists; the verdict states the same count. */
+  dominantMembers?: number,
 ): ReportData['verdict'] {
   const sentences: string[] = [];
   let headline: string;
@@ -664,9 +689,10 @@ function buildVerdict(
     const noun = dominantIsFailure ? 'repeating failure' : 'repeated output';
     const verb = dominantIsFailure ? 'report the same failure' : 'emit the same output';
     headline = `${pct}% of this window is one ${noun}: ${headLine}`;
-    sentences.push(
-      `${fmtCount(cluster.members.length)} statements in ${cluster.service} ${verb} on every occurrence.`,
-    );
+    const listed = dominantMembers ?? cluster.members.length;
+    const where =
+      cluster.service && cluster.service !== '(unattributed)' ? ` in ${cluster.service}` : ' with no service name';
+    sentences.push(`${fmtCount(listed)} statements${where} ${verb} on every occurrence.`);
   } else if (actions.length > 0) {
     const covered = actions.reduce((s, a) => s + a.evidence.length + (a.moreStatements ?? 0), 0);
     headline = `${fmtCount(covered)} statements carry the removable volume in this window`;
@@ -681,7 +707,10 @@ function buildVerdict(
   }
   actions.forEach((a, i) => {
     if (a.kind === 'tier_down') {
-      sentences.push(`Action ${i + 1} routes low-severity statements off the ingest path; nothing is deleted.`);
+      sentences.push(
+        `Action ${i + 1} routes low-severity statements to ${a.title.replace(/^Route .* statements to /, '')}` +
+          (a.note?.includes('are not kept') ? '; sampled and dropped lines are not kept.' : '; nothing is deleted.'),
+      );
     } else if (a.kind === 'cap') {
       sentences.push(`Action ${i + 1} caps that volume at the engine.`);
     } else {
@@ -749,7 +778,7 @@ function buildVerifyChecks(
   checks.push({
     id: 'tier_delivery',
     state: 'not_configured',
-    label: 'retrievable tier delivery',
+    label: 'cheaper-tier delivery',
     detail: 'not configured in this window',
     ...(tierIdx >= 0 ? { enabledByAction: tierIdx + 1 } : {}),
   });

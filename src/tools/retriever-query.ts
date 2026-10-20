@@ -75,7 +75,7 @@ export const retrieverQuerySchema = {
     .string()
     .optional()
     .describe(
-      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. REQUIRED unless `pattern_hash` is given: the engine rejects a blank search, so there is no unscoped full-window scan. To scope to one pattern pass `pattern_hash`, which is matched as a text token; a Reporter-named `pattern` cannot be matched against the archive at all and is refused with a remedy.'
+      'Bloom-filter search expression using the TenX subset: `==`, `||`, `&&`, `includes(field, "substr")`. Example: `severity_level=="ERROR" && includes(text, "ECONNREFUSED")`. Selective values are dramatically cheaper than open-ended scans. REQUIRED unless `pattern_hash` is given: the engine rejects a blank search, so there is no unscoped full-window scan. To scope to one pattern pass `pattern_hash`, which is matched as a text token; a Reporter-named `pattern` cannot be matched against the offloaded events at all and is refused with a remedy.'
     ),
   from: z
     .string()

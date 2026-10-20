@@ -20,7 +20,7 @@
  * Data source routing:
  *   - Reporter/Receiver/Retriever tier (TSDB available): top_patterns scoped
  *     to service.
- *   - Dev / no-TSDB tier: poc_from_siem path via log10x_poc_from_siem.
+ *   - Dev / no-TSDB tier: poc_from_siem path via log10x_poc_from_siem_submit.
  *   Customer sees the same output shape either way.
  *
  * routes_to drill: log10x_pattern_detail with the selected tenx_hash.

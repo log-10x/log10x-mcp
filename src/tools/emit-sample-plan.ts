@@ -21,7 +21,7 @@
  * timestamp in the header, and no vendor hostname anywhere in it (enforced at
  * render time by `assertNoVendorHost`, and by a regression test per SIEM).
  *
- * The sampling matches `log10x_poc_from_siem` bucket for bucket — same
+ * The sampling matches `log10x_poc_from_siem_submit` bucket for bucket — same
  * `randomTimeBuckets`, same `perBucketCap`, same connector bucket counts —
  * so a fenced POC and a credentialed POC over the same window differ because
  * the logs differ, not because two samplers disagreed.
@@ -63,7 +63,7 @@ export const emitSamplePlanSchema = {
     .default('14d')
     .describe(
       'How far back to sample. Accepts `1h`, `24h`, `7d`, `14d`, `30d`. Default `14d`, matching ' +
-        '`log10x_poc_from_siem`: a wide window is what makes first-seen, growth and ' +
+        '`log10x_poc_from_siem_submit`: a wide window is what makes first-seen, growth and ' +
         'stable-versus-new readable at all.',
     ),
   target_event_count: z
@@ -73,7 +73,7 @@ export const emitSamplePlanSchema = {
     .default(DEFAULT_TARGET_EVENT_COUNT)
     .describe(
       'Target event count for the export. Default 1,000,000 (~500 MB at 500 B average): the same ' +
-        'default `log10x_poc_from_siem` uses, so a fenced POC and a credentialed one see samples of ' +
+        'default `log10x_poc_from_siem_submit` uses, so a fenced POC and a credentialed one see samples of ' +
         'the same size. Lower it when the export has to fit a laptop or a coffee break.',
     ),
   scope: z
@@ -200,7 +200,7 @@ function humanSummary(plan: SamplePlan, fenced: boolean, scriptPath?: string): s
     lines.push('');
     lines.push(
       '_This server is not running in the fenced profile, so it could have pulled the sample ' +
-        'itself via `log10x_poc_from_siem`. The script is still the right answer when the ' +
+        'itself via `log10x_poc_from_siem_submit`. The script is still the right answer when the ' +
         'credentials live somewhere this process does not._',
     );
   }

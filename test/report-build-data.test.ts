@@ -203,3 +203,86 @@ test('windowLabel wording', () => {
   assert.equal(windowLabel(1, 'file'), 'this log sample');
   assert.equal(windowLabel(6, 'file'), 'this log sample');
 });
+
+test('tier_down says the lines stay in the SIEM on its cheaper tier, never in a bucket', () => {
+  for (const [siem, label, short, stays] of [
+    ['datadog', 'Datadog', 'Flex Logs', 'stay searchable in Datadog'],
+    ['cloudwatch', 'CloudWatch', 'Infrequent Access', 'stay in CloudWatch Logs'],
+  ] as const) {
+    const { data } = build(1, { siem, siemLabel: label });
+    const tier = data.actions.find((a) => a.kind === 'tier_down');
+    assert.ok(tier, `${siem}: expected a tier_down action`);
+    assert.match(tier!.title, new RegExp(`to ${short}$`));
+    assert.match(tier!.note!, new RegExp(stays));
+    const text = JSON.stringify(data);
+    assert.doesNotMatch(text, /own bucket|retrievable on demand|retrievable tier/, `${siem}: tier_down described as offload`);
+  }
+});
+
+function planFor(destination: 'cloudwatch' | 'datadog', target: Record<string, unknown>, retrieverInstalled = false) {
+  return import('../src/lib/plan-solver.js').then(({ solvePlan }) =>
+    solvePlan(
+      standardPatterns().map((p) => ({
+        hash: p.tenxHash ?? p.hash,
+        name: p.template,
+        services: { [p.service ?? 'svc']: p.bytes },
+        severity: p.severity ?? 'INFO',
+        bytes: p.bytes,
+      })),
+      { destination, retrieverInstalled, ...target } as never,
+    ),
+  );
+}
+
+test('with a solved plan, the report states the plan\'s share on its basis and reconciles its statements', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const plan = await planFor('cloudwatch', { targetPct: 30 });
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  assert.equal(data.totals.planPct, plan.achievedPct);
+  assert.equal(data.totals.planBasis, 'bill');
+  const noCluster = { ...data, achievable: undefined };
+  const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml(noCluster))![1];
+  assert.match(h1, new RegExp(`${Math.round(plan.achievedPct)}% off the bill$`));
+});
+
+test('a GB budget plan says less volume, never off the bill', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const plan = await planFor('cloudwatch', { target: { kind: 'gb_budget', value: 0.001 } });
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  assert.equal(data.totals.planBasis, 'bytes');
+  const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml({ ...data, achievable: undefined }))![1];
+  assert.doesNotMatch(h1, /off the bill/);
+});
+
+test('an offload plan names the bucket; a tier_down plan keeps the lines in the SIEM', async () => {
+  const offload = await planFor('cloudwatch', { targetPct: 60 }, true);
+  const offloads = offload.planned.some((r) => r.action === 'offload');
+  const { data } = build(1, { plan: offload, planSpanSeconds: 3600 });
+  const tier = data.actions.find((a) => a.kind === 'tier_down');
+  assert.ok(tier);
+  if (offloads) assert.match(tier!.note!, /own bucket/);
+  const tierOnly = await planFor('cloudwatch', { targetPct: 30 });
+  const t2 = build(1, { plan: tierOnly, planSpanSeconds: 3600 }).data.actions.find((a) => a.kind === 'tier_down');
+  if (tierOnly.planned.every((r) => r.action === 'pass' || r.action === 'tier_down')) assert.doesNotMatch(t2!.note!, /bucket/);
+});
+
+test('with too little severity attribution, a plan adds no volume action', async () => {
+  const plan = await planFor('cloudwatch', { targetPct: 30 });
+  const { data } = build(0, { plan, planSpanSeconds: 3600 });
+  assert.equal(data.actions.filter((a) => a.kind === 'tier_down').length, 0);
+});
+
+test('the report title carries no em dash', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const { data } = build();
+  const title = /<title>(.*?)<\/title>/s.exec(renderReportHtml(data))![1];
+  assert.doesNotMatch(title, /&mdash;|—/);
+});
+
+test('a plan that moves nothing prints no reconciling sentence', async () => {
+  const plan = await planFor('cloudwatch', { target: { kind: 'gb_budget', value: 1000 } });
+  assert.equal(plan.planned.filter((r) => r.action !== 'pass').length, 0);
+  const { data } = build(1, { plan, planSpanSeconds: 3600 });
+  const tier = data.actions.find((a) => a.kind === 'tier_down');
+  if (tier) assert.doesNotMatch(tier.note!, /whole plan/);
+});

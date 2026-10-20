@@ -29,8 +29,8 @@
   "actions": [
     {
       "kind": "tier_down",
-      "title": "Route otelcol and other low-severity statements to the retrievable tier",
-      "note": "2 low-severity statements carry 3.9 MB this window. They keep landing in your own bucket, retrievable on demand; they stop landing on the ingest path. Nothing is deleted.",
+      "title": "Route otelcol and other low-severity statements to Infrequent Access",
+      "note": "2 low-severity statements carry 3.9 MB this window. Their lines over each limit go to the Infrequent Access log class, where they stay in CloudWatch Logs; Standard stops counting them. Nothing is deleted.",
       "impactBytes": 3900000,
       "evidence": [
         {
@@ -248,7 +248,7 @@
     {
       "id": "tier_delivery",
       "state": "not_configured",
-      "label": "retrievable tier delivery",
+      "label": "cheaper-tier delivery",
       "detail": "not configured in this window",
       "enabledByAction": 1
     },
@@ -263,7 +263,7 @@
     "protectedEvents": 6000,
     "sentences": [
       "every ERROR and WARN event (6.0K this window) stays on the ingest path in full.",
-      "Statements routed by action 1 land in your own bucket and come back on demand with their statement identifier as the query key."
+      "Lines routed by action 1 go to the Infrequent Access log class, where they stay in CloudWatch Logs."
     ]
   }
 }

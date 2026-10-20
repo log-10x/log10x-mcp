@@ -629,7 +629,7 @@ function formatOutOfModeMessage(toolName: string, mode: ModeResolution): string 
     lines.push(
       `This boot attached read-only to the public demo dataset because no API key was set.`,
       `The POC tools ARE registered in this boot: a cost POC on the user's own logs runs`,
-      `via \`log10x_poc_from_local\` with nothing sent out.`,
+      `via \`log10x_poc_from_local\`, with no log line leaving the machine.`,
       ``,
       `For the user's own environment: sign in (\`log10x_signin_start\`) or set \`LOG10X_API_KEY\`.`,
       `For a pure prospect boot with no demo attach: set \`LOG10X_DEMO_FALLBACK=off\` and restart.`
@@ -1501,14 +1501,14 @@ registerLog10xTool('log10x_poc_from_siem_status', pocFromSiemStatusSchema, (args
 //
 // Local-source POC: pulls log lines from kubectl (and, in follow-up
 // work, docker / journald) when no log-analyzer connection is
-// available. Distinct from log10x_poc_from_siem in three ways:
+// available. Distinct from log10x_poc_from_siem_submit in three ways:
 //   1. No vendor credentials needed (uses ambient kubeconfig)
 //   2. Cost framing is an industry-pricing matrix, NOT a prediction
 //      of any specific bill — kubectl only sees pod stdout, not
 //      CloudTrail / ALB / VM-hosted apps
 //   3. Synchronous (kubectl pull is fast); no snapshot lifecycle
 // The user must explicitly invoke this tool — there is NO automatic
-// fallthrough from log10x_poc_from_siem when SIEM creds fail. Implicit
+// fallthrough from log10x_poc_from_siem_submit when SIEM creds fail. Implicit
 // fallthrough would let a prospect see local-source numbers framed as
 // if they were SIEM bill predictions; explicit invocation forces the
 // caller to acknowledge the framing change.

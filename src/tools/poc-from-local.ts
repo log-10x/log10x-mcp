@@ -3,7 +3,7 @@
  * files/globs and renders a cost-optimization report without touching
  * any log-analyzer API.
  *
- * Distinct from `log10x_poc_from_siem`:
+ * Distinct from `log10x_poc_from_siem_submit`:
  *   - No vendor credentials needed (kubeconfig, or plain file reads)
  *   - Cost framing is an industry-pricing matrix (Datadog list,
  *     Splunk list, CloudWatch, OpenSearch), NOT a prediction of any
@@ -47,7 +47,8 @@ import {
 import { receiverBytesStatement } from '../lib/receiver-bytes.js';
 import { renderNativeControlSection, controlPatterns } from '../lib/datadog-native-control.js';
 import { extractPatterns, pipelineSplitAttribute } from '../lib/pattern-extraction.js';
-import type { RoundTripResult } from '../lib/dev-cli.js';
+import { DevCliNotInstalledError, type RoundTripResult } from '../lib/dev-cli.js';
+import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -84,6 +85,21 @@ export const REPORT_FILE_NAME = 'log10x-poc-report.html';
  * bodies off a hosted model's context has somewhere to read them instead.
  */
 export const PLAN_FILE_NAME = 'plan.md';
+
+/** Kept rows a tool response carries: the costliest, since the rest are the long tail the plan leaves alone. */
+export const RESPONSE_KEPT_ROWS = 20;
+
+/**
+ * The plan as a tool response carries it. Every kept row (thousands on a real
+ * capture, over a megabyte) would fill an agent's context, so the response
+ * keeps the costliest RESPONSE_KEPT_ROWS and counts the rest; the report and
+ * the engine files are built from the full plan.
+ */
+export function planForResponse(plan: Plan): Plan {
+  if (plan.kept.length <= RESPONSE_KEPT_ROWS) return plan;
+  const kept = [...plan.kept].sort((a, b) => b.billUsd - a.billUsd).slice(0, RESPONSE_KEPT_ROWS);
+  return { ...plan, kept, keptTotal: plan.kept.length, keptOmitted: plan.kept.length - kept.length };
+}
 
 const SIEM_IDS = [
   'cloudwatch', 'datadog', 'sumo', 'gcp-logging', 'elasticsearch',
@@ -364,6 +380,14 @@ export const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
 ];
 
+/** At most `max` characters, cut at a word boundary, with an ellipsis-free "(cut)" marker when shortened. */
+export function clipAtWord(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const head = s.slice(0, max);
+  const at = head.lastIndexOf(' ');
+  return `${(at > max * 0.6 ? head.slice(0, at) : head).replace(/[\s,;:.]+$/, '')} (cut)`;
+}
+
 export async function executePocFromLocal(args: PocFromLocalArgs): Promise<StructuredOutput> {
   const telemetry = newTelemetry();
   let inner: Awaited<ReturnType<typeof executePocFromLocalInner>>;
@@ -392,15 +416,18 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     // `backend_unavailable` + retryable:true, sending agents into a retry
     // loop against a cluster that does not exist).
     const noCluster = /kubectl|kubeconfig|cluster/i.test(msg);
+    const noEngine = e instanceof DevCliNotInstalledError;
     const err: PrimitiveError = {
-      error_type: noCluster ? 'config_missing' : 'local_processing_failed',
+      error_type: noCluster || noEngine ? 'config_missing' : 'local_processing_failed',
       retryable: false,
       suggested_backoff_ms: null,
-      hint: noCluster
-        ? `No Kubernetes cluster is reachable from this host (${msg.slice(0, 160)}). ` +
+      hint: noEngine
+        ? tenxAvailabilityShortHint()
+        : noCluster
+        ? `No Kubernetes cluster is reachable from this host (${clipAtWord(msg, 160)}). ` +
           'If this estate is serverless or file-based, re-run with source:"file" and paths:[...] ' +
           'against local log files: do not retry the kubectl path.'
-        : msg.slice(0, 400),
+        : clipAtWord(msg, 400),
     };
     const human_summary = `poc_from_local failed: ${err.hint}`;
     return buildEnvelope({
@@ -453,7 +480,7 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
           ? `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. This plan reaches ${pl.achievedPct.toFixed(0)}%, keeping everything. Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}.`
           : `Target: cut ${pl.targetPct}% of the ${pl.destination} bill. Keeping everything, this plan reaches ${pl.achievedPct.toFixed(0)}% (ceiling ${pl.keepEverythingCeilingPct.toFixed(0)}%). ${pl.gap ? pl.gap.message : ''}`)
     : hasData
-    ? `POC from ${inner.source}: ${Math.round(inner.daily_pct_reduction_low ?? 0)}-${Math.round(inner.daily_pct_reduction_high ?? 0)}% byte reduction across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}). At list prices and default rates across vendors: ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)}/day.`
+    ? `POC from ${inner.source}: non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_expected ?? 0)}% of the bytes across ${inner.distinct_patterns} pattern${inner.distinct_patterns !== 1 ? 's' : ''} (${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''}): the candidates a plan can compact, tier down or offload. No plan is made without a target; pass target_percent_reduction or a budget. At list prices and default rates this volume costs ${fmtDollar(inner.daily_dollar_projection_low ?? 0)}-${fmtDollar(inner.daily_dollar_projection_high ?? 0)} a day across vendors.`
     : inner.source === 'file'
       ? 'POC from files: no log lines pulled. Check the paths / glob patterns.'
       : 'POC from kubectl: no log lines pulled. Check namespace + pod filter.';
@@ -485,11 +512,9 @@ function buildHumanSummary(inner: PocFromLocalInner, hasData: boolean): string {
       : `POC from kubectl pulled 0 log lines across the requested window. Either no pods matched the namespace + pod filter, or kubectl is not reachable. Confirm the namespace and re-run with a wider window or pod selector.`;
   }
   const srcNoun = inner.source === 'file' ? 'file' : 'pod';
-  const lo = Math.round(inner.daily_pct_reduction_low ?? 0);
-  const hi = Math.round(inner.daily_pct_reduction_high ?? 0);
   const dlo = fmtDollar(inner.daily_dollar_projection_low ?? 0);
   const dhi = fmtDollar(inner.daily_dollar_projection_high ?? 0);
-  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Estimated byte reduction is ${lo}-${hi}% per day. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
+  const base = `Sampled ${inner.events_pulled.toLocaleString()} events from ${inner.pods_sampled} ${srcNoun}${inner.pods_sampled !== 1 ? 's' : ''} (${fmtBytes(inner.total_bytes)}) covering ${inner.distinct_patterns} distinct pattern${inner.distinct_patterns !== 1 ? 's' : ''}. Non-error, high-frequency statements carry ${Math.round(inner.daily_pct_reduction_expected ?? 0)}% of the bytes: the candidates a plan can compact, tier down or offload. At list prices and default rates the same volume costs roughly ${dlo}-${dhi}/day across vendors.`;
   const withRoundTrip = inner.round_trip ? `${base} ${describeRoundTrip(inner.round_trip)}` : base;
   if (inner.report_path) {
     return `${withRoundTrip} The action-plan report was written to ${inner.report_path}; open it in a browser.`;
@@ -827,7 +852,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     }
     lines.push('');
     lines.push(
-      `_For native stack exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
+      `_For native stack exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem_submit\` once you have credentials available._`
     );
   }
   lines.push('');
@@ -1231,6 +1256,24 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         reset_window_seconds: 240,
         unattributed_planned: built.unattributedPlanned,
       };
+    } else {
+      // No engine files this run. A previous run's files in this directory
+      // would read as this run's plan; they may also be a plan the user means
+      // to apply, so they stay, and the run says what they are.
+      const stale: string[] = [];
+      for (const name of [CAPS_FILE_NAME, ACTIONS_FILE_NAME]) {
+        try {
+          const st = await fs.stat(nodePath.resolve(process.cwd(), name));
+          stale.push(`${name} (written ${st.mtime.toISOString().replace('T', ' ').slice(0, 16)} UTC)`);
+        } catch {
+          // not there
+        }
+      }
+      if (stale.length > 0) {
+        const note = `This run writes no engine files. ${stale.join(' and ')} in this directory ${stale.length === 1 ? 'is' : 'are'} from a previous run, not this one.`;
+        sample.notes.push(note);
+        lines.push('', `_${note}_`);
+      }
     }
   } catch (e) {
     if (e instanceof ReportRefusal) throw e;
@@ -1284,7 +1327,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     ...(fenced_verification ? { fenced_verification } : {}),
     ...(fenced_offer ? { fenced_offer: { disclosure: fenced_offer.disclosure, action: fenced_offer.action } } : {}),
     feasibility,
-    ...(plan ? { plan } : {}),
+    ...(plan ? { plan: planForResponse(plan) } : {}),
     commitment_artifact,
     ...(extraction.roundTrip ? { round_trip: extraction.roundTrip } : {}),
   };

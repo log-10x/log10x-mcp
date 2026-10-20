@@ -56,6 +56,10 @@ Add an `mcpServers` entry of the same shape: `"command": "npx"`, `"args": ["-y",
 
 Full setup walkthrough: https://doc.log10x.com/apps/mcp/
 
+Chart images (`include_chart` on `log10x_top_patterns` and `log10x_pattern_trend`) need `chart.js` and `chartjs-node-canvas`, optional peers that are not installed with the package; without them charts render as text.
+
+The Elasticsearch, Azure Monitor and GCP Cloud Logging connectors, and the Azure App Configuration and GCP Secret Manager config stores, also use optional SDKs that keep the default install small. Add them when the server starts, for example `npx -y -p log10x-mcp -p @azure/monitor-query -p @azure/identity log10x-mcp`; the connector names the packages it needs if they are missing.
+
 ## Credentials
 
 Account-scoped tools need a Log10x API key. Two ways to get one:
@@ -86,6 +90,7 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 | `LOG10X_RETRIEVER_AUTH_HEADER` / `LOG10X_RETRIEVER_AUTH_VALUE` | Override the fetch-back auth header (defaults derive from the active environment). |
 | `LOG10X_OFFLOAD_BUCKET` / `LOG10X_STREAMER_BUCKET` | S3 bucket names the offload tools manage. |
 | `TENX_LICENSE_KEY` | Engine license key. Passed through to the engine on both the compile path and the local-engine run path (`log10x_resolve_batch`, `log10x_extract_templates`), in docker mode as well as local mode. In docker mode, a key the engine rejects is withheld on an automatic retry so the run falls back to the image's built-in limited license rather than failing; the downgrade is logged on the server's stderr. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Sends the server's own tool-call traces to an OTLP endpoint. The OpenTelemetry SDK is an optional peer and is not installed with the package: install `@opentelemetry/sdk-node`, `@opentelemetry/exporter-trace-otlp-http` and `@opentelemetry/resources` beside it, or tracing stays off and the server says so on stderr. |
 | `TENX_LICENSE_FILE` | Path to an engine license file, the alternative to `TENX_LICENSE_KEY`. Read by the engine itself, so it must name a path the engine process can see (inside the container when the engine runs in docker). |
 | `LOG10X_TENX_MODE` | `local` or `docker` for the local-engine and compile tools. Unset auto-detects: a `tenx` on PATH wins, docker is the fallback. Set `docker` to run the engine image instead of a local install, which is also the escape when a local `tenx` has no license. |
 | `LOG10X_TENX_PATH` | Path to the local `tenx` binary (used when the resolved mode is `local`). Defaults to `tenx` on PATH. |
