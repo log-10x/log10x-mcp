@@ -468,11 +468,24 @@ export function buildDisclosedDollarValue(
   if (source === 'unset') {
     return { value, source, disclosure: '(no $/GB rate configured: set `analyzerCost` in your env config or pass `effective_ingest_per_gb`)' };
   }
-  return {
-    value,
-    source,
-    disclosure: `(at ${describeDefaultRate(siemLabel, listRatePerGb)}. Your actual bill may differ with discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`,
-  };
+  return { value, source, disclosure: listPriceDisclosure(siemLabel, listRatePerGb) };
+}
+
+/** The list-price disclosure by label and rate. The plan solver prices every pattern on every step, so it is built once per pair. */
+const listPriceDisclosures = new Map<string | null, Map<number | null, string>>();
+
+function listPriceDisclosure(siemLabel: string | null, listRatePerGb: number | null): string {
+  let byRate = listPriceDisclosures.get(siemLabel);
+  if (!byRate) {
+    byRate = new Map();
+    listPriceDisclosures.set(siemLabel, byRate);
+  }
+  let text = byRate.get(listRatePerGb);
+  if (text === undefined) {
+    text = `(at ${describeDefaultRate(siemLabel, listRatePerGb)}. Your actual bill may differ with discounts, commits, or contract tier. To use your real rate, set \`analyzerCost\` in your env config or pass \`effective_ingest_per_gb\`.)`;
+    byRate.set(listRatePerGb, text);
+  }
+  return text;
 }
 
 /** Internal alias used during the migration. Renderers should call buildDisclosedDollarValue. */

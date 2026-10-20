@@ -115,9 +115,23 @@ const DEFAULT_RATE_NOTES: Partial<Record<SiemId, string>> = {
   clickhouse: 'a storage stand-in; the ClickHouse bill is compute',
 };
 
+/**
+ * Both lookups below read only the constant tables above, and the plan solver
+ * calls them for every pattern on every step, so each keeps its answers.
+ */
+const siemIdCache = new Map<string, SiemId | undefined>();
+const defaultRateCache = new Map<string, string>();
+
 /** A SiemId from an id or a display name; undefined when neither matches. */
 export function siemIdOf(x: string | null | undefined): SiemId | undefined {
   if (!x) return undefined;
+  if (siemIdCache.has(x)) return siemIdCache.get(x);
+  const id = siemIdOfUncached(x);
+  siemIdCache.set(x, id);
+  return id;
+}
+
+function siemIdOfUncached(x: string): SiemId | undefined {
   const k = x.trim();
   if (k in DEFAULT_ANALYZER_COST_PER_GB) return k as SiemId;
   const lower = k.toLowerCase();
@@ -146,6 +160,15 @@ export function defaultRateNote(x: string | null | undefined): string | undefine
  * not a Datadog list price (a blend of Datadog's two meters: ...)".
  */
 export function describeDefaultRate(x: string | null | undefined, ratePerGb?: number | null): string {
+  const key = `${x ?? ''}\u0000${ratePerGb ?? ''}`;
+  const hit = defaultRateCache.get(key);
+  if (hit !== undefined) return hit;
+  const text = describeDefaultRateUncached(x, ratePerGb);
+  defaultRateCache.set(key, text);
+  return text;
+}
+
+function describeDefaultRateUncached(x: string | null | undefined, ratePerGb?: number | null): string {
   const id = siemIdOf(x);
   const rate = ratePerGb ?? (id ? DEFAULT_ANALYZER_COST_PER_GB[id] : undefined);
   const shown =

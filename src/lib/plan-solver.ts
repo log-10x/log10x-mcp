@@ -338,6 +338,9 @@ export interface Plan {
   >;
   planned: PlannedRow[];
   kept: PlannedRow[];
+  /** Set only on a copy trimmed for a tool response: how many kept rows the full plan has, and how many the copy leaves out. */
+  keptTotal?: number;
+  keptOmitted?: number;
   /** Present when the keep-everything ceiling is below the target. Names the
    *  remedies (install the retriever, or accept loss) rather than pretending. */
   gap: null | {
@@ -524,6 +527,9 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       return { p, scopedBytes, scopedCapBytes };
     })
     .filter((r) => r.scopedBytes > 0);
+  // Rows by hash: the selection loop looks a row up for every moved pattern on
+  // every step, which a linear search made cubic in the pattern count.
+  const rowByHash = new Map(rows.map((r) => [r.p.hash, r] as const));
 
   const billUsdList = rows.reduce(
     (s, r) => s + billOf(r.scopedBytes, opts.destination, r.p.avgEventBytes),
@@ -569,7 +575,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     if (!perEvent) return 0;
     let n = 0;
     for (const [h, bytes] of moved) {
-      const avg = rows.find((x) => x.p.hash === h)?.p.avgEventBytes;
+      const avg = rowByHash.get(h)?.p.avgEventBytes;
       n += bytes / (avg && avg > 0 ? avg : perEvent.assumed_event_bytes);
     }
     return n;
@@ -746,7 +752,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       const tierEvents = flexEventsOf(moved);
       savedAmount = 0;
       for (const [h, bytes] of moved) {
-        const src = rows.find((x) => x.p.hash === h)!;
+        const src = rowByHash.get(h)!;
         const saved = gain('tier_down', bytes, src.p.avgEventBytes, tierEvents);
         chosen.set(h, { action: 'tier_down', saved });
         tierDownMoved.set(h, bytes);
@@ -864,7 +870,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   // still prints no share of the bill.
   const indexVolumeOf = (rs: PlannedRow[], lever: (r: PlannedRow) => Action | 'pass'): number =>
     rs.reduce((s, pr) => {
-      const src = rows.find((x) => x.p.hash === pr.hash);
+      const src = rowByHash.get(pr.hash);
       if (!src) return s;
       const a = lever(pr);
       if (a === 'pass') return s;

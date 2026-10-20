@@ -85,6 +85,21 @@ export const REPORT_FILE_NAME = 'log10x-poc-report.html';
  */
 export const PLAN_FILE_NAME = 'plan.md';
 
+/** Kept rows a tool response carries: the costliest, since the rest are the long tail the plan leaves alone. */
+export const RESPONSE_KEPT_ROWS = 20;
+
+/**
+ * The plan as a tool response carries it. Every kept row (thousands on a real
+ * capture, over a megabyte) would fill an agent's context, so the response
+ * keeps the costliest RESPONSE_KEPT_ROWS and counts the rest; the report and
+ * the engine files are built from the full plan.
+ */
+export function planForResponse(plan: Plan): Plan {
+  if (plan.kept.length <= RESPONSE_KEPT_ROWS) return plan;
+  const kept = [...plan.kept].sort((a, b) => b.billUsd - a.billUsd).slice(0, RESPONSE_KEPT_ROWS);
+  return { ...plan, kept, keptTotal: plan.kept.length, keptOmitted: plan.kept.length - kept.length };
+}
+
 const SIEM_IDS = [
   'cloudwatch', 'datadog', 'sumo', 'gcp-logging', 'elasticsearch',
   'azure-monitor', 'splunk', 'clickhouse', 'coralogix', 'elastic-serverless',
@@ -1284,7 +1299,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     ...(fenced_verification ? { fenced_verification } : {}),
     ...(fenced_offer ? { fenced_offer: { disclosure: fenced_offer.disclosure, action: fenced_offer.action } } : {}),
     feasibility,
-    ...(plan ? { plan } : {}),
+    ...(plan ? { plan: planForResponse(plan) } : {}),
     commitment_artifact,
     ...(extraction.roundTrip ? { round_trip: extraction.roundTrip } : {}),
   };
