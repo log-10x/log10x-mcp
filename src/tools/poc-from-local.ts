@@ -47,7 +47,8 @@ import {
 import { receiverBytesStatement } from '../lib/receiver-bytes.js';
 import { renderNativeControlSection, controlPatterns } from '../lib/datadog-native-control.js';
 import { extractPatterns, pipelineSplitAttribute } from '../lib/pattern-extraction.js';
-import type { RoundTripResult } from '../lib/dev-cli.js';
+import { DevCliNotInstalledError, type RoundTripResult } from '../lib/dev-cli.js';
+import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
 import { fmtBytes, fmtCount, fmtDollar, fmtPct } from '../lib/format.js';
 import { buildEnvelope, type StructuredOutput } from '../lib/output-types.js';
 import { newTelemetry, buildUnifiedFields } from '../lib/unified-envelope.js';
@@ -379,6 +380,14 @@ export const INDUSTRY_PRICING: PriceRow[] = [
   { vendor: 'OpenSearch', perGb: 0.1, note: 'self-hosted compute baseline (no canonical list rate)' },
 ];
 
+/** At most `max` characters, cut at a word boundary, with an ellipsis-free "(cut)" marker when shortened. */
+export function clipAtWord(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const head = s.slice(0, max);
+  const at = head.lastIndexOf(' ');
+  return `${(at > max * 0.6 ? head.slice(0, at) : head).replace(/[\s,;:.]+$/, '')} (cut)`;
+}
+
 export async function executePocFromLocal(args: PocFromLocalArgs): Promise<StructuredOutput> {
   const telemetry = newTelemetry();
   let inner: Awaited<ReturnType<typeof executePocFromLocalInner>>;
@@ -407,15 +416,18 @@ export async function executePocFromLocal(args: PocFromLocalArgs): Promise<Struc
     // `backend_unavailable` + retryable:true, sending agents into a retry
     // loop against a cluster that does not exist).
     const noCluster = /kubectl|kubeconfig|cluster/i.test(msg);
+    const noEngine = e instanceof DevCliNotInstalledError;
     const err: PrimitiveError = {
-      error_type: noCluster ? 'config_missing' : 'local_processing_failed',
+      error_type: noCluster || noEngine ? 'config_missing' : 'local_processing_failed',
       retryable: false,
       suggested_backoff_ms: null,
-      hint: noCluster
-        ? `No Kubernetes cluster is reachable from this host (${msg.slice(0, 160)}). ` +
+      hint: noEngine
+        ? tenxAvailabilityShortHint()
+        : noCluster
+        ? `No Kubernetes cluster is reachable from this host (${clipAtWord(msg, 160)}). ` +
           'If this estate is serverless or file-based, re-run with source:"file" and paths:[...] ' +
           'against local log files: do not retry the kubectl path.'
-        : msg.slice(0, 400),
+        : clipAtWord(msg, 400),
     };
     const human_summary = `poc_from_local failed: ${err.hint}`;
     return buildEnvelope({

@@ -44,6 +44,7 @@ import { queryInstant } from '../lib/api.js';
 import { LABELS } from '../lib/promql.js';
 import { resolveMetricsEnv } from '../lib/resolve-env.js';
 import { sanitizeUserProse } from '../lib/anti-jargon-prose.js';
+import { tenxAvailabilityShortHint } from '../lib/install-hints.js';
 
 /**
  * Resolve a pattern_hash to its dominant pattern name (Symbol Message)
@@ -767,7 +768,7 @@ async function executePatternExamplesInner(
     return graceful('Pattern Examples: pattern extractor invocation failed', [
       `tenx CLI failed on ${probe.events.length} events: ${(e as Error).message.slice(0, 200)}`,
       '',
-      'Verify tenx is installed (`brew install log-10x/tap/log10x`) or set `LOG10X_TENX_MODE=docker`.',
+      tenxAvailabilityShortHint(),
     ]);
   }
 
