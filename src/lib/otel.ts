@@ -53,8 +53,8 @@ export async function initOtel(): Promise<boolean> {
     return false;
   }
   try {
-    // Dynamic import keeps the ~3MB SDK out of the cold-start path on the
-    // common no-OTel case.
+    // The SDK is an optional peer dependency, not installed by default, and
+    // loaded only when an OTLP endpoint is set.
     const { NodeSDK } = await import('@opentelemetry/sdk-node');
     const { OTLPTraceExporter } = await import('@opentelemetry/exporter-trace-otlp-http');
     const { resourceFromAttributes } = await import('@opentelemetry/resources');
@@ -72,7 +72,13 @@ export async function initOtel(): Promise<boolean> {
   } catch (e) {
     // OTel init failure must NOT take down the MCP. Log to stderr and
     // continue without tracing.
-    process.stderr.write(`[log10x-mcp] OTel init failed: ${(e as Error).message}\n`);
+    const missing = (e as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND';
+    process.stderr.write(
+      missing
+        ? '[log10x-mcp] OTEL_EXPORTER_OTLP_ENDPOINT is set, but the OpenTelemetry SDK is not installed, so tracing is off. ' +
+            'It is an optional peer: npm install @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http @opentelemetry/resources\n'
+        : `[log10x-mcp] OTel init failed: ${(e as Error).message}\n`
+    );
     return false;
   }
 }

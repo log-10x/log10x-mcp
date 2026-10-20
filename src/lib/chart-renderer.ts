@@ -44,7 +44,12 @@ async function getCanvas(): Promise<import('chartjs-node-canvas').ChartJSNodeCan
     });
     return canvasInstance;
   } catch (e) {
-    process.stderr.write(`[log10x-mcp] chart renderer init failed (fallback to no-image): ${(e as Error).message}\n`);
+    const missing = (e as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND';
+    process.stderr.write(
+      missing
+        ? '[log10x-mcp] chart images are off: chartjs-node-canvas and chart.js are optional peers, not installed by default. Charts render as text.\n'
+        : `[log10x-mcp] chart renderer init failed (fallback to no-image): ${(e as Error).message}\n`
+    );
     return null;
   }
 }

@@ -1,16 +1,17 @@
 /**
  * Datadog Logs connector.
  *
- * Uses the Logs API `searchLogs` (v2) endpoint with cursor pagination.
- * `DD_SITE` (or `DATADOG_SITE`) routes between US/EU/… endpoints; we
- * rely on the SDK's built-in site configuration so US1/EU1/US3/US5/AP1
- * all work without code changes.
+ * Uses the Logs API list endpoint (GET /api/v2/logs/events) with cursor
+ * pagination, called directly: it is the one Datadog call the connector
+ * makes, and the Datadog API client package it used to come from was the
+ * largest part of a fresh install. `DD_SITE` (or `DATADOG_SITE`) selects
+ * the site (US1 by default, EU1, US3, US5, AP1, ...).
  *
  * Credential discovery: `DD_API_KEY` + `DD_APP_KEY` (also accepts
  * `DATADOG_*` variants) — both are required by the Logs API.
  */
 
-import { client, v2 } from '@datadog/datadog-api-client';
+import { datadogApiBase } from '../datadog-metrics-read.js';
 
 import type {
   SiemConnector,
@@ -34,6 +35,76 @@ export const DATADOG_BUCKET_COUNT = 24;
 
 /** Page size per cursor step. Datadog's own ceiling on this endpoint is 5000. */
 export const DATADOG_PAGE_LIMIT = 1000;
+
+/** One log event as GET /api/v2/logs/events returns it. */
+interface DatadogLogEvent {
+  id?: string;
+  type?: string;
+  attributes?: {
+    timestamp?: string;
+    message?: string;
+    service?: string;
+    status?: string;
+    tags?: string[];
+    host?: string;
+    attributes?: Record<string, unknown>;
+  };
+}
+
+interface DatadogLogsPage {
+  data?: DatadogLogEvent[];
+  meta?: { page?: { after?: string } };
+}
+
+/** An HTTP failure from the Logs API, carrying the status and Retry-After for the retry helper. */
+export class DatadogHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly retryAfterMs?: number
+  ) {
+    super(message);
+  }
+}
+
+/** GET /api/v2/logs/events for one page. Exported for tests. */
+export async function listLogsPage(
+  base: string,
+  keys: { apiKey: string; appKey: string },
+  params: { query?: string; fromMs: number; toMs: number; cursor?: string; limit: number },
+  fetchImpl: typeof fetch = fetch
+): Promise<DatadogLogsPage> {
+  const url = new URL('/api/v2/logs/events', base);
+  if (params.query) url.searchParams.set('filter[query]', params.query);
+  url.searchParams.set('filter[from]', new Date(params.fromMs).toISOString());
+  url.searchParams.set('filter[to]', new Date(params.toMs).toISOString());
+  if (params.cursor) url.searchParams.set('page[cursor]', params.cursor);
+  url.searchParams.set('page[limit]', String(params.limit));
+  url.searchParams.set('sort', 'timestamp');
+  const res = await fetchImpl(url, {
+    headers: {
+      'DD-API-KEY': keys.apiKey,
+      'DD-APPLICATION-KEY': keys.appKey,
+      Accept: 'application/json',
+    },
+  });
+  if (!res.ok) {
+    const body = (await res.text().catch(() => '')).slice(0, 300);
+    const retryAfter = Number(res.headers.get('retry-after'));
+    throw new DatadogHttpError(
+      res.status,
+      `Datadog Logs API ${res.status}: ${body}`,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined
+    );
+  }
+  return (await res.json()) as DatadogLogsPage;
+}
+
+/** 429 and 5xx are worth retrying; a 4xx such as a bad key or query is not. */
+function isRetryableDatadogError(err: unknown): boolean {
+  if (err instanceof DatadogHttpError) return err.status === 429 || err.status >= 500;
+  return true;
+}
 
 function getKeys(): { apiKey?: string; appKey?: string; site?: string } {
   return {
@@ -73,13 +144,7 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
     };
   }
 
-  const configuration = client.createConfiguration({
-    authMethods: { apiKeyAuth: apiKey, appKeyAuth: appKey },
-  });
-  if (site) {
-    configuration.setServerVariables({ site });
-  }
-  const api = new v2.LogsApi(configuration);
+  const base = datadogApiBase(site || 'datadoghq.com');
 
   const deadline = Date.now() + opts.maxPullMinutes * 60_000;
   const windowMs = parseWindowMs(opts.window);
@@ -121,15 +186,17 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
         break bucketLoop;
       }
       try {
-        const resp = await retryWithBackoff(() =>
-          api.listLogsGet({
-            filterQuery: queryStr || undefined,
-            filterFrom: new Date(bucket.fromMs),
-            filterTo: new Date(bucket.toMs),
-            pageCursor: cursor,
-            pageLimit,
-            sort: 'timestamp',
-          })
+        const resp = await retryWithBackoff(
+          () =>
+            listLogsPage(
+              base,
+              { apiKey, appKey },
+              { query: queryStr || undefined, fromMs: bucket.fromMs, toMs: bucket.toMs, cursor, limit: pageLimit }
+            ),
+          {
+            isRetryable: isRetryableDatadogError,
+            extractRetryAfterMs: (e) => (e instanceof DatadogHttpError ? e.retryAfterMs : undefined),
+          }
         );
         const data = resp.data || [];
         for (const ev of data) {
