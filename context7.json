@@ -1,0 +1,14 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/log-10x/log10x-mcp",
+  "public_key": "pk_mBTI54punnhDsDeraCYaq",
+  "projectTitle": "Log10x MCP",
+  "description": "MCP server that ranks log patterns by volume and cost and plans an action for the excess over each cap: compact on Splunk and self-managed Elasticsearch, tier down or offload to S3 on other platforms. Runs locally over stdio.",
+  "rules": [
+    "Install with npx -y log10x-mcp@latest; the server runs locally over stdio.",
+    "For a cost POC on local log files call log10x_poc_from_local; it needs the tenx binary on PATH or Docker.",
+    "Without LOG10X_API_KEY the server answers read-only from a public demo dataset.",
+    "Compact applies only to Splunk and self-managed Elasticsearch; on other platforms the actions are tier down and offload.",
+    "The Elasticsearch, Azure Monitor and GCP Cloud Logging connectors need their SDK added at start, for example npx -y -p log10x-mcp -p @elastic/elasticsearch log10x-mcp; a connector without it names the packages to add."
+  ]
+}
