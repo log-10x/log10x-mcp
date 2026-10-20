@@ -282,7 +282,7 @@ export async function fetchExistingResults(
 }
 
 /** Marker prefix for the unresolvable-pattern-name error (caller input). */
-export const UNRESOLVABLE_PATTERN_PREFIX = 'Pattern name not resolvable against the archive:';
+export const UNRESOLVABLE_PATTERN_PREFIX = 'Pattern name not resolvable against the offloaded events:';
 
 /**
  * A Reporter-named pattern CANNOT be matched against the offload archive, and
@@ -330,13 +330,13 @@ export function buildPatternSearch(pattern: string): string {
   const safe = pattern.trim().replace(/"/g, '');
   throw new Error(
     `${UNRESOLVABLE_PATTERN_PREFIX} "${safe}". A Symbol Message is a derived ` +
-      'label computed from the event, so it is never a token in the archived bytes ' +
+      'label computed from the event, so it is never a token in the offloaded bytes ' +
       'and the Bloom index cannot match it. The field this previously queried, ' +
       '`tenx_user_pattern`, does not exist in the engine at all. Pass ' +
       '`pattern_hash` instead: top_patterns returns it on the same row as the ' +
       'pattern name, and event_lookup resolves a name to a hash. The hash is ' +
       'matched as a text token, which works because the Receiver stamps it into ' +
-      'each archived event.'
+      'each offloaded event.'
   );
 }
 

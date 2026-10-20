@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Log10x &mdash; log volume action plan</title>
+<title>Log10x: log volume action plan</title>
 <style>
 :root{--bg:#f2f4f6;--panel:#fff;--sunk:#eaeef2;--line:#dde3e9;--line2:#c8d1da;--ink:#161c23;--dim:#5d6773;--faint:#8b95a1;--val:#8a3f76;--val-bg:#f6ecf3;--bar:#2c3540;--ok:#2e6b4f;--ok-bg:#ddefe6;--wrn:#8a5c10;--skip:#8b95a1}
 @media (prefers-color-scheme:dark){:root{--bg:#101419;--panel:#171c22;--sunk:#12161b;--line:#242b34;--line2:#333c47;--ink:#dfe5ec;--dim:#8b96a4;--faint:#6a7481;--val:#d091c0;--val-bg:#2a1e28;--bar:#9aa6b4;--ok:#79b39c;--ok-bg:#1c2b25;--wrn:#d5a445;--skip:#6a7481}}
@@ -95,8 +95,8 @@ footer p{margin:0 0 9px} footer b{color:var(--dim);font-weight:600}
 
 <h2>Action plan</h2>
 <article class="act">
-<div class="ahead"><span class="anum">1</span><h3>Route otelcol and other low-severity statements to the retrievable tier</h3><span class="impact">&minus;3.9 MB this window</span></div>
-<p class="anote">2 low-severity statements carry 3.9 MB this window. They keep landing in your own bucket, retrievable on demand; they stop landing on the ingest path. Nothing is deleted.</p>
+<div class="ahead"><span class="anum">1</span><h3>Route otelcol and other low-severity statements to Infrequent Access</h3><span class="impact">&minus;3.9 MB this window</span></div>
+<p class="anote">2 low-severity statements carry 3.9 MB this window. Their lines over each limit go to the Infrequent Access log class, where they stay in CloudWatch Logs; Standard stops counting them. Nothing is deleted.</p>
 <p class="annot">Collector self-telemetry, confirmed with the platform team.</p>
 <div class="alabel">evidence, from your window</div>
 <pre class="face"><span class="fl">Logs exported resource logs <i class="v">$</i> log records <i class="v">$</i></span></pre><p class="evm">3.0K events &middot; 1.0K bytes each &middot; identifier <code>qkI1</code></p>
@@ -146,11 +146,11 @@ kubectl -n demo rollout restart daemonset tenx-fluentd</pre>
 <div class="chk ok"><i>&#10003;</i><div>9.9K events resolved to 5 statements</div></div>
 <div class="chk ok"><i>&#10003;</i><div>multi-line statements welded <span>&middot; 1 statements arrive whole</span></div></div>
 <div class="chk ok"><i>&#10003;</i><div>severity attribution sufficient <span>&middot; 100% of statements</span></div></div>
-<div class="chk skip"><i>&ndash;</i><div>retrievable tier delivery <span>&middot; not configured in this window &middot; action 1 enables it</span></div></div>
+<div class="chk skip"><i>&ndash;</i><div>cheaper-tier delivery <span>&middot; not configured in this window &middot; action 1 enables it</span></div></div>
 <div class="chk skip"><i>&ndash;</i><div>environment doctor <span>&middot; run log10x_doctor for engine + delivery checks &middot; not run on this pass</span></div></div>
 </div>
 <div class="kept">
-<p><b>What this plan does not touch:</b> every ERROR and WARN event (6.0K this window) stays on the ingest path in full. Statements routed by action 1 land in your own bucket and come back on demand with their statement identifier as the query key.</p>
+<p><b>What this plan does not touch:</b> every ERROR and WARN event (6.0K this window) stays on the ingest path in full. Lines routed by action 1 go to the Infrequent Access log class, where they stay in CloudWatch Logs.</p>
 </div>
 
 <footer>

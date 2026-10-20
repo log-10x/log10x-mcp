@@ -257,7 +257,7 @@ export function renderReportHtml(data: ReportData): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Log10x &mdash; log volume action plan</title>
+<title>Log10x: log volume action plan</title>
 <style>
 ${CSS}
 </style>

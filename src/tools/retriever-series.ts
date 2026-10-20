@@ -790,7 +790,7 @@ function buildSeriesHumanSummary(s: {
     const transportBound = wallTimeMs > 30_000 && result.workerFiles === 0;
     if (transportBound) {
       third =
-        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0: retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale archive index). ` +
+        `Series is empty AND wall_time ${wallTimeMs}ms with worker_files=0: retriever likely did not return events for this pattern in this window (possible timeout, worker starvation, or stale offload index). ` +
         `Less likely: pattern truly empty in window, OR search expression did not match. Check log10x_doctor retriever_forensic_health.`;
     } else {
       third =

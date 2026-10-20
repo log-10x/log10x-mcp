@@ -1,7 +1,7 @@
 /**
  * Shared pattern-extraction lib — run a batch of events through the engine.
  *
- * Used by log10x_resolve_batch and log10x_poc_from_siem. Both tools feed
+ * Used by log10x_resolve_batch and log10x_poc_from_siem_submit. Both tools feed
  * raw log lines through this and get back a structured list of per-pattern
  * records with aggregated counts, bytes, severity, service, and sample
  * event bodies.

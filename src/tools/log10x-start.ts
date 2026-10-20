@@ -114,7 +114,10 @@ export interface MustAskUser {
 }
 
 export interface Log10xStartEnvelope {
+  /** The tier the probes found. On the demo dataset it is the public pipeline's, not the user's (see demo_dataset). */
   tier: Tier;
+  /** True when this boot reads the public demo dataset: nothing is installed in the user's environment. */
+  demo_dataset?: boolean;
   siem_detected: string | null;
   capability_summary: CapabilitySummary;
   action_menu: ActionMenuItem[];
@@ -459,7 +462,9 @@ function renderVerbatim(args: {
   intent: 'cost' | 'forensic' | 'install' | 'orient';
   lens?: SiemLensResolution;
 }): string {
-  const tierLine = {
+  const tierLine = isDemoFallbackActive()
+    ? 'Nothing installed in your environment. The tools below read the public demo dataset, which a 10x Receiver produces.'
+    : {
     dev: 'Dev CLI: local binary only. No pipeline infrastructure detected.',
     reporter: 'Reporter: cost attribution metrics flowing; in-path actions not yet wired.',
     receiver: 'Receiver: in-path; compaction per source (the sidecar\'s optimize flag), sample / drop per pattern as cap-CSV plans.',
@@ -638,7 +643,17 @@ export async function executeLog10xStart(
   });
 
   const menu = buildActionMenu(caps, tier);
-  const phases = buildJourneyPhases(tier, caps);
+  // On the demo dataset the probes see the public pipeline, not the user's:
+  // the journey is the user's, so it starts at the beginning.
+  const phases = isDemoFallbackActive()
+    ? buildJourneyPhases('dev', {
+        ...caps,
+        cost_attribution_available: false,
+        siem_query_available: false,
+        compact_installable: false,
+        forensic_query_available: false,
+      })
+    : buildJourneyPhases(tier, caps);
   const lensRes: SiemLensResolution = resolveSiemLens(args.siem_lens, siemDetected);
   const mustRenderVerbatim = renderVerbatim({
     tier,
@@ -660,6 +675,7 @@ export async function executeLog10xStart(
 
   const envelope: Log10xStartEnvelope = {
     tier,
+    ...(isDemoFallbackActive() ? { demo_dataset: true } : {}),
     siem_detected: siemDetected,
     capability_summary: caps,
     action_menu: menu,
@@ -671,7 +687,7 @@ export async function executeLog10xStart(
     ...(lensRes.lensed ? { siem_lens: lensRes.effective ?? undefined, siem_actual: lensRes.actual, siem_lens_basis: lensRes.basis } : {}),
   };
 
-  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}Tier "${tier}". ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
+  const headline = `${lensRes.lensed && lensRes.display ? `[lens: ${lensRes.display}] ` : ''}${isDemoFallbackActive() ? 'Demo dataset; nothing installed in the user\'s environment.' : `Tier "${tier}".`} ${menu.filter((m) => m.applicable).length} of ${menu.length} action paths available. Awaiting the user's pick. When they pick, call that action_menu item's routes_to tool; do NOT call log10x_start again.`;
 
   return buildEnvelope({
     tool: 'log10x_start',

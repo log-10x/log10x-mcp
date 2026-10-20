@@ -247,3 +247,10 @@ test('with a solved plan, the action counts the plan\'s moved statements and the
   const h1 = /<h1>(.*?)<\/h1>/s.exec(renderReportHtml(noCluster))![1];
   assert.match(h1, new RegExp(`${Math.round(plan.achievedPct)}% off the bill$`));
 });
+
+test('the report title carries no em dash', async () => {
+  const { renderReportHtml } = await import('../src/lib/report/html-template-v1.js');
+  const { data } = build();
+  const title = /<title>(.*?)<\/title>/s.exec(renderReportHtml(data))![1];
+  assert.doesNotMatch(title, /&mdash;|—/);
+});

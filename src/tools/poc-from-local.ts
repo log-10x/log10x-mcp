@@ -3,7 +3,7 @@
  * files/globs and renders a cost-optimization report without touching
  * any log-analyzer API.
  *
- * Distinct from `log10x_poc_from_siem`:
+ * Distinct from `log10x_poc_from_siem_submit`:
  *   - No vendor credentials needed (kubeconfig, or plain file reads)
  *   - Cost framing is an industry-pricing matrix (Datadog list,
  *     Splunk list, CloudWatch, OpenSearch), NOT a prediction of any
@@ -854,7 +854,7 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
     }
     lines.push('');
     lines.push(
-      `_For native stack exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem\` once you have credentials available._`
+      `_For native stack exclusion configs, paste-ready Receiver YAML, and the full 9-section report, run \`log10x_poc_from_siem_submit\` once you have credentials available._`
     );
   }
   lines.push('');
@@ -1258,6 +1258,22 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         reset_window_seconds: 240,
         unattributed_planned: built.unattributedPlanned,
       };
+    } else {
+      // No engine files this run. A previous run's files in this directory
+      // would read as this run's plan, so they go.
+      const stale: string[] = [];
+      for (const name of [CAPS_FILE_NAME, ACTIONS_FILE_NAME]) {
+        const path = nodePath.resolve(process.cwd(), name);
+        try {
+          await fs.rm(path);
+          stale.push(name);
+        } catch {
+          // not there: nothing to remove
+        }
+      }
+      if (stale.length > 0) {
+        sample.notes.push(`removed ${stale.join(' and ')} left by a previous run: this run makes no engine files`);
+      }
     }
   } catch (e) {
     if (e instanceof ReportRefusal) throw e;
