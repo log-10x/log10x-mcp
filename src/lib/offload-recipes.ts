@@ -1228,16 +1228,18 @@ export function elasticFrozenTierRecipe(
   const repo = opts.repository ?? 'found-snapshots';
   const tdAlias = opts.tierDownAlias ?? 'tenx-tierdown';
   const keepAlias = opts.keepAlias ?? 'tenx-app';
-  const minAge = opts.frozenMinAge ?? '7d';
+  const minAge = opts.frozenMinAge ?? '1m';
   return {
     target: 'elasticsearch-frozen',
     language: 'text',
-    body: `# 1) Policy for the tier_down slice: leave hot on rollover, then mount as a
-#    PARTIALLY-MOUNTED searchable snapshot in the frozen tier.
+    body: `# 1) Policy for the tier_down slice: roll over hourly, then mount the rolled
+#    index as a PARTIALLY-MOUNTED searchable snapshot in the frozen tier as soon
+#    as ILM sees it. Every route into frozen lands in hot first; this keeps the
+#    stay to about an hour plus the poll interval.
 PUT _ilm/policy/tenx-tier-down
 {
   "policy": { "phases": {
-    "hot":    { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "1d" } } },
+    "hot":    { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "1h" } } },
     "frozen": { "min_age": "${minAge}", "actions": { "searchable_snapshot": { "snapshot_repository": "${repo}" } } }
   }}
 }
@@ -1315,9 +1317,15 @@ PUT ${keepAlias}-000001
       'and a term query on `tenx_hash` still returned 400/400 with `routeState` ' +
       'aggregatable, so the down-tiered slice remains retrievable by stamped ' +
       'identity. ' +
-      'PREREQUISITE: searchable snapshots need an Enterprise licence self-managed, ' +
-      'or Gold and above on Elastic Cloud Hosted, plus a registered snapshot ' +
-      'repository (Elastic Cloud provides `found-snapshots` by default). ' +
+      'PREREQUISITE: searchable snapshots need an Enterprise licence (Elastic ' +
+      'documents no lower tier for them), plus a registered snapshot repository ' +
+      '(Elastic Cloud provides `found-snapshots` by default). ' +
+      'RESIDENCY: every route into the frozen tier lands in hot first, this one ' +
+      'included. The tier_down index rolls over hourly and mounts right after, so ' +
+      'a demoted statement spends about an hour in hot plus the ILM poll interval. ' +
+      'Hourly rollover means one frozen index per hour per alias; add a delete ' +
+      'phase at the retention the account wants so the shard count on frozen ' +
+      'stays bounded. ' +
       'ON ELASTIC CLOUD HOSTED THE SAVING IS NOT AUTOMATIC: Hosted is priced by ' +
       'provisioned resources, so moving data out of hot creates headroom and the ' +
       'deployment must then be RESIZED to bank it. Do not tell a Hosted customer ' +

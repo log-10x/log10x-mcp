@@ -255,7 +255,7 @@ const BASELINE: Record<string, string> = {
   cloudwatchIaRecipe: '633b8867c697a37c',
   'azureLogsTierRecipe.basic': '9a0c878895b4dfca',
   'azureLogsTierRecipe.aux': 'de87bc671d7264ff',
-  elasticFrozenTierRecipe: 'e9b1e55c341a7060',
+  elasticFrozenTierRecipe: '93f8ddc058499fe9',
   coralogixMonitoringRecipe: 'fe5e4e08051e9336',
   coralogixTcoApiContract: 'e998aad4c0143e5e',
   'offloadRecipe.vector': '27371df4724db204',
