@@ -589,12 +589,12 @@ test('re-review 1 gate: the files-lane switch follows the engine', async () => {
   assert.doesNotMatch(body('1.1.146'), /\\nGH_ENABLED=true/);
 });
 
-test('policy_git: the pinned 1.1.146 writes the git lane; below 1.1.146 the gate refuses it', async () => {
+test('policy_git: the pinned engine (1.1.146 or later) writes the git lane; below 1.1.146 the gate refuses it', async () => {
   const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
   const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
   const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
   const { manifestEngineVersion, engineReadsCeiling } = await import('../src/lib/fleet-default-install.js');
-  assert.equal(manifestEngineVersion(), '1.1.146');
+  assert.equal(manifestEngineVersion(), '1.1.147');
   // advise_install takes policy_git only where engineReadsCeiling holds for the pinned engine.
   assert.equal(engineReadsCeiling('1.1.145'), false);
   assert.equal(engineReadsCeiling('1.1.146'), true);
