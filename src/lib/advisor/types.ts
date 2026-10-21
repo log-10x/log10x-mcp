@@ -141,7 +141,7 @@ export interface AdvisePlan {
    *   - 'placeholder' — REPLACE_WITH_LICENSE_JWT (skipInstall mode or
    *     license fetch deferred)
    *   - 'builtin'     — no licence configured; the engine runs its built-in
-   *     evaluation licence (10 nodes, 30 days from each start, airgapped)
+   *     Free tier (up to 10 nodes, no expiry, airgapped)
    */
   licenseKind?: 'user-scoped' | 'demo' | 'user-pasted' | 'placeholder' | 'builtin';
   /**

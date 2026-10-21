@@ -70,8 +70,8 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * pullable, not to what is tagged in git. 1.1.81: all five answer, checked
  * 2026-09-28, and the Fluent Bit sidecar pairing ran on it (1.1.80 has no
  * edge-10x image). 1.1.85: all five answer, checked 2026-09-28. With no
- * licence configured, edge-10x runs its built-in evaluation licence (10
- * nodes, 30 days from each start, airgapped), which is what an install plan
+ * licence configured, edge-10x runs its built-in Free tier (up to 10
+ * nodes, no expiry, airgapped), which is what an install plan
  * emits by default.
  * 1.1.86 (2026-09-28): all five images answer; the Receiver's receive-mode
  * pass-through fix (config #74) ships in this image, checked with a Fluent
@@ -85,10 +85,11 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * template hash on every node (E85). 1.1.146: the Receiver's rate regulator
  * reads service totals, keep counts for error lines, an events unit and `*`
  * rows, and pulls its policy files from a git branch; Datadog metrics post as
- * distributions. Pinned by digest.
+ * distributions. 1.1.147: with no licence the engine runs the built-in Free
+ * tier, up to 10 nodes, no expiry. Pinned by digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.146@sha256:4d7be22e5e91ffe344ec9878b45063d21a9c2eb4909799a6d5a7f456db5f0c3a';
+  'log10x/edge-10x:1.1.147@sha256:a043ccd828742c4eccee09abb654ce6a7357b6123f73300ed04f8605e874b8c4';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

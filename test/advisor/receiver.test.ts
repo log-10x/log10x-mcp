@@ -591,8 +591,7 @@ for (const fw of ['fluentbit', 'otel-collector'] as ForwarderKind[]) {
 }
 
 // The install wizard's default (2026-09-28): no licence in the plan. The
-// engine runs its built-in evaluation licence (10 nodes, 30 days from each
-// start, airgapped), so the overlay must name no licence at all. A
+// engine runs its built-in Free tier (up to 10 nodes, no expiry, airgapped), so the overlay must name no licence at all. A
 // TENX_LICENSE_FILE pointing at a missing file, or a volume naming a Secret
 // nobody created, keeps the pod from starting.
 for (const fw of wizardSupportedReceivers) {
@@ -622,7 +621,7 @@ for (const fw of wizardSupportedReceivers) {
     );
     const lic = plan.preflight.find((c) => c.name === 'license');
     assert.ok(lic, 'the preflight names the licence the engine runs on');
-    assert.match(lic!.detail, /10 nodes, 30 days from each start, airgapped/);
+    assert.match(lic!.detail, /up to 10 nodes, no expiry, airgapped/);
     // No backends given means no log10x backend: a clean row.
     assert.equal(lic!.status, 'ok');
     assert.ok(!/log10x` metrics backend/.test(lic!.detail));
@@ -730,7 +729,7 @@ test('reporter (standalone): a builtin plan sets no licence value, so chart 1.2.
   // Only a comment may mention the key; no value line sets it.
   assert.ok(!/^log10xLicenseJwt:/m.test(values), `no log10xLicenseJwt value: ${values}`);
   assert.ok(!/^licenseSecret:/m.test(values), `no licenseSecret block: ${values}`);
-  assert.match(values, /built-in evaluation license \(10 nodes,/);
+  assert.match(values, /built-in Free tier \(up to 10 nodes,/);
   assert.ok(!plan.install.some((s) => s.title === 'Create license Secret'));
 });
 

@@ -451,7 +451,7 @@ test('azure plan says the operator gets the storage data roles and the api key i
     'the api key is documented as optional',
   );
   assert.ok(
-    text.includes('built-in evaluation licence'),
+    text.includes('built-in Free tier'),
     'the empty-key behaviour is named',
   );
 });

@@ -12,7 +12,7 @@
  *      Kubernetes Secret mounted at `/etc/tenx/license/license.jwt`
  *      via `TENX_LICENSE_FILE`. With none (the default), the overlay
  *      carries no licence env, volume or mount, and the engine runs its
- *      built-in evaluation licence: 10 nodes, 30 days from each start,
+ *      built-in Free tier: up to 10 nodes, no expiry,
  *      airgapped. Each forwarder has a different
  *      config-rewiring shape (Fluent Bit replaces `config:`, OTel
  *      deep-merges `config:`, Vector replaces `customConfig`, Logstash
@@ -32,7 +32,7 @@
  *      engine resource overrides / extraArgs / extraEnv. License
  *      delivery: none by default (chart 1.2.0+ renders no Secret, env or
  *      mount when `log10xLicenseJwt` is empty, and the engine runs its
- *      built-in evaluation licence), a chart-managed Secret for a demo
+ *      built-in Free tier), a chart-managed Secret for a demo
  *      or pasted JWT (inlined into `log10xLicenseJwt`), or a
  *      user-supplied Secret via
  *      `licenseSecret.{create:false, existingSecret, secretKey}` for
@@ -136,7 +136,7 @@ export interface ForwarderSpec {
     licenseSecretKey?: string;
     /**
      * True when the plan carries no licence at all. The engine then runs its
-     * built-in evaluation licence (10 nodes, 30 days from each start,
+     * built-in Free tier (up to 10 nodes, no expiry,
      * airgapped), and the overlay must name no licence: a TENX_LICENSE_FILE
      * pointing at a file that is not there, or a volume naming a Secret that
      * does not exist, keeps the pod from starting.
@@ -484,7 +484,7 @@ function legacyElasticSelector(releaseName: string, chartSubstring: string): str
  * belong to the user's upstream chart, which interprets no
  * Log10x-specific top-level field. With `builtinLicense`, the block
  * carries no licence env, no volumeMounts and no extraVolumes, and the
- * engine runs its built-in evaluation licence.
+ * engine runs its built-in Free tier.
  */
 /** Name of the policy ConfigMap the engine's kubernetes pull lane reads
  * (matches the engine's $K8S_CONFIGMAP default and configure_engine's
@@ -788,7 +788,7 @@ function renderLog10xSidecar(opts: {
   envLines.push(...renderPolicyPullEnvLines('      ', opts.policyGit));
   envLines.push(...engineEnvLines('      ', opts.engineEnv));
   // No licence: no mount and no volume. The container then has nothing to
-  // wait on, and the engine logs that it runs the built-in evaluation licence.
+  // wait on, and the engine logs that it runs the built-in Free tier.
   // /tmp is the one path the engine writes (the GitOps mirror GH_DEST and the
   // pull cache); the root filesystem is read-only.
   const mountBlock = `
@@ -1370,7 +1370,7 @@ bash "%~dp0post-render.sh"
       // Build the daemonset.extraEnvs block. Emits TENX_RUN_ARGS, plus
       // TENX_LICENSE_FILE when the plan carries a licence (the
       // log10x/filebeat-10x image sets no licence env of its own, so with
-      // none the engine runs its built-in evaluation licence); appends TENX_AIRGAPPED and
+      // none the engine runs its built-in Free tier); appends TENX_AIRGAPPED and
       // per-backend env vars (secret + plain) when applicable. The
       // backend env-var contract is identical to the sidecar path: the
       // same BACKEND_ENV_SPECS entries, so DD_API_KEY/ELASTIC_API_KEY/etc.
@@ -2054,7 +2054,7 @@ export const STANDALONE_SPEC: ForwarderSpec = {
     // No licence (builtin, the default): emit no licence value at all.
     // Chart 1.2.0+ renders no Secret, no TENX_LICENSE_FILE and no mount when
     // `log10xLicenseJwt` is empty and `licenseSecret.create` keeps its
-    // default, and the engine runs its built-in evaluation licence.
+    // default, and the engine runs its built-in Free tier.
     //
     // `gitToken` and `config.git` defaults are deliberately not emitted:
     // both match chart defaults, and the chart's secret-template only
@@ -2073,8 +2073,8 @@ export const STANDALONE_SPEC: ForwarderSpec = {
       ? `\ntenx:${extras}\n`
       : '';
     const licenseBlock = builtinLicense
-      ? `# No license: the engine runs its built-in evaluation license (10 nodes,
-# 30 days from each start, airgapped). To license it, set log10xLicenseJwt,
+      ? `# No license: the engine runs its built-in Free tier (up to 10 nodes,
+# no expiry, airgapped). To license it, set log10xLicenseJwt,
 # or point licenseSecret at a Secret holding the JWT.`
       : isDemoLicense === false
       ? `log10xLicenseJwt: ""          # Provided via the Secret below (create it before \`helm upgrade\`)

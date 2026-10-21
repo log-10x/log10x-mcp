@@ -189,7 +189,7 @@ export const adviseRetrieverSchema = {
     .enum(['builtin', 'signin', 'demo', 'paste'])
     .optional()
     .describe(
-      'How the engine is licensed. Defaults to `"builtin"`: nothing is minted and no key is written, and the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Pass `"paste"` with `license_jwt_paste` to wire a licence you hold into the values file. `"signin"` mints a user-scoped JWT (emits `signin_required` when no Auth0 session exists) and `"demo"` mints a 1-node, 14-day JWT; a minted JWT is never written to disk, so it is supplied at install time with `--set-string`. Omitting this arg on a later call keeps the earlier choice.'
+      'How the engine is licensed. Defaults to `"builtin"`: nothing is minted and no key is written, and the engine runs its built-in Free tier (up to 10 nodes, no expiry, airgapped). Pass `"paste"` with `license_jwt_paste` to wire a licence you hold into the values file. `"signin"` mints a user-scoped JWT (emits `signin_required` when no Auth0 session exists) and `"demo"` mints a 1-node, 14-day JWT; a minted JWT is never written to disk, so it is supplied at install time with `--set-string`. Omitting this arg on a later call keeps the earlier choice.'
     ),
   license_jwt_paste: z
     .string()
@@ -669,7 +669,7 @@ function wizardEnvelopeMeta(data: RetrieverWizardData): {
       }
       const isDemoLicense = data.license_kind === 'demo';
       if (isDemoLicense) {
-        warnings.push('plan emitted with a demo license: 1 node, expires 14 days after it was minted. Re-run with `license_source: "signin"` before then, or with `license_source: "builtin"` to run the engine\'s built-in evaluation licence (10 nodes, 30 days from each start, airgapped).');
+        warnings.push('plan emitted with a demo license: 1 node, expires 14 days after it was minted. Re-run with `license_source: "signin"` before then, or with `license_source: "builtin"` to run the engine\'s built-in Free tier (up to 10 nodes, no expiry, airgapped).');
       }
       const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string; role: ActionRole }> = [];
       actions.push({
@@ -1840,7 +1840,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
 
   // Licence source: an explicit arg wins; a pasted JWT alone means paste;
   // otherwise keep the session's earlier choice, and a session that never
-  // chose runs on the engine's built-in evaluation licence.
+  // chose runs on the engine's built-in Free tier.
   const licenseSource: NonNullable<RetrieverWizardSession['licenseSource']> =
     args.license_source ??
     (args.license_jwt_paste ? 'paste' : undefined) ??
@@ -1971,8 +1971,8 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
       'License gate skipped (verify mode on installed retriever).';
   }
   // Builtin (the default): nothing to acquire. The Retriever chart runs with
-  // no key (log10xApiKey empty) and the engine uses its built-in evaluation
-  // licence, which is also what a minted JWT led to, since a minted JWT is
+  // no key (log10xApiKey empty) and the engine uses its built-in Free
+  // tier, which is also what a minted JWT led to, since a minted JWT is
   // never written into the values file.
   const builtinLicense = session.licenseSource === 'builtin';
   if (!builtinLicense && !session.licenseJwt && session.licenseSource !== 'paste' && !skipLicenseGate) {
@@ -2012,7 +2012,7 @@ export async function executeAdviseRetriever(args: AdviseRetrieverArgs): Promise
         `> ${msg}`,
         '',
         `Options:`,
-        `- Re-invoke with \`license_source: "builtin"\` to install with no key: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped)`,
+        `- Re-invoke with \`license_source: "builtin"\` to install with no key: the engine runs its built-in Free tier (up to 10 nodes, no expiry, airgapped)`,
         `- Sign in via \`log10x_signin_start\``,
         `- Re-invoke with \`license_source: "paste"\` and \`license_jwt_paste: "<your-jwt>"\``,
         `- Retry: the gateway may have been transiently unavailable`,

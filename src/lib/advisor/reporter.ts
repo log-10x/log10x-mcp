@@ -96,8 +96,8 @@ export interface ReporterAdviseArgs {
   isDemoLicense?: boolean;
   /**
    * True when the plan deliberately carries no licence (the install
-   * wizard's default). The engine then runs its built-in evaluation
-   * licence: 10 nodes, 30 days from each start, airgapped. The plan emits
+   * wizard's default). The engine then runs its built-in Free
+   * tier: up to 10 nodes, no expiry, airgapped. The plan emits
    * no licence Secret step, and no overlay names TENX_LICENSE_FILE or a
    * licence volume. Ignored when `licenseJwt` is set.
    */
@@ -166,7 +166,7 @@ export interface ReporterAdviseArgs {
    * `TENX_AIRGAPPED=true` env var on the engine sidecar.
    *
    * Every licence runs airgapped on engine 1.1.61+, including the
-   * built-in evaluation licence (which is airgapped by construction) and
+   * built-in Free tier (which is airgapped by construction) and
    * a demo JWT: both verify offline.
    */
   airgapped?: boolean;
@@ -282,12 +282,12 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // upgrade` to use `--post-renderer ./tenx-kustomize/post-render.sh`.
   // No blocker.
   // No licence is a supported install: the engine runs its built-in
-  // evaluation licence. The blocker only fires when the caller made no
+  // Free tier. The blocker only fires when the caller made no
   // licence choice at all.
   const builtinLicense = !args.licenseJwt && args.builtinLicense === true;
   if (!args.licenseJwt && !builtinLicense && !args.skipInstall) {
     blockers.push(
-      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Teardown and verify plans work without either.'
+      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in Free tier (up to 10 nodes, no expiry, airgapped). Teardown and verify plans work without either.'
     );
   }
   if (destination === 'splunk' && !args.splunkHecToken && !args.skipInstall) {
@@ -426,7 +426,7 @@ export async function buildReporterPlan(args: ReporterAdviseArgs): Promise<Advis
   // "demo license".
   //
   //   - no licenseJwt, builtinLicense              → 'builtin'
-  //     (the engine runs its built-in evaluation licence)
+  //     (the engine runs its built-in Free tier)
   //   - no licenseJwt at all                       → 'placeholder'
   //     (skipInstall mode, or fetch failed and the plan emitted the
   //     REPLACE_WITH_LICENSE_JWT default)
@@ -707,7 +707,7 @@ async function runPreflight(
           name: 'license',
           status: reportsToLog10x ? 'warn' : 'ok',
           detail:
-            'no licence configured: the engine runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped) and logs that it does at startup. Nothing to mint, store or mount. ' +
+            'no licence configured: the engine runs its built-in Free tier (up to 10 nodes, no expiry, airgapped) and logs that it does at startup. Nothing to mint, store or mount. ' +
             (reportsToLog10x
               ? 'Because it runs airgapped, the engine sends nothing to log10x, so the `log10x` metrics backend receives no metrics on this licence; other backends are unaffected. To report to log10x, re-run the wizard with `license_source: "signin"` or `"paste"`; the plan then adds a step that creates the licence Secret.'
               : 'To license it later, re-run the wizard with `license_source: "signin"` or `"paste"`; the plan then adds a step that creates the licence Secret.'),
@@ -716,7 +716,7 @@ async function runPreflight(
           name: 'license JWT',
           status: 'unknown',
           detail:
-            'the plan delivers the licence JWT you chose through a Kubernetes Secret. To run without one, re-run with `license_source: "builtin"`: the engine then runs its built-in evaluation licence (10 nodes, 30 days from each start, airgapped).',
+            'the plan delivers the licence JWT you chose through a Kubernetes Secret. To run without one, re-run with `license_source: "builtin"`: the engine then runs its built-in Free tier (up to 10 nodes, no expiry, airgapped).',
         }
   );
 
