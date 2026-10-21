@@ -2,8 +2,7 @@
  * Licence default of `log10x_advise_install` (2026-09-28).
  *
  * With no `license_source`, the wizard puts no licence in the plan: the
- * engine runs its built-in evaluation licence (10 nodes, 30 days from each
- * start, airgapped). Nothing is minted, so the gateway is never called, and
+ * engine runs its built-in Free tier (up to 10 nodes, no expiry, airgapped). Nothing is minted, so the gateway is never called, and
  * no step creates a licence Secret. An explicit choice sticks across calls,
  * so the re-invoke after sign-in, or the call that carries a pasted JWT,
  * keeps the licence the user asked for.
@@ -72,7 +71,7 @@ test('schema: license_source offers builtin and leaves the default to the wizard
   assert.equal(field.safeParse('builtin').success, true);
   for (const v of ['signin', 'paste', 'demo']) assert.equal(field.safeParse(v).success, true, v);
   assert.match(field.description ?? '', /Defaults to `"builtin"`/);
-  assert.match(field.description ?? '', /10 nodes, 30 days from each start, airgapped/);
+  assert.match(field.description ?? '', /up to 10 nodes, no expiry, airgapped/);
 });
 
 const PROM_ANSWERS = {
@@ -101,10 +100,10 @@ for (const forwarder of ['fluentbit', 'otel-collector'] as const) {
     assert.ok(!text.includes('create secret generic'), 'no kubectl create secret in a builtin plan');
     const md = String(d.markdown);
     assert.match(md, /\*\*License\*\*: none in the plan/);
-    assert.match(md, /10 nodes, 30 days from each start, airgapped/);
+    assert.match(md, /up to 10 nodes, no expiry, airgapped/);
     assert.ok(!/14-day/.test(md), 'the default path never mentions a demo window');
     const warnings = ((out as { warnings?: string[] }).warnings ?? []).join('\n');
-    assert.match(warnings, /built-in evaluation licence, 10 nodes, 30 days from each start, airgapped/);
+    assert.match(warnings, /built-in Free tier, up to 10 nodes, no expiry, airgapped/);
     assert.ok(!/demo license/i.test(warnings), 'no demo warning on the default path');
     assert.ok(!/`log10x` metrics backend/.test(warnings), 'no log10x-backend warning when log10x was never chosen');
   });
@@ -165,7 +164,7 @@ test('wizard: an explicit log10x backend still works, with the licence warning',
   assert.equal(d.mode, 'plan');
   assert.equal(d.license_kind, 'builtin');
   const warnings = ((out as { warnings?: string[] }).warnings ?? []).join('\n');
-  assert.match(warnings, /`log10x` metrics backend receives nothing on the built-in evaluation licence/);
+  assert.match(warnings, /`log10x` metrics backend receives nothing on the built-in Free tier/);
   assert.match(String(d.markdown), /the `log10x` metrics backend receives no metrics until the engine is licensed/);
   const lic = (d.preflight as Array<{ name: string; status: string }>).find((c) => c.name === 'license');
   assert.equal(lic?.status, 'warn');

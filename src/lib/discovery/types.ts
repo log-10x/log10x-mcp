@@ -443,7 +443,7 @@ export interface WizardSession {
   /**
    * How the user chose to license the engine:
    *   - 'builtin' — no licence at all (the default). The engine runs its
-   *     built-in evaluation licence: 10 nodes, 30 days from each start,
+   *     built-in Free tier: up to 10 nodes, no expiry,
    *     airgapped. Nothing is minted, stored or mounted.
    *   - 'signin' — sign in to log10x first, then re-invoke; produces a
    *     user-scoped license

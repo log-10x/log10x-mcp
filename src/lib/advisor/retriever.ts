@@ -84,8 +84,8 @@ export interface RetrieverAdviseArgs {
   licenseSupplied?: boolean;
   /**
    * True when the plan deliberately carries no licence (the wizard's
-   * default): the engine runs its built-in evaluation licence, 10 nodes,
-   * 30 days from each start, airgapped. Suppresses the missing-JWT blocker.
+   * default): the engine runs its built-in Free tier, up to 10 nodes,
+   * no expiry, airgapped. Suppresses the missing-JWT blocker.
    */
   builtinLicense?: boolean;
   /** Override: input S3 bucket name. Default: from snapshot. */
@@ -332,7 +332,7 @@ export const AZURE_SNAPSHOT_SCOPE_NOTE =
   'AWS-derived snapshot field is read on this path.';
 
 export const AZURE_API_KEY_NOTE =
-  '`log10xApiKey` is optional. Left empty, the engine runs on its built-in evaluation licence and says so in ' +
+  '`log10xApiKey` is optional. Left empty, the engine runs on its built-in Free tier and says so in ' +
   'the pod log. Set it only when you hold a Log10x licence key.';
 
 /**
@@ -349,8 +349,8 @@ export function licenseNotEmittedNote(storageProvider: RetrieverStorageProvider)
       ? '`--set-string log10xApiKey="$LOG10X_API_KEY"`'
       : '`--set-string tenx.apiKey="$LOG10X_API_KEY"`';
   return (
-    'No licence key is written into the values file. The engine runs on its built-in evaluation licence (10 nodes, ' +
-    '30 days from each start, airgapped) until ' +
+    'No licence key is written into the values file. The engine runs on its built-in Free tier (up to 10 nodes, ' +
+    'no expiry, airgapped) until ' +
     `a key is supplied, and a key is supplied at install time with ${flag} so it stays out of any file on disk.`
   );
 }
@@ -498,7 +498,7 @@ export async function buildRetrieverPlan(args: RetrieverAdviseArgs): Promise<Adv
   const blockers: string[] = [];
   if (!args.licenseJwt && args.builtinLicense !== true && !args.skipInstall) {
     blockers.push(
-      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in evaluation licence (10 nodes, 30 days from each start, airgapped). Verify and teardown plans work without either.'
+      'No licence choice reached the plan: pass a license JWT via `license_jwt` (a user-scoped one from `POST /api/v1/license`, or a 1-node 14-day demo from `POST /api/v1/license/demo`), or pass `builtinLicense: true` to run the engine on its built-in Free tier (up to 10 nodes, no expiry, airgapped). Verify and teardown plans work without either.'
     );
   }
   if (isAzure && !args.skipInstall) {
@@ -1423,7 +1423,7 @@ function renderAzureRetrieverValues(opts: {
           '# Supplied at install time so no key lands in this file:',
           '#   --set-string log10xApiKey="$LOG10X_API_KEY"',
         ];
-  return `# log10xApiKey is optional: empty means the built-in evaluation licence.
+  return `# log10xApiKey is optional: empty means the built-in Free tier.
 ${apiKeyLines.join('\n')}
 
 fullnameOverride: "${opts.releaseName}"

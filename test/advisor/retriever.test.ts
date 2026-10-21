@@ -213,7 +213,7 @@ test('builtinLicense: no licence is a supported retriever install, and nothing i
   const text = JSON.stringify(plan.install);
   assert.ok(!/apiKey: "/.test(text), 'no key written into the values file');
   assert.ok(
-    plan.notes.some((n) => /10 nodes, 30 days from each start, airgapped/.test(n)),
-    'the plan names the evaluation limits'
+    plan.notes.some((n) => /up to 10 nodes, no expiry, airgapped/.test(n)),
+    'the plan names the Free tier limits'
   );
 });

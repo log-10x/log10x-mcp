@@ -3107,8 +3107,7 @@ symbolMessageHashField=tenx_hash           # stable pattern identity rides along
 log10xMetricsEnabled=false                 # metric backend is BYO; hosted metrics stay off
 TENX_AIRGAPPED=true                        # REQUIRED: no egress from the sandbox to log10x
 # TENX_LICENSE_KEY=<your license JWT>      # optional: without it the engine runs its built-in
-                                           # evaluation license (10 nodes, 30 days from each
-                                           # start, airgapped)
+                                           # Free tier (up to 10 nodes, no expiry, airgapped)
 TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /tmp; a /var/log
                                            # rollingFile failure poisons pipeline launch (measured).
                                            # Layers built by build-receive-layer.sh >= 1.1.63
@@ -3150,7 +3149,7 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
       'events to :24225. receiverReadOnly defaults to false, so writeback is on ' +
       'as soon as the forwarder module is included: no extra flag.',
     prerequisites: [
-      'TENX_AIRGAPPED=true is mandatory, not optional: with a license key set, validation is otherwise an online, fail-closed call on EVERY cold start (10 s connect timeout). Every license verifies offline when airgapped, and the built-in evaluation license needs no network at all. See SERVERLESS_TASK6_LICENSE_EGRESS.md.',
+      'TENX_AIRGAPPED=true is mandatory, not optional: with a license key set, validation is otherwise an online, fail-closed call on EVERY cold start (10 s connect timeout). Every license verifies offline when airgapped, and the built-in Free tier needs no network at all. See SERVERLESS_TASK6_LICENSE_EGRESS.md.',
       'Engine memory: ~175 MB resident (measured, 1.1.57 native, post-traffic). Size the function memory for function + collector + engine.',
       'Cold start: engine spawn -> OTLP listener accepting measured at 1.4-1.9 s (native, 1 vCPU-equivalent, local x86 Docker). Real-Lambda numbers pending the one-shot confirmation run.',
     ],
@@ -3169,7 +3168,7 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
 #     /opt/tenx/config/...                <- config tree
 #     /opt/tenx/symbols/...               <- symbol library
 #     (no license file: without TENX_LICENSE_KEY the engine runs its
-#      built-in evaluation license)
+#      built-in Free tier)
 #   Built by: engine packaging/lambda-layer/build-receive-layer.sh
 #
 # Lifecycle (implemented in ReceiveExtension, engine PR #120; each step
@@ -3193,7 +3192,7 @@ TENX_LOG_PATH=/tmp/tenx/                   # Lambda's fs is read-only outside /t
       'subscription envelopes there: the remainder path).',
     prerequisites: [
       'The engine extension layer is public: `tenx-receive` (x86_64) and `tenx-receive-arm64` in account 351939435334, in eight regions. The version differs by region; take the ARN from https://doc.log10x.com/engine/launcher/extension/',
-      'Without TENX_LICENSE_KEY each function runs the engine\'s built-in evaluation license (10 nodes, 30 days from each start, airgapped). Set TENX_LICENSE_KEY on each function to license it.',
+      'Without TENX_LICENSE_KEY each function runs the engine\'s built-in Free tier (up to 10 nodes, no expiry, airgapped). Set TENX_LICENSE_KEY on each function to license it.',
     ],
   };
 

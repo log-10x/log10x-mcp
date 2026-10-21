@@ -77,8 +77,7 @@ export interface TenxServerlessProps {
   /**
    * SSM parameter holding a license JWT, set as TENX_LICENSE_KEY on each
    * attached function. Optional: without it each function runs the
-   * engine's built-in evaluation license (10 nodes, 30 days from each
-   * start, airgapped). A key is validated OFFLINE (ES256, embedded public
+   * engine's built-in Free tier (up to 10 nodes, no expiry, airgapped). A key is validated OFFLINE (ES256, embedded public
    * keys) because this construct always sets TENX_AIRGAPPED=true: a Lambda
    * estate must not carry a boot-time dependency on an external licensing
    * endpoint.
@@ -188,7 +187,7 @@ export class TenxServerless extends Construct {
     fn.addEnvironment('TENX_AIRGAPPED', 'true');
     // No license env unless a key was given: the public layer carries no
     // license file, and a TENX_LICENSE_FILE naming a missing file stops the
-    // engine. Without a key the engine runs its built-in evaluation license.
+    // engine. Without a key the engine runs its built-in Free tier.
     if (this.licenseKey) fn.addEnvironment('TENX_LICENSE_KEY', this.licenseKey);
     fn.addEnvironment('TENX_LOG_PATH', '/tmp/tenx/');
 

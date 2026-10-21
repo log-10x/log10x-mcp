@@ -240,13 +240,13 @@ test('lambdaEstateCdkConstruct: attach() wires per-pattern only when a mute file
 });
 
 // The public layer carries no licence file. A function with no licence env
-// runs the built-in evaluation licence; a TENX_LICENSE_FILE naming a missing
+// runs the built-in Free tier; a TENX_LICENSE_FILE naming a missing
 // file stops the engine, so neither the recipe nor the construct sets one.
 test('serverless: no licence env by default; TENX_LICENSE_KEY licenses a function', () => {
   const r = lambdaOtelExtensionRecipe({ region: 'us-east-1', bucket: 'acme-offload' });
   assert.ok(!/^TENX_LICENSE_FILE=/m.test(r.engine.body), 'the engine env must not point at a licence file');
   const pre = r.executionEnvironment.prerequisites.join(' ');
-  assert.match(pre, /Without TENX_LICENSE_KEY each function runs the engine's built-in evaluation license \(10 nodes, 30 days from each start, airgapped\)/);
+  assert.match(pre, /Without TENX_LICENSE_KEY each function runs the engine's built-in Free tier \(up to 10 nodes, no expiry, airgapped\)/);
 
   const cdk = lambdaEstateCdkConstruct({ region: 'us-east-1', coralogixRegion: 'us2' });
   assert.ok(!cdk.body.includes("addEnvironment('TENX_LICENSE_FILE'"), 'the construct must not set TENX_LICENSE_FILE');
