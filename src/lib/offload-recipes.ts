@@ -1234,8 +1234,9 @@ export function elasticFrozenTierRecipe(
     language: 'text',
     body: `# 1) Policy for the tier_down slice: roll over hourly, then mount the rolled
 #    index as a PARTIALLY-MOUNTED searchable snapshot in the frozen tier as soon
-#    as ILM sees it. Every route into frozen lands in hot first; this keeps the
-#    stay to about an hour plus the poll interval.
+#    as ILM sees it. Every route into frozen lands in hot first. Measured with
+#    the default 10-minute poll: rollover at the first poll past the hour, the
+#    snapshot and mount three polls later, about 110 minutes per index on hot.
 PUT _ilm/policy/tenx-tier-down
 {
   "policy": { "phases": {
@@ -1322,7 +1323,9 @@ PUT ${keepAlias}-000001
       '(Elastic Cloud provides `found-snapshots` by default). ' +
       'RESIDENCY: every route into the frozen tier lands in hot first, this one ' +
       'included. The tier_down index rolls over hourly and mounts right after, so ' +
-      'a demoted statement spends about an hour in hot plus the ILM poll interval. ' +
+      'with the default 10-minute ILM poll each index lived about 110 minutes on hot ' +
+      '(rollover at the first poll past the hour, snapshot and mount three polls later), ' +
+      'so a demoted line leaves hot 40 to 110 minutes after it arrives. ' +
       'Hourly rollover means one frozen index per hour per alias; add a delete ' +
       'phase at the retention the account wants so the shard count on frozen ' +
       'stays bounded. ' +
