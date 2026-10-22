@@ -1,6 +1,6 @@
 {
   "name": "log10x-mcp",
-  "version": "1.30.76",
+  "version": "1.30.77",
   "description": "Rank log patterns by cost, then compact, tier down or offload the excess. No log data reaches log10x.",
   "mcpName": "io.github.log-10x/log10x-mcp",
   "type": "module",
@@ -63,11 +63,11 @@
     "@aws-sdk/client-ssm": "^3.1063.0",
     "@aws-sdk/credential-providers": "^3.1032.0",
     "@clickhouse/client": "^1.18.2",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@opentelemetry/api": "^1.9.1",
     "@smithy/protocol-http": "^5.3.14",
     "@smithy/signature-v4": "^5.4.6",
-    "hono": "^4.12.12",
+    "hono": "^4.13.13",
     "protobufjs": "^8.0.3",
     "snappyjs": "^0.7.0",
     "zod": "^3.24.4"
