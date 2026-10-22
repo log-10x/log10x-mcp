@@ -325,6 +325,15 @@ export interface BackendEnvSpec {
   plain: Array<{ envVar: string; default?: string; placeholder?: string }>;
 }
 
+/**
+ * Metric backends a Receiver image cannot load. Edge 1.1.147 is a native build
+ * without the Elastic metric registry: with `@run/output/metric/elastic` it
+ * fails at launch (ClassNotFoundException ElasticMetricRegistryFactory), so a
+ * Receiver render leaves it out. The hot-tier run reads each statement's size
+ * from the Receiver's own indices instead.
+ */
+export const RECEIVER_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic']);
+
 export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpec>> = {
   // datadog — `config/pipelines/run/output/metric/datadog/config.yaml`
   // reads DD_API_KEY (required) + DD_SITE (defaults to us5.datadoghq.com
@@ -409,7 +418,7 @@ function renderTenxExtraArgsAndEnv(opts: {
   airgapped?: boolean;
   airgappedAsEnvVar: boolean;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !(opts.airgappedAsEnvVar && RECEIVER_UNLOADABLE_BACKENDS.has(b)));
   const lines: string[] = [];
 
   if (nonLog10xBackends.length > 0) {
@@ -732,7 +741,7 @@ function renderLog10xSidecar(opts: {
   engineEnv?: Array<[string, string]>;
   policyGit?: PolicyGitDelivery;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !RECEIVER_UNLOADABLE_BACKENDS.has(b));
   const argLines: string[] = [
     `      - "@run/input/forwarder/${opts.forwarderKind}"`,
     `      - "@apps/receiver"`,
@@ -1359,7 +1368,7 @@ bash "%~dp0post-render.sh"
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
       // the in-container engine emits metrics to those backends.
-      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x');
+      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x' && !RECEIVER_UNLOADABLE_BACKENDS.has(b));
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');
       if (readOnly) runArgs.push('receiverReadOnly', 'true');

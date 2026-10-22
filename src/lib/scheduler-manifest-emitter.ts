@@ -66,6 +66,20 @@ export interface PolicyOptions {
   nodes_by_container?: Record<string, number>;
   /** Name of the Secret (k8s) holding DD_API_KEY, DD_APP_KEY and DD_SITE. Default: log10x-datadog. */
   datadog_secret_name?: string;
+  /**
+   * Elasticsearch hot tier held under this many GB of index store on the hot
+   * nodes, or `auto` for 80% of their disk. When set the tick is the hot-tier run.
+   */
+  hot_tier_gb?: number | 'auto';
+  /** Hours a kept line stays on hot, when the ILM policy on the kept alias does not say. */
+  hot_retention_hours?: number;
+  /** Name of the Secret (k8s) holding LOG10X_ES_URL and LOG10X_ES_API_KEY. Default: log10x-elasticsearch. */
+  elasticsearch_secret_name?: string;
+}
+
+/** True when the policy holds a number every hour (the Datadog budget run or the hot-tier run). */
+export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'hot_tier_gb'>): boolean {
+  return opts.budget_usd_monthly !== undefined || opts.hot_tier_gb !== undefined;
 }
 
 /** The budget run's delivery for a scheduler. */
@@ -79,8 +93,8 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
 /** The schedule a policy runs on: a budget run is hourly unless the caller names one. */
-export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly'>): SchedulePreset {
-  return opts.schedule ?? (opts.budget_usd_monthly !== undefined ? 'hourly' : 'daily-03utc');
+export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'hot_tier_gb'>): SchedulePreset {
+  return opts.schedule ?? (isBudgetRun(opts) ? 'hourly' : 'daily-03utc');
 }
 
 /**
@@ -157,7 +171,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    ...(opts.budget_usd_monthly !== undefined
+    ...(opts.hot_tier_gb !== undefined
+      ? hotTierPolicyLines(opts)
+      : opts.budget_usd_monthly !== undefined
       ? budgetPolicyLines(opts)
       : opts.budget_gb_monthly !== undefined
       ? [
@@ -174,11 +190,11 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     `  scheduler: ${yamlString(opts.scheduler)}`,
     ``,
     `config_plane:`,
-    ...(opts.budget_usd_monthly !== undefined && budgetDelivery(opts.scheduler) === 'configmap'
+    ...(isBudgetRun(opts) && budgetDelivery(opts.scheduler) === 'configmap'
       ? [`  delivery: configmap`, `  namespace: ${yamlString(opts.namespace ?? 'log10x')}`]
       : [
           `  repo: ${yamlString(opts.config_plane)}`,
-          ...(opts.budget_usd_monthly !== undefined
+          ...(isBudgetRun(opts)
             ? [`  delivery: gitops`, `  # the run commits straight to this branch; the engine's gitops pull reads it (GH_BRANCH)`, `  policy_branch: log10x-policy`]
             : []),
         ]),
@@ -186,6 +202,30 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
   ];
   return lines.join('\n') + '\n';
+}
+
+function hotTierPolicyLines(opts: PolicyOptions): string[] {
+  const nodes = Object.entries(opts.nodes_by_container ?? {});
+  return [
+    `  # Elasticsearch hot tier held under a size: GB of index store on the hot nodes,`,
+    `  # or auto for 80% of their disk (Elasticsearch stops allocating at 85%).`,
+    `  # Each run rewrites the byte limits so growth goes to the frozen tier.`,
+    `  hot_tier_gb: ${opts.hot_tier_gb}`,
+    ...(opts.hot_retention_hours !== undefined
+      ? [`  hot_retention_hours: ${opts.hot_retention_hours}`]
+      : [`  # hours a kept line stays on hot: read from the ILM policy on pass_alias unless set here`, `  # hot_retention_hours: 168`]),
+    `  pass_alias: tenx-app`,
+    `  tier_down_alias: tenx-tierdown`,
+    `  container_field: kubernetes.container_name`,
+    `  # error lines over a limit that pass per statement per node per window`,
+    `  keep_count: ${opts.keep_count ?? 50}`,
+    `  default_action: tier_down`,
+    ...(budgetDelivery(opts.scheduler) === 'gitops'
+      ? nodes.length === 0
+        ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
+        : [`  nodes_by_container:`, ...nodes.map(([c, n]) => `    ${c}: ${n}`)]
+      : []),
+  ];
 }
 
 function budgetPolicyLines(opts: PolicyOptions): string[] {
@@ -235,7 +275,7 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
  * (separated by `---`) so the user can `kubectl apply -f` the single file.
  */
 export function emitK8sCronJob(opts: PolicyOptions): string {
-  if (opts.budget_usd_monthly !== undefined) return emitK8sBudgetCronJob(opts);
+  if (isBudgetRun(opts)) return emitK8sBudgetCronJob(opts);
   const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
   const secretName = opts.secret_name ?? 'log10x-secret';
@@ -320,7 +360,8 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
 export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
-  const ddSecret = opts.datadog_secret_name ?? 'log10x-datadog';
+  const hot = opts.hot_tier_gb !== undefined;
+  const ddSecret = hot ? opts.elasticsearch_secret_name ?? 'log10x-elasticsearch' : opts.datadog_secret_name ?? 'log10x-datadog';
   const policyYaml = emitPolicyYaml(opts);
   const sa = 'log10x-budget-run';
   const ddEnv = (name: string, optional = false): string[] => [
@@ -334,12 +375,23 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   return [
     `# Log10x budget run: Kubernetes CronJob`,
     `# Generated by log10x_setup_recurring.`,
-    `# Holds Datadog Standard indexing at ${opts.budget_usd_monthly} USD a month: each run writes`,
-    `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
-    `# log10x-action-intent ConfigMap the Receiver reads.`,
-    `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
-    `#   --from-literal=DD_PAT=<personal access token> [--from-literal=DD_SITE=<site>]`,
-    `# or, instead of DD_PAT: --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+    ...(hot
+      ? [
+          `# Holds the Elasticsearch hot tier under ${opts.hot_tier_gb === 'auto' ? '80% of the hot nodes\' disk' : `${opts.hot_tier_gb} GB`}: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=LOG10X_ES_URL=<https://host:9200> --from-literal=LOG10X_ES_API_KEY=<encoded API key>`,
+          `# The key needs the monitor and read_ilm cluster privileges, and read and monitor on tenx-*.`,
+        ]
+      : [
+          `# Holds Datadog Standard indexing at ${opts.budget_usd_monthly} USD a month: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=DD_PAT=<personal access token> [--from-literal=DD_SITE=<site>]`,
+          `# or, instead of DD_PAT: --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+        ]),
     `# Apply with: kubectl apply -f log10x-cronjob.yaml`,
     `---`,
     `apiVersion: v1`,
@@ -430,10 +482,9 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `                - |`,
     `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
     `              env:`,
-    ...ddEnv('DD_PAT', true),
-    ...ddEnv('DD_API_KEY', true),
-    ...ddEnv('DD_APP_KEY', true),
-    ...ddEnv('DD_SITE', true),
+    ...(hot
+      ? [...ddEnv('LOG10X_ES_URL'), ...ddEnv('LOG10X_ES_API_KEY', true)]
+      : [...ddEnv('DD_PAT', true), ...ddEnv('DD_API_KEY', true), ...ddEnv('DD_APP_KEY', true), ...ddEnv('DD_SITE', true)]),
     ...(opts.env_id
       ? [
           `                - name: LOG10X_ENV_ID`,
@@ -501,7 +552,9 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     ``,
     `      - name: Run log10x tick`,
     `        env:`,
-    ...(opts.budget_usd_monthly !== undefined
+    ...(opts.hot_tier_gb !== undefined
+      ? [`          LOG10X_ES_URL: \${{ secrets.LOG10X_ES_URL }}`, `          LOG10X_ES_API_KEY: \${{ secrets.LOG10X_ES_API_KEY }}`]
+      : opts.budget_usd_monthly !== undefined
       ? [
           `          DD_PAT: \${{ secrets.DD_PAT }}`,
           `          DD_API_KEY: \${{ secrets.DD_API_KEY }}`,
