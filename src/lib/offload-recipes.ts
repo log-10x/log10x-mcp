@@ -1325,7 +1325,7 @@ PUT ${keepAlias}-000001
       'included. The tier_down index rolls over hourly and mounts right after, so ' +
       'with the default 10-minute ILM poll each index lived about 110 minutes on hot ' +
       '(rollover at the first poll past the hour, snapshot and mount three polls later), ' +
-      'so a demoted line leaves hot 40 to 110 minutes after it arrives. ' +
+      'so a demoted line leaves hot 30 to 110 minutes after it arrives. ' +
       'Hourly rollover means one frozen index per hour per alias; add a delete ' +
       'phase at the retention the account wants so the shard count on frozen ' +
       'stays bounded. ' +
