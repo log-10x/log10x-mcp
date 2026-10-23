@@ -142,6 +142,8 @@ export interface RowsBudget {
   container_label: string;
   /** Minutes of the meter's window; 60 in production. A shorter window scales the reads to an hour, for a time-scaled test rig. */
   meter_minutes: number;
+  /** Rows an hour other writers put into the table; the rest of the meter is the Receiver's. Default 0. */
+  outside_rows_per_hour: number;
   /** Error lines over a limit that pass per statement per node per window. */
   keep_count: number;
   default_action: 'offload';
@@ -599,6 +601,11 @@ function parseRows(red: Record<string, unknown> | undefined): RowsBudget | undef
   }
   const table = nonEmptyString(red?.['clickhouse_table'], 'clickhouse_table', 'default.otel_logs');
   if (!table.includes('.')) throw new PolicyLoadError(`clickhouse_table must be database.table; got: ${table}`);
+  const rawO = red?.['outside_rows_per_hour'];
+  const outsideRows = rawO === undefined ? 0 : typeof rawO === 'number' ? rawO : Number(rawO);
+  if (!Number.isFinite(outsideRows) || outsideRows < 0) {
+    throw new PolicyLoadError(`outside_rows_per_hour must be a number of rows an hour, 0 or more; got: ${String(rawO)}`);
+  }
   const rawM = red?.['meter_minutes'];
   const meterMinutes = rawM === undefined ? 60 : positiveNumber(rawM);
   if (meterMinutes === undefined || !Number.isInteger(meterMinutes) || meterMinutes > 60 || 60 % meterMinutes !== 0) {
@@ -627,6 +634,7 @@ function parseRows(red: Record<string, unknown> | undefined): RowsBudget | undef
     ...(typeof red?.['clickhouse_cluster'] === 'string' && red['clickhouse_cluster'].trim() ? { cluster: red['clickhouse_cluster'].trim() } : {}),
     container_label: nonEmptyString(red?.['container_label'], 'container_label', 'k8s_container'),
     meter_minutes: meterMinutes,
+    outside_rows_per_hour: outsideRows,
     keep_count,
     default_action: 'offload',
     service_actions,

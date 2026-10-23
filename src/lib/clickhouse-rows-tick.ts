@@ -154,9 +154,13 @@ export async function readRowsInputs(
 
   // the Receiver's own counters, the last complete hour, by container, statement, severity and route
   const envLabel = envId ? `{tenx_env="${envId.replace(/"/g, '')}"}` : '';
+  // Each counter's value at the window's end less its value at the start; a series born inside
+  // the window counts from zero (increase() drops a new series' first value, and pattern series
+  // keep being born as new statements print).
+  const sel = `all_events_summaryVolume_total${envLabel}`;
   const promql =
     `sum by (${rows.container_label}, tenx_hash, message_pattern, severity_level, routeState) ` +
-    `(increase(all_events_summaryVolume_total${envLabel}[${Math.round(windowSec / 60)}m] @ ${hourStart}))`;
+    `(clamp_min(${sel} @ ${hourStart} - (${sel} @ ${hourStart - windowSec} or ${sel} @ ${hourStart} * 0), 0))`;
   queries.push(promql);
   const resp = await prom.queryInstant(promql);
   if (resp.status !== 'success') throw new Error(`Prometheus answered ${resp.status} to the statements query`);
@@ -214,8 +218,10 @@ export interface RowsPlan {
   /** W, the meter's last complete hour. */
   rowsLastHour: number;
   activeRows: number;
-  /** O, rows the meter counted beyond the Receiver's pass lines, taken as writers outside it. */
+  /** O, rows an hour other writers put into the table (the policy's outside_rows_per_hour). */
   outsidePerHour: number;
+  /** Meter rows on the Receiver over the pass lines its counters read: each statement's rate is scaled by it. */
+  counterScale: number;
   allowancePerHour: number;
   levelPerHour?: number;
   floorPerHour: number;
@@ -292,7 +298,10 @@ export function planRows(input: RowsPlanInput): RowsPlan {
     targetSource = `${fmtRows(R)} rows an hour, the meter's last complete hour, recorded by this run`;
     if (!(W > 0)) warnings.push('The meter counted no rows in the last complete hour, so no rate is recorded yet; the next run reads it again.');
   }
-  const O = Math.max(0, W - reads.passLinesPerHour);
+  // The meter is the truth for totals; the Receiver's counters apportion it across statements.
+  const O = Math.min(W, rows.outside_rows_per_hour);
+  const receiverRows = Math.max(0, W - O);
+  const counterScale = reads.passLinesPerHour > 0 && receiverRows > 0 ? Math.max(1, receiverRows / reads.passLinesPerHour) : 1;
 
   // statements by container, all routes summed: the Receiver's intake, and the floor each keeps
   // whatever its limit: the always-pass sample per window per node, plus the keep count for an
@@ -304,7 +313,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
     const m = agg.get(s.container) ?? new Map<string, { rate: number; error: boolean }>();
     const key = s.hash || s.pattern;
     const x = m.get(key) ?? { rate: 0, error: false };
-    x.rate += s.linesPerHour;
+    x.rate += s.linesPerHour * counterScale;
     x.error = x.error || ['ERROR', 'CRITICAL', 'FATAL'].includes(s.severity);
     m.set(key, x);
     agg.set(s.container, m);
@@ -389,7 +398,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
     `Rows written: ${fmtRows(W)} of ${fmtRows(R)} an hour last hour (${targetSource}; part_log on ${rows.table}); ` +
     `at these limits the table takes about ${fmtRows(projected)} an hour, with ${fmtRows(moved)} an hour of lines to the account's bucket.`;
   lines.push(
-    `Outside the Receiver: ${fmtRows(O)} rows an hour (the meter less the Receiver's ${fmtRows(reads.passLinesPerHour)} pass lines). The table holds ${fmtRows(reads.activeRows)} active rows.`,
+    `Outside the Receiver: ${fmtRows(O)} rows an hour (outside_rows_per_hour). The Receiver's counters read ${fmtRows(reads.passLinesPerHour)} pass lines an hour against ${fmtRows(receiverRows)} rows the meter puts on it, so each statement's rate is scaled by ${counterScale.toFixed(2)}. The table holds ${fmtRows(reads.activeRows)} active rows.`,
     `The Receiver's statements send ${fmtRows(budgetedPerHour)} lines an hour` +
       (level !== undefined
         ? `; ${fmtRows(forBudgeted)} an hour fits the rate, so each statement keeps up to ${fmtRows(level)} an hour and the noisiest give way first.`
@@ -402,6 +411,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
       `The always-pass sample alone keeps about ${fmtRows(floorPerHour)} lines an hour, more than the ${fmtRows(forBudgeted)} an hour that fits, so the table takes about ${fmtRows(projected)} an hour above the rate. Raise the rate, lower rateReceiverBaselineCount, or add the noisiest services to the Receiver's scope.`,
     );
   }
+  if (counterScale > 1.5) warnings.push(`The Receiver's counters read ${fmtRows(reads.passLinesPerHour)} pass lines an hour against ${fmtRows(receiverRows)} rows on the meter; rates are scaled by ${counterScale.toFixed(2)}, which assumes the counters miss lines evenly across statements.`);
   if (O >= R) warnings.push(`Rows from writers outside the Receiver already reach ${fmtRows(O)} an hour, at or above the rate, so the Receiver's services keep nothing beyond the always-pass sample.`);
   return {
     targetRows: R,
@@ -409,6 +419,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
     rowsLastHour: W,
     activeRows: reads.activeRows,
     outsidePerHour: O,
+    counterScale,
     allowancePerHour: allowance,
     ...(level !== undefined ? { levelPerHour: level } : {}),
     floorPerHour,
