@@ -104,7 +104,8 @@ function fakeCluster(opts: { hotStore: number; hotDisk: number; passStore: numbe
     if (p === '/_ilm/policy/tenx-keep') return { 'tenx-keep': { policy: { phases: { hot: { actions: { rollover: { max_age: '1h' } } }, frozen: { min_age: '9h', actions: {} } } } } };
     if (p === '/_ilm/policy/tenx-tier-down') return { 'tenx-tier-down': { policy: { phases: { hot: { actions: { rollover: { max_age: '1h' } } }, frozen: { min_age: '1m', actions: {} } } } } };
     if (p === '/partial-tenx-tierdown-000002/_ilm/explain')
-      return { indices: { 'partial-tenx-tierdown-000002': { lifecycle_date_millis: (NOW - 7200) * 1000, index_creation_date_millis: (NOW - 7200 + 2100) * 1000 } } };
+      // index_creation_date_millis on a mounted index is the original creation: a trap the run must not read.
+      return { indices: { 'partial-tenx-tierdown-000002': { lifecycle_date_millis: (NOW - 7200) * 1000, index_creation_date_millis: (NOW - 10800) * 1000, phase: 'frozen', step: 'complete', step_time_millis: (NOW - 7200 + 2100) * 1000 } } };
     if (p.startsWith('/tenx-app/_mapping/field/')) {
       const f = decodeURIComponent(p.split('/').pop()!);
       return { 'tenx-app-000001': { mappings: { [f]: { full_name: f, mapping: { [f.split('.').pop()!]: { type: 'text', fields: { keyword: { type: 'keyword' } } } } } } } };
@@ -183,9 +184,9 @@ test('plan: over the size, the noisiest statement is held and hot settles at S',
   const MBh = 1e6;
   const r = reads({
     statements: [
-      { container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 600 * MBh, linesPerHour: 1 },
-      { container: 'cart', pattern: 'B', name: 'b', severity: 'INFO', route: 'pass', bytesPerHour: 300 * MBh, linesPerHour: 1 },
-      { container: 'kafka', pattern: 'C', name: 'c', severity: 'INFO', route: 'pass', bytesPerHour: 100 * MBh, linesPerHour: 1 },
+      { container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 600 * MBh, linesPerHour: (600 * MBh) / 300 },
+      { container: 'cart', pattern: 'B', name: 'b', severity: 'INFO', route: 'pass', bytesPerHour: 300 * MBh, linesPerHour: (300 * MBh) / 300 },
+      { container: 'kafka', pattern: 'C', name: 'c', severity: 'INFO', route: 'pass', bytesPerHour: 100 * MBh, linesPerHour: (100 * MBh) / 300 },
     ],
   });
   const plan = planHotTier({ hot, reads: r, instances: { cart: 2, kafka: 1 }, nodesTotal: 3, exceptions: [], targetServices: [] });
@@ -205,7 +206,7 @@ test('plan: over the size, the noisiest statement is held and hot settles at S',
 });
 
 test('plan: under the size, every statement keeps its lines with headroom', () => {
-  const r = reads({ hotStoreBytes: 3 * GB, pass: { storeBytes: 2 * GB, countedBytes: 2 * GB, indices: 1 }, statements: [{ container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 1e8, linesPerHour: 1 }] });
+  const r = reads({ hotStoreBytes: 3 * GB, pass: { storeBytes: 2 * GB, countedBytes: 2 * GB, indices: 1 }, statements: [{ container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 1e8, linesPerHour: (1e8) / 300 }] });
   const plan = planHotTier({ hot, reads: r, instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
   assert.equal(plan.levelPerHour, undefined);
   assert.equal(plan.movedPerHour, 0);
@@ -213,7 +214,7 @@ test('plan: under the size, every statement keeps its lines with headroom', () =
 });
 
 test('plan: above the size now, the allowance is held below the steady-state number until hot drains', () => {
-  const base = { statements: [{ container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 2e9, linesPerHour: 1 }] };
+  const base = { statements: [{ container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 2e9, linesPerHour: (2e9) / 300 }] };
   const under = planHotTier({ hot, reads: reads({ ...base, hotStoreBytes: 8 * GB }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
   const over = planHotTier({ hot, reads: reads({ ...base, hotStoreBytes: 12 * GB, pass: { storeBytes: 9 * GB, countedBytes: 9 * GB, indices: 1 } }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
   assert.equal(over.overSize, true);
@@ -223,8 +224,8 @@ test('plan: above the size now, the allowance is held below the steady-state num
 test('plan: a service in exceptions is left alone and still counts against the size', () => {
   const r = reads({
     statements: [
-      { container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 9e8, linesPerHour: 1 },
-      { container: 'audit', pattern: 'Z', name: 'z', severity: 'INFO', route: 'pass', bytesPerHour: 3e8, linesPerHour: 1 },
+      { container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 9e8, linesPerHour: (9e8) / 300 },
+      { container: 'audit', pattern: 'Z', name: 'z', severity: 'INFO', route: 'pass', bytesPerHour: 3e8, linesPerHour: (3e8) / 300 },
     ],
   });
   const plan = planHotTier({ hot, reads: r, instances: {}, nodesTotal: 1, exceptions: ['audit'], targetServices: [] });
@@ -232,6 +233,31 @@ test('plan: a service in exceptions is left alone and still counts against the s
   assert.equal(audit.cap, 0);
   assert.equal(audit.action, 'pass');
   assert.ok(plan.projectedBytes <= 10 * GB * 1.001);
+});
+
+test('plan: when the always-pass sample alone exceeds what fits, the run says so and projects above S', () => {
+  // 2,000 small statements, one line every few seconds each: the 5-line sample per window keeps them all.
+  const statements = Array.from({ length: 2000 }, (_, i) => ({ container: `svc${i % 40}`, pattern: `p${i}`, name: `n${i}`, severity: 'INFO', route: 'pass', bytesPerHour: 300 * 60, linesPerHour: 60 }));
+  statements.push({ container: 'cart', pattern: 'BIG', name: 'big', severity: 'INFO', route: 'pass', bytesPerHour: 2e9, linesPerHour: 2e9 / 300 });
+  // 9.8 GB outside the Receiver on a 10 GB size: almost nothing fits, less than the floor.
+  const plan = planHotTier({ hot, reads: reads({ hotStoreBytes: 10.2 * GB, pass: { storeBytes: 0.4 * GB, countedBytes: 0.4 * GB, indices: 1 }, tierDown: { storeBytes: 0, countedBytes: 0, indices: 0 }, statements }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.ok(plan.floorPerHour > 0);
+  assert.equal(plan.floorExceedsSize, true);
+  // the noisy statement is held to its own sample
+  const cart = plan.rows.find((x) => x.container === 'cart')!;
+  assert.ok(cart.keptPerHour < 2e9 * 0.01, String(cart.keptPerHour));
+  assert.ok(plan.projectedBytes > 10 * GB);
+  assert.ok(plan.warnings.some((w) => /always-pass sample/.test(w)));
+});
+
+test('plan: the floor is part of the kept total, so a binding size still projects at or under S', () => {
+  const MB = 1e6;
+  const st = (c: string, p: string, rate: number) => ({ container: c, pattern: p, name: p, severity: 'INFO', route: 'pass', bytesPerHour: rate, linesPerHour: rate / 300 });
+  const plan = planHotTier({ hot, reads: reads({ statements: [st('cart', 'A', 600 * MB), st('cart', 'B', 300 * MB), st('kafka', 'C', 100 * MB)] }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.floorExceedsSize, false);
+  assert.ok(plan.projectedBytes <= 10 * GB * 1.001, String(plan.projectedBytes));
+  // each statement's sample: 5 lines x 15 windows x 300 bytes
+  assert.ok(Math.abs(plan.floorPerHour - 3 * 5 * 15 * 300) < 1, String(plan.floorPerHour));
 });
 
 const seams = tick as unknown as { _setBudgetDeps?: (d: unknown) => void; _resetBudgetDeps?: () => void };

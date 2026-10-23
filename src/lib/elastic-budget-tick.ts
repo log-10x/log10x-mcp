@@ -23,7 +23,7 @@
 
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from './report/user-units.js';
 import { FLEET_DEFAULT_HEADROOM } from './fleet-default.js';
-import { perWindowPerNode, waterLevel, type BudgetAction } from './budget-tick.js';
+import { perWindowPerNode, type BudgetAction } from './budget-tick.js';
 import type { HotTierBudget } from './policy-loader.js';
 
 const HOUR = 3600;
@@ -214,9 +214,12 @@ export async function readHotTierInputs(nowSec: number, hot: HotTierBudget, req:
   const tdPolicy = tdName ? (await req('GET', `/_ilm/policy/${encodeURIComponent(tdName)}`))?.[tdName]?.policy : undefined;
   const tdMaxAge = esDurationHours(tdPolicy?.phases?.hot?.actions?.rollover?.max_age);
   if (tdMounted.length > 0 && tdMaxAge !== undefined) {
-    const ex = await req('GET', `/${tdMounted.map(encodeURIComponent).join(',')}/_ilm/explain?filter_path=indices.*.lifecycle_date_millis,indices.*.index_creation_date_millis`);
+    // On a mounted index index_creation_date_millis is the original index's creation; the mount is
+    // done when the frozen phase's step reads complete, at step_time_millis.
+    const ex = await req('GET', `/${tdMounted.map(encodeURIComponent).join(',')}/_ilm/explain?filter_path=indices.*.lifecycle_date_millis,indices.*.phase,indices.*.step,indices.*.step_time_millis`);
     const delays = Object.values<any>(ex?.indices ?? {})
-      .map((i) => (Number(i.index_creation_date_millis) - Number(i.lifecycle_date_millis)) / 3.6e6)
+      .filter((i) => i.phase === 'frozen' && i.step === 'complete')
+      .map((i) => (Number(i.step_time_millis) - Number(i.lifecycle_date_millis)) / 3.6e6)
       .filter((d) => Number.isFinite(d) && d >= 0)
       .sort((a, b) => a - b);
     if (delays.length > 0) {
@@ -332,6 +335,10 @@ export interface HotTierPlan {
   allowancePerHour: number;
   /** Fleet counted bytes an hour each statement keeps when the size binds; undefined under it. */
   levelPerHour?: number;
+  /** Counted bytes an hour the always-pass sample and error keep counts keep whatever the limits. */
+  floorPerHour: number;
+  /** True when the floor alone exceeds what fits: hot settles above S. */
+  floorExceedsSize: boolean;
   movedPerHour: number;
   tierDownInFlightBytes: number;
   /** Hot store the limits settle at once the current lines on hot have aged out. */
@@ -351,6 +358,25 @@ export interface HotTierPlanInput {
   nodesTotal: number;
   exceptions: string[];
   targetServices: string[];
+}
+
+/**
+ * The level L at which the kept total, sum(max(min(rate, L), floor)), equals the
+ * allowance: the regulator passes each statement's always-pass sample (and an
+ * error statement's keep count) whatever its limit, so no statement keeps less
+ * than its floor. Undefined when the floors alone exceed the allowance.
+ */
+export function waterLevelWithFloor(items: Array<{ rate: number; floor: number }>, allowance: number): number | undefined {
+  const kept = (L: number): number => items.reduce((a, x) => a + Math.max(Math.min(x.rate, L), Math.min(x.floor, x.rate)), 0);
+  if (kept(0) > allowance) return undefined;
+  let lo = 0;
+  let hi = Math.max(0, ...items.map((x) => x.rate));
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (kept(mid) > allowance) hi = mid;
+    else lo = mid;
+  }
+  return lo;
 }
 
 function median(values: number[]): number | undefined {
@@ -393,38 +419,65 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   const R = reads.retentionHours;
   const L = reads.tierDownHotHours;
 
-  // statements by container, all routes summed: the Receiver's intake
-  const byContainer = new Map<string, Map<string, number>>();
+  // statements by container, all routes summed: the Receiver's intake, and the floor each keeps
+  // whatever its limit: the always-pass sample per window per node, plus the keep count for an
+  // error statement, in bytes at the statement's own line size.
+  const windowsPerHour = HOUR / REGULATOR_WINDOW_SECONDS;
+  const agg = new Map<string, Map<string, { rate: number; lines: number; error: boolean }>>();
   for (const s of input.reads.statements) {
     if (!s.container || !(s.bytesPerHour > 0)) continue;
-    const m = byContainer.get(s.container) ?? new Map<string, number>();
-    m.set(s.pattern, (m.get(s.pattern) ?? 0) + s.bytesPerHour);
-    byContainer.set(s.container, m);
+    const m = agg.get(s.container) ?? new Map<string, { rate: number; lines: number; error: boolean }>();
+    const x = m.get(s.pattern) ?? { rate: 0, lines: 0, error: false };
+    x.rate += s.bytesPerHour;
+    x.lines += s.linesPerHour;
+    x.error = x.error || ['ERROR', 'CRITICAL', 'FATAL'].includes(s.severity);
+    m.set(s.pattern, x);
+    agg.set(s.container, m);
   }
+  const floorOf = (c: string, x: { rate: number; lines: number; error: boolean }): number => {
+    const lineBytes = x.lines > 0 ? x.rate / x.lines : 0;
+    const perWindow = ALWAYS_PASS_LINES + (x.error ? hot.keep_count : 0);
+    return Math.min(x.rate, perWindow * windowsPerHour * Math.max(1, input.instances[c] ?? 1) * lineBytes);
+  };
+  const byContainer = new Map<string, Map<string, number>>();
+  for (const [c, m] of agg) byContainer.set(c, new Map([...m].map(([p, x]) => [p, x.rate])));
   const exempt = new Set(input.exceptions);
   const inScope = (c: string): boolean => !exempt.has(c) && (input.targetServices.length === 0 || input.targetServices.includes(c));
   const actionOf = (c: string): BudgetAction => hot.service_actions[c] ?? hot.default_action;
   let exemptPerHour = 0;
-  const budgeted: Array<{ c: string; rate: number }> = [];
-  for (const [c, m] of byContainer) {
-    for (const r of m.values()) {
-      if (inScope(c)) budgeted.push({ c, rate: r });
-      else exemptPerHour += r;
+  const budgeted: Array<{ c: string; rate: number; floor: number }> = [];
+  for (const [c, m] of agg) {
+    for (const x of m.values()) {
+      if (inScope(c)) budgeted.push({ c, rate: x.rate, floor: floorOf(c, x) });
+      else exemptPerHour += x.rate;
     }
   }
   const budgetedPerHour = budgeted.reduce((a, x) => a + x.rate, 0);
-  const rates = budgeted.map((x) => x.rate);
+  const floorPerHour = budgeted.reduce((a, x) => a + x.floor, 0);
+  const keptAt = (L: number | undefined): number =>
+    L === undefined ? floorPerHour : budgeted.reduce((a, x) => a + Math.max(Math.min(x.rate, L), x.floor), 0);
+  const solve = (forBudgeted: number): { level?: number; infeasible: boolean } => {
+    if (budgetedPerHour <= forBudgeted) return { infeasible: false };
+    const L = waterLevelWithFloor(budgeted, forBudgeted);
+    return L === undefined ? { level: 0, infeasible: true } : { level: L, infeasible: false };
+  };
 
   // A = (S - outside - tier_down in flight) / (k x R); the tier_down in flight depends on A, so iterate.
   let level: number | undefined;
+  let infeasible = false;
   let allowance = Math.max(0, (S - outside) / (k * R));
   let moved = 0;
   let inFlight = 0;
+  const keptOf = (x: { rate: number; floor: number }, L: number | undefined): number => (L === undefined ? x.rate : Math.max(Math.min(x.rate, L), x.floor));
+  const settle = (): void => {
+    const sol = solve(Math.max(0, allowance - exemptPerHour));
+    level = sol.level;
+    infeasible = sol.infeasible;
+    moved = budgeted.reduce((a, x) => a + (x.rate - keptOf(x, level)), 0);
+  };
   for (let i = 0; i < 8; i++) {
-    const forBudgeted = Math.max(0, allowance - exemptPerHour);
-    level = budgetedPerHour > forBudgeted ? waterLevel(rates, forBudgeted) : undefined;
-    moved = level === undefined ? 0 : budgeted.reduce((a, x) => a + Math.max(0, x.rate - (level as number)), 0);
-    const movedToTd = level === undefined ? 0 : budgeted.reduce((a, x) => a + (actionOf(x.c) === 'tier_down' ? Math.max(0, x.rate - (level as number)) : 0), 0);
+    settle();
+    const movedToTd = budgeted.reduce((a, x) => a + (actionOf(x.c) === 'tier_down' ? x.rate - keptOf(x, level) : 0), 0);
     inFlight = kTd * movedToTd * L;
     allowance = Math.max(0, (S - outside - inFlight) / (k * R));
   }
@@ -432,9 +485,7 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   const overSize = H > S;
   if (overSize && H > 0) {
     allowance *= S / H;
-    const forBudgeted = Math.max(0, allowance - exemptPerHour);
-    level = budgetedPerHour > forBudgeted ? waterLevel(rates, forBudgeted) : undefined;
-    moved = level === undefined ? 0 : budgeted.reduce((a, x) => a + Math.max(0, x.rate - (level as number)), 0);
+    settle();
   }
   const forBudgeted = Math.max(0, allowance - exemptPerHour);
   const headroom = budgetedPerHour > 0 ? Math.min(FLEET_DEFAULT_HEADROOM, Math.max(1, forBudgeted / budgetedPerHour)) : FLEET_DEFAULT_HEADROOM;
@@ -452,8 +503,9 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
       rows.push({ container: c, action: 'pass', instances: n, bytesPerHour: rate, keptPerHour: rate, cap: 0, total: perWindowPerNode(rate * FLEET_DEFAULT_HEADROOM, n) });
       continue;
     }
+    const items = budgeted.filter((x) => x.c === c);
     const capPerHour = level !== undefined ? level : Math.max(...ps) * headroom;
-    const keptPerHour = level !== undefined ? ps.reduce((a, r) => a + Math.min(r, level as number), 0) : rate * headroom;
+    const keptPerHour = level !== undefined ? items.reduce((a, x) => a + keptOf(x, level), 0) : rate * headroom;
     keptTotal += level !== undefined ? keptPerHour : rate;
     knownCaps.push(capPerHour);
     knownTotals.push(keptPerHour);
@@ -475,7 +527,7 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   const starNodes = mNodes !== undefined ? Math.max(1, Math.round(mNodes)) : Math.max(1, input.nodesTotal);
   const star = { action: hot.default_action as BudgetAction, instances: starNodes, cap: perWindowPerNode(starCap, starNodes), total: perWindowPerNode(starTotal, starNodes), keptPerHour: starTotal };
 
-  const keptBudgeted = level !== undefined ? budgetedPerHour - moved : budgetedPerHour;
+  const keptBudgeted = level !== undefined ? keptAt(level) : budgetedPerHour;
   const projected = outside + k * (keptBudgeted + exemptPerHour) * R + inFlight;
   const heldLine =
     `Hot tier: ${fmtGB(H)} of ${fmtGB(S)} (${targetSource}) on ${reads.hotNodes} hot node${reads.hotNodes === 1 ? '' : 's'}; ` +
@@ -490,6 +542,11 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   );
   if (overSize) {
     lines.push(`Hot is above the size now; the allowance is held at ${Math.round((S / H) * 100)}% until it drains, which takes up to ${Math.round(R)} hours as the indices on hot age out.`);
+  }
+  if (infeasible) {
+    warnings.push(
+      `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit) alone keeps about ${fmtGB(floorPerHour * 24)} a day on hot, more than the ${fmtGB(Math.max(0, allowance - exemptPerHour) * 24)} a day that fits, so hot settles above ${fmtGB(S)} at about ${fmtGB(projected)}. Raise the size, move the noisiest services to offload, or lower the sample.`,
+    );
   }
   if (outside + inFlight >= S) {
     warnings.push(`Lines outside the Receiver and the tier_down lines waiting to move already fill ${fmtGB(S)}, so the Receiver's services keep nothing beyond the always-pass sample of ${ALWAYS_PASS_LINES} lines a statement a window.`);
@@ -506,6 +563,8 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
     tierDownHotHours: L,
     allowancePerHour: allowance,
     ...(level !== undefined ? { levelPerHour: level } : {}),
+    floorPerHour,
+    floorExceedsSize: infeasible,
     movedPerHour: moved,
     tierDownInFlightBytes: inFlight,
     projectedBytes: projected,
