@@ -150,7 +150,7 @@ test('reads: the meter is part_log NewPart rows in the last complete hour, by ev
   assert.equal(r.statements.length, 4);
   assert.match(f.sql[0], /clusterAllReplicas\('default', system\.part_log\)/);
   assert.match(f.promql[0], /sum by \(k8s_container, tenx_hash, message_pattern, severity_level, routeState\)/);
-  assert.match(f.promql[0], /all_events_summaryVolume_total\{tenx_env="edge"\}\[60m\] @ \d+/);
+  assert.match(f.promql[0], /clamp_min\(all_events_summaryVolume_total\{tenx_env="edge"\} @ \d+ - \(all_events_summaryVolume_total\{tenx_env="edge"\} @ \d+ or /);
 });
 
 test('reads: a 10-minute meter window on a time-scaled rig reads as a rate an hour', async () => {
@@ -168,7 +168,7 @@ test('reads: a 10-minute meter window on a time-scaled rig reads as a rate an ho
   assert.equal(r.rowsLastHour, 900);
   assert.equal(r.statements[0]?.linesPerHour, 600);
   assert.match(sql[0], /intDiv\(toUnixTimestamp\(event_time\), 600\) \* 600/);
-  assert.match(f.promql[0], /\[10m\] @ /);
+  assert.match(f.promql[0], new RegExp(`@ ${W} - \\(all_events_summaryVolume_total @ ${W - 600} or `));
   assert.throws(() => parsePolicyYaml(policyText('  rows_per_hour: 1000\n  meter_minutes: 7')), /dividing 60/);
 });
 
@@ -178,8 +178,8 @@ function reads(W: number, pass: number, statements: RowsReads['statements']): Ro
 const st = (c: string, h: string, lines: number, sev = 'INFO') => ({ container: c, hash: h, pattern: `p_${h}`, severity: sev, route: 'pass', linesPerHour: lines });
 
 test('plan: the rate binds, the floor is subtracted, and the table takes at most R an hour', () => {
-  const rows = parsePolicyYaml(policyText('  rows_per_hour: 6000')).rows!;
-  // W 8000 last hour; the Receiver passed 7000, so 1000 rows an hour come from outside it.
+  const rows = parsePolicyYaml(policyText('  rows_per_hour: 6000\n  outside_rows_per_hour: 1000')).rows!;
+  // W 8000 last hour; 1000 rows an hour come from another writer, the Receiver passed 7000.
   const rd = reads(8000, 7000, [st('kafka', 'k1', 4000), st('kafka', 'k2', 2000), st('cart', 'c1', 1000)]);
   const plan = planRows({ rows, reads: rd, instances: { kafka: 2, cart: 1 }, nodesTotal: 2, exceptions: [], targetServices: [] });
   assert.equal(plan.targetRows, 6000);
@@ -239,4 +239,18 @@ test('plan: auto takes the meter at the first run and the recorded rate after it
   assert.equal(later.targetRows, 7777);
   assert.equal(later.overRate, true);
   assert.ok(later.projectedPerHour <= 7777 + 1);
+});
+
+test('plan: the meter anchors the totals; counters that miss lines are scaled up to it', () => {
+  const rows = parsePolicyYaml(policyText('  rows_per_hour: 4500')).rows!;
+  // the counters saw a tenth of what the meter counted
+  const rd = reads(9000, 900, [st('kafka', 'k1', 600), st('cart', 'c1', 300)]);
+  const plan = planRows({ rows, reads: rd, instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.outsidePerHour, 0);
+  assert.equal(plan.counterScale, 10);
+  const kafka = plan.rows.find((r) => r.container === 'kafka')!;
+  assert.equal(kafka.linesPerHour, 6000);
+  assert.ok(plan.projectedPerHour <= 4500 + 1);
+  assert.ok(plan.warnings.some((w) => w.includes('scaled by 10.00')));
+  assert.throws(() => parsePolicyYaml(policyText('  rows_per_hour: 10\n  outside_rows_per_hour: -1')), /0 or more/);
 });
