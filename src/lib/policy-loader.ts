@@ -125,6 +125,34 @@ export interface DollarBudget {
 }
 
 /**
+ * Rows written into a ClickHouse logs table held at a rate (the rows run). The
+ * run reads the rows ClickHouse wrote in the last hour from its own query log and
+ * each statement's lines an hour from the Receiver's counters, and rewrites the
+ * per-statement limits and service totals, in events, so the excess goes to the
+ * account's own bucket before ClickHouse receives it.
+ */
+export interface RowsBudget {
+  /** R: rows an hour into the logs table; undefined: `auto`, the meter's last complete hour at the first applied run. */
+  rows_per_hour?: number;
+  /** `database.table` the meter counts. */
+  table: string;
+  /** Cluster name for `clusterAllReplicas` on ClickHouse Cloud (each node keeps its own part_log); undefined reads the one node. */
+  cluster?: string;
+  /** Prometheus label carrying the container (the regulator's containerField). */
+  container_label: string;
+  /** Minutes of the meter's window; 60 in production. A shorter window scales the reads to an hour, for a time-scaled test rig. */
+  meter_minutes: number;
+  /** Rows an hour other writers put into the table; the rest of the meter is the Receiver's. Default 0. */
+  outside_rows_per_hour: number;
+  /** Error lines over a limit that pass per statement per node per window. */
+  keep_count: number;
+  default_action: 'offload';
+  service_actions: Record<string, 'offload'>;
+  nodes_by_container: Record<string, number>;
+  nodes_total?: number;
+}
+
+/**
  * An Elasticsearch hot tier held under a size (the hot-tier run). The run
  * reads the hot nodes' store and the Receiver's own indices every hour and
  * rewrites the per-statement limits, in bytes, so growth goes to the frozen
@@ -182,6 +210,8 @@ export interface Policy {
    * not the mute-list tick.
    */
   budget_usd?: DollarBudget;
+  /** ROWS RUN on ClickHouse: hold the rows written into the logs table at a rate an hour. */
+  rows?: RowsBudget;
   /**
    * HOT-TIER BUDGET on Elasticsearch: hold the hot nodes' store under a size.
    * When present the tick is the hot-tier run (caps, actions, totals in bytes).
@@ -436,10 +466,16 @@ export function parsePolicyYaml(text: string): Policy {
     );
   }
   const budget_usd = parseDollarBudget(red);
+  const rows = parseRows(red);
   const hot_tier = parseHotTier(red);
-  if (hot_tier && (budget_usd || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+  if (hot_tier && (budget_usd || rows || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
     throw new PolicyLoadError(
-      'reduction carries hot_tier_gb with budget_usd_monthly, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+      'reduction carries hot_tier_gb with budget_usd_monthly, rows_per_hour, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+    );
+  }
+  if (rows && (budget_usd || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+    throw new PolicyLoadError(
+      'reduction carries rows_per_hour with budget_usd_monthly, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
     );
   }
   if (budget_usd && (budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
@@ -447,8 +483,8 @@ export function parsePolicyYaml(text: string): Policy {
       'reduction carries budget_usd_monthly with budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
     );
   }
-  if (delivery === 'configmap' && !budget_usd && !hot_tier) {
-    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly or reduction.hot_tier_gb.');
+  if (delivery === 'configmap' && !budget_usd && !rows && !hot_tier) {
+    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly, reduction.rows_per_hour or reduction.hot_tier_gb.');
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
@@ -536,6 +572,7 @@ export function parsePolicyYaml(text: string): Policy {
     target_percent,
     ...(budget_gb_monthly !== undefined ? { budget_gb_monthly } : {}),
     ...(budget_usd ? { budget_usd } : {}),
+    ...(rows ? { rows } : {}),
     ...(hot_tier ? { hot_tier } : {}),
     exceptions,
     min_delta_pp,
@@ -548,7 +585,7 @@ export function parsePolicyYaml(text: string): Policy {
       ...(env_id !== undefined ? { env_id } : {}),
       commit_strategy,
       ...(base_branch !== undefined ? { base_branch } : {}),
-      ...(budget_usd || hot_tier ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
+      ...(budget_usd || rows || hot_tier ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
       ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
       ...(cmName !== undefined ? { configmap: cmName } : {}),
       ...(policyBranch !== undefined ? { policy_branch: policyBranch } : {}),
@@ -621,35 +658,59 @@ function nonEmptyString(raw: unknown, field: string, dflt: string): string {
 }
 
 /**
- * The hot-tier block of `reduction` (`hot_tier_gb: <GB>` or `hot_tier_gb: auto`),
- * or undefined when the policy has none.
+ * The rows block of `reduction` (`rows_per_hour: <n>` or `rows_per_hour: auto`), or
+ * undefined when the policy has none. The only action on ClickHouse is offload: a
+ * line over its service's total never enters the table.
  */
-function parseHotTier(red: Record<string, unknown> | undefined): HotTierBudget | undefined {
-  const raw = red?.['hot_tier_gb'];
+function parseRows(red: Record<string, unknown> | undefined): RowsBudget | undefined {
+  const raw = red?.['rows_per_hour'];
   if (raw === undefined) return undefined;
   const auto = typeof raw === 'string' && raw.trim().toLowerCase() === 'auto';
-  const gb = auto ? undefined : positiveNumber(raw);
-  if (!auto && gb === undefined) {
-    throw new PolicyLoadError(`hot_tier_gb must be a positive number of GB, or auto for a share of the hot nodes' disk; got: ${String(raw)}`);
+  const n = auto ? undefined : positiveNumber(raw);
+  if (!auto && n === undefined) {
+    throw new PolicyLoadError(`rows_per_hour must be a positive number of rows an hour, or auto for the meter's last hour at the first run; got: ${String(raw)}`);
   }
-  const rawShare = red?.['hot_tier_share'];
-  const share = rawShare === undefined ? 0.8 : positiveNumber(rawShare);
-  if (share === undefined || share >= 1) {
-    throw new PolicyLoadError(`hot_tier_share must be a number above 0 and below 1; got: ${String(rawShare)}`);
+  const table = nonEmptyString(red?.['clickhouse_table'], 'clickhouse_table', 'default.otel_logs');
+  if (!table.includes('.')) throw new PolicyLoadError(`clickhouse_table must be database.table; got: ${table}`);
+  const rawO = red?.['outside_rows_per_hour'];
+  const outsideRows = rawO === undefined ? 0 : typeof rawO === 'number' ? rawO : Number(rawO);
+  if (!Number.isFinite(outsideRows) || outsideRows < 0) {
+    throw new PolicyLoadError(`outside_rows_per_hour must be a number of rows an hour, 0 or more; got: ${String(rawO)}`);
   }
-  const rawR = red?.['hot_retention_hours'];
-  const retention = rawR === undefined ? undefined : positiveNumber(rawR);
-  if (rawR !== undefined && retention === undefined) {
-    throw new PolicyLoadError(`hot_retention_hours must be a positive number of hours; got: ${String(rawR)}`);
+  const rawM = red?.['meter_minutes'];
+  const meterMinutes = rawM === undefined ? 60 : positiveNumber(rawM);
+  if (meterMinutes === undefined || !Number.isInteger(meterMinutes) || meterMinutes > 60 || 60 % meterMinutes !== 0) {
+    throw new PolicyLoadError(`meter_minutes must be a whole number of minutes dividing 60 (60 in production); got: ${String(rawM)}`);
   }
+  const rawK = red?.['keep_count'];
+  const keep_count = rawK === undefined ? 50 : typeof rawK === 'string' ? Number(rawK) : typeof rawK === 'number' ? rawK : NaN;
+  if (!Number.isInteger(keep_count) || keep_count < 0) {
+    throw new PolicyLoadError(`keep_count must be a whole number of lines, 0 or more; got: ${String(rawK)}`);
+  }
+  if (red?.['default_action'] !== undefined && red['default_action'] !== 'offload') {
+    throw new PolicyLoadError(`default_action: ${String(red['default_action'])} has no ClickHouse route; the rows run writes offload only.`);
+  }
+  const service_actions: Record<string, 'offload'> = {};
+  const rawSa = red?.['service_actions'];
+  if (rawSa && typeof rawSa === 'object' && !Array.isArray(rawSa)) {
+    for (const [c, act] of Object.entries(rawSa as Record<string, unknown>)) {
+      if (act !== 'offload') throw new PolicyLoadError(`service_actions.${c}: ${String(act)} has no ClickHouse route; the rows run writes offload only.`);
+      service_actions[c] = 'offload';
+    }
+  }
+  const nodes_total = red?.['nodes_total'] === undefined ? undefined : countMap({ nodes_total: red['nodes_total'] }, 'reduction').nodes_total;
   return {
-    ...(gb !== undefined ? { gb } : {}),
-    capacity_share: share,
-    ...(retention !== undefined ? { retention_hours: retention } : {}),
-    pass_alias: nonEmptyString(red?.['pass_alias'], 'pass_alias', 'tenx-app'),
-    tier_down_alias: nonEmptyString(red?.['tier_down_alias'], 'tier_down_alias', 'tenx-tierdown'),
-    container_field: nonEmptyString(red?.['container_field'], 'container_field', 'kubernetes.container_name'),
-    ...budgetCommon(red),
+    ...(n !== undefined ? { rows_per_hour: n } : {}),
+    table,
+    ...(typeof red?.['clickhouse_cluster'] === 'string' && red['clickhouse_cluster'].trim() ? { cluster: red['clickhouse_cluster'].trim() } : {}),
+    container_label: nonEmptyString(red?.['container_label'], 'container_label', 'k8s_container'),
+    meter_minutes: meterMinutes,
+    outside_rows_per_hour: outsideRows,
+    keep_count,
+    default_action: 'offload',
+    service_actions,
+    nodes_by_container: countMap(red?.['nodes_by_container'], 'nodes_by_container'),
+    ...(nodes_total !== undefined ? { nodes_total } : {}),
   };
 }
 
@@ -770,4 +831,37 @@ export function serviceBudgetsProblem(
 
 export function serviceBudgetUsd(b: ServiceBudgetInput | ServiceBudget): number {
   return typeof b === 'number' ? b : b.usd;
+}
+
+/**
+ * The hot-tier block of `reduction` (`hot_tier_gb: <GB>` or `hot_tier_gb: auto`),
+ * or undefined when the policy has none.
+ */
+function parseHotTier(red: Record<string, unknown> | undefined): HotTierBudget | undefined {
+  const raw = red?.['hot_tier_gb'];
+  if (raw === undefined) return undefined;
+  const auto = typeof raw === 'string' && raw.trim().toLowerCase() === 'auto';
+  const gb = auto ? undefined : positiveNumber(raw);
+  if (!auto && gb === undefined) {
+    throw new PolicyLoadError(`hot_tier_gb must be a positive number of GB, or auto for a share of the hot nodes' disk; got: ${String(raw)}`);
+  }
+  const rawShare = red?.['hot_tier_share'];
+  const share = rawShare === undefined ? 0.8 : positiveNumber(rawShare);
+  if (share === undefined || share >= 1) {
+    throw new PolicyLoadError(`hot_tier_share must be a number above 0 and below 1; got: ${String(rawShare)}`);
+  }
+  const rawR = red?.['hot_retention_hours'];
+  const retention = rawR === undefined ? undefined : positiveNumber(rawR);
+  if (rawR !== undefined && retention === undefined) {
+    throw new PolicyLoadError(`hot_retention_hours must be a positive number of hours; got: ${String(rawR)}`);
+  }
+  return {
+    ...(gb !== undefined ? { gb } : {}),
+    capacity_share: share,
+    ...(retention !== undefined ? { retention_hours: retention } : {}),
+    pass_alias: nonEmptyString(red?.['pass_alias'], 'pass_alias', 'tenx-app'),
+    tier_down_alias: nonEmptyString(red?.['tier_down_alias'], 'tier_down_alias', 'tenx-tierdown'),
+    container_field: nonEmptyString(red?.['container_field'], 'container_field', 'kubernetes.container_name'),
+    ...budgetCommon(red),
+  };
 }
