@@ -570,7 +570,10 @@ export interface BudgetFiles {
 }
 
 /** The four files the Receiver reads. Rows: `<container>,<value>::<reason>`; `*` last. */
-export function renderBudgetFiles(plan: BudgetPlan): BudgetFiles {
+export function renderBudgetFiles(plan: {
+  rows: ReadonlyArray<Pick<ServiceRow, 'container' | 'cap' | 'action' | 'total'>>;
+  star: Pick<BudgetPlan['star'], 'cap' | 'action' | 'total'>;
+}): BudgetFiles {
   const reason = 'budget run';
   const caps = ['container,cap'];
   const actions = ['container,action'];

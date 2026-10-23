@@ -66,6 +66,20 @@ export interface PolicyOptions {
   nodes_by_container?: Record<string, number>;
   /** Name of the Secret (k8s) holding DD_API_KEY, DD_APP_KEY and DD_SITE. Default: log10x-datadog. */
   datadog_secret_name?: string;
+  /**
+   * Rows written into a ClickHouse logs table held at this many rows an hour, or
+   * `auto` for the meter's last hour at the first run. When set the tick is the rows run.
+   */
+  rows_per_hour?: number | 'auto';
+  /** The `database.table` the rows run meters. Default default.otel_logs. */
+  clickhouse_table?: string;
+  /** Name of the Secret (k8s) holding CLICKHOUSE_URL, CLICKHOUSE_API_KEY (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD) and LOG10X_CUSTOMER_METRICS_URL. Default: log10x-clickhouse. */
+  clickhouse_secret_name?: string;
+}
+
+/** True when the policy holds a number every hour (the Datadog budget run or the ClickHouse rows run). */
+export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'rows_per_hour'>): boolean {
+  return opts.budget_usd_monthly !== undefined || opts.rows_per_hour !== undefined;
 }
 
 /** The budget run's delivery for a scheduler. */
@@ -79,8 +93,8 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
 /** The schedule a policy runs on: a budget run is hourly unless the caller names one. */
-export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly'>): SchedulePreset {
-  return opts.schedule ?? (opts.budget_usd_monthly !== undefined ? 'hourly' : 'daily-03utc');
+export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'rows_per_hour'>): SchedulePreset {
+  return opts.schedule ?? (isBudgetRun(opts) ? 'hourly' : 'daily-03utc');
 }
 
 /**
@@ -157,7 +171,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    ...(opts.budget_usd_monthly !== undefined
+    ...(opts.rows_per_hour !== undefined
+      ? rowsPolicyLines(opts)
+      : opts.budget_usd_monthly !== undefined
       ? budgetPolicyLines(opts)
       : opts.budget_gb_monthly !== undefined
       ? [
@@ -174,11 +190,11 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     `  scheduler: ${yamlString(opts.scheduler)}`,
     ``,
     `config_plane:`,
-    ...(opts.budget_usd_monthly !== undefined && budgetDelivery(opts.scheduler) === 'configmap'
+    ...(isBudgetRun(opts) && budgetDelivery(opts.scheduler) === 'configmap'
       ? [`  delivery: configmap`, `  namespace: ${yamlString(opts.namespace ?? 'log10x')}`]
       : [
           `  repo: ${yamlString(opts.config_plane)}`,
-          ...(opts.budget_usd_monthly !== undefined
+          ...(isBudgetRun(opts)
             ? [`  delivery: gitops`, `  # the run commits straight to this branch; the engine's gitops pull reads it (GH_BRANCH)`, `  policy_branch: log10x-policy`]
             : []),
         ]),
@@ -186,6 +202,29 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
   ];
   return lines.join('\n') + '\n';
+}
+
+function rowsPolicyLines(opts: PolicyOptions): string[] {
+  const nodes = Object.entries(opts.nodes_by_container ?? {});
+  return [
+    `  # ClickHouse: rows written into the logs table an hour, held at this figure,`,
+    `  # or auto for the meter's last complete hour at the first run. Each run reads`,
+    `  # NewPart rows from system.part_log and rewrites the per-statement limits and`,
+    `  # service totals, in lines, so the excess goes to the account's own bucket`,
+    `  # before ClickHouse receives it.`,
+    `  rows_per_hour: ${opts.rows_per_hour}`,
+    `  clickhouse_table: ${yamlString(opts.clickhouse_table ?? 'default.otel_logs')}`,
+    `  # the Prometheus label carrying the container (the regulator's containerField)`,
+    `  container_label: k8s_container`,
+    `  # error lines over a limit that pass per statement per node per window`,
+    `  keep_count: ${opts.keep_count ?? 50}`,
+    `  default_action: offload`,
+    ...(budgetDelivery(opts.scheduler) === 'gitops'
+      ? nodes.length === 0
+        ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
+        : [`  nodes_by_container:`, ...nodes.map(([c, n]) => `    ${c}: ${n}`)]
+      : []),
+  ];
 }
 
 function budgetPolicyLines(opts: PolicyOptions): string[] {
@@ -235,7 +274,7 @@ function budgetPolicyLines(opts: PolicyOptions): string[] {
  * (separated by `---`) so the user can `kubectl apply -f` the single file.
  */
 export function emitK8sCronJob(opts: PolicyOptions): string {
-  if (opts.budget_usd_monthly !== undefined) return emitK8sBudgetCronJob(opts);
+  if (isBudgetRun(opts)) return emitK8sBudgetCronJob(opts);
   const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
   const secretName = opts.secret_name ?? 'log10x-secret';
@@ -320,7 +359,8 @@ export function emitK8sCronJob(opts: PolicyOptions): string {
 export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
-  const ddSecret = opts.datadog_secret_name ?? 'log10x-datadog';
+  const rows = opts.rows_per_hour !== undefined;
+  const ddSecret = rows ? opts.clickhouse_secret_name ?? 'log10x-clickhouse' : opts.datadog_secret_name ?? 'log10x-datadog';
   const policyYaml = emitPolicyYaml(opts);
   const sa = 'log10x-budget-run';
   const ddEnv = (name: string, optional = false): string[] => [
@@ -334,12 +374,25 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   return [
     `# Log10x budget run: Kubernetes CronJob`,
     `# Generated by log10x_setup_recurring.`,
-    `# Holds Datadog Standard indexing at ${opts.budget_usd_monthly} USD a month: each run writes`,
-    `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
-    `# log10x-action-intent ConfigMap the Receiver reads.`,
-    `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
-    `#   --from-literal=DD_PAT=<personal access token> [--from-literal=DD_SITE=<site>]`,
-    `# or, instead of DD_PAT: --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+    ...(rows
+      ? [
+          `# Holds the rows written into ${opts.clickhouse_table ?? 'default.otel_logs'} at ${opts.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${opts.rows_per_hour} rows an hour`}: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=CLICKHOUSE_URL=<https://host:8443> --from-literal=CLICKHOUSE_API_KEY=<key> \\`,
+          `#   --from-literal=LOG10X_CUSTOMER_METRICS_URL=<the Prometheus the Receiver's scrape lands in>`,
+          `# (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD in place of the key). The ClickHouse user needs`,
+          `# SELECT on system.part_log and system.parts and nothing on the logs table.`,
+        ]
+      : [
+          `# Holds Datadog Standard indexing at ${opts.budget_usd_monthly} USD a month: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=DD_PAT=<personal access token> [--from-literal=DD_SITE=<site>]`,
+          `# or, instead of DD_PAT: --from-literal=DD_API_KEY=<api key> --from-literal=DD_APP_KEY=<application key>`,
+        ]),
     `# Apply with: kubectl apply -f log10x-cronjob.yaml`,
     `---`,
     `apiVersion: v1`,
@@ -430,10 +483,9 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `                - |`,
     `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
     `              env:`,
-    ...ddEnv('DD_PAT', true),
-    ...ddEnv('DD_API_KEY', true),
-    ...ddEnv('DD_APP_KEY', true),
-    ...ddEnv('DD_SITE', true),
+    ...(rows
+      ? [...ddEnv('CLICKHOUSE_URL'), ...ddEnv('CLICKHOUSE_API_KEY', true), ...ddEnv('CLICKHOUSE_USER', true), ...ddEnv('CLICKHOUSE_PASSWORD', true), ...ddEnv('LOG10X_CUSTOMER_METRICS_URL', true)]
+      : [...ddEnv('DD_PAT', true), ...ddEnv('DD_API_KEY', true), ...ddEnv('DD_APP_KEY', true), ...ddEnv('DD_SITE', true)]),
     ...(opts.env_id
       ? [
           `                - name: LOG10X_ENV_ID`,
@@ -501,7 +553,15 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     ``,
     `      - name: Run log10x tick`,
     `        env:`,
-    ...(opts.budget_usd_monthly !== undefined
+    ...(opts.rows_per_hour !== undefined
+      ? [
+          `          CLICKHOUSE_URL: \${{ secrets.CLICKHOUSE_URL }}`,
+          `          CLICKHOUSE_API_KEY: \${{ secrets.CLICKHOUSE_API_KEY }}`,
+          `          CLICKHOUSE_USER: \${{ secrets.CLICKHOUSE_USER }}`,
+          `          CLICKHOUSE_PASSWORD: \${{ secrets.CLICKHOUSE_PASSWORD }}`,
+          `          LOG10X_CUSTOMER_METRICS_URL: \${{ secrets.LOG10X_CUSTOMER_METRICS_URL }}`,
+        ]
+      : opts.budget_usd_monthly !== undefined
       ? [
           `          DD_PAT: \${{ secrets.DD_PAT }}`,
           `          DD_API_KEY: \${{ secrets.DD_API_KEY }}`,

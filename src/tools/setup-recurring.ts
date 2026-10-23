@@ -160,6 +160,23 @@ export const setupRecurringSchema = {
     .string()
     .optional()
     .describe('With budget_usd_monthly on k8s_cron: the Secret holding DD_PAT (or DD_API_KEY and DD_APP_KEY) and optional DD_SITE. Default: log10x-datadog.'),
+  rows_per_hour: z
+    .union([z.number().positive(), z.literal('auto')])
+    .optional()
+    .describe(
+      'CLICKHOUSE ROWS RATE: rows an hour written into the logs table, held at this figure, or `auto` for the meter\'s last complete hour at the first run. ' +
+        'Each run reads NewPart rows from system.part_log and each statement\'s lines from the Receiver\'s Prometheus counters, and rewrites the limits and totals in lines so the excess goes to the account\'s own bucket before ClickHouse receives it. ' +
+        'Replaces target_percent, budget_gb_monthly and budget_usd_monthly (k8s_cron or github_actions). The Receiver must be installed with log_destination clickhouse (counting events).'
+    ),
+  clickhouse_table: z
+    .string()
+    .regex(/^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/, 'database.table')
+    .optional()
+    .describe('With rows_per_hour: the logs table the run meters, as database.table. Default default.otel_logs.'),
+  clickhouse_secret_name: z
+    .string()
+    .optional()
+    .describe('With rows_per_hour on k8s_cron: the Secret holding CLICKHOUSE_URL, CLICKHOUSE_API_KEY (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD) and LOG10X_CUSTOMER_METRICS_URL. Default: log10x-clickhouse.'),
 
   /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
@@ -275,6 +292,9 @@ interface RecurringWizardSession {
   service_budgets?: Record<string, ServiceBudgetInput>;
   keep_count?: number;
   datadog_secret_name?: string;
+  rows_per_hour?: number | 'auto';
+  clickhouse_table?: string;
+  clickhouse_secret_name?: string;
   schedule?: SchedulePreset;
   scheduler?: SchedulerKind;
   config_plane?: string;
@@ -328,6 +348,17 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
   if (args.service_budgets !== undefined) session.service_budgets = args.service_budgets;
   if (args.keep_count !== undefined) session.keep_count = args.keep_count;
   if (args.datadog_secret_name !== undefined) session.datadog_secret_name = args.datadog_secret_name;
+  if (args.rows_per_hour !== undefined) {
+    if (args.target_percent !== undefined || args.budget_gb_monthly !== undefined || args.budget_usd_monthly !== undefined) {
+      throw new Error('rows_per_hour replaces target_percent, budget_gb_monthly and budget_usd_monthly: pass one goal.');
+    }
+    session.rows_per_hour = args.rows_per_hour;
+    delete session.target_percent;
+    delete session.budget_gb_monthly;
+    delete session.budget_usd_monthly;
+  }
+  if (args.clickhouse_table !== undefined) session.clickhouse_table = args.clickhouse_table;
+  if (args.clickhouse_secret_name !== undefined) session.clickhouse_secret_name = args.clickhouse_secret_name;
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
   if (args.scheduler !== undefined) session.scheduler = args.scheduler as SchedulerKind;
   if (args.config_plane !== undefined) session.config_plane = args.config_plane;
@@ -380,7 +411,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.target_percent === undefined && session.budget_gb_monthly === undefined && session.budget_usd_monthly === undefined) {
+  if (session.target_percent === undefined && session.budget_gb_monthly === undefined && session.budget_usd_monthly === undefined && session.rows_per_hour === undefined) {
     return {
       kind: 'ask',
       question_id: 'target_percent',
@@ -393,13 +424,14 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Example: `target_percent: 30`',
           'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead, each tick cuts only the overage.',
           'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
+          'ClickHouse: `rows_per_hour: 500000` (or `auto`) holds the rows written into the logs table at that rate, the excess going to the account\'s own bucket (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
       ),
     };
   }
-  if (session.schedule === undefined && session.budget_usd_monthly === undefined) {
+  if (session.schedule === undefined && session.budget_usd_monthly === undefined && session.rows_per_hour === undefined) {
     return {
       kind: 'ask',
       question_id: 'schedule',
@@ -440,13 +472,13 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.budget_usd_monthly !== undefined && !BUDGET_SCHEDULERS.includes(session.scheduler)) {
+  if ((session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && !BUDGET_SCHEDULERS.includes(session.scheduler)) {
     return {
       kind: 'ask',
       question_id: 'scheduler',
       markdown: buildQuestion(
         'Q4',
-        'A Standard budget runs on k8s_cron or github_actions',
+        session.rows_per_hour !== undefined ? 'A rows rate runs on k8s_cron or github_actions' : 'A Standard budget runs on k8s_cron or github_actions',
         [
           `\`${session.scheduler}\` runs the mute-list tick, which holds no budget.`,
           '**k8s_cron**: the run inside the cluster writes the policy ConfigMap the Receiver reads and discovers the node count (the default).',
@@ -474,7 +506,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.config_plane === undefined && session.budget_usd_monthly !== undefined && session.scheduler === 'k8s_cron') {
+  if (session.config_plane === undefined && (session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && session.scheduler === 'k8s_cron') {
     session.config_plane = '';
   }
   if (session.config_plane === undefined) {
@@ -597,6 +629,7 @@ function buildProgressLine(session: RecurringWizardSession): string {
   if (session.target_percent !== undefined) parts.push(`target=${session.target_percent}%`);
   if (session.budget_gb_monthly !== undefined) parts.push(`budget=${session.budget_gb_monthly}GB/mo`);
   if (session.budget_usd_monthly !== undefined) parts.push(`standard_budget=$${session.budget_usd_monthly}/mo`);
+  if (session.rows_per_hour !== undefined) parts.push(`rows_per_hour=${session.rows_per_hour}`);
   if (session.schedule !== undefined) parts.push(`schedule=${session.schedule}`);
   if (session.scheduler !== undefined) parts.push(`scheduler=${session.scheduler}`);
   if (session.config_plane !== undefined) parts.push(`repo=${session.config_plane}`);
@@ -616,7 +649,9 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Field            | Value |`,
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
-    session.budget_usd_monthly !== undefined
+    session.rows_per_hour !== undefined
+      ? `| Rows rate        | ${session.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${session.rows_per_hour} rows an hour`} into ${session.clickhouse_table ?? 'default.otel_logs'}, the excess to the account's bucket |`
+      : session.budget_usd_monthly !== undefined
       ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |` +
         (session.service_budgets && Object.keys(session.service_budgets).length > 0
           ? `\n| Own numbers      | ${Object.entries(session.service_budgets).map(([c, v]) => `${c} $${serviceBudgetUsd(v)}`).join(', ')} a month |`
@@ -628,7 +663,7 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Min delta        | ${session.min_delta_pp ?? 2}pp |`,
     `| Schedule         | ${scheduleOf(session)} (${resolveCronExpression(scheduleOf(session))}) |`,
     `| Scheduler        | ${session.scheduler ?? 'k8s_cron'} |`,
-    session.budget_usd_monthly !== undefined && session.scheduler === 'k8s_cron'
+    (session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && session.scheduler === 'k8s_cron'
       ? `| Delivery         | policy ConfigMap log10x-action-intent in ${session.namespace ?? 'log10x'} |`
       : `| Config repo      | ${session.config_plane || '(not set)'} |`,
   ].join('\n');
@@ -661,6 +696,15 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
           ...(session.datadog_secret_name !== undefined ? { datadog_secret_name: session.datadog_secret_name } : {}),
         }
       : {}),
+    ...(session.rows_per_hour !== undefined
+      ? {
+          rows_per_hour: session.rows_per_hour,
+          ...(session.clickhouse_table !== undefined ? { clickhouse_table: session.clickhouse_table } : {}),
+          ...(session.nodes_by_container !== undefined ? { nodes_by_container: session.nodes_by_container } : {}),
+          ...(session.keep_count !== undefined ? { keep_count: session.keep_count } : {}),
+          ...(session.clickhouse_secret_name !== undefined ? { clickhouse_secret_name: session.clickhouse_secret_name } : {}),
+        }
+      : {}),
     schedule: scheduleOf(session),
     scheduler: (session.scheduler ?? 'k8s_cron') as SchedulerKind,
     config_plane: session.config_plane ?? '',
@@ -675,6 +719,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
 function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOptions): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const cronExpr = resolveCronExpression(scheduleOf(opts));
+  if (opts.rows_per_hour !== undefined) return buildRowsApplyInstructions(opts, cronExpr);
   if (opts.budget_usd_monthly !== undefined) return buildBudgetApplyInstructions(opts, cronExpr);
 
   switch (scheduler) {
@@ -775,6 +820,47 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `   \`\`\``,
       ].join('\n');
   }
+}
+
+function buildRowsApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
+  const install =
+    'Install (or re-install) the Receiver with `log10x_advise_install` and `log_destination: "clickhouse"` on engine 1.1.146 or later, where it counts lines (`rateReceiverUnit events`) and records that in the policy files (`regulator-unit`); the run refuses a Receiver recorded as counting bytes. The Receiver\'s Prometheus scrape must land in a Prometheus the run can read (`LOG10X_CUSTOMER_METRICS_URL`).';
+  const table = opts.clickhouse_table ?? 'default.otel_logs';
+  if (budgetDelivery(opts.scheduler) === 'configmap') {
+    const ns = opts.namespace ?? 'log10x';
+    const secret = opts.clickhouse_secret_name ?? 'log10x-clickhouse';
+    return [
+      `### Apply instructions: rows run, Kubernetes CronJob`,
+      ``,
+      `1. ${install}`,
+      `2. **Create the ClickHouse Secret** in \`${ns}\`, the Receiver's namespace: the HTTP endpoint and a key (or a user and password) with SELECT on \`system.part_log\` and \`system.parts\`, plus the Prometheus URL:`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=CLICKHOUSE_URL=<https://host:8443> --from-literal=CLICKHOUSE_API_KEY=<key> --from-literal=LOG10X_CUSTOMER_METRICS_URL=<http://prometheus:9090>`,
+      `   \`\`\``,
+      `3. **Apply the CronJob manifest** (policy, service account, RBAC, CronJob):`,
+      `   \`\`\`bash`,
+      `   kubectl apply -f log10x-cronjob.yaml`,
+      `   \`\`\``,
+      `4. Run it once now, so the \`*\` row is in lines before the first schedule (\`${cronExpr}\` UTC); with \`rows_per_hour: auto\` this run records the rate:`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create job --from=cronjob/log10x-recurring log10x-first-run`,
+      `   kubectl -n ${ns} logs -l job-name=log10x-first-run`,
+      `   \`\`\``,
+      `5. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`. The meter it holds is NewPart rows in \`system.part_log\` on \`${table}\`.`,
+    ].join('\n');
+  }
+  return [
+    `### Apply instructions: rows run, GitHub Actions (gitops pull)`,
+    ``,
+    `1. ${install} Pass \`policy_git: { repo: "<owner/name>" }\` so the Receiver pulls \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN).`,
+    `2. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
+    `3. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
+    `4. **Add the secrets** \`CLICKHOUSE_URL\` and \`CLICKHOUSE_API_KEY\` (or \`CLICKHOUSE_USER\` and \`CLICKHOUSE_PASSWORD\`), and \`LOG10X_CUSTOMER_METRICS_URL\`.`,
+    `5. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch; with \`rows_per_hour: auto\` the first applied run also commits \`rows-per-hour\`, the rate it holds from then on. The meter is NewPart rows in \`system.part_log\` on \`${table}\`.`,
+    ...(cronExpr === resolveCronExpression('hourly')
+      ? [`6. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
+      : []),
+  ].join('\n');
 }
 
 function buildBudgetApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
