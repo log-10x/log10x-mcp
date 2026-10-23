@@ -183,6 +183,11 @@ export function receiverFleetValues(input: {
    * list compact encodes with.
    */
   elasticHotTier?: boolean;
+  /**
+   * A ClickHouse Receiver the rows run holds: limits and totals count lines
+   * (rateReceiverUnit events), and each returned record carries tenx_hash.
+   */
+  clickhouseRows?: boolean;
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
@@ -191,15 +196,15 @@ export function receiverFleetValues(input: {
   const options: Array<[string, string]> = [];
   const env: Array<[string, string]> = [];
   const notes: string[] = [];
-  if (input.datadog || input.elasticHotTier) options.push(['symbolMessageHashField', 'tenx_hash']);
+  if (input.datadog || input.elasticHotTier || input.clickhouseRows) options.push(['symbolMessageHashField', 'tenx_hash']);
   if (input.elasticHotTier) options.push(['outputEncodeField', ELASTIC_HOT_TIER_FIELDS]);
   const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 
   // Datadog bills Standard per event, so a Datadog Receiver on an engine that
   // reads rateReceiverUnit counts events unless the caller asks for bytes.
-  const unit = input.unit ?? (input.datadog && ceiling ? 'events' : 'bytes');
+  const unit = input.unit ?? ((input.datadog || input.clickhouseRows) && ceiling ? 'events' : 'bytes');
   let eventsUnitWritten = false;
-  if (input.datadog && unit === 'events') {
+  if ((input.datadog || input.clickhouseRows) && unit === 'events') {
     if (ceiling) {
       options.push(['rateReceiverUnit', 'events']);
       eventsUnitWritten = true;
