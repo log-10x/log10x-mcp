@@ -208,7 +208,7 @@ export const adviseInstallSchema = {
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
   log_destination: z
-    .enum(['datadog'])
+    .enum(['datadog', 'clickhouse'])
     .optional()
     .describe(
       'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees.'
@@ -2292,8 +2292,11 @@ async function renderInstallPlan(
   // only on an engine that declares its options (an undeclared option fails
   // the launch). The Reporter chart pins no engine version, so it gets none.
   const datadogLogs = session.logDestination === 'datadog';
+  // A ClickHouse Receiver the rows run holds: limits and totals in lines, the hash on every record.
+  const clickhouseRows = session.logDestination === 'clickhouse' && app === 'receiver';
   const fleetValues = receiverFleetValues({
     datadog: datadogLogs && app === 'receiver',
+    ...(clickhouseRows ? { clickhouseRows: true } : {}),
     ...(datadogLogs && app === 'receiver' && session.fleetDefault
       ? {
           fleetDefault: {

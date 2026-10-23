@@ -467,7 +467,7 @@ export interface WizardSession {
    * Where the forwarder ships the log events (not the metrics). `datadog`
    * adds the fleet-default step after the POC to a Receiver plan.
    */
-  logDestination?: 'datadog';
+  logDestination?: 'datadog' | 'clickhouse';
   /** The fleet default's route and error share, when the caller set them. */
   fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number; capEventsPerWindowPerNode?: number };
   /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */
