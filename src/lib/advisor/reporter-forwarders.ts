@@ -326,13 +326,18 @@ export interface BackendEnvSpec {
 }
 
 /**
- * Metric backends a Receiver image cannot load. Edge 1.1.147 is a native build
- * without the Elastic metric registry: with `@run/output/metric/elastic` it
- * fails at launch (ClassNotFoundException ElasticMetricRegistryFactory), so a
- * Receiver render leaves it out. The hot-tier run reads each statement's size
- * from the Receiver's own indices instead.
+ * Metric backends the edge image cannot load, so no render adds them. The
+ * Receiver overlays and the standalone Reporter chart both run log10x/edge-10x
+ * (helm-charts charts/reporter/values.yaml).
+ * - elastic: edge 1.1.147 fails at launch with ClassNotFoundException
+ *   ElasticMetricRegistryFactory (run on the Elastic rig, 10-22). The hot-tier
+ *   run reads each statement's size from the Receiver's own indices instead.
+ * - cloudwatch: its registry lives in pipeline-extensions metrics-extensions,
+ *   which run-edge does not link; the edge reflect-config lists only the
+ *   Datadog registry (engine session reading, 10-23).
+ * - signalfx: config ships no pipelines/run/output/metric/signalfx module.
  */
-export const RECEIVER_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic']);
+export const EDGE_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic', 'cloudwatch', 'signalfx']);
 
 export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpec>> = {
   // datadog — `config/pipelines/run/output/metric/datadog/config.yaml`
@@ -418,7 +423,7 @@ function renderTenxExtraArgsAndEnv(opts: {
   airgapped?: boolean;
   airgappedAsEnvVar: boolean;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !(opts.airgappedAsEnvVar && RECEIVER_UNLOADABLE_BACKENDS.has(b)));
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
   const lines: string[] = [];
 
   if (nonLog10xBackends.length > 0) {
@@ -741,7 +746,7 @@ function renderLog10xSidecar(opts: {
   engineEnv?: Array<[string, string]>;
   policyGit?: PolicyGitDelivery;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !RECEIVER_UNLOADABLE_BACKENDS.has(b));
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
   const argLines: string[] = [
     `      - "@run/input/forwarder/${opts.forwarderKind}"`,
     `      - "@apps/receiver"`,
@@ -1368,7 +1373,7 @@ bash "%~dp0post-render.sh"
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
       // the in-container engine emits metrics to those backends.
-      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x' && !RECEIVER_UNLOADABLE_BACKENDS.has(b));
+      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');
       if (readOnly) runArgs.push('receiverReadOnly', 'true');

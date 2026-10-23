@@ -15,7 +15,7 @@ import { parsePolicyYaml, PolicyLoadError } from '../src/lib/policy-loader.js';
 import { emitPolicyYaml, emitK8sCronJob, emitGitHubActions } from '../src/lib/scheduler-manifest-emitter.js';
 import { esDurationHours, ilmHotHours, planHotTier, readHotTierInputs, type EsRequest, type HotTierReads } from '../src/lib/elastic-budget-tick.js';
 import { receiverFleetValues, ELASTIC_HOT_TIER_FIELDS } from '../src/lib/fleet-default-install.js';
-import { RECEIVER_FORWARDER_SPECS } from '../src/lib/advisor/reporter-forwarders.js';
+import { RECEIVER_FORWARDER_SPECS, STANDALONE_SPEC } from '../src/lib/advisor/reporter-forwarders.js';
 import * as tick from '../src/lib/recurring-tick.js';
 
 const GB = 1e9;
@@ -78,6 +78,12 @@ test('an Elasticsearch Receiver for the hot-tier run stamps the counted size, an
   });
   assert.doesNotMatch(yaml, /@run\/output\/metric\/elastic/);
   assert.match(yaml, /utf8Size/);
+});
+
+test('the standalone Reporter, on the same edge image, never renders the Elastic metric output either', () => {
+  const yaml = STANDALONE_SPEC.renderValues({ releaseName: 'r', licenseJwt: '', builtinLicense: true, airgapped: true, licenseSecretName: 's', licenseSecretKey: 'k', backends: ['elastic', 'cloudwatch', 'signalfx', 'datadog'] } as any);
+  assert.doesNotMatch(yaml, /@run\/output\/metric\/(elastic|cloudwatch|signalfx)/);
+  assert.match(yaml, /@run\/output\/metric\/datadog/);
 });
 
 /** A cluster with one hot node, one frozen node, the Receiver's aliases and three statements. */
