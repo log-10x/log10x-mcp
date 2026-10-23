@@ -1693,8 +1693,10 @@ export function clickhouseOffloadHonesty(): string[] {
       'created with an explicit schema and use_hive_partitioning = 1 while the prefix is ' +
       'still empty caches that empty listing as resolved: the partition columns then read ' +
       'file defaults, and every path predicate returns ZERO ROWS, with no error, for the ' +
-      'lifetime of the table. ClickHouse issue 116888, open, filed 2026-08-28 by a ClickHouse ' +
-      'member. The DDL below carries the check as its own numbered step; do not skip it and ' +
+      'lifetime of the table. ClickHouse issue 116888, fixed on master by PR 120308 on ' +
+      '2026-09-21, first in the 26.10 release line and not backported to 26.9 or older; a ' +
+      'ClickHouse Cloud service runs the version its console shows. The install order avoids ' +
+      'it on any release. The DDL below carries the check as its own numbered step; do not skip it and ' +
       'do not reorder the steps. MEASURED on 2026-09-15 (gap 7, ClickHouse 26.5.7.64, four ' +
       'tables over one DDL, two objects of 20,000 rows each), and the trigger is narrower ' +
       'than the issue summary reads: THE READ ARMS IT, NOT THE CREATE. A table created ' +
@@ -2338,8 +2340,9 @@ ALTER TABLE ${n.db}.${n.hot} ADD COLUMN IF NOT EXISTS day Date MATERIALIZED toDa
 --    schema and use_hive_partitioning = 1 while the prefix is still empty
 --    caches that empty listing as resolved: the partition columns then read
 --    file defaults and every path predicate returns ZERO ROWS, with no error,
---    for the lifetime of the table. ClickHouse issue 116888, open, filed
---    2026-08-28 by a ClickHouse member. The s3 TABLE FUNCTION below lists at
+--    for the lifetime of the table. ClickHouse issue 116888, fixed on master
+--    by PR 120308 on 2026-09-21, first in the 26.10 release line and not
+--    backported to 26.9 or older; this order avoids it on any release. The s3 TABLE FUNCTION below lists at
 --    call time and caches nothing, so it is safe to run before the table
 --    exists. Wait for a non-zero count. A bucket listing answers the same
 --    question:  aws s3 ls s3://${p.bucket}/ --recursive | head
