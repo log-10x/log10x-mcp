@@ -419,7 +419,7 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
           `#   --from-literal=CLICKHOUSE_URL=<https://host:8443> --from-literal=CLICKHOUSE_API_KEY=<key> \\`,
           `#   --from-literal=LOG10X_CUSTOMER_METRICS_URL=<the Prometheus the Receiver's scrape lands in>`,
           `# (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD in place of the key). The ClickHouse user needs`,
-          `# SELECT on system.query_log and system.parts and nothing on the logs table.`,
+          `# SELECT on system.part_log and system.parts and nothing on the logs table.`,
         ]
       : hot
       ? [
