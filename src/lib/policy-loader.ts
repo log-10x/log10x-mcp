@@ -124,6 +124,32 @@ export interface DollarBudget {
   nodes_total?: number;
 }
 
+/**
+ * Rows written into a ClickHouse logs table held at a rate (the rows run). The
+ * run reads the rows ClickHouse wrote in the last hour from its own query log and
+ * each statement's lines an hour from the Receiver's counters, and rewrites the
+ * per-statement limits and service totals, in events, so the excess goes to the
+ * account's own bucket before ClickHouse receives it.
+ */
+export interface RowsBudget {
+  /** R: rows an hour into the logs table; undefined: `auto`, the meter's last complete hour at the first applied run. */
+  rows_per_hour?: number;
+  /** `database.table` the meter counts. */
+  table: string;
+  /** Cluster name for `clusterAllReplicas` on ClickHouse Cloud (each node keeps its own part_log); undefined reads the one node. */
+  cluster?: string;
+  /** Prometheus label carrying the container (the regulator's containerField). */
+  container_label: string;
+  /** Minutes of the meter's window; 60 in production. A shorter window scales the reads to an hour, for a time-scaled test rig. */
+  meter_minutes: number;
+  /** Error lines over a limit that pass per statement per node per window. */
+  keep_count: number;
+  default_action: 'offload';
+  service_actions: Record<string, 'offload'>;
+  nodes_by_container: Record<string, number>;
+  nodes_total?: number;
+}
+
 /** A named service's own number, and the `service` tag Datadog's usage metric carries for it. */
 export interface ServiceBudget {
   usd: number;
@@ -155,6 +181,8 @@ export interface Policy {
    * not the mute-list tick.
    */
   budget_usd?: DollarBudget;
+  /** ROWS RUN on ClickHouse: hold the rows written into the logs table at a rate an hour. */
+  rows?: RowsBudget;
   /** Services the policy must never touch. */
   exceptions: string[];
   /**
@@ -404,13 +432,19 @@ export function parsePolicyYaml(text: string): Policy {
     );
   }
   const budget_usd = parseDollarBudget(red);
+  const rows = parseRows(red);
+  if (rows && (budget_usd || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+    throw new PolicyLoadError(
+      'reduction carries rows_per_hour with budget_usd_monthly, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+    );
+  }
   if (budget_usd && (budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
     throw new PolicyLoadError(
       'reduction carries budget_usd_monthly with budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
     );
   }
-  if (delivery === 'configmap' && !budget_usd) {
-    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly.');
+  if (delivery === 'configmap' && !budget_usd && !rows) {
+    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly or reduction.rows_per_hour.');
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
@@ -498,6 +532,7 @@ export function parsePolicyYaml(text: string): Policy {
     target_percent,
     ...(budget_gb_monthly !== undefined ? { budget_gb_monthly } : {}),
     ...(budget_usd ? { budget_usd } : {}),
+    ...(rows ? { rows } : {}),
     exceptions,
     min_delta_pp,
     lookback_window,
@@ -509,7 +544,7 @@ export function parsePolicyYaml(text: string): Policy {
       ...(env_id !== undefined ? { env_id } : {}),
       commit_strategy,
       ...(base_branch !== undefined ? { base_branch } : {}),
-      ...(budget_usd ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
+      ...(budget_usd || rows ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
       ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
       ...(cmName !== undefined ? { configmap: cmName } : {}),
       ...(policyBranch !== undefined ? { policy_branch: policyBranch } : {}),
@@ -542,6 +577,63 @@ function hasNamedServices(raw: unknown): boolean {
 }
 
 const BUDGET_ACTIONS: ReadonlySet<string> = new Set(['tier_down', 'offload']);
+
+function nonEmptyString(raw: unknown, field: string, dflt: string): string {
+  if (raw === undefined) return dflt;
+  if (typeof raw !== 'string' || raw.trim() === '') throw new PolicyLoadError(`${field} must be a non-empty string; got: ${JSON.stringify(raw)}`);
+  return raw.trim();
+}
+
+/**
+ * The rows block of `reduction` (`rows_per_hour: <n>` or `rows_per_hour: auto`), or
+ * undefined when the policy has none. The only action on ClickHouse is offload: a
+ * line over its service's total never enters the table.
+ */
+function parseRows(red: Record<string, unknown> | undefined): RowsBudget | undefined {
+  const raw = red?.['rows_per_hour'];
+  if (raw === undefined) return undefined;
+  const auto = typeof raw === 'string' && raw.trim().toLowerCase() === 'auto';
+  const n = auto ? undefined : positiveNumber(raw);
+  if (!auto && n === undefined) {
+    throw new PolicyLoadError(`rows_per_hour must be a positive number of rows an hour, or auto for the meter's last hour at the first run; got: ${String(raw)}`);
+  }
+  const table = nonEmptyString(red?.['clickhouse_table'], 'clickhouse_table', 'default.otel_logs');
+  if (!table.includes('.')) throw new PolicyLoadError(`clickhouse_table must be database.table; got: ${table}`);
+  const rawM = red?.['meter_minutes'];
+  const meterMinutes = rawM === undefined ? 60 : positiveNumber(rawM);
+  if (meterMinutes === undefined || !Number.isInteger(meterMinutes) || meterMinutes > 60 || 60 % meterMinutes !== 0) {
+    throw new PolicyLoadError(`meter_minutes must be a whole number of minutes dividing 60 (60 in production); got: ${String(rawM)}`);
+  }
+  const rawK = red?.['keep_count'];
+  const keep_count = rawK === undefined ? 50 : typeof rawK === 'string' ? Number(rawK) : typeof rawK === 'number' ? rawK : NaN;
+  if (!Number.isInteger(keep_count) || keep_count < 0) {
+    throw new PolicyLoadError(`keep_count must be a whole number of lines, 0 or more; got: ${String(rawK)}`);
+  }
+  if (red?.['default_action'] !== undefined && red['default_action'] !== 'offload') {
+    throw new PolicyLoadError(`default_action: ${String(red['default_action'])} has no ClickHouse route; the rows run writes offload only.`);
+  }
+  const service_actions: Record<string, 'offload'> = {};
+  const rawSa = red?.['service_actions'];
+  if (rawSa && typeof rawSa === 'object' && !Array.isArray(rawSa)) {
+    for (const [c, act] of Object.entries(rawSa as Record<string, unknown>)) {
+      if (act !== 'offload') throw new PolicyLoadError(`service_actions.${c}: ${String(act)} has no ClickHouse route; the rows run writes offload only.`);
+      service_actions[c] = 'offload';
+    }
+  }
+  const nodes_total = red?.['nodes_total'] === undefined ? undefined : countMap({ nodes_total: red['nodes_total'] }, 'reduction').nodes_total;
+  return {
+    ...(n !== undefined ? { rows_per_hour: n } : {}),
+    table,
+    ...(typeof red?.['clickhouse_cluster'] === 'string' && red['clickhouse_cluster'].trim() ? { cluster: red['clickhouse_cluster'].trim() } : {}),
+    container_label: nonEmptyString(red?.['container_label'], 'container_label', 'k8s_container'),
+    meter_minutes: meterMinutes,
+    keep_count,
+    default_action: 'offload',
+    service_actions,
+    nodes_by_container: countMap(red?.['nodes_by_container'], 'nodes_by_container'),
+    ...(nodes_total !== undefined ? { nodes_total } : {}),
+  };
+}
 
 /** The dollar budget block of `reduction`, or undefined when the policy has none. */
 function parseDollarBudget(red: Record<string, unknown> | undefined): DollarBudget | undefined {

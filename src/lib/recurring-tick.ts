@@ -49,6 +49,7 @@ import {
   type BudgetFiles,
   type DdQuery,
 } from './budget-tick.js';
+import { chCredsFromEnv, chRequester, fmtRows, planRows, readRowsInputs, renderRowsReport, type ChQuery } from './clickhouse-rows-tick.js';
 import type { DatadogMetricsCreds } from './datadog-metrics-read.js';
 import { inClusterK8sApi, podNamespace, type K8sApi } from './k8s-in-cluster.js';
 import { POLICY_CONFIGMAP_NAME, POLICY_GIT_BRANCH_DEFAULT, POLICY_GIT_DIR, REGULATOR_UNIT_KEY } from './advisor/reporter-forwarders.js';
@@ -656,6 +657,7 @@ function appendHistory(result: TickResult): void {
  * @throws PromUnreachableError (exit code 2) when Prometheus cannot be reached.
  */
 export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  if (policy.rows) return runRowsTick(policy, opts);
   if (policy.budget_usd) return runBudgetTick(policy, opts);
   const { dryRun = false, verbose = false } = opts;
 
@@ -922,6 +924,10 @@ interface BudgetDeps {
   /** null: no cluster API (the run reports a read failure on configmap delivery). */
   k8s?: K8sApi | null;
   nowMs?: () => number;
+  /** The rows run's ClickHouse access; default from CLICKHOUSE_URL and its key. */
+  ch?: ChQuery | null;
+  /** The rows run's Prometheus; default the ambient customer metrics backend. */
+  prom?: CustomerMetricsBackend | null;
 }
 
 let budgetDeps: BudgetDeps = {};
@@ -1117,6 +1123,132 @@ export async function runBudgetTick(policy: Policy, opts: TickOptions = {}): Pro
     return result;
   }
 
+  const result = budgetResult('applied', `applied: ${summary}`, { ...extra, history_path: HISTORY_FILE });
+  appendHistory(result);
+  return result;
+}
+
+/** The rows run writes limits in lines; a Receiver recorded as counting bytes would read them as bytes. */
+function eventsUnitRefusal(unit: string | undefined, where: string): string | undefined {
+  const u = (unit ?? '').trim();
+  if (u === 'events') return undefined;
+  return (
+    `The rows run writes limits in lines, and ${where} ` +
+    (u === '' ? 'does not record what the Receiver counts' : `says the Receiver counts "${u}"`) +
+    '. A Receiver counting bytes would read every limit as bytes. Install it with rateReceiverUnit events (log10x_advise_install with log_destination clickhouse records it), then run again. Nothing was written.'
+  );
+}
+
+/** The file beside the policy files that records R when the policy says `auto`. */
+const ROWS_RATE_KEY = 'rows-per-hour';
+
+/**
+ * One rows run (`reduction.rows_per_hour`): reads the rows ClickHouse wrote in the
+ * last complete hour and the Receiver's counters, rewrites the limits and totals
+ * in lines so the table takes the rate, and writes the files the way the budget
+ * run does. An offloaded line never enters the table, so there is nothing in flight.
+ */
+export async function runRowsTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  const rows = policy.rows!;
+  const { dryRun = false, verbose = false } = opts;
+  const deps = budgetDeps;
+  const nowSec = Math.floor((deps.nowMs ? deps.nowMs() : Date.now()) / 1000);
+  const delivery = policy.config_plane.delivery ?? 'gitops';
+  const k8s = deps.k8s === undefined ? inClusterK8sApi() : deps.k8s ?? undefined;
+  const keep = 'The files from the last run stay in force.';
+  const namespace = policy.config_plane.namespace ?? podNamespace() ?? 'log10x';
+  const cmName = policy.config_plane.configmap ?? POLICY_CONFIGMAP_NAME;
+  const branch = policy.config_plane.policy_branch ?? POLICY_BRANCH_DEFAULT;
+  const repoPath = delivery === 'gitops' ? resolveRepoPath(policy.config_plane.repo) : '';
+  const rel = (f: string): string => `${BUDGET_FILE_DIR}/${f}`;
+  let reads;
+  let nodes: { instances: Record<string, number>; nodesTotal: number };
+  let cm: { data: Record<string, string>; resourceVersion: string } | undefined;
+  let unit: string | undefined;
+  let recorded: string | undefined;
+  const current: Record<string, string | undefined> = {};
+  try {
+    let ch = deps.ch ?? undefined;
+    if (!ch) {
+      const creds = chCredsFromEnv();
+      if (!creds) throw new Error('CLICKHOUSE_URL is not set; the run reads system.part_log and system.parts with it (and CLICKHOUSE_API_KEY, or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD).');
+      ch = chRequester(creds);
+    }
+    let prom = deps.prom ?? undefined;
+    if (!prom) {
+      prom = await backendLoader();
+      if (!prom) throw new Error('no Prometheus backend is configured (LOG10X_CUSTOMER_METRICS_URL); the run reads each statement\'s lines an hour from the Receiver\'s counters there.');
+    }
+    reads = await readRowsInputs(nowSec, rows, ch, prom, policy.config_plane.env_id);
+    if (delivery === 'configmap') {
+      if (!k8s) throw new Error('no Kubernetes API in this process (KUBERNETES_SERVICE_HOST and the service-account token), so the node count cannot be discovered.');
+      nodes = await discoverInstances(k8s, namespace, cmName);
+      cm = await k8s.getConfigMap(namespace, cmName);
+      unit = cm.data[REGULATOR_UNIT_KEY];
+      recorded = cm.data[ROWS_RATE_KEY];
+      for (const f of BUDGET_FILE_NAMES) current[f] = cm.data[f];
+    } else {
+      const counts = rows.nodes_by_container;
+      const max = Object.values(counts).reduce((a, n) => Math.max(a, n), 1);
+      nodes = { instances: counts, nodesTotal: rows.nodes_total ?? max };
+      await git(repoPath, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]).catch(() => undefined);
+      const local = pathJoin(repoPath, ...rel(REGULATOR_UNIT_KEY).split('/'));
+      unit = (await readPolicyBranchFile(repoPath, branch, rel(REGULATOR_UNIT_KEY))) ?? (existsSync(local) ? readFileSync(local, 'utf8') : undefined);
+      recorded = await readPolicyBranchFile(repoPath, branch, rel(ROWS_RATE_KEY));
+      for (const f of BUDGET_FILE_NAMES) current[f] = await readPolicyBranchFile(repoPath, branch, rel(f));
+    }
+  } catch (err) {
+    const result = budgetResult('read_failed', `rows run read failed: ${err instanceof Error ? err.message : String(err)} ${keep}`);
+    appendHistory(result);
+    return result;
+  }
+  const refusal = eventsUnitRefusal(
+    unit,
+    delivery === 'configmap' ? `the ConfigMap ${namespace}/${cmName} (key ${REGULATOR_UNIT_KEY})` : `the gitops repo (${rel(REGULATOR_UNIT_KEY)} on ${branch} or the checkout)`,
+  );
+  if (refusal) {
+    const result = budgetResult('refused', refusal);
+    appendHistory(result);
+    return result;
+  }
+  const recordedRate = recorded !== undefined && Number.isFinite(Number(recorded.trim())) && Number(recorded.trim()) > 0 ? Number(recorded.trim()) : undefined;
+  const plan = planRows({ rows, reads, instances: nodes.instances, nodesTotal: nodes.nodesTotal, exceptions: policy.exceptions, targetServices: policy.target_services, recordedRate });
+  const files = renderBudgetFiles(plan);
+  const report = renderRowsReport(plan, rows, nowSec);
+  const rateFile: Record<string, string> = rows.rows_per_hour === undefined && recordedRate === undefined && plan.targetRows > 0 ? { [ROWS_RATE_KEY]: `${plan.targetRows}\n` } : {};
+  if (verbose) process.stderr.write(`[tenx-recur] ${[plan.heldLine, ...plan.lines].join('\n[tenx-recur] ')}\n`);
+  const summary = plan.heldLine;
+  const extra = { budget_report: report, budget_files: files };
+  if (dryRun) {
+    const result = budgetResult('dry_run', `dry-run: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
+  if (Object.keys(rateFile).length === 0 && BUDGET_FILE_NAMES.every((f) => current[f] === files[f])) {
+    const result = budgetResult('no_change', `no change: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
+  try {
+    if (delivery === 'configmap' && cm) {
+      await k8s!.replaceConfigMap(namespace, cmName, { ...cm.data, ...files, ...rateFile, [BUDGET_REPORT_KEY]: report }, cm.resourceVersion);
+    } else {
+      await commitToPolicyBranch(
+        repoPath,
+        branch,
+        {
+          ...Object.fromEntries(BUDGET_FILE_NAMES.map((f) => [rel(f), files[f]])),
+          ...Object.fromEntries(Object.entries(rateFile).map(([k, v]) => [rel(k), v])),
+          'reports/latest.md': report,
+        },
+        `chore(log10x): rows run, ${fmtRows(plan.targetRows)} rows an hour into ${rows.table}`,
+      );
+    }
+  } catch (err) {
+    const result = budgetResult('error', `write failed: ${err instanceof Error ? err.message : String(err)} ${keep}`, extra);
+    appendHistory(result);
+    return result;
+  }
   const result = budgetResult('applied', `applied: ${summary}`, { ...extra, history_path: HISTORY_FILE });
   appendHistory(result);
   return result;
