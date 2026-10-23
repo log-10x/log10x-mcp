@@ -540,6 +540,9 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
       ? `The Receiver's statements send ${fmtGB(budgetedPerHour * 24)} a day; ${fmtGB(allowance * 24)} a day fits the size, so each statement keeps up to ${fmtGB(level * 24)} a day and the noisiest give way first.`
       : `The Receiver's statements send ${fmtGB(budgetedPerHour * 24)} a day, under the ${fmtGB(allowance * 24)} a day that fits the size; every statement keeps its lines, with room to grow ${headroom.toFixed(1)} times.`,
   );
+  lines.push(
+    `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit) keeps about ${fmtGB(floorPerHour * 24)} a day on hot whatever the limits; the size holds down to that floor.`,
+  );
   if (overSize) {
     lines.push(`Hot is above the size now; the allowance is held at ${Math.round((S / H) * 100)}% until it drains, which takes up to ${Math.round(R)} hours as the indices on hot age out.`);
   }
