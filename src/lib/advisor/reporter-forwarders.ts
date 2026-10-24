@@ -329,12 +329,9 @@ export interface BackendEnvSpec {
  * Metric backends the edge image cannot load, so no render adds them. The
  * Receiver overlays and the standalone Reporter chart both run log10x/edge-10x
  * (helm-charts charts/reporter/values.yaml).
- * - elastic: edge 1.1.147 fails at launch with ClassNotFoundException
- *   ElasticMetricRegistryFactory (run on the Elastic rig, 10-22). The hot-tier
- *   run reads each statement's size from the Receiver's own indices instead.
- * - cloudwatch: fails the same way (ClassNotFoundException
- *   CloudWatchMetricRegistryFactory, run 10-23); its registry lives in
- *   pipeline-extensions metrics-extensions, which run-edge does not link.
+ * - elastic: the edge image does not ship ElasticMetricRegistryFactory; the
+ *   hot-tier run reads sizes from the Receiver's indices.
+ * - cloudwatch: the edge image does not link CloudWatchMetricRegistryFactory.
  * - signalfx: config ships no pipelines/run/output/metric/signalfx module.
  */
 export const EDGE_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic', 'cloudwatch', 'signalfx']);
