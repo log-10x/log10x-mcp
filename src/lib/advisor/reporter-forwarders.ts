@@ -332,9 +332,9 @@ export interface BackendEnvSpec {
  * - elastic: edge 1.1.147 fails at launch with ClassNotFoundException
  *   ElasticMetricRegistryFactory (run on the Elastic rig, 10-22). The hot-tier
  *   run reads each statement's size from the Receiver's own indices instead.
- * - cloudwatch: its registry lives in pipeline-extensions metrics-extensions,
- *   which run-edge does not link; the edge reflect-config lists only the
- *   Datadog registry (engine session reading, 10-23).
+ * - cloudwatch: fails the same way (ClassNotFoundException
+ *   CloudWatchMetricRegistryFactory, run 10-23); its registry lives in
+ *   pipeline-extensions metrics-extensions, which run-edge does not link.
  * - signalfx: config ships no pipelines/run/output/metric/signalfx module.
  */
 export const EDGE_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic', 'cloudwatch', 'signalfx']);
