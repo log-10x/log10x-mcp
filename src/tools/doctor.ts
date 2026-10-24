@@ -53,7 +53,7 @@ import {
   type ObjectStoreTarget,
   type StoreObjectMeta,
 } from '../lib/object-store.js';
-import { verifyConfigGeneration } from '../lib/config-generation.js';
+import { runningGenerationsQuery, verifyConfigGeneration } from '../lib/config-generation.js';
 import { findNewestConfigMapTarget } from './commitment-report.js';
 
 /**
@@ -1276,7 +1276,7 @@ async function addConfigLiveCheck(
     // verdict rather than this leg hanging the doctor run.
     const resp = await iQueryInstant(
       env,
-      `count by (tenx_config_version) (increase(all_events_summaryBytes_total{${envSel}}[1h]))`,
+      runningGenerationsQuery(envSel),
       QUERY_BUDGET.cheap,
     );
     if (!resp || resp.status !== 'success') return [];
@@ -1293,7 +1293,7 @@ async function addConfigLiveCheck(
     stale:
       'The engine is not running the cap policy you wrote: it is still polling the ConfigMap, has not reloaded, or is crash-looping. Check the receiver pod (kubectl get pods, restartCount) and its logs; once it reloads, tenx_config_version will match the written generation.',
     unverified:
-      'A generation was written but the engine advertises none. Confirm the receiver is deployed with the config-generation stamp (the tenx_config_version enrichment field) and that the metric backend is reachable.',
+      'A generation was written but the engine advertises none. Confirm the receiver is deployed with the config-generation stamp (configGeneration.file, which publishes config_generation_summaryBytes_total{tenx_config_version=...}) and that the metric backend is reachable.',
   };
 
   const status: CheckStatus =

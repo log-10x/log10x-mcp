@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import {
   computeGeneration,
   renderGenerationCsv,
+  runningGenerationsQuery,
   verifyConfigGeneration,
   type ConfigLiveDeps,
 } from '../src/lib/config-generation.js';
@@ -93,4 +94,12 @@ test('reads degrade gracefully: throwing deps do not throw the verifier', async 
   };
   const r = await verifyConfigGeneration(throwing);
   assert.equal(r.verdict, 'not_configured'); // caps unreadable => nothing to verify
+});
+
+test('the generation is read from its own series, with the per-counter label as a fallback', () => {
+  const q = runningGenerationsQuery('tenx_env=~"edge|cloud"');
+  assert.ok(q.startsWith('count by (tenx_config_version) ('), q);
+  assert.ok(q.includes('increase(config_generation_summaryBytes_total{tenx_env=~"edge|cloud"}[1h])'), q);
+  assert.ok(q.includes('increase(all_events_summaryBytes_total{tenx_env=~"edge|cloud",tenx_config_version!=""}[1h])'), q);
+  assert.equal((q.match(/\(/g) ?? []).length, (q.match(/\)/g) ?? []).length, q);
 });
