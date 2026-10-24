@@ -96,7 +96,7 @@ test('reads degrade gracefully: throwing deps do not throw the verifier', async 
   assert.equal(r.verdict, 'not_configured'); // caps unreadable => nothing to verify
 });
 
-test('the generation is read from its own series, with the old per-counter label as a fallback', () => {
+test('the generation is read from its own series, with the per-counter label as a fallback', () => {
   const q = runningGenerationsQuery('tenx_env=~"edge|cloud"');
   assert.ok(q.startsWith('count by (tenx_config_version) ('), q);
   assert.ok(q.includes('increase(config_generation_summaryBytes_total{tenx_env=~"edge|cloud"}[1h])'), q);

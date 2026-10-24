@@ -13,10 +13,8 @@
  * which the receiver's config-generation object then loads and stamps on every
  * event as `tenx_config_version=<generation>`; the receiver's `config_generation`
  * aggregator publishes it as one series per generation
- * (`config_generation_summaryBytes_total{tenx_config_version=...}`). So the
- * running engine advertises which policy generation it loaded, and the
- * per-pattern counters do not carry the label, so a policy write does not
- * restart their series. The option is OPT-IN and decoupled from
+ * (`config_generation_summaryBytes_total{tenx_config_version=...}`), so the running engine
+ * advertises which policy generation it loaded. The option is OPT-IN and decoupled from
  * caps: a receiver pointed at no file (e.g. GitOps-managed caps without this
  * MCP) emits no label and never depends on the file existing. See
  * `pipelines/run/receive/rate/config-generation-object.js` (the loader) and
@@ -80,8 +78,7 @@ export interface ConfigLiveDeps {
 
 /**
  * The PromQL that lists the generations the running engines advertise over the
- * last hour. Receivers on config before the `config_generation` series carried
- * the label on every counter, so their `all_events` series answer too.
+ * last hour; the all_events term also reads receivers that label every counter.
  */
 export function runningGenerationsQuery(envSel: string): string {
   return (
