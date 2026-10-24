@@ -21,6 +21,8 @@ export const CEILING_MIN_ENGINE = '1.1.146';
 
 /** Error lines over a limit that still pass, per statement per node per window. */
 export const KEEP_COUNT_DEFAULT = 50;
+/** The returned record's fields for the hot-tier run: identity, route, name, level and the counted size. */
+export const ELASTIC_HOT_TIER_FIELDS = 'fullText("tenx_hash","routeState","message_pattern","severity_level","utf8Size")';
 
 /** Levels the receiver config's floor list names; each is written so none falls back to the config's value. */
 export const SEVERITY_FLOOR_LEVELS = ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL', 'FATAL'] as const;
@@ -178,6 +180,14 @@ export function receiverFleetValues(input: {
    * (rateReceiverUnit events), and each returned record carries tenx_hash.
    */
   clickhouseRows?: boolean;
+  /**
+   * An Elasticsearch Receiver the hot-tier run holds: each returned record
+   * carries `tenx_hash`, `routeState`, `message_pattern`, `severity_level`
+   * and `utf8Size` (the size the byte limits count), which the run sums from
+   * the Receiver's indices. Not with compact: it replaces the output field
+   * list compact encodes with.
+   */
+  elasticHotTier?: boolean;
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
@@ -186,7 +196,8 @@ export function receiverFleetValues(input: {
   const options: Array<[string, string]> = [];
   const env: Array<[string, string]> = [];
   const notes: string[] = [];
-  if (input.datadog || input.clickhouseRows) options.push(['symbolMessageHashField', 'tenx_hash']);
+  if (input.datadog || input.clickhouseRows || input.elasticHotTier) options.push(['symbolMessageHashField', 'tenx_hash']);
+  if (input.elasticHotTier) options.push(['outputEncodeField', ELASTIC_HOT_TIER_FIELDS]);
   const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 
   // Datadog bills Standard per event, so a Datadog Receiver on an engine that

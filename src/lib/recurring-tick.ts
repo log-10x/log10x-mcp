@@ -49,6 +49,7 @@ import {
   type BudgetFiles,
   type DdQuery,
 } from './budget-tick.js';
+import { esCredsFromEnv, esRequester, fmtGB, planHotTier, readHotTierInputs, renderHotTierReport, type EsRequest } from './elastic-budget-tick.js';
 import { chCredsFromEnv, chRequester, fmtRows, planRows, readRowsInputs, renderRowsReport, type ChQuery } from './clickhouse-rows-tick.js';
 import type { DatadogMetricsCreds } from './datadog-metrics-read.js';
 import { inClusterK8sApi, podNamespace, type K8sApi } from './k8s-in-cluster.js';
@@ -657,6 +658,7 @@ function appendHistory(result: TickResult): void {
  * @throws PromUnreachableError (exit code 2) when Prometheus cannot be reached.
  */
 export async function runTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  if (policy.hot_tier) return runHotTierTick(policy, opts);
   if (policy.rows) return runRowsTick(policy, opts);
   if (policy.budget_usd) return runBudgetTick(policy, opts);
   const { dryRun = false, verbose = false } = opts;
@@ -924,6 +926,8 @@ interface BudgetDeps {
   /** null: no cluster API (the run reports a read failure on configmap delivery). */
   k8s?: K8sApi | null;
   nowMs?: () => number;
+  /** The hot-tier run's Elasticsearch access; default from LOG10X_ES_URL and its key. */
+  es?: EsRequest | null;
   /** The rows run's ClickHouse access; default from CLICKHOUSE_URL and its key. */
   ch?: ChQuery | null;
   /** The rows run's Prometheus; default the ambient customer metrics backend. */
@@ -1242,6 +1246,117 @@ export async function runRowsTick(policy: Policy, opts: TickOptions = {}): Promi
           'reports/latest.md': report,
         },
         `chore(log10x): rows run, ${fmtRows(plan.targetRows)} rows an hour into ${rows.table}`,
+      );
+    }
+  } catch (err) {
+    const result = budgetResult('error', `write failed: ${err instanceof Error ? err.message : String(err)} ${keep}`, extra);
+    appendHistory(result);
+    return result;
+  }
+  const result = budgetResult('applied', `applied: ${summary}`, { ...extra, history_path: HISTORY_FILE });
+  appendHistory(result);
+  return result;
+}
+
+/**
+ * The hot-tier run refuses a Receiver recorded as counting events: its limits
+ * are bytes. No record means bytes, the Receiver's default unit.
+ */
+function bytesUnitRefusal(unit: string | undefined, where: string): string | undefined {
+  const u = (unit ?? '').trim();
+  if (u === '' || u === 'bytes') return undefined;
+  return (
+    `The hot-tier run writes limits in bytes, and ${where} says the Receiver counts "${u}". ` +
+    'A Receiver counting events would read every limit as lines. Re-install it counting bytes (the default for Elasticsearch), then run again. Nothing was written.'
+  );
+}
+
+/**
+ * One hot-tier run (`reduction.hot_tier_gb`): reads the hot nodes and the
+ * Receiver's indices, rewrites the byte limits so the hot tier settles under
+ * the size, and writes the files the way the budget run does.
+ */
+export async function runHotTierTick(policy: Policy, opts: TickOptions = {}): Promise<TickResult> {
+  const hot = policy.hot_tier!;
+  const { dryRun = false, verbose = false } = opts;
+  const deps = budgetDeps;
+  const nowSec = Math.floor((deps.nowMs ? deps.nowMs() : Date.now()) / 1000);
+  const delivery = policy.config_plane.delivery ?? 'gitops';
+  const k8s = deps.k8s === undefined ? inClusterK8sApi() : deps.k8s ?? undefined;
+  const keep = 'The files from the last run stay in force.';
+  const namespace = policy.config_plane.namespace ?? podNamespace() ?? 'log10x';
+  const cmName = policy.config_plane.configmap ?? POLICY_CONFIGMAP_NAME;
+  const branch = policy.config_plane.policy_branch ?? POLICY_BRANCH_DEFAULT;
+  const repoPath = delivery === 'gitops' ? resolveRepoPath(policy.config_plane.repo) : '';
+  const rel = (f: string): string => `${BUDGET_FILE_DIR}/${f}`;
+  let reads;
+  let nodes: { instances: Record<string, number>; nodesTotal: number };
+  let cm: { data: Record<string, string>; resourceVersion: string } | undefined;
+  let unit: string | undefined;
+  const current: Record<string, string | undefined> = {};
+  try {
+    let es = deps.es ?? undefined;
+    if (!es) {
+      const creds = esCredsFromEnv();
+      if (!creds) throw new Error('LOG10X_ES_URL is not set; the run reads the hot tier and the Receiver\'s indices with it (and LOG10X_ES_API_KEY, or LOG10X_ES_USER and LOG10X_ES_PASSWORD).');
+      es = esRequester(creds);
+    }
+    reads = await readHotTierInputs(nowSec, hot, es);
+    if (delivery === 'configmap') {
+      if (!k8s) throw new Error('no Kubernetes API in this process (KUBERNETES_SERVICE_HOST and the service-account token), so the node count cannot be discovered.');
+      nodes = await discoverInstances(k8s, namespace, cmName);
+      cm = await k8s.getConfigMap(namespace, cmName);
+      unit = cm.data[REGULATOR_UNIT_KEY];
+      for (const f of BUDGET_FILE_NAMES) current[f] = cm.data[f];
+    } else {
+      const counts = hot.nodes_by_container;
+      const max = Object.values(counts).reduce((a, n) => Math.max(a, n), 1);
+      nodes = { instances: counts, nodesTotal: hot.nodes_total ?? max };
+      await git(repoPath, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]).catch(() => undefined);
+      const local = pathJoin(repoPath, ...rel(REGULATOR_UNIT_KEY).split('/'));
+      unit = (await readPolicyBranchFile(repoPath, branch, rel(REGULATOR_UNIT_KEY))) ?? (existsSync(local) ? readFileSync(local, 'utf8') : undefined);
+      for (const f of BUDGET_FILE_NAMES) current[f] = await readPolicyBranchFile(repoPath, branch, rel(f));
+    }
+  } catch (err) {
+    const result = budgetResult('read_failed', `hot-tier run read failed: ${err instanceof Error ? err.message : String(err)} ${keep}`);
+    appendHistory(result);
+    return result;
+  }
+  const refusal = bytesUnitRefusal(
+    unit,
+    delivery === 'configmap' ? `the ConfigMap ${namespace}/${cmName} (key ${REGULATOR_UNIT_KEY})` : `the gitops repo (${rel(REGULATOR_UNIT_KEY)} on ${branch} or the checkout)`,
+  );
+  if (refusal) {
+    const result = budgetResult('refused', refusal);
+    appendHistory(result);
+    return result;
+  }
+
+  const plan = planHotTier({ hot, reads, instances: nodes.instances, nodesTotal: nodes.nodesTotal, exceptions: policy.exceptions, targetServices: policy.target_services });
+  const files = renderBudgetFiles(plan);
+  const report = renderHotTierReport(plan, hot, nowSec);
+  if (verbose) process.stderr.write(`[tenx-recur] ${[plan.heldLine, ...plan.lines].join('\n[tenx-recur] ')}\n`);
+  const summary = plan.heldLine;
+  const extra = { budget_report: report, budget_files: files };
+  if (dryRun) {
+    const result = budgetResult('dry_run', `dry-run: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
+  if (BUDGET_FILE_NAMES.every((f) => current[f] === files[f])) {
+    const result = budgetResult('no_change', `no change: ${summary}`, extra);
+    appendHistory(result);
+    return result;
+  }
+  try {
+    if (delivery === 'configmap' && cm) {
+      await k8s!.replaceConfigMap(namespace, cmName, { ...cm.data, ...files, [BUDGET_REPORT_KEY]: report }, cm.resourceVersion);
+    } else {
+      await commitToPolicyBranch(
+        repoPath,
+        branch,
+        { ...Object.fromEntries(BUDGET_FILE_NAMES.map((f) => [rel(f), files[f]])), 'reports/latest.md': report },
+        `chore(log10x): hot-tier run, hot held under ${fmtGB(plan.targetBytes)}`,
       );
     }
   } catch (err) {

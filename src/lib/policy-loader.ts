@@ -152,6 +152,33 @@ export interface RowsBudget {
   nodes_total?: number;
 }
 
+/**
+ * An Elasticsearch hot tier held under a size (the hot-tier run). The run
+ * reads the hot nodes' store and the Receiver's own indices every hour and
+ * rewrites the per-statement limits, in bytes, so growth goes to the frozen
+ * tier instead of filling hot.
+ */
+export interface HotTierBudget {
+  /** S in GB of index store on the hot nodes; undefined: `capacity_share` of their disk. */
+  gb?: number;
+  /** Share of the hot nodes' disk to hold under when `gb` is not set. Default 0.8 (Elasticsearch's low watermark is 85%). */
+  capacity_share: number;
+  /** Hours a kept line stays on hot; default read from the ILM policy on the kept alias. */
+  retention_hours?: number;
+  /** Write alias of the kept lines (routeState pass). */
+  pass_alias: string;
+  /** Write alias of the tier_down lines, rolled to frozen by ILM. */
+  tier_down_alias: string;
+  /** Field holding the container in the Receiver's documents. */
+  container_field: string;
+  /** Error lines over a limit that pass per statement per node per window. */
+  keep_count: number;
+  default_action: 'tier_down' | 'offload';
+  service_actions: Record<string, 'tier_down' | 'offload'>;
+  nodes_by_container: Record<string, number>;
+  nodes_total?: number;
+}
+
 /** A named service's own number, and the `service` tag Datadog's usage metric carries for it. */
 export interface ServiceBudget {
   usd: number;
@@ -185,6 +212,11 @@ export interface Policy {
   budget_usd?: DollarBudget;
   /** ROWS RUN on ClickHouse: hold the rows written into the logs table at a rate an hour. */
   rows?: RowsBudget;
+  /**
+   * HOT-TIER BUDGET on Elasticsearch: hold the hot nodes' store under a size.
+   * When present the tick is the hot-tier run (caps, actions, totals in bytes).
+   */
+  hot_tier?: HotTierBudget;
   /** Services the policy must never touch. */
   exceptions: string[];
   /**
@@ -435,6 +467,12 @@ export function parsePolicyYaml(text: string): Policy {
   }
   const budget_usd = parseDollarBudget(red);
   const rows = parseRows(red);
+  const hot_tier = parseHotTier(red);
+  if (hot_tier && (budget_usd || rows || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+    throw new PolicyLoadError(
+      'reduction carries hot_tier_gb with budget_usd_monthly, rows_per_hour, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+    );
+  }
   if (rows && (budget_usd || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
     throw new PolicyLoadError(
       'reduction carries rows_per_hour with budget_usd_monthly, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
@@ -445,8 +483,8 @@ export function parsePolicyYaml(text: string): Policy {
       'reduction carries budget_usd_monthly with budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
     );
   }
-  if (delivery === 'configmap' && !budget_usd && !rows) {
-    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly or reduction.rows_per_hour.');
+  if (delivery === 'configmap' && !budget_usd && !rows && !hot_tier) {
+    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly, reduction.rows_per_hour or reduction.hot_tier_gb.');
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
@@ -535,6 +573,7 @@ export function parsePolicyYaml(text: string): Policy {
     ...(budget_gb_monthly !== undefined ? { budget_gb_monthly } : {}),
     ...(budget_usd ? { budget_usd } : {}),
     ...(rows ? { rows } : {}),
+    ...(hot_tier ? { hot_tier } : {}),
     exceptions,
     min_delta_pp,
     lookback_window,
@@ -546,7 +585,7 @@ export function parsePolicyYaml(text: string): Policy {
       ...(env_id !== undefined ? { env_id } : {}),
       commit_strategy,
       ...(base_branch !== undefined ? { base_branch } : {}),
-      ...(budget_usd || rows ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
+      ...(budget_usd || rows || hot_tier ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
       ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
       ...(cmName !== undefined ? { configmap: cmName } : {}),
       ...(policyBranch !== undefined ? { policy_branch: policyBranch } : {}),
@@ -579,6 +618,38 @@ function hasNamedServices(raw: unknown): boolean {
 }
 
 const BUDGET_ACTIONS: ReadonlySet<string> = new Set(['tier_down', 'offload']);
+
+/** The shared limit settings of a budget block: keep count, actions, node counts. */
+function budgetCommon(red: Record<string, unknown> | undefined): Pick<HotTierBudget, 'keep_count' | 'default_action' | 'service_actions' | 'nodes_by_container' | 'nodes_total'> {
+  const rawK = red?.['keep_count'];
+  const k = rawK === undefined ? 50 : typeof rawK === 'string' ? Number(rawK) : typeof rawK === 'number' ? rawK : NaN;
+  if (!Number.isInteger(k) || k < 0) {
+    throw new PolicyLoadError(`keep_count must be a whole number of lines, 0 or more; got: ${String(rawK)}`);
+  }
+  const rawAction = red?.['default_action'];
+  const default_action = rawAction === undefined ? 'tier_down' : String(rawAction);
+  if (!BUDGET_ACTIONS.has(default_action)) {
+    throw new PolicyLoadError(`default_action must be tier_down or offload; got: ${default_action}`);
+  }
+  const service_actions: Record<string, 'tier_down' | 'offload'> = {};
+  const rawSa = red?.['service_actions'];
+  if (rawSa && typeof rawSa === 'object' && !Array.isArray(rawSa)) {
+    for (const [svc, a] of Object.entries(rawSa as Record<string, unknown>)) {
+      if (typeof a !== 'string' || !BUDGET_ACTIONS.has(a)) {
+        throw new PolicyLoadError(`service_actions.${svc} must be tier_down or offload; got: ${String(a)}`);
+      }
+      service_actions[svc] = a as 'tier_down' | 'offload';
+    }
+  }
+  const nodes_total = red?.['nodes_total'] === undefined ? undefined : countMap({ nodes_total: red['nodes_total'] }, 'reduction').nodes_total;
+  return {
+    keep_count: k,
+    default_action: default_action as 'tier_down' | 'offload',
+    service_actions,
+    nodes_by_container: countMap(red?.['nodes_by_container'], 'nodes_by_container'),
+    ...(nodes_total !== undefined ? { nodes_total } : {}),
+  };
+}
 
 function nonEmptyString(raw: unknown, field: string, dflt: string): string {
   if (raw === undefined) return dflt;
@@ -760,4 +831,37 @@ export function serviceBudgetsProblem(
 
 export function serviceBudgetUsd(b: ServiceBudgetInput | ServiceBudget): number {
   return typeof b === 'number' ? b : b.usd;
+}
+
+/**
+ * The hot-tier block of `reduction` (`hot_tier_gb: <GB>` or `hot_tier_gb: auto`),
+ * or undefined when the policy has none.
+ */
+function parseHotTier(red: Record<string, unknown> | undefined): HotTierBudget | undefined {
+  const raw = red?.['hot_tier_gb'];
+  if (raw === undefined) return undefined;
+  const auto = typeof raw === 'string' && raw.trim().toLowerCase() === 'auto';
+  const gb = auto ? undefined : positiveNumber(raw);
+  if (!auto && gb === undefined) {
+    throw new PolicyLoadError(`hot_tier_gb must be a positive number of GB, or auto for a share of the hot nodes' disk; got: ${String(raw)}`);
+  }
+  const rawShare = red?.['hot_tier_share'];
+  const share = rawShare === undefined ? 0.8 : positiveNumber(rawShare);
+  if (share === undefined || share >= 1) {
+    throw new PolicyLoadError(`hot_tier_share must be a number above 0 and below 1; got: ${String(rawShare)}`);
+  }
+  const rawR = red?.['hot_retention_hours'];
+  const retention = rawR === undefined ? undefined : positiveNumber(rawR);
+  if (rawR !== undefined && retention === undefined) {
+    throw new PolicyLoadError(`hot_retention_hours must be a positive number of hours; got: ${String(rawR)}`);
+  }
+  return {
+    ...(gb !== undefined ? { gb } : {}),
+    capacity_share: share,
+    ...(retention !== undefined ? { retention_hours: retention } : {}),
+    pass_alias: nonEmptyString(red?.['pass_alias'], 'pass_alias', 'tenx-app'),
+    tier_down_alias: nonEmptyString(red?.['tier_down_alias'], 'tier_down_alias', 'tenx-tierdown'),
+    container_field: nonEmptyString(red?.['container_field'], 'container_field', 'kubernetes.container_name'),
+    ...budgetCommon(red),
+  };
 }

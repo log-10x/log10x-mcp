@@ -75,11 +75,20 @@ export interface PolicyOptions {
   clickhouse_table?: string;
   /** Name of the Secret (k8s) holding CLICKHOUSE_URL, CLICKHOUSE_API_KEY (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD) and LOG10X_CUSTOMER_METRICS_URL. Default: log10x-clickhouse. */
   clickhouse_secret_name?: string;
+  /**
+   * Elasticsearch hot tier held under this many GB of index store on the hot
+   * nodes, or `auto` for 80% of their disk. When set the tick is the hot-tier run.
+   */
+  hot_tier_gb?: number | 'auto';
+  /** Hours a kept line stays on hot, when the ILM policy on the kept alias does not say. */
+  hot_retention_hours?: number;
+  /** Name of the Secret (k8s) holding LOG10X_ES_URL and LOG10X_ES_API_KEY. Default: log10x-elasticsearch. */
+  elasticsearch_secret_name?: string;
 }
 
-/** True when the policy holds a number every hour (the Datadog budget run or the ClickHouse rows run). */
-export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'rows_per_hour'>): boolean {
-  return opts.budget_usd_monthly !== undefined || opts.rows_per_hour !== undefined;
+/** True when the policy holds a number every hour (the Datadog budget run, the ClickHouse rows run or the Elasticsearch hot-tier run). */
+export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb'>): boolean {
+  return opts.budget_usd_monthly !== undefined || opts.rows_per_hour !== undefined || opts.hot_tier_gb !== undefined;
 }
 
 /** The budget run's delivery for a scheduler. */
@@ -93,7 +102,7 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
 /** The schedule a policy runs on: a budget run is hourly unless the caller names one. */
-export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'rows_per_hour'>): SchedulePreset {
+export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb'>): SchedulePreset {
   return opts.schedule ?? (isBudgetRun(opts) ? 'hourly' : 'daily-03utc');
 }
 
@@ -171,7 +180,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    ...(opts.rows_per_hour !== undefined
+    ...(opts.hot_tier_gb !== undefined
+      ? hotTierPolicyLines(opts)
+      : opts.rows_per_hour !== undefined
       ? rowsPolicyLines(opts)
       : opts.budget_usd_monthly !== undefined
       ? budgetPolicyLines(opts)
@@ -219,6 +230,30 @@ function rowsPolicyLines(opts: PolicyOptions): string[] {
     `  # error lines over a limit that pass per statement per node per window`,
     `  keep_count: ${opts.keep_count ?? 50}`,
     `  default_action: offload`,
+    ...(budgetDelivery(opts.scheduler) === 'gitops'
+      ? nodes.length === 0
+        ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
+        : [`  nodes_by_container:`, ...nodes.map(([c, n]) => `    ${c}: ${n}`)]
+      : []),
+  ];
+}
+
+function hotTierPolicyLines(opts: PolicyOptions): string[] {
+  const nodes = Object.entries(opts.nodes_by_container ?? {});
+  return [
+    `  # Elasticsearch hot tier held under a size: GB of index store on the hot nodes,`,
+    `  # or auto for 80% of their disk (Elasticsearch stops allocating at 85%).`,
+    `  # Each run rewrites the byte limits so growth goes to the frozen tier.`,
+    `  hot_tier_gb: ${opts.hot_tier_gb}`,
+    ...(opts.hot_retention_hours !== undefined
+      ? [`  hot_retention_hours: ${opts.hot_retention_hours}`]
+      : [`  # hours a kept line stays on hot: read from the ILM policy on pass_alias unless set here`, `  # hot_retention_hours: 168`]),
+    `  pass_alias: tenx-app`,
+    `  tier_down_alias: tenx-tierdown`,
+    `  container_field: kubernetes.container_name`,
+    `  # error lines over a limit that pass per statement per node per window`,
+    `  keep_count: ${opts.keep_count ?? 50}`,
+    `  default_action: tier_down`,
     ...(budgetDelivery(opts.scheduler) === 'gitops'
       ? nodes.length === 0
         ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
@@ -360,7 +395,12 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   const cronExpr = resolveCronExpression(scheduleOf(opts));
   const namespace = opts.namespace ?? 'log10x';
   const rows = opts.rows_per_hour !== undefined;
-  const ddSecret = rows ? opts.clickhouse_secret_name ?? 'log10x-clickhouse' : opts.datadog_secret_name ?? 'log10x-datadog';
+  const hot = opts.hot_tier_gb !== undefined;
+  const ddSecret = hot
+    ? opts.elasticsearch_secret_name ?? 'log10x-elasticsearch'
+    : rows
+    ? opts.clickhouse_secret_name ?? 'log10x-clickhouse'
+    : opts.datadog_secret_name ?? 'log10x-datadog';
   const policyYaml = emitPolicyYaml(opts);
   const sa = 'log10x-budget-run';
   const ddEnv = (name: string, optional = false): string[] => [
@@ -374,7 +414,16 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   return [
     `# Log10x budget run: Kubernetes CronJob`,
     `# Generated by log10x_setup_recurring.`,
-    ...(rows
+    ...(hot
+      ? [
+          `# Holds the Elasticsearch hot tier under ${opts.hot_tier_gb === 'auto' ? "80% of the hot nodes' disk" : `${opts.hot_tier_gb} GB`}: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=LOG10X_ES_URL=<https://host:9200> --from-literal=LOG10X_ES_API_KEY=<encoded API key>`,
+          `# The key needs the monitor and read_ilm cluster privileges, and read and monitor on tenx-*.`,
+        ]
+      : rows
       ? [
           `# Holds the rows written into ${opts.clickhouse_table ?? 'default.otel_logs'} at ${opts.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${opts.rows_per_hour} rows an hour`}: each run writes`,
           `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
@@ -483,7 +532,9 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `                - |`,
     `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
     `              env:`,
-    ...(rows
+    ...(hot
+      ? [...ddEnv('LOG10X_ES_URL'), ...ddEnv('LOG10X_ES_API_KEY', true)]
+      : rows
       ? [...ddEnv('CLICKHOUSE_URL'), ...ddEnv('CLICKHOUSE_API_KEY', true), ...ddEnv('CLICKHOUSE_USER', true), ...ddEnv('CLICKHOUSE_PASSWORD', true), ...ddEnv('LOG10X_CUSTOMER_METRICS_URL', true)]
       : [...ddEnv('DD_PAT', true), ...ddEnv('DD_API_KEY', true), ...ddEnv('DD_APP_KEY', true), ...ddEnv('DD_SITE', true)]),
     ...(opts.env_id
@@ -553,7 +604,9 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     ``,
     `      - name: Run log10x tick`,
     `        env:`,
-    ...(opts.rows_per_hour !== undefined
+    ...(opts.hot_tier_gb !== undefined
+      ? [`          LOG10X_ES_URL: \${{ secrets.LOG10X_ES_URL }}`, `          LOG10X_ES_API_KEY: \${{ secrets.LOG10X_ES_API_KEY }}`]
+      : opts.rows_per_hour !== undefined
       ? [
           `          CLICKHOUSE_URL: \${{ secrets.CLICKHOUSE_URL }}`,
           `          CLICKHOUSE_API_KEY: \${{ secrets.CLICKHOUSE_API_KEY }}`,

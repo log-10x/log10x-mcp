@@ -325,6 +325,17 @@ export interface BackendEnvSpec {
   plain: Array<{ envVar: string; default?: string; placeholder?: string }>;
 }
 
+/**
+ * Metric backends the edge image cannot load, so no render adds them. The
+ * Receiver overlays and the standalone Reporter chart both run log10x/edge-10x
+ * (helm-charts charts/reporter/values.yaml).
+ * - elastic: the edge image does not ship ElasticMetricRegistryFactory; the
+ *   hot-tier run reads sizes from the Receiver's indices.
+ * - cloudwatch: the edge image does not link CloudWatchMetricRegistryFactory.
+ * - signalfx: config ships no pipelines/run/output/metric/signalfx module.
+ */
+export const EDGE_UNLOADABLE_BACKENDS: ReadonlySet<MetricsBackendKind> = new Set<MetricsBackendKind>(['elastic', 'cloudwatch', 'signalfx']);
+
 export const BACKEND_ENV_SPECS: Partial<Record<MetricsBackendKind, BackendEnvSpec>> = {
   // datadog — `config/pipelines/run/output/metric/datadog/config.yaml`
   // reads DD_API_KEY (required) + DD_SITE (defaults to us5.datadoghq.com
@@ -409,7 +420,7 @@ function renderTenxExtraArgsAndEnv(opts: {
   airgapped?: boolean;
   airgappedAsEnvVar: boolean;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
   const lines: string[] = [];
 
   if (nonLog10xBackends.length > 0) {
@@ -732,7 +743,7 @@ function renderLog10xSidecar(opts: {
   engineEnv?: Array<[string, string]>;
   policyGit?: PolicyGitDelivery;
 }): string {
-  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x');
+  const nonLog10xBackends = (opts.backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
   const argLines: string[] = [
     `      - "@run/input/forwarder/${opts.forwarderKind}"`,
     `      - "@apps/receiver"`,
@@ -1359,7 +1370,7 @@ bash "%~dp0post-render.sh"
       // the receiver app; optimize/readOnly add their mode flags;
       // non-log10x backends append @run/output/metric/<b> entries so
       // the in-container engine emits metrics to those backends.
-      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x');
+      const nonLog10xBackends = (backends ?? []).filter((b) => b !== 'log10x' && !EDGE_UNLOADABLE_BACKENDS.has(b));
       const runArgs = ['@run/input/forwarder/filebeat', '@apps/receiver'];
       if (optimize) runArgs.push('receiverOptimize', 'true');
       if (readOnly) runArgs.push('receiverReadOnly', 'true');
