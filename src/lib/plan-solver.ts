@@ -48,20 +48,16 @@ import {
 import { type SiemId, defaultRateLabel } from './siem/pricing.js';
 import { isProtectedSeverity } from './severity-policy.js';
 import { isSplunkDestination, splunkKeepRaw, type SplunkPricing } from './siem/splunk-keep-raw.js';
+import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS, SECONDS_PER_DAY } from './report/user-units.js';
+import { ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT } from './fleet-default-install.js';
 
 /**
- * The regulator's shipped configuration (config/pipelines/run/receive/rate/config.yaml):
- * a pattern under this share of its container's bytes in a window is not capped, and
- * the severity floors keep this share of each level's over-cap events.
+ * Lines of a statement over its cap that the shipped Receiver still passes per
+ * window per node: the keep count for an error-class level, none for the rest
+ * (config/pipelines/run/receive/rate/config.yaml keepCounts and severityFloors).
  */
-export const ENGINE_MIN_SHARE = 0.05;
-export const ENGINE_SEVERITY_FLOORS: Record<string, number> = {
-  TRACE: 0.1, DEBUG: 0.1, INFO: 0.1, WARN: 0.3, WARNING: 0.3, ERROR: 0.5, CRITICAL: 0.5, FATAL: 0.5,
-};
-export const ENGINE_MIN_RETENTION = 0.1;
-export function engineSeverityFloor(severity?: string | null): number {
-  const key = (severity ?? '').toUpperCase();
-  return ENGINE_SEVERITY_FLOORS[key] ?? ENGINE_MIN_RETENTION;
+export function keptOverCapLines(severity?: string | null): number {
+  return (ERROR_CLASS_LEVELS as readonly string[]).includes((severity ?? '').toUpperCase()) ? KEEP_COUNT_DEFAULT : 0;
 }
 
 /** True ladder order: keep-everything (in-SIEM before out) then lossy. */
@@ -97,8 +93,8 @@ export interface SolverPattern {
   services: Record<string, number>;
   /** Dominant severity for the pattern. */
   severity: string;
-  /** Total observed bytes for the pattern (over whatever window the caller
-   *  measured — the plan is percentage-correct at any scale). */
+  /** Total observed bytes for the pattern over `SolveOpts.spanSeconds`, the
+   *  span the Receiver's per-window sample and keep count are counted over. */
   bytes: number;
   /** Average event size in bytes; degrades the compact ratio for tiny events. */
   avgEventBytes?: number;
@@ -190,6 +186,14 @@ export interface SolveOpts {
    * exceptionServices still win. Never inferred, never estate-wide.
    */
   unprotectPatterns?: string[];
+  /** The span the patterns' bytes cover, in seconds. Absent = a 30-day month. */
+  spanSeconds?: number;
+  /**
+   * Receiver nodes each container's pods run on. Each node keeps its own
+   * always-pass sample and keep count, so a container absent here counts as
+   * one node and the plan says so.
+   */
+  nodesByContainer?: Record<string, number>;
 }
 
 export interface PlannedRow {
@@ -206,9 +210,9 @@ export interface PlannedRow {
   billUsd: number;
   action: Action | 'pass';
   /**
-   * tier_down rows: the bytes the engine moves, the pattern's excess over its
-   * container's cap less the share the severity floors keep. A month's bytes
-   * in the plan's own scale.
+   * tier_down rows: the bytes the engine moves, the pattern's lines past the
+   * larger of its container's cap and the always-pass sample, less the keep
+   * count of an error-class level, on every node. In the plan's own scale.
    */
   movedBytesMonthly?: number;
   savedUsd: number;
@@ -284,7 +288,8 @@ export interface Plan {
   /**
    * Notes the cost model attached to this plan's projections, deduplicated.
    * The compute term's own sentences ride here, so a renderer that shows the
-   * plan can show why a ClickHouse dollar is what it is.
+   * plan can show why a ClickHouse dollar is what it is. A tier_down plan adds
+   * what the Receiver keeps over each cap and the node count it was counted on.
    */
   notes?: string[];
   /**
@@ -606,12 +611,26 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   // How the engine enforces tier_down: a cap on each pattern's bytes per
   // container per window, the excess over it taking the container's action.
   // The cap that moves the planned patterns and no other is the largest kept
-  // pattern's bytes in that container, so what a plan moves is each planned
-  // pattern's excess over that cap, less the share the severity floors keep,
-  // and nothing for a pattern under the regulator's share guard. Recomputed
-  // as the selection grows, since every pattern added lowers its container's
-  // cap.
+  // pattern's bytes in that container. Each window on each node the Receiver
+  // passes a pattern's lines up to the larger of the cap and the always-pass
+  // sample, then the keep count of an error-class level, and moves the rest
+  // (rate-object-cap.js). Recomputed as the selection grows, since every
+  // pattern added lowers its container's cap.
   const containerOf = (p: SolverPattern): string => serviceMix(p.services).dominant;
+  const windows = (opts.spanSeconds && opts.spanSeconds > 0 ? opts.spanSeconds : 30 * SECONDS_PER_DAY) / REGULATOR_WINDOW_SECONDS;
+  const nodesOf = (c: string): number => {
+    const n = opts.nodesByContainer?.[c];
+    return n != null && Number.isFinite(n) && n >= 1 ? Math.round(n) : 1;
+  };
+  /** Billed bytes the Receiver moves of a planned pattern under `cap`, counted in the cap's unit. */
+  const movedUnderCap = (r: (typeof rows)[number], cap: number, nodes: number): number => {
+    if (r.scopedCapBytes <= 0) return 0;
+    const capUnitsPerByte = r.scopedCapBytes / r.scopedBytes;
+    // One line a window on every node over the span; 0 when the line size is unknown.
+    const perLine = windows * nodes * (r.p.avgEventBytes ?? 0) * capUnitsPerByte;
+    const kept = Math.max(cap, ALWAYS_PASS_LINES * perLine) + keptOverCapLines(r.p.severity) * perLine;
+    return Math.max(0, r.scopedCapBytes - kept) / capUnitsPerByte;
+  };
   const byContainer = new Map<string, (typeof rows)[number][]>();
   for (const r of rows) {
     const c = containerOf(r.p);
@@ -625,7 +644,6 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     const moved = new Map<string, number>();
     const caps = new Map<string, TierDownCap>();
     for (const [c, members] of byContainer) {
-      const total = members.reduce((s, r) => s + r.scopedBytes, 0);
       // The cap is in the Receiver's unit, between the largest kept pattern
       // and the smallest moved one, at their geometric mean.
       let keptMax = 0;
@@ -649,12 +667,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
         ...(movedMin !== undefined ? { movedMinBytesMonthly: movedMin } : {}),
       });
       for (const r of members) {
-        if (!chosenHashes.has(r.p.hash)) continue;
-        const share = total > 0 ? r.scopedBytes / total : 0;
-        // The excess above the cap, in the cap's unit, as a share of the pattern's billed bytes.
-        const excessShare = r.scopedCapBytes > 0 ? Math.max(0, r.scopedCapBytes - cap) / r.scopedCapBytes : 0;
-        const excess = share < ENGINE_MIN_SHARE ? 0 : excessShare * r.scopedBytes;
-        moved.set(r.p.hash, excess * (1 - engineSeverityFloor(r.p.severity)));
+        if (chosenHashes.has(r.p.hash)) moved.set(r.p.hash, movedUnderCap(r, cap, nodesOf(c)));
       }
     }
     return { moved, caps };
@@ -745,9 +758,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
 
   // Rung 1-2: the in-SIEM lever, biggest patterns first, until the target.
   if (inSiem === 'tier_down') {
-    for (const r of rankedNonError) {
-      if (savedAmount >= targetAmount) break;
-      chosen.set(r.p.hash, { action: 'tier_down', saved: 0 });
+    const settle = (): void => {
       const { moved } = tierDownMoves(new Set(chosen.keys()));
       const tierEvents = flexEventsOf(moved);
       savedAmount = 0;
@@ -758,6 +769,11 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
         tierDownMoved.set(h, bytes);
         savedAmount += saved;
       }
+    };
+    for (const r of rankedNonError) {
+      if (savedAmount >= targetAmount) break;
+      chosen.set(r.p.hash, { action: 'tier_down', saved: 0 });
+      settle();
     }
     // Toward a dollar budget, Flex at a tier that adds more than the Standard
     // indexing it avoids is no lever: plan none of it.
@@ -766,14 +782,17 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       tierDownMoved.clear();
       savedAmount = 0;
     }
-    // A pattern whose excess moves nothing, under its container's cap or the
-    // share guard, is not planned. Taking it out leaves the other caps as
-    // they are, since its bytes were already at or under them.
-    for (const [h, c] of [...chosen.entries()]) {
-      if (c.action === 'tier_down' && (tierDownMoved.get(h) ?? 0) <= 0) {
+    // A pattern that moves nothing, under its container's cap or within what
+    // the Receiver keeps over it, is not planned. Kept, it can raise its
+    // container's cap, so the rest are counted again under the caps that leaves.
+    for (;;) {
+      const none = [...chosen.keys()].filter((h) => (tierDownMoved.get(h) ?? 0) <= 0);
+      if (none.length === 0) break;
+      for (const h of none) {
         chosen.delete(h);
         tierDownMoved.delete(h);
       }
+      settle();
     }
   } else if (inSiem) {
     for (const r of rankedNonError) {
@@ -1008,6 +1027,27 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
       `that is ASSUMED.`
     : undefined;
 
+  // What the moved figures leave behind, and on how many nodes.
+  const tierDownRows = planned.filter((r) => r.action === 'tier_down');
+  const floorNotes: string[] = [];
+  if (tierDownRows.length > 0) {
+    const levels = ERROR_CLASS_LEVELS.join(', ').replace(/, (\w+)$/, ' or $1');
+    const unknown = [...new Set(tierDownRows.map((r) => r.dominantService))].filter(
+      (c) => !(Number(opts.nodesByContainer?.[c]) >= 1),
+    );
+    const unsized = tierDownRows.filter((r) => !((rowByHash.get(r.hash)?.p.avgEventBytes ?? 0) > 0)).length;
+    floorNotes.push(
+      `tier_down moves a planned statement's lines over its cap except what the Receiver passes whatever the cap: ` +
+        `the first ${ALWAYS_PASS_LINES} lines of each statement and, for an ${levels} statement, ${KEEP_COUNT_DEFAULT} lines over the cap, ` +
+        `every ${REGULATOR_WINDOW_SECONDS / 60}-minute window on each node.` +
+        (unknown.length > 0
+          ? ` Node count unknown for ${unknown.join(', ')}: counted as one node. Each further node keeps as much again, so the moved figures there are the most that moves.`
+          : '') +
+        (unsized > 0 ? ` ${unsized} planned statement${unsized === 1 ? ' carries' : 's carry'} no line size, so nothing is kept back from ${unsized === 1 ? 'its' : 'their'} moved figure${unsized === 1 ? '' : 's'}.` : ''),
+    );
+  }
+  const notes = [...new Set([...(modeledNotes ?? []), ...floorNotes])];
+
   return {
     destination: opts.destination,
     retrieverInstalled: opts.retrieverInstalled,
@@ -1032,7 +1072,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     rateSource,
     modeled: planModeled,
     ...(planModeledNote ? { modeledNote: planModeledNote } : {}),
-    ...(modeledNotes && modeledNotes.length ? { notes: [...new Set(modeledNotes)] } : {}),
+    ...(notes.length ? { notes } : {}),
     prerequisites,
     ...(rateSource === 'customer_supplied' ? { customerRatePerGb: opts.customerRatePerGb } : {}),
     bytesInMonthly: bytesIn,

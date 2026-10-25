@@ -111,7 +111,7 @@ function solve(capUnit: 'receiver' | 'payload') {
       ...(p.count > 0 ? { avgEventBytes: (p.rawBytes ?? p.bytes) / p.count } : {}),
       ...(capUnit === 'receiver' ? { capBytes: p.receiverCapBytes } : { capBytes: p.bytes }),
     })),
-    { destination: 'datadog', retrieverInstalled: false, target: { kind: 'percent', value: 70 }, scope: 'all', allowLossy: false, exceptionServices: [] },
+    { destination: 'datadog', retrieverInstalled: false, target: { kind: 'percent', value: 70 }, scope: 'all', allowLossy: false, exceptionServices: [], spanSeconds: SPAN },
   );
 }
 

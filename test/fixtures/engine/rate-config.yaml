@@ -1,0 +1,286 @@
+# Verbatim copy of log-10x/config pipelines/run/receive/rate/config.yaml at
+# commit 71f1d80132b99564d32be62f062bd5e2c6ded09f (origin/main, 2026-10-23).
+# test/regulator-defaults-pin.test.ts pins the plan solver to it. Refresh
+# by copying the file again below this header.
+
+# yaml-language-server: $schema=https://schema.log10x.com/pipelines/run/receive/rate/schema.json
+
+# 🔟❎ 'run' rate regulator configuration
+
+# The rate regulator holds each log pattern in a container to a cap per window, and
+# each container to an optional total per window, counted in bytes or in events.
+# Lines over a cap or a total take the container's action; error-class levels keep
+# a fixed count of lines per pattern per window. An optional mute file overrides the
+# regulator for explicitly declared patterns.
+# To learn more see https://doc.log10x.com/run/receive/rate/
+
+# Set the 10x pipeline to 'run'
+tenx: run
+
+# =============================== Dependencies ================================
+
+include: run/modules/receive/rate
+
+# ============================== Rate Options =================================
+
+rateReceiver:
+
+  # 'fieldNames' identifies the log PATTERN (the numerator bucket): the field the
+  #  message initializer writes, named by symbolMessageField (message_pattern). The container is configured
+  #  separately via 'containerField' below -- it is the denominator and is keyed
+  #  on its own, so a pattern's share is measured per container.
+  fieldNames:
+    - $=yield TenXEnv.get("symbolMessageField")
+
+  # 'containerField' names the field whose value scopes the share denominator
+  #  (the per-container total). Defaults to the k8s container name, which is
+  #  stable across pod replicas (never the pod). When the field is absent on an
+  #  event (non-k8s input), the regulator falls back to a single node-wide bucket.
+  containerField: $=yield TenXEnv.get("k8sContainerNameField")
+
+  # 'resetIntervalMs' is the window over which recent share is measured. A
+  #  regulator instance starts its first window at the first line it regulates
+  #  and a new one every interval after that, the same windows for all its
+  #  patterns and services. They do not follow the clock, and a policy file
+  #  reload does not start a new window.
+  resetIntervalMs: $=parseDuration("4m")
+
+  # 'unit' is what the caps, the totals and the share guard count: 'bytes' (each
+  #  event counts the UTF-8 size of the whole record the forwarder sends, not only
+  #  the message) or 'events' (each line counts 1). Write the cap
+  #  and total files in the same unit. Any other value stops the launch.
+  unit: bytes
+
+  # 'absoluteCap' is the fleet-wide cap: the budget, in 'unit', for a single
+  #  pattern per container within the current window. Past it, lines take the
+  #  container's action, except the 'baselineCount' sample and, for the levels
+  #  in 'keepCounts', that many lines per pattern per window.
+  #
+  #  Default 0 = disabled. Three customer configurations are first-class:
+  #    - Per-container only: leave 'absoluteCap' unset, set 'capLookup.file' below.
+  #      Listed containers get the file's cap; unlisted containers are
+  #      unregulated by the absolute cap. Most selective.
+  #    - Fleet-wide only: set 'absoluteCap' to a positive integer (e.g., 10485760
+  #      for 10 MB). Applies to every container the regulator sees.
+  #    - Both: per-container entries in 'capLookup.file' override the fleet-wide
+  #      cap; unlisted containers fall back to the fleet-wide cap (safety floor).
+  # absoluteCap: 10485760   # 10 MB
+
+  # 'minSharePercent' is an optional guard for legitimately high-volume
+  #  containers. If a pattern is over its cap BUT below this share of its
+  #  container's volume, it is left alone. 0 turns the guard off, so a cap holds
+  #  every pattern it is set for.
+  minSharePercent: 0
+
+  # 'defaultAction' is the action the held lines of a container with neither its
+  #  own row nor a '*' row in 'actionLookupFile' take: 'pass', 'offload',
+  #  'tier_down', 'compact', 'sample' or 'drop'. 'pass' leaves them in place, so
+  #  only the containers the file covers act on theirs. A value outside the six
+  #  logs a warning at load and 'pass' applies. Read by the regulators that
+  #  consult 'actionLookupFile'.
+  defaultAction: pass
+
+  # 'keepCounts' is the number of lines per pattern per window a level passes once
+  #  the pattern is over its cap or its service over its total, also under a mute
+  #  entry, in place of its 'severityFloors' draw. ERROR, CRITICAL and FATAL keep
+  #  a count of 50 even when removed here; -1 gives a level its floor instead.
+  keepCounts:
+    - ERROR=50
+    - CRITICAL=50    # the level enrichment maps fatal/critical -> CRITICAL
+    - FATAL=50       # kept for forwarders whose level vocabulary emits FATAL
+
+  # 'severityFloors' is the fraction of each level kept at random once a pattern is
+  #  over its cap, for levels not in 'keepCounts'. 0 keeps none, so the cap holds.
+  #  Floor-map keys must match the level vocabulary emitted by the level enrichment.
+  severityFloors:
+    - TRACE=0
+    - DEBUG=0
+    - INFO=0
+    - WARN=0
+    - ERROR=0        # 'keepCounts' governs ERROR, CRITICAL and FATAL
+    - CRITICAL=0
+    - FATAL=0
+
+  # 'minRetentionThreshold' is the floor used for any level not present in
+  #  'severityFloors'.
+  minRetentionThreshold: 0
+
+  # 'warmupMs' is an optional per-instance grace period before the regulator starts
+  #  capping a newly-seen container. Scope is per regulator instance, so a regulator
+  #  restart restarts the window. 0 caps a container from its first line. See
+  #  https://doc.log10x.com/run/receive/rate/#warmup for the operator guide.
+  warmupMs: 0
+
+  # 'baselineCount' is the number of events of each pattern kept per window
+  #  regardless of the cap and the share, so even a heavily-capped pattern leaves
+  #  a forensic sample. In a service with a total, the sample counts toward it.
+  baselineCount: 5
+
+  # 'baselineMaxOverTotal' is the most sample lines a service passes per window
+  #  once it has passed its total; the rest take the regular path (the keep
+  #  count, then the service's action). It bounds a service that prints many new
+  #  patterns in one window. Counted in lines whatever 'unit' is. 0 removes the
+  #  bound, so every sample line passes.
+  baselineMaxOverTotal: 50
+
+  # 'ingestionCostPerGB' is used only to render savings metrics in dollars; it does
+  #  not affect the keep/drop decision (the decision is share-based).
+  ingestionCostPerGB: 1.5
+
+  # ---------------------------- Mute File Options ----------------------------
+
+  # Optional declarative mute file keyed by the joined 'fieldNames'. The mute file
+  # composes with the regulator: a listed, active pattern is decided by its file
+  # entry (the human declaration wins), and everything else is handled by the
+  # regulator.
+  #
+  # File format (CSV; header row + one comma-separated entry per row):
+  #   fieldSet,value
+  #   <fieldSetKey>,<sampleRate>:<untilEpochSec>[:<reason>]
+  #
+  # sampleRate 1.0 = never sampled; <1.0 = retain at that rate. Entries self-heal
+  # past 'untilEpochSec'. The 'keepCounts' levels still pass their count per
+  # pattern per window, so a 0.0 mute never silences ERROR/CRITICAL/FATAL, and in
+  # a capped container the lines a mute passes count toward the service's total.
+  #
+  # Periodically pulling the mute file to keep it fresh is done via the gitops
+  # configuration -- see https://doc.log10x.com/config/github/#config
+  lookup:
+
+    # 'file' specifies the mute file path. Hot-reloaded on in-place writes (the
+    #  gitops pattern); Kubernetes ConfigMap mounts won't reload. Comment out to
+    #  run the regulator alone (the default).
+    # file: $=path("data/sample/mutes") + "/mutes.csv"
+
+    # 'retain' specifies the period before the file is marked as stale.
+    retain: $=parseDuration("10m")
+
+  # ---------------------------- Cap File Options -----------------------------
+
+  # Optional declarative per-container cap file keyed by the value of
+  # 'containerField' (the k8s container name by default). Each entry assigns a
+  # cap, in 'unit', to a specific container; the file wins per-event over
+  # 'absoluteCap' above. A row keyed '*' applies to every container without a
+  # row of its own. Unlisted containers with no '*' row fall back to
+  # 'absoluteCap' (or to no cap, when 'absoluteCap' is unset/0). A row of 0
+  # exempts its container; a '*' row of 0 exempts every container without a row
+  # of its own, so 'absoluteCap' then applies to none of them.
+  #
+  # File format (CSV; header row + one comma-separated entry per row):
+  #   container,cap
+  #   <container>,<cap>[:<untilEpochSec>][:<reason>]
+  #   *,<cap>[:<untilEpochSec>][:<reason>]
+  #
+  # Written by the Log10x MCP: its budget run (log10x_setup_recurring) writes the
+  # file to the policy ConfigMap or commits it to the policy branch. A
+  # log10x_configure_engine call derives caps from a target percent or a monthly
+  # dollar budget and delivers them as its 'delivery' says: a PR against the
+  # gitops repo, a write to the policy ConfigMap, or no write (stdout_only).
+  capLookup:
+
+    # 'file' specifies the per-container cap file path. Hot-reloaded on in-place
+    #  writes (the gitops pattern) and when the file is replaced via ATOMIC_MOVE
+    #  (the Kubernetes ConfigMap pull driver, whose copy is at
+    #  ${java.io.tmpdir}/tenx/kubernetes/<namespace>/<configMap>/caps.csv).
+    #
+    # CAP_LOOKUP_FILE sets the path. Unset, no cap table loads and every container
+    # falls back to 'absoluteCap', so a Receiver launches before its policy files
+    # arrive.
+    #
+    # With GH_ENABLED=true (the policy lane in pipelines/gitops/config.yaml), the
+    # default is the pulled copy of the policy repo's log10x/policy/caps.csv, in
+    # the lane's mirror folder: ${GH_DEST:-${java.io.tmpdir}/tenx/github}. The
+    # policy folder must then hold caps.csv when the engine starts. GH_ENABLED is
+    # read as the lane reads it: true, True or TRUE turn it on (any other value
+    # but false/False/FALSE stops the launch). It wins over the ConfigMap path
+    # for all four policy files: enable one lane, not both.
+    file: '$=TenXEnv.get("CAP_LOOKUP_FILE", (TenXEnv.get("GH_ENABLED", "false") == "true" || TenXEnv.get("GH_ENABLED", "false") == "True" || TenXEnv.get("GH_ENABLED", "false") == "TRUE") ? TenXEnv.get("GH_DEST", TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/github") + "/log10x/policy/caps.csv" : TenXEnv.get("CAP_LOOKUP_FILE"))'
+
+    # 'retain' specifies the period before the file is marked as stale.
+    retain: $=parseDuration("10m")
+
+  # =========================== Config-Version Stamp ============================
+  #
+  # 'configGeneration.file' points at the config-generation.csv the MCP control
+  # plane (log10x_configure_engine) writes as a SIBLING of the cap file in the
+  # cap ConfigMap. The receiver reads its `generation` value (a hash of the cap
+  # policy) and stamps it on every event as `tenx_config_version`. The
+  # `config_generation` aggregator publishes it as one series per generation
+  # (`config_generation_summaryBytes_total{tenx_config_version=...}`); the per-pattern
+  # counters do not carry it, so a policy write does not restart their series.
+  # The running engine advertises which config generation it loaded and the MCP
+  # can verify the policy it wrote is live (the config-generation closed loop).
+  # Hot-reloaded like the cap file.
+  #
+  # OPT-IN, decoupled from caps: unset by default, so the stamp is emitted ONLY
+  # when this points at a file. A receiver running the regulator WITHOUT the MCP
+  # closed loop (GitOps-managed caps) leaves it unset and never loads the file --
+  # no dependency, no init failure on a missing file. Set CONFIG_GENERATION_FILE
+  # (or this) to the sibling of caps.csv, e.g.:
+  #   ${java.io.tmpdir}/tenx/kubernetes/<namespace>/<configMap>/config-generation.csv
+  # With GH_ENABLED=true the default is the GitHub policy lane's pulled copy of
+  # log10x/policy/config-generation.csv.
+  configGeneration:
+    file: '$=TenXEnv.get("CONFIG_GENERATION_FILE", (TenXEnv.get("GH_ENABLED", "false") == "true" || TenXEnv.get("GH_ENABLED", "false") == "True" || TenXEnv.get("GH_ENABLED", "false") == "TRUE") ? TenXEnv.get("GH_DEST", TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/github") + "/log10x/policy/config-generation.csv" : "")'
+
+  # --------------------------- Action File Options ---------------------------
+
+  # Optional declarative per-SERVICE action file, keyed by the value of
+  # 'containerField' (the k8s container name = the service). Each entry assigns
+  # the disposition of that service's held lines: 'pass' (default), 'offload'
+  # (to customer S3), 'tier_down' (SIEM cheap tier), 'compact' (lossless
+  # encode), 'sample', or 'drop'. The cap and the total decide which lines are
+  # held; the action only decides what happens to them. A row keyed '*' applies
+  # to every service without a row of its own; a service with neither takes
+  # 'defaultAction' above ('pass' unless set), and a cap file with no actions
+  # file loads an empty table.
+  #
+  # File format (CSV; header row + one comma-separated entry per row):
+  #   container,action
+  #   <container>,<action>[:<untilEpochSec>][:<reason>]
+  #   *,<action>[:<untilEpochSec>][:<reason>]
+  #
+  # Written by the Log10x MCP beside the cap file, the same way (see 'capLookup').
+  # 'actionLookupFile' is the per-service action file path. Declared as a FLAT
+  #  key (like 'fieldNames' / 'minSharePercent'): the schema generator nests a
+  #  group only when two or more options share its prefix, and this option is
+  #  the only one under 'actionLookup'. Always set (default below, sibling to the
+  #  cap file) so the cap-variant regulator can read it: the pulled copy of
+  #  log10x/policy/actions.csv with GH_ENABLED=true, else the ConfigMap path.
+  #  ACTION_LOOKUP_FILE overrides for non-k8s / fixed-path deployments.
+  actionLookupFile: '$=TenXEnv.get("ACTION_LOOKUP_FILE", (TenXEnv.get("GH_ENABLED", "false") == "true" || TenXEnv.get("GH_ENABLED", "false") == "True" || TenXEnv.get("GH_ENABLED", "false") == "TRUE") ? TenXEnv.get("GH_DEST", TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/github") + "/log10x/policy/actions.csv" : TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/kubernetes/" + TenXEnv.get("K8S_NAMESPACE", "demo") + "/" + TenXEnv.get("K8S_CONFIGMAP", "log10x-action-intent") + "/actions.csv")'
+
+  # ---------------------------- Total File Options ---------------------------
+
+  # Optional declarative per-SERVICE total file, keyed by the value of
+  # 'containerField'. Each entry bounds what the service passes per window on
+  # this node, in 'unit'. When the service's caps alone let more than its total
+  # through in the previous window, every pattern's cap scales by total / that
+  # amount for the whole window, or by what they let through so far this window
+  # once that is larger, so its largest patterns are held first. The scale
+  # follows the previous window, so the window after a storm is scaled by the
+  # storm for its whole length and recovers the window after. The first window
+  # after a quiet one fills its total in arrival order before the scale applies.
+  # A service whose first lines of this window and of the last window it sent in
+  # are two window lengths or more apart scales by total / its units so far this
+  # window instead. Once the lines it passed reach the total, every further line
+  # takes the service's action. The 'baselineCount' sample counts toward the
+  # total like any line, and once the total is spent the service passes at most
+  # 'baselineMaxOverTotal' more sample lines in the window. The 'keepCounts'
+  # lines and the lines a mute entry passes still pass and count toward the
+  # total, so an error storm or a muted pattern can exceed it by that much. Read
+  # by the cap-file regulators, for containers with a cap. A row keyed '*'
+  # applies to every service without a row of its own; a row of 0 exempts its
+  # service, and a '*' row of 0 gives every unlisted service no total. A missing
+  # file loads as an empty table.
+  #
+  # File format (CSV; header row + one comma-separated entry per row):
+  #   container,total
+  #   <container>,<total>[:<untilEpochSec>][:<reason>]
+  #   *,<total>[:<untilEpochSec>][:<reason>]
+  #
+  # 'totalLookupFile' is the per-service total file path, a FLAT key like
+  #  'actionLookupFile', defaulting to the sibling of the cap file: the pulled
+  #  copy of log10x/policy/totals.csv with GH_ENABLED=true, else the ConfigMap
+  #  path. TOTAL_LOOKUP_FILE overrides for non-k8s / fixed-path deployments.
+  totalLookupFile: '$=TenXEnv.get("TOTAL_LOOKUP_FILE", (TenXEnv.get("GH_ENABLED", "false") == "true" || TenXEnv.get("GH_ENABLED", "false") == "True" || TenXEnv.get("GH_ENABLED", "false") == "TRUE") ? TenXEnv.get("GH_DEST", TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/github") + "/log10x/policy/totals.csv" : TenXEnv.get("java.io.tmpdir", "/tmp") + "/tenx/kubernetes/" + TenXEnv.get("K8S_NAMESPACE", "demo") + "/" + TenXEnv.get("K8S_CONFIGMAP", "log10x-action-intent") + "/totals.csv")'

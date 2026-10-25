@@ -957,6 +957,8 @@ async function executePocFromLocalInner(args: PocFromLocalArgs): Promise<PocFrom
         target,
         scope: 'all',
         allowLossy: args.allow_lossy ?? false,
+        spanSeconds: planSpanSeconds,
+        ...(sample.containerNodes ? { nodesByContainer: sample.containerNodes } : {}),
         exceptionServices: [
           ...exceptions,
           ...[...pinServicesLower.entries()].filter(([, a]) => a === 'pass').map(([k]) => k),
