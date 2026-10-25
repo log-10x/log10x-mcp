@@ -5,6 +5,8 @@
  *   1. the hot nodes' index store and disk (`_nodes`, `_nodes/<ids>/stats`),
  *      and the store of the Receiver's own indices still on hot, split into
  *      kept lines (the pass alias) and tier_down lines (the tier_down alias);
+ *      a tier_down index counts as on hot when a shard of it sits on a hot
+ *      node (`_cat/shards`), so one placed on warm is outside S;
  *   2. how long a kept line stays on hot, from the ILM policy on the pass
  *      alias, and how long a tier_down index stays on hot, from its policy
  *      and the mount times of the indices already moved;
@@ -14,7 +16,8 @@
  *   4. the store each counted byte takes on hot, measured on the indices
  *      still there;
  * then the allowance: A = (S - lines outside the Receiver - tier_down in
- * flight) / (store per byte x hours on hot) counted bytes an hour for the
+ * flight on hot, zero when the tier_down write index is off hot) / (store
+ * per byte x hours on hot) counted bytes an hour for the
  * kept lines, spread over statements with the water level the Datadog run
  * uses (the noisiest held first), as per-node per-window byte limits.
  *
@@ -124,7 +127,12 @@ export interface HotTierReads {
   /** Disk on the hot nodes, bytes. */
   hotDiskBytes: number;
   pass: { storeBytes: number; countedBytes: number; indices: number };
+  /** The tier_down indices not yet mounted with a shard on a hot node. */
   tierDown: { storeBytes: number; countedBytes: number; indices: number };
+  /** The tier_down indices not yet mounted with no shard on a hot node, outside S. */
+  tierDownOffHot: { storeBytes: number; indices: number };
+  /** True when the tier_down write index sits on hot, so moved lines wait there for their mount. */
+  tierDownOnHot: boolean;
   retentionHours: number;
   retentionSource: string;
   tierDownHotHours: number;
@@ -157,9 +165,9 @@ async function sumSize(req: EsRequest, indices: string[]): Promise<number> {
 export async function readHotTierInputs(nowSec: number, hot: HotTierBudget, req: EsRequest): Promise<HotTierReads> {
   // 1. hot nodes
   const nodes = await req('GET', '/_nodes?filter_path=nodes.*.name,nodes.*.roles');
-  const hotIds = Object.entries<any>(nodes?.nodes ?? {})
-    .filter(([, n]) => (n.roles ?? []).some((r: string) => r === 'data_hot' || r === 'data'))
-    .map(([id]) => id);
+  const hotEntries = Object.entries<any>(nodes?.nodes ?? {}).filter(([, n]) => (n.roles ?? []).some((r: string) => r === 'data_hot' || r === 'data'));
+  const hotIds = hotEntries.map(([id]) => id);
+  const hotNames = new Set(hotEntries.map(([, n]) => String(n.name)));
   if (hotIds.length === 0) throw new Error('no node has the data_hot (or data) role, so there is no hot tier to hold.');
   const stats = await req('GET', `/_nodes/${hotIds.join(',')}/stats/fs,indices?filter_path=nodes.*.fs.total.total_in_bytes,nodes.*.indices.store.size_in_bytes`);
   let hotStoreBytes = 0;
@@ -174,19 +182,35 @@ export async function readHotTierInputs(nowSec: number, hot: HotTierBudget, req:
   const passIdx: string[] = [];
   const tdIdx: string[] = [];
   const tdMounted: string[] = [];
+  let tdWrite: string | undefined;
   for (const [index, v] of Object.entries<any>(aliases)) {
     const names = Object.keys(v?.aliases ?? {});
     const mounted = MOUNTED.test(index);
     if (names.includes(hot.pass_alias) && !mounted) passIdx.push(index);
     if (names.includes(hot.tier_down_alias)) (mounted ? tdMounted : tdIdx).push(index);
+    if (!mounted && v?.aliases?.[hot.tier_down_alias]?.is_write_index === true) tdWrite = index;
   }
   if (passIdx.length === 0) throw new Error(`no index on hot carries the alias ${hot.pass_alias}; set pass_alias to the Receiver's write alias for kept lines.`);
+  if (!tdWrite && tdIdx.length === 1) tdWrite = tdIdx[0];
+  // A relocating shard's node reads "<from> -> <address> <id> <to>"; it is on hot while either end is.
+  const tdHotIdx: string[] = [];
+  const tdOffIdx: string[] = [];
+  if (tdIdx.length > 0) {
+    const shards = await req('GET', `/_cat/shards/${tdIdx.map(encodeURIComponent).join(',')}?format=json&h=index,node`);
+    const onHot = new Set<string>();
+    for (const sh of Array.isArray(shards) ? shards : []) {
+      const ends = String(sh?.node ?? '').split(' -> ');
+      if ([ends[0], ends[1]?.split(' ').pop()].some((n) => n && hotNames.has(n))) onHot.add(String(sh.index));
+    }
+    for (const i of tdIdx) (onHot.has(i) ? tdHotIdx : tdOffIdx).push(i);
+  }
+  const tierDownOnHot = tdWrite !== undefined ? tdHotIdx.includes(tdWrite) : tdIdx.length === 0 || tdHotIdx.length > 0;
   const storeOf = async (indices: string[]): Promise<number> => {
     if (indices.length === 0) return 0;
     const s = await req('GET', `/${indices.map(encodeURIComponent).join(',')}/_stats/store?level=indices&filter_path=indices.*.total.store.size_in_bytes`);
     return Object.values<any>(s?.indices ?? {}).reduce((a, i) => a + Number(i?.total?.store?.size_in_bytes ?? 0), 0);
   };
-  const [passStore, tdStore, passCounted, tdCounted] = await Promise.all([storeOf(passIdx), storeOf(tdIdx), sumSize(req, passIdx), sumSize(req, tdIdx)]);
+  const [passStore, tdStore, passCounted, tdCounted, tdOffStore] = await Promise.all([storeOf(passIdx), storeOf(tdHotIdx), sumSize(req, passIdx), sumSize(req, tdHotIdx), storeOf(tdOffIdx)]);
 
   // 3. how long kept lines and tier_down indices stay on hot
   let retentionHours = hot.retention_hours;
@@ -294,7 +318,9 @@ export async function readHotTierInputs(nowSec: number, hot: HotTierBudget, req:
     hotStoreBytes,
     hotDiskBytes,
     pass: { storeBytes: passStore, countedBytes: passCounted, indices: passIdx.length },
-    tierDown: { storeBytes: tdStore, countedBytes: tdCounted, indices: tdIdx.length },
+    tierDown: { storeBytes: tdStore, countedBytes: tdCounted, indices: tdHotIdx.length },
+    tierDownOffHot: { storeBytes: tdOffStore, indices: tdOffIdx.length },
+    tierDownOnHot,
     retentionHours,
     retentionSource,
     tierDownHotHours,
@@ -478,7 +504,7 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   for (let i = 0; i < 8; i++) {
     settle();
     const movedToTd = budgeted.reduce((a, x) => a + (actionOf(x.c) === 'tier_down' ? x.rate - keptOf(x, level) : 0), 0);
-    inFlight = kTd * movedToTd * L;
+    inFlight = reads.tierDownOnHot ? kTd * movedToTd * L : 0;
     allowance = Math.max(0, (S - outside - inFlight) / (k * R));
   }
   // Above S now: lines already on hot leave only as their indices age out, so hold tighter until it drains.
@@ -533,8 +559,11 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
     `Hot tier: ${fmtGB(H)} of ${fmtGB(S)} (${targetSource}) on ${reads.hotNodes} hot node${reads.hotNodes === 1 ? '' : 's'}; ` +
     `at these limits it settles at about ${fmtGB(projected)} within ${Math.round(R)} hours, with ${fmtGB(moved * 24)} a day of counted lines moved to ${elasticDestination(hot.default_action)}.`;
   lines.push(
-    `Outside the Receiver: ${fmtGB(outside)} on hot. The Receiver's kept lines: ${fmtGB(reads.pass.storeBytes)} in ${reads.pass.indices} indices; its tier_down lines not yet moved: ${fmtGB(reads.tierDown.storeBytes)} in ${reads.tierDown.indices}.`,
-    `A kept line stays on hot ${Math.round(R * 10) / 10} hours (${reads.retentionSource}); a tier_down index ${Math.round(L * 10) / 10} hours (${reads.tierDownSource}).`,
+    `Outside the Receiver: ${fmtGB(outside)} on hot. The Receiver's kept lines: ${fmtGB(reads.pass.storeBytes)} in ${reads.pass.indices} indices; its tier_down lines not yet moved: ${fmtGB(reads.tierDown.storeBytes)} in ${reads.tierDown.indices} on hot` +
+      (reads.tierDownOffHot.indices > 0 ? `, ${fmtGB(reads.tierDownOffHot.storeBytes)} in ${reads.tierDownOffHot.indices} off hot, outside the size.` : '.'),
+    reads.tierDownOnHot
+      ? `A kept line stays on hot ${Math.round(R * 10) / 10} hours (${reads.retentionSource}); a tier_down index ${Math.round(L * 10) / 10} hours (${reads.tierDownSource}).`
+      : `A kept line stays on hot ${Math.round(R * 10) / 10} hours (${reads.retentionSource}); the tier_down write index is off hot, so moved lines take no room on hot while they wait for their mount.`,
     `Each counted byte takes ${k.toFixed(2)} bytes of store kept, ${kTd.toFixed(2)} as tier_down (measured on the indices on hot).`,
     level !== undefined
       ? `The Receiver's statements send ${fmtGB(budgetedPerHour * 24)} a day; ${fmtGB(allowance * 24)} a day fits the size, so each statement keeps up to ${fmtGB(level * 24)} a day and the noisiest give way first.`
