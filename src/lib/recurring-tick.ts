@@ -29,7 +29,7 @@ import { join as pathJoin } from 'node:path';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 
-import type { Policy } from './policy-loader.js';
+import type { HotTierBudget, Policy } from './policy-loader.js';
 import type { CustomerMetricsBackend } from './customer-metrics.js';
 import { emitMuteRows, type MuteCsvRow } from './mute-csv-writer.js';
 import {
@@ -1272,6 +1272,21 @@ function bytesUnitRefusal(unit: string | undefined, where: string): string | und
 }
 
 /**
+ * `hot_tier_gb: auto` is refused while the tier_down write index sits on hot:
+ * under a 2.5x step in load hot peaked at 1.43 of the size with the index on
+ * hot (114% of disk at the 80% share, past the 95% flood stage) and at 1.04
+ * with it on warm (benchmarks elastic-hot-tier-budget).
+ */
+function autoOnHotRefusal(hot: HotTierBudget, tierDownOnHot: boolean): string | undefined {
+  if (hot.gb !== undefined || !tierDownOnHot) return undefined;
+  return (
+    `hot_tier_gb is auto (${Math.round(hot.capacity_share * 100)}% of the hot nodes' disk), and the tier_down write index sits on hot, ` +
+    'where moved lines waiting for their mount can carry the hot tier past the disk watermarks under a step in load. ' +
+    "Place the tier_down index on warm (log10x_advise_retriever's Elasticsearch frozen-tier recipe with tierDownPlacement warm), or set hot_tier_gb to a size in GB. Nothing was written."
+  );
+}
+
+/**
  * One hot-tier run (`reduction.hot_tier_gb`): reads the hot nodes and the
  * Receiver's indices, rewrites the byte limits so the hot tier settles under
  * the size, and writes the files the way the budget run does.
@@ -1325,7 +1340,7 @@ export async function runHotTierTick(policy: Policy, opts: TickOptions = {}): Pr
   const refusal = bytesUnitRefusal(
     unit,
     delivery === 'configmap' ? `the ConfigMap ${namespace}/${cmName} (key ${REGULATOR_UNIT_KEY})` : `the gitops repo (${rel(REGULATOR_UNIT_KEY)} on ${branch} or the checkout)`,
-  );
+  ) ?? autoOnHotRefusal(hot, reads.tierDownOnHot);
   if (refusal) {
     const result = budgetResult('refused', refusal);
     appendHistory(result);

@@ -354,6 +354,35 @@ test('the run writes byte limits to the policy ConfigMap, and refuses a Receiver
   void mkdtempSync(join(tmpdir(), 'hot-tier-'));
 });
 
+test('auto is refused while the tier_down write index sits on hot, and runs with it on warm', async () => {
+  const statements = [{ c: 'cart', h: 'A', r: 'pass', bytes: 20 * GB }];
+  const writes: Array<Record<string, string>> = [];
+  const k8s = {
+    async listRunningPods(namespace?: string) {
+      const r = [{ nodeName: 'n1', containers: ['fluent-bit', 'tenx'], policyConfigMaps: ['log10x-action-intent'] }];
+      return namespace === 'logging' ? r : [...r, { nodeName: 'n1', containers: ['cart'] }];
+    },
+    async getConfigMap() {
+      return { data: { 'caps.csv': 'container,cap\n' }, resourceVersion: '1' };
+    },
+    async replaceConfigMap(_ns: string, _n: string, data: Record<string, string>) {
+      writes.push(data);
+    },
+  };
+  const run = async (size: string, tdNode: string) => {
+    const { req } = fakeCluster({ hotStore: 9 * GB, hotDisk: 20 * GB, passStore: 6 * GB, passCounted: 6 * GB, tdStore: 1 * GB, tdCounted: 1 * GB, tdNode, statements });
+    seams._setBudgetDeps?.({ es: req, k8s, nowMs: () => NOW * 1000 });
+    return tick.runTick(parsePolicyYaml(policyText(`  hot_tier_gb: ${size}`)));
+  };
+  const onHot = await run('auto', 'hot1');
+  assert.equal(onHot.status, 'refused');
+  assert.match(onHot.message, /tier_down write index sits on hot/);
+  assert.equal(writes.length, 0);
+  assert.equal((await run('auto', 'wrm1')).status, 'applied');
+  assert.equal((await run('10', 'hot1')).status, 'applied');
+  assert.equal(writes.length, 2);
+});
+
 /** The JSON body sent after `PUT <path>` in a recipe. */
 function recipeRequest(body: string, path: string): any {
   const lines = body.split('\n');
@@ -369,14 +398,14 @@ function recipeRequest(body: string, path: string): any {
   return JSON.parse(buf.join('\n'));
 }
 
-test('recipe: the tier_down template prefers data_warm only when the placement is warm', () => {
+test('recipe: the tier_down template prefers data_warm unless the placement is hot', () => {
   const pref = 'index.routing.allocation.include._tier_preference';
-  const plain = elasticFrozenTierRecipe();
-  assert.equal(elasticFrozenTierRecipe({ tierDownPlacement: 'hot' }).body, plain.body);
+  const plain = elasticFrozenTierRecipe({ tierDownPlacement: 'hot' });
   assert.equal(recipeRequest(plain.body, '_index_template/tenx-tierdown-tpl').template.settings[pref], undefined);
   assert.match(plain.note, /lands in hot first/);
 
-  const warm = elasticFrozenTierRecipe({ tierDownPlacement: 'warm' });
+  const warm = elasticFrozenTierRecipe();
+  assert.equal(elasticFrozenTierRecipe({ tierDownPlacement: 'warm' }).body, warm.body);
   const td = recipeRequest(warm.body, '_index_template/tenx-tierdown-tpl');
   assert.equal(td.template.settings[pref], 'data_warm,data_hot');
   assert.equal(td.template.settings['index.lifecycle.name'], 'tenx-tier-down');

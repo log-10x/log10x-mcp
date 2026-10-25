@@ -1228,7 +1228,7 @@ export function elasticFrozenTierRecipe(
     tierDownAlias?: string;
     keepAlias?: string;
     frozenMinAge?: string;
-    /** Where the tier_down slice is written. `warm`: its template prefers data_warm (data_hot when the cluster has no warm node), so it waits for its mount off hot. Default `hot`. */
+    /** Where the tier_down slice is written. `warm` (default): its template prefers data_warm (data_hot when the cluster has no warm node), so it waits for its mount off hot. `hot`: no preference. */
     tierDownPlacement?: 'hot' | 'warm';
   } = {}
 ): SiemTierRecipe {
@@ -1236,7 +1236,7 @@ export function elasticFrozenTierRecipe(
   const tdAlias = opts.tierDownAlias ?? 'tenx-tierdown';
   const keepAlias = opts.keepAlias ?? 'tenx-app';
   const minAge = opts.frozenMinAge ?? '1m';
-  const warm = opts.tierDownPlacement === 'warm';
+  const warm = opts.tierDownPlacement !== 'hot';
   return {
     target: 'elasticsearch-frozen',
     language: 'text',
