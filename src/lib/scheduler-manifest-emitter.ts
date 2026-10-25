@@ -77,7 +77,7 @@ export interface PolicyOptions {
   clickhouse_secret_name?: string;
   /**
    * Elasticsearch hot tier held under this many GB of index store on the hot
-   * nodes, or `auto` for 80% of their disk. When set the tick is the hot-tier run.
+   * nodes, or `auto` for 80% of their disk (tier_down index on warm). When set the tick is the hot-tier run.
    */
   hot_tier_gb?: number | 'auto';
   /** Hours a kept line stays on hot, when the ILM policy on the kept alias does not say. */
@@ -242,7 +242,8 @@ function hotTierPolicyLines(opts: PolicyOptions): string[] {
   const nodes = Object.entries(opts.nodes_by_container ?? {});
   return [
     `  # Elasticsearch hot tier held under a size: GB of index store on the hot nodes,`,
-    `  # or auto for 80% of their disk (Elasticsearch stops allocating at 85%).`,
+    `  # or auto for 80% of their disk, which needs the tier_down index on warm`,
+    `  # (the run refuses auto while that index sits on hot).`,
     `  # Each run rewrites the byte limits so growth goes to the frozen tier.`,
     `  hot_tier_gb: ${opts.hot_tier_gb}`,
     ...(opts.hot_retention_hours !== undefined

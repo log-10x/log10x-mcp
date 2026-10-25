@@ -183,7 +183,7 @@ export const setupRecurringSchema = {
     .union([z.number().positive(), z.literal('auto')])
     .optional()
     .describe(
-      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk. ' +
+      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk, refused while the tier_down write index sits on hot (place it on warm with the recipe\'s tierDownPlacement warm, or give a size). ' +
         'Each run reads the hot nodes\' store and the Receiver\'s indices still on hot, and rewrites each statement\'s byte limit so lines over it go to the frozen tier and the hot tier settles at the size under steady load. ' +
         'Replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour (k8s_cron or github_actions). The Receiver must count bytes (the default) and stamp utf8Size on each record, and its indices must follow the Elasticsearch frozen-tier recipe from log10x_advise_retriever.'
     ),
@@ -458,7 +458,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead, each tick cuts only the overage.',
           'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
           'ClickHouse: `rows_per_hour: 500000` (or `auto`) holds the rows written into the logs table at that rate, the excess going to the account\'s own bucket (k8s_cron or github_actions).',
-          'Elasticsearch: `hot_tier_gb: 400` (or `auto` for 80% of the hot nodes\' disk) holds the index store on the hot nodes under that size, lines over their limits going to the frozen tier (k8s_cron or github_actions).',
+          'Elasticsearch: `hot_tier_gb: 400` (or `auto` for 80% of the hot nodes\' disk, with the tier_down index on warm) holds the index store on the hot nodes under that size, lines over their limits going to the frozen tier (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
