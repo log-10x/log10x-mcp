@@ -954,8 +954,8 @@ function topKey(
  * (Datadog, CloudWatch, Azure Monitor, Coralogix, ClickHouse and the rest
  * of the no-op set) every contributor is non-compactable and we fall
  * back to a conservative drop-only band (low=10, expected=15, high=25).
- * ClickHouse is in that set by measurement, not by a missing expander: see
- * COST_MODEL_BY_DESTINATION.clickhouse in lib/cost.ts.
+ * ClickHouse is in that set because compaction measured about 7% of table
+ * bytes there: see COST_MODEL_BY_DESTINATION.clickhouse in lib/cost.ts.
  */
 function recommendTargetRange(top: BaselineTopContributor[]): {
   low_pct: number;

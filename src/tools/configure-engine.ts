@@ -34,10 +34,9 @@
  * bill is stated for it and the dollar axis
  * of isPlanFeasible is not used there (lib/cost.ts projectPerEventTierMove).
  *
- * ClickHouse is in the no-op list on a measurement rather than a missing
- * expander: compaction there was worth about 7% of table bytes, and table
- * bytes are not the ClickHouse bill. That bill is compute, and compute follows
- * rows inserted, so offload is the lever.
+ * ClickHouse is in the no-op list because compaction there was worth about
+ * 7% of table bytes, and table bytes are not the ClickHouse bill. That bill
+ * is compute, and compute follows rows inserted, so offload is the lever.
  *
  * drop/sample are opt-in only on the destination-resolution path: they appear
  * in no DEFAULT_ACTION_BY_DESTINATION entry, so the per-service auto path

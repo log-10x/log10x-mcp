@@ -272,8 +272,8 @@ test('siemSupportsCompact returns true ONLY where the cost model says compact is
 });
 
 test('siemSupportsCompact is false on clickhouse: the bill is compute, the lever is offload', () => {
-  // Not a missing expander. Measured on a ClickStack table, compaction was
-  // worth about 7% of table bytes, and table bytes are not the ClickHouse bill.
+  // Measured on a ClickStack table, compaction was worth about 7% of table
+  // bytes, and table bytes are not the ClickHouse bill.
   assert.equal(siemSupportsCompact('clickhouse'), false);
 });
 
