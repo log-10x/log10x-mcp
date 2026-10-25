@@ -189,7 +189,7 @@ test('reads: a tier_down index on warm is outside the hot store, the split and t
   assert.equal(onWarm.tierDownOnHot, false);
   assert.deepEqual(onWarm.tierDown, { storeBytes: 0, countedBytes: 0, indices: 0 });
   assert.deepEqual(onWarm.tierDownOffHot, { storeBytes: 1 * GB, indices: 1 });
-  // the moved lines still count as the statement's intake
+  // the moved lines count as the statement's intake
   assert.ok(onWarm.statements.some((x) => x.route === 'tier_down' && x.bytesPerHour > 0));
   // a shard relocating off hot is on hot until it lands
   const moving = await readHotTierInputs(NOW, hot, fakeCluster({ ...base, tdNode: 'hot1 -> 10.0.0.9 Xy12 wrm1' }).req);
@@ -242,7 +242,7 @@ test('plan: tier_down in flight counts only while the tier_down write index sits
     { container: 'kafka', pattern: 'C', name: 'c', severity: 'INFO', route: 'pass', bytesPerHour: 100 * MBh, linesPerHour: (100 * MBh) / 300 },
   ];
   const input = { hot, instances: { cart: 2, kafka: 1 }, nodesTotal: 3, exceptions: [], targetServices: [] };
-  // on hot: the numbers the run gave before placement was read (1.30.84)
+  // on hot: tier_down in flight counts against the size
   const onHot = planHotTier({ ...input, reads: reads({ statements }) });
   assert.equal(onHot.tierDownInFlightBytes, 499998719.9999999);
   assert.equal(onHot.allowancePerHour, 750000128);
@@ -380,7 +380,7 @@ test('recipe: the tier_down template prefers data_warm only when the placement i
   const td = recipeRequest(warm.body, '_index_template/tenx-tierdown-tpl');
   assert.equal(td.template.settings[pref], 'data_warm,data_hot');
   assert.equal(td.template.settings['index.lifecycle.name'], 'tenx-tier-down');
-  // the kept lines stay where they were
+  // the kept lines' template carries no tier preference
   assert.equal(recipeRequest(warm.body, '_index_template/tenx-app-tpl').template.settings[pref], undefined);
   assert.doesNotMatch(warm.body, /lands in hot first/);
   assert.match(warm.note, /written on warm/);

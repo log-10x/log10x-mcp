@@ -129,7 +129,7 @@ export interface HotTierReads {
   pass: { storeBytes: number; countedBytes: number; indices: number };
   /** The tier_down indices not yet mounted with a shard on a hot node. */
   tierDown: { storeBytes: number; countedBytes: number; indices: number };
-  /** The tier_down indices not yet mounted with no shard on a hot node (warm, say): outside S. */
+  /** The tier_down indices not yet mounted with no shard on a hot node, outside S. */
   tierDownOffHot: { storeBytes: number; indices: number };
   /** True when the tier_down write index sits on hot, so moved lines wait there for their mount. */
   tierDownOnHot: boolean;
