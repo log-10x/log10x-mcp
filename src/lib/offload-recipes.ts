@@ -1204,10 +1204,14 @@ export function fluentBitCoralogixRecipe(
 }
 
 
+/** Days a kept line stays on hot at most under the frozen-tier recipe's tenx-keep policy, by default. */
+export const ELASTIC_KEEP_HOT_DAYS = 7;
+
 /**
  * Elasticsearch frozen tier. VERIFIED END TO END on a live Elastic Cloud Hosted
- * deployment (v9.4.4, enterprise licence) on 2026-07-31, and this emits the
- * artifacts that run actually used, not an idealised version of them.
+ * deployment (v9.4.4, enterprise licence) on 2026-07-31: the tier_down policy,
+ * templates and bootstrap are the artifacts that run used. tenx-keep takes the
+ * same searchable_snapshot action after its hot retention.
  *
  * What was observed:
  *   partial-tenx-tierdown-000001  400 docs  store=0b      node roles=f (frozen)
@@ -1230,6 +1234,8 @@ export function elasticFrozenTierRecipe(
     frozenMinAge?: string;
     /** Where the tier_down slice is written. `warm` (default): its template prefers data_warm (data_hot when the cluster has no warm node), so it waits for its mount off hot. `hot`: no preference. */
     tierDownPlacement?: 'hot' | 'warm';
+    /** Days a kept line stays on hot at most: a daily rollover, then the frozen phase at this many days less one. Default ELASTIC_KEEP_HOT_DAYS. */
+    keepHotDays?: number;
   } = {}
 ): SiemTierRecipe {
   const repo = opts.repository ?? 'found-snapshots';
@@ -1237,6 +1243,9 @@ export function elasticFrozenTierRecipe(
   const keepAlias = opts.keepAlias ?? 'tenx-app';
   const minAge = opts.frozenMinAge ?? '1m';
   const warm = opts.tierDownPlacement !== 'hot';
+  const keepDays = Math.max(1, Math.round(Number.isFinite(opts.keepHotDays) ? opts.keepHotDays! : ELASTIC_KEEP_HOT_DAYS));
+  const keepMinAge = `${keepDays - 1}d`;
+  const days = (n: number): string => `${n} day${n === 1 ? '' : 's'}`;
   return {
     target: 'elasticsearch-frozen',
     language: 'text',
@@ -1258,12 +1267,20 @@ PUT _ilm/policy/tenx-tier-down
   }}
 }
 
-# 2) Policy for everything we keep. Same rollover, never leaves hot. This is the
-#    control: without it you cannot tell "the slice moved" from "everything moved".
+# 2) Policy for everything we keep: roll over daily, then mount the rolled index
+#    on the frozen tier in the same repository. The frozen min_age, counted from
+#    rollover, is how long kept lines stay on hot: ${days(keepDays - 1)} after the daily
+#    rollover, ${days(keepDays)} at most. The hot-tier run (log10x_setup_recurring
+#    hot_tier_gb) reads it, max_age plus min_age, as a kept line's hours on hot.
+#    No delete phase: applying the recipe removes no data. Still the control:
+#    tier_down lines reach frozen within about two hours of arriving, kept lines
+#    only after this retention, so "the slice moved" stays distinct from
+#    "everything moved".
 PUT _ilm/policy/tenx-keep
 {
   "policy": { "phases": {
-    "hot": { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "30d" } } }
+    "hot":    { "min_age": "0ms", "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "1d" } } },
+    "frozen": { "min_age": "${keepMinAge}", "actions": { "searchable_snapshot": { "snapshot_repository": "${repo}" } } }
   }}
 }
 
@@ -1345,9 +1362,12 @@ PUT ${keepAlias}-000001
           'with the default 10-minute ILM poll each index lived about 110 minutes on hot ' +
           '(rollover at the first poll past the hour, snapshot and mount three polls later), ' +
           'so a demoted line leaves hot 30 to 110 minutes after it arrives. ') +
-      'Hourly rollover means one frozen index per hour per alias; add a delete ' +
-      'phase at the retention the account wants so the shard count on frozen ' +
-      'stays bounded. ' +
+      `KEPT LINES: tenx-keep rolls over daily and mounts the rolled index on frozen ${days(keepDays - 1)} later, ` +
+      `so a kept line stays on hot ${days(keepDays)} at most; the hot-tier run reads that from the policy. ` +
+      'The tier_down alias rolls over hourly and the kept alias daily, one frozen ' +
+      'index per rollover. The recipe has no delete phase, so applying it removes ' +
+      'no data; a delete phase at the retention the account wants keeps the shard ' +
+      'count on frozen bounded. ' +
       'ON ELASTIC CLOUD HOSTED THE SAVING IS NOT AUTOMATIC: Hosted is priced by ' +
       'provisioned resources, so moving data out of hot creates headroom and the ' +
       'deployment must then be RESIZED to bank it. Do not tell a Hosted customer ' +

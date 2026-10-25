@@ -691,14 +691,19 @@ subjects:
 /** YAML list items for engine options, at the given indent, quoted. */
 function engineOptionArgLines(indent: string, options: Array<[string, string]> | undefined): string[] {
   const out: string[] = [];
-  for (const [k, v] of options ?? []) out.push(`${indent}- "${k}"`, `${indent}- "${v}"`);
+  for (const [k, v] of options ?? []) out.push(`${indent}- ${yamlQuoted(k)}`, `${indent}- ${yamlQuoted(v)}`);
   return out;
+}
+
+/** A YAML double-quoted scalar: a JSON string is one, with `"` and `\` escaped. */
+function yamlQuoted(v: string): string {
+  return JSON.stringify(v);
 }
 
 /** `- name:` / `value:` env entries at the given indent. */
 function engineEnvLines(indent: string, env: Array<[string, string]> | undefined): string[] {
   const out: string[] = [];
-  for (const [k, v] of env ?? []) out.push(`${indent}- name: ${k}`, `${indent}  value: "${v}"`);
+  for (const [k, v] of env ?? []) out.push(`${indent}- name: ${k}`, `${indent}  value: ${yamlQuoted(v)}`);
   return out;
 }
 
@@ -1392,7 +1397,7 @@ bash "%~dp0post-render.sh"
           ? []
           : [`    - name: TENX_LICENSE_FILE`, `      value: /etc/tenx/license/license.jwt`]),
         `    - name: TENX_RUN_ARGS`,
-        `      value: "${runArgs.join(' ')}"`,
+        `      value: ${yamlQuoted(runArgs.join(' '))}`,
       ];
       if (airgapped) {
         envLines.push(`    - name: TENX_AIRGAPPED`);
