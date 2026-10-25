@@ -34,12 +34,14 @@ import {
   scheduleOf,
   BUDGET_SCHEDULERS,
   budgetDelivery,
+  isBudgetRun,
   type PolicyOptions,
   type SchedulePreset,
   type SchedulerKind,
 } from '../lib/scheduler-manifest-emitter.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import { serviceBudgetsProblem, serviceBudgetUsd, type ServiceBudgetInput } from '../lib/policy-loader.js';
+import { ELASTIC_HOT_TIER_FIELDS } from '../lib/fleet-default-install.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -137,7 +139,7 @@ export const setupRecurringSchema = {
   nodes_by_container: z
     .record(z.string(), z.number().int().positive())
     .optional()
-    .describe('With budget_usd_monthly on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
+    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
   service_budgets: z
     .record(
       z.string().min(1),
@@ -155,7 +157,7 @@ export const setupRecurringSchema = {
     .int()
     .min(0)
     .optional()
-    .describe('With budget_usd_monthly: error lines over a limit that pass per statement per node per window. Default 50.'),
+    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb: error lines over a limit that pass per statement per node per window. Default 50.'),
   datadog_secret_name: z
     .string()
     .optional()
@@ -177,6 +179,18 @@ export const setupRecurringSchema = {
     .string()
     .optional()
     .describe('With rows_per_hour on k8s_cron: the Secret holding CLICKHOUSE_URL, CLICKHOUSE_API_KEY (or CLICKHOUSE_USER and CLICKHOUSE_PASSWORD) and LOG10X_CUSTOMER_METRICS_URL. Default: log10x-clickhouse.'),
+  hot_tier_gb: z
+    .union([z.number().positive(), z.literal('auto')])
+    .optional()
+    .describe(
+      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk. ' +
+        'Each run reads the hot nodes\' store and the Receiver\'s indices still on hot, and rewrites each statement\'s byte limit so lines over it go to the frozen tier and the hot tier settles at the size under steady load. ' +
+        'Replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour (k8s_cron or github_actions). The Receiver must count bytes (the default) and stamp utf8Size on each record, and its indices must follow the Elasticsearch frozen-tier recipe from log10x_advise_retriever.'
+    ),
+  elasticsearch_secret_name: z
+    .string()
+    .optional()
+    .describe('With hot_tier_gb on k8s_cron: the Secret holding LOG10X_ES_URL and LOG10X_ES_API_KEY (an encoded API key). Default: log10x-elasticsearch.'),
 
   /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
@@ -186,7 +200,7 @@ export const setupRecurringSchema = {
     .union([z.enum(SCHEDULE_PRESETS), z.string().regex(/^[\d*,\-\/\s]+$/, 'cron expression')])
     .optional()
     .describe(
-      'Tick schedule. Presets: hourly (the default for budget_usd_monthly), daily-03utc (the default otherwise), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
+      'Tick schedule. Presets: hourly (the default for budget_usd_monthly, rows_per_hour and hot_tier_gb), daily-03utc (the default otherwise), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
     ),
 
   /**
@@ -295,6 +309,8 @@ interface RecurringWizardSession {
   rows_per_hour?: number | 'auto';
   clickhouse_table?: string;
   clickhouse_secret_name?: string;
+  hot_tier_gb?: number | 'auto';
+  elasticsearch_secret_name?: string;
   schedule?: SchedulePreset;
   scheduler?: SchedulerKind;
   config_plane?: string;
@@ -326,6 +342,12 @@ function getOrCreateSession(id: string | undefined): RecurringWizardSession {
 }
 
 function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringArgs): void {
+  if (
+    args.hot_tier_gb !== undefined &&
+    (args.target_percent !== undefined || args.budget_gb_monthly !== undefined || args.budget_usd_monthly !== undefined || args.rows_per_hour !== undefined)
+  ) {
+    throw new Error('hot_tier_gb replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour: pass one goal.');
+  }
   if (args.target_services !== undefined) session.target_services = args.target_services;
   if (args.target_percent !== undefined) session.target_percent = args.target_percent;
   if (args.budget_gb_monthly !== undefined) session.budget_gb_monthly = args.budget_gb_monthly;
@@ -341,6 +363,8 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
     session.budget_usd_monthly = args.budget_usd_monthly;
     delete session.target_percent;
     delete session.budget_gb_monthly;
+    delete session.rows_per_hour;
+    delete session.hot_tier_gb;
   }
   if (args.standard_indexes !== undefined) session.standard_indexes = args.standard_indexes;
   if (args.standard_rate_per_million !== undefined) session.standard_rate_per_million = args.standard_rate_per_million;
@@ -356,9 +380,18 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
     delete session.target_percent;
     delete session.budget_gb_monthly;
     delete session.budget_usd_monthly;
+    delete session.hot_tier_gb;
   }
   if (args.clickhouse_table !== undefined) session.clickhouse_table = args.clickhouse_table;
   if (args.clickhouse_secret_name !== undefined) session.clickhouse_secret_name = args.clickhouse_secret_name;
+  if (args.hot_tier_gb !== undefined) {
+    session.hot_tier_gb = args.hot_tier_gb;
+    delete session.target_percent;
+    delete session.budget_gb_monthly;
+    delete session.budget_usd_monthly;
+    delete session.rows_per_hour;
+  }
+  if (args.elasticsearch_secret_name !== undefined) session.elasticsearch_secret_name = args.elasticsearch_secret_name;
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
   if (args.scheduler !== undefined) session.scheduler = args.scheduler as SchedulerKind;
   if (args.config_plane !== undefined) session.config_plane = args.config_plane;
@@ -411,7 +444,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.target_percent === undefined && session.budget_gb_monthly === undefined && session.budget_usd_monthly === undefined && session.rows_per_hour === undefined) {
+  if (session.target_percent === undefined && session.budget_gb_monthly === undefined && !isBudgetRun(session)) {
     return {
       kind: 'ask',
       question_id: 'target_percent',
@@ -425,13 +458,14 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Alternative: `budget_gb_monthly: 2000` keeps ingest under a standing line instead, each tick cuts only the overage.',
           'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
           'ClickHouse: `rows_per_hour: 500000` (or `auto`) holds the rows written into the logs table at that rate, the excess going to the account\'s own bucket (k8s_cron or github_actions).',
+          'Elasticsearch: `hot_tier_gb: 400` (or `auto` for 80% of the hot nodes\' disk) holds the index store on the hot nodes under that size, lines over their limits going to the frozen tier (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
       ),
     };
   }
-  if (session.schedule === undefined && session.budget_usd_monthly === undefined && session.rows_per_hour === undefined) {
+  if (session.schedule === undefined && !isBudgetRun(session)) {
     return {
       kind: 'ask',
       question_id: 'schedule',
@@ -472,13 +506,17 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if ((session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && !BUDGET_SCHEDULERS.includes(session.scheduler)) {
+  if (isBudgetRun(session) && !BUDGET_SCHEDULERS.includes(session.scheduler)) {
     return {
       kind: 'ask',
       question_id: 'scheduler',
       markdown: buildQuestion(
         'Q4',
-        session.rows_per_hour !== undefined ? 'A rows rate runs on k8s_cron or github_actions' : 'A Standard budget runs on k8s_cron or github_actions',
+        session.hot_tier_gb !== undefined
+          ? 'A hot-tier size runs on k8s_cron or github_actions'
+          : session.rows_per_hour !== undefined
+          ? 'A rows rate runs on k8s_cron or github_actions'
+          : 'A Standard budget runs on k8s_cron or github_actions',
         [
           `\`${session.scheduler}\` runs the mute-list tick, which holds no budget.`,
           '**k8s_cron**: the run inside the cluster writes the policy ConfigMap the Receiver reads and discovers the node count (the default).',
@@ -506,7 +544,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       ),
     };
   }
-  if (session.config_plane === undefined && (session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && session.scheduler === 'k8s_cron') {
+  if (session.config_plane === undefined && isBudgetRun(session) && session.scheduler === 'k8s_cron') {
     session.config_plane = '';
   }
   if (session.config_plane === undefined) {
@@ -630,6 +668,7 @@ function buildProgressLine(session: RecurringWizardSession): string {
   if (session.budget_gb_monthly !== undefined) parts.push(`budget=${session.budget_gb_monthly}GB/mo`);
   if (session.budget_usd_monthly !== undefined) parts.push(`standard_budget=$${session.budget_usd_monthly}/mo`);
   if (session.rows_per_hour !== undefined) parts.push(`rows_per_hour=${session.rows_per_hour}`);
+  if (session.hot_tier_gb !== undefined) parts.push(`hot_tier_gb=${session.hot_tier_gb}`);
   if (session.schedule !== undefined) parts.push(`schedule=${session.schedule}`);
   if (session.scheduler !== undefined) parts.push(`scheduler=${session.scheduler}`);
   if (session.config_plane !== undefined) parts.push(`repo=${session.config_plane}`);
@@ -649,7 +688,9 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Field            | Value |`,
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
-    session.rows_per_hour !== undefined
+    session.hot_tier_gb !== undefined
+      ? `| Hot tier         | ${hotTierSize(session.hot_tier_gb)} of index store on the hot nodes, lines over their limits to the frozen tier |`
+      : session.rows_per_hour !== undefined
       ? `| Rows rate        | ${session.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${session.rows_per_hour} rows an hour`} into ${session.clickhouse_table ?? 'default.otel_logs'}, the excess to the account's bucket |`
       : session.budget_usd_monthly !== undefined
       ? `| Standard budget  | $${session.budget_usd_monthly} a month, whole account, held month to date |` +
@@ -663,10 +704,14 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Min delta        | ${session.min_delta_pp ?? 2}pp |`,
     `| Schedule         | ${scheduleOf(session)} (${resolveCronExpression(scheduleOf(session))}) |`,
     `| Scheduler        | ${session.scheduler ?? 'k8s_cron'} |`,
-    (session.budget_usd_monthly !== undefined || session.rows_per_hour !== undefined) && session.scheduler === 'k8s_cron'
+    isBudgetRun(session) && session.scheduler === 'k8s_cron'
       ? `| Delivery         | policy ConfigMap log10x-action-intent in ${session.namespace ?? 'log10x'} |`
       : `| Config repo      | ${session.config_plane || '(not set)'} |`,
   ].join('\n');
+}
+
+function hotTierSize(gb: number | 'auto'): string {
+  return gb === 'auto' ? "80% of the hot nodes' disk" : `${gb} GB`;
 }
 
 // ─── artifact emission ────────────────────────────────────────────────────────
@@ -705,6 +750,14 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
           ...(session.clickhouse_secret_name !== undefined ? { clickhouse_secret_name: session.clickhouse_secret_name } : {}),
         }
       : {}),
+    ...(session.hot_tier_gb !== undefined
+      ? {
+          hot_tier_gb: session.hot_tier_gb,
+          ...(session.nodes_by_container !== undefined ? { nodes_by_container: session.nodes_by_container } : {}),
+          ...(session.keep_count !== undefined ? { keep_count: session.keep_count } : {}),
+          ...(session.elasticsearch_secret_name !== undefined ? { elasticsearch_secret_name: session.elasticsearch_secret_name } : {}),
+        }
+      : {}),
     schedule: scheduleOf(session),
     scheduler: (session.scheduler ?? 'k8s_cron') as SchedulerKind,
     config_plane: session.config_plane ?? '',
@@ -719,6 +772,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
 function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOptions): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const cronExpr = resolveCronExpression(scheduleOf(opts));
+  if (opts.hot_tier_gb !== undefined) return buildHotTierApplyInstructions(opts, cronExpr);
   if (opts.rows_per_hour !== undefined) return buildRowsApplyInstructions(opts, cronExpr);
   if (opts.budget_usd_monthly !== undefined) return buildBudgetApplyInstructions(opts, cronExpr);
 
@@ -820,6 +874,53 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
         `   \`\`\``,
       ].join('\n');
   }
+}
+
+function buildHotTierApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
+  const install =
+    'Install (or re-install) the Receiver for Elasticsearch counting bytes, the default: the run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events (`regulator-unit`). ' +
+    `Every record it returns must carry \`utf8Size\`, the size the limits count, and \`tenx_hash\`: engine options \`symbolMessageHashField tenx_hash\` and \`outputEncodeField ${ELASTIC_HOT_TIER_FIELDS}\`.`;
+  const recipe =
+    'Apply the Elasticsearch frozen-tier recipe (`log10x_advise_retriever` with `destination: "elasticsearch"`): kept lines go to the `tenx-app` alias and `routeState: tier_down` lines to `tenx-tierdown`, which ILM mounts on the frozen tier. ' +
+    'The run reads how long a kept line stays on hot from the ILM policy on `tenx-app`, its rollover `max_age` plus the `min_age` of the first phase after hot. When that policy has no phase after hot, add one at the age a kept line leaves hot (`warm`, `cold`, `frozen` or `delete`), or set `hot_retention_hours` in policy.yaml.';
+  const reads = 'The run reads the cluster (node stats, ILM and the Receiver\'s indices) and writes nothing to it.';
+  if (budgetDelivery(opts.scheduler) === 'configmap') {
+    const ns = opts.namespace ?? 'log10x';
+    const secret = opts.elasticsearch_secret_name ?? 'log10x-elasticsearch';
+    return [
+      `### Apply instructions: hot-tier run, Kubernetes CronJob`,
+      ``,
+      `1. ${install}`,
+      `2. ${recipe}`,
+      `3. **Create the Elasticsearch Secret** in \`${ns}\`, the Receiver's namespace, with the cluster URL and an encoded API key. ${reads}`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=LOG10X_ES_URL=<https://host:9200> --from-literal=LOG10X_ES_API_KEY=<encoded API key>`,
+      `   \`\`\``,
+      `4. **Apply the CronJob manifest** (policy, service account, RBAC, CronJob):`,
+      `   \`\`\`bash`,
+      `   kubectl apply -f log10x-cronjob.yaml`,
+      `   \`\`\``,
+      `5. Run it once now, so the limits and the \`*\` row are in force before the first schedule (\`${cronExpr}\` UTC):`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create job --from=cronjob/log10x-recurring log10x-first-run`,
+      `   kubectl -n ${ns} logs -l job-name=log10x-first-run`,
+      `   \`\`\``,
+      `6. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`. It states the hot store against the size and where hot settles at the limits written.`,
+    ].join('\n');
+  }
+  return [
+    `### Apply instructions: hot-tier run, GitHub Actions (gitops pull)`,
+    ``,
+    `1. ${install} Give it the gitops pull of \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN), which \`log10x_advise_install\` renders from \`policy_git: { repo: "<owner/name>" }\`.`,
+    `2. ${recipe}`,
+    `3. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
+    `4. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
+    `5. **Add the secrets** \`LOG10X_ES_URL\` and \`LOG10X_ES_API_KEY\` (an encoded API key). ${reads}`,
+    `6. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch (schedule \`${cronExpr}\` UTC).`,
+    ...(cronExpr === resolveCronExpression('hourly')
+      ? [`7. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
+      : []),
+  ].join('\n');
 }
 
 function buildRowsApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
@@ -1110,7 +1211,11 @@ function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult):
 function buildEmitHumanSummary(session: RecurringWizardSession, result: EmitResult): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const target =
-    session.budget_usd_monthly !== undefined
+    session.hot_tier_gb !== undefined
+      ? `an Elasticsearch hot tier held under ${hotTierSize(session.hot_tier_gb)}`
+      : session.rows_per_hour !== undefined
+      ? `a ClickHouse rate of ${session.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${session.rows_per_hour} rows an hour`}`
+      : session.budget_usd_monthly !== undefined
       ? `a $${session.budget_usd_monthly} a month Standard budget`
       : session.budget_gb_monthly !== undefined
       ? `a ${session.budget_gb_monthly} GB/mo budget`

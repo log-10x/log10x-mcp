@@ -12,10 +12,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import {
   executeSetupRecurring,
+  setupRecurringSchema,
 } from '../src/tools/setup-recurring.js';
 import { isStructuredOutput, StructuredOutputSchema } from '../src/lib/output-types.js';
+import { parsePolicyYaml } from '../src/lib/policy-loader.js';
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -349,4 +352,96 @@ test('container_apps_job: emit returns the az deploy script and gitops-aware ins
     instructions.includes('Azure Files'),
     'instructions must foreclose the share-based variant'
   );
+});
+
+// ─── Elasticsearch hot-tier path ──────────────────────────────────────────────
+
+test('hot tier: the schema takes hot_tier_gb as GB or auto, and an Elasticsearch Secret name', () => {
+  const schema = z.object(setupRecurringSchema);
+  assert.equal(schema.safeParse({ hot_tier_gb: 400 }).success, true);
+  assert.equal(schema.safeParse({ hot_tier_gb: 'auto' }).success, true);
+  assert.equal(schema.safeParse({ hot_tier_gb: 0 }).success, false);
+  assert.equal(schema.safeParse({ hot_tier_gb: 'lots' }).success, false);
+  assert.equal(schema.safeParse({ hot_tier_gb: 400, elasticsearch_secret_name: 'es-keys' }).success, true);
+});
+
+test('hot tier: a second goal beside hot_tier_gb is refused', async () => {
+  for (const other of [{ target_percent: 30 }, { budget_gb_monthly: 2000 }, { budget_usd_monthly: 20_000 }, { rows_per_hour: 500_000 }]) {
+    await assert.rejects(executeSetupRecurring({ target_services: [], hot_tier_gb: 400, ...other }), /hot_tier_gb replaces .*pass one goal/);
+  }
+});
+
+test('hot tier on k8s_cron: hourly without asking, a policy the loader reads, the log10x-elasticsearch Secret', async () => {
+  let result = await executeSetupRecurring({ target_services: [] });
+  const session_id = getData(result).session_id as string;
+  result = await executeSetupRecurring({ session_id, hot_tier_gb: 400 });
+  let data = getData(result);
+  assert.equal(data.question_id, 'scheduler', 'the hot-tier run skips the schedule question');
+  result = await executeSetupRecurring({ session_id, scheduler: 'k8s_cron', namespace: 'logging' });
+  data = getData(result);
+  assert.equal(data.question_id, 'confirm', String(data.markdown));
+  assert.match(String(data.markdown), /Hot tier +\| 400 GB of index store on the hot nodes/);
+  result = await executeSetupRecurring({ session_id, confirm: true });
+  data = getData(result);
+  assert.equal(data.mode, 'emit', String(data.markdown));
+
+  const p = parsePolicyYaml(String(data.policy_yaml));
+  assert.equal(p.hot_tier?.gb, 400);
+  assert.equal(p.hot_tier?.default_action, 'tier_down');
+  assert.equal(p.cron_utc, '0 * * * *');
+  assert.equal(p.config_plane.delivery, 'configmap');
+  assert.equal(p.config_plane.namespace, 'logging');
+  assert.match(String(data.policy_yaml), /preset: "?hourly"?\n/);
+
+  const m = String(data.scheduler_manifest);
+  assert.equal(data.scheduler_manifest_filename, 'log10x-cronjob.yaml');
+  assert.match(m, /\n  schedule: "0 \* \* \* \*"\n/);
+  assert.match(m, /- name: LOG10X_ES_URL\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: log10x-elasticsearch\n\s+key: LOG10X_ES_URL/);
+  assert.match(m, /- name: LOG10X_ES_API_KEY\n\s+valueFrom:\n\s+secretKeyRef:\n\s+name: log10x-elasticsearch\n\s+key: LOG10X_ES_API_KEY/);
+  assert.doesNotMatch(m, /DD_API_KEY|CLICKHOUSE_URL/);
+
+  const ins = String(data.apply_instructions);
+  assert.match(ins, /hot-tier run, Kubernetes CronJob/);
+  assert.match(ins, /create secret generic log10x-elasticsearch --from-literal=LOG10X_ES_URL=.* --from-literal=LOG10X_ES_API_KEY=/);
+  assert.match(ins, /utf8Size/);
+  assert.match(ins, /log10x_advise_retriever/);
+  assert.match(String(data.human_summary), /Elasticsearch hot tier held under 400 GB/);
+});
+
+test('hot tier auto on github_actions: 80% of the hot disk, Elasticsearch secrets, a named Secret on k8s_cron', async () => {
+  let result = await executeSetupRecurring({
+    target_services: [],
+    hot_tier_gb: 'auto',
+    scheduler: 'github_actions',
+    config_plane: 'https://github.com/acme/log10x-config',
+    nodes_by_container: { checkout: 2 },
+    confirm: true,
+  });
+  let data = getData(result);
+  assert.equal(data.mode, 'emit', String(data.markdown));
+  const p = parsePolicyYaml(String(data.policy_yaml));
+  assert.ok(p.hot_tier);
+  assert.equal(p.hot_tier?.gb, undefined);
+  assert.equal(p.hot_tier?.capacity_share, 0.8);
+  assert.deepEqual(p.hot_tier?.nodes_by_container, { checkout: 2 });
+  assert.equal(p.config_plane.delivery, 'gitops');
+  assert.equal(p.cron_utc, '0 * * * *');
+  const w = String(data.scheduler_manifest);
+  assert.match(w, /- cron: "0 \* \* \* \*"/);
+  assert.match(w, /LOG10X_ES_URL: \$\{\{ secrets\.LOG10X_ES_URL \}\}/);
+  assert.match(w, /LOG10X_ES_API_KEY: \$\{\{ secrets\.LOG10X_ES_API_KEY \}\}/);
+  assert.match(String(data.apply_instructions), /720 runs a month/);
+
+  result = await executeSetupRecurring({ target_services: [], hot_tier_gb: 'auto', scheduler: 'k8s_cron', elasticsearch_secret_name: 'es-keys', confirm: true });
+  data = getData(result);
+  assert.equal(data.mode, 'emit', String(data.markdown));
+  assert.match(String(data.scheduler_manifest), /name: es-keys\n\s+key: LOG10X_ES_URL/);
+  assert.match(String(data.scheduler_manifest), /80% of the hot nodes' disk/);
+});
+
+test('hot tier: a scheduler that cannot hold the size is asked to move', async () => {
+  const result = await executeSetupRecurring({ target_services: [], hot_tier_gb: 400, scheduler: 'eventbridge' as any });
+  const data = getData(result);
+  assert.equal(data.question_id, 'scheduler');
+  assert.match(String(data.markdown), /A hot-tier size runs on k8s_cron or github_actions/);
 });
