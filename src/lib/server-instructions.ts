@@ -412,8 +412,8 @@ DEPLOYMENT DECIDES THE LEVERS: on Elasticsearch, OpenSearch, and Splunk the avai
 on how the customer runs the platform, not on the vendor name. Compaction needs OUR expander to be
 installable, meaning the l1es plugin (self-managed Elasticsearch/OpenSearch, version-pinned) or the
 10x Splunk app, so a managed or serverless platform can carry the bytes but has nowhere to expand
-them, and compact is not offered there. ClickHouse is refused on a different ground: an expander
-exists, and compaction still measured about 7% of table bytes, which is not the ClickHouse bill. When the user names Elasticsearch or
+them, and compact is not offered there. ClickHouse is refused because compaction measured about 7%
+of table bytes, which is not the ClickHouse bill, and offload is the lever there. When the user names Elasticsearch or
 OpenSearch, ASK whether they run it themselves before pricing compaction, and pass
 \`deployment: "self_managed"\` once they confirm; with the deployment unknown the plan prices only
 the levers that hold either way, and says so. Never infer self-managed from silence, and never pass

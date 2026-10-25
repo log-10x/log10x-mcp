@@ -23,10 +23,9 @@ import type { OutputDestination } from './reporter-forwarders.js';
 
 /**
  * Where the customer gets the expander. The MCP cannot resolve the artifact
- * itself: the plugin is built against an exact platform version
- * (`l1es-plugin-0.3.0.es.8.17.0.zip` and its OpenSearch twin), and we do not
- * know the version of a SIEM we never connected to. Point at the page that
- * carries the matrix rather than emit a download URL that may not match.
+ * itself: the l1es plugin is built against an exact platform version, and we
+ * do not know the version of a SIEM we never connected to. Point at the page
+ * that carries the matrix rather than emit a download URL that may not match.
  */
 const EXPANDER_DOCS: Partial<Record<OutputDestination, string>> = {
   splunk: 'https://doc.log10x.com/apps/receiver/compact/splunk/',
@@ -79,5 +78,5 @@ export const EXPANDER_PREREQUISITE_GENERAL =
   'or the [l1es plugin](https://doc.log10x.com/apps/receiver/compact/elasticsearch/) for self-managed Elasticsearch 8.17.0 / OpenSearch 2.19.0. ' +
   'Install it before you compact anything the destination is searched on, or those searches return compacted lines. ' +
   'Managed and serverless platforms (Datadog, CloudWatch, Elastic Cloud Serverless) have nowhere to install one. ' +
-  'ClickHouse has one, and it is still not the lever: compaction measured about 7% of table bytes there, and the ' +
-  'ClickHouse bill is compute. Use tier_down or offload on all of these instead of compaction.';
+  'Compaction is not offered on ClickHouse, where it measured about 7% of table bytes and the bill is compute. ' +
+  'Use tier_down or offload on all of these instead of compaction.';

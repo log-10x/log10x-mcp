@@ -36,10 +36,10 @@ const COMPACTING: SiemId[] = ['splunk', 'elasticsearch_self' as SiemId];
 const MECHANISM_ONLY: SiemId[] = ['elasticsearch'];
 /**
  * Destinations where `compact` is a no-op and the claim would be false.
- * ClickHouse is here on a measurement rather than a missing expander: the
- * column codecs and the text index already take the repetition compaction
- * would take, which put it at about 7% of table bytes, and table bytes are not
- * the ClickHouse bill. Offload is the lever there.
+ * ClickHouse is here because the column codecs and the text index already
+ * take the repetition compaction would take, which put it at about 7% of
+ * table bytes, and table bytes are not the ClickHouse bill. Offload is the
+ * lever there.
  */
 const NO_OP: SiemId[] = ['datadog', 'cloudwatch', 'sumo', 'clickhouse'];
 

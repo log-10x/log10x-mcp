@@ -810,10 +810,10 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     ingest_per_gb: 0.0,
     storage_per_gb_month: 0.023,
     billing_basis: 'stored-month',
-    // COMPACT IS NOT A LEVER ON CLICKHOUSE, and this is a measurement rather
-    // than a missing expander. On a ClickStack table at ZSTD(1) the compact
-    // form is worth about 7% of table bytes: the text index and the column
-    // codecs have already taken the repetition that compaction would take.
+    // COMPACT IS NOT A LEVER ON CLICKHOUSE, by measurement. On a ClickStack
+    // table at ZSTD(1) the compact form is worth about 7% of table bytes: the
+    // text index and the column codecs have already taken the repetition that
+    // compaction would take.
     // Seven percent of a line that is itself a small share of the bill is not
     // a lever. Offload is.
     compact_mode: 'no-op',
