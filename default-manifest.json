@@ -745,6 +745,17 @@
       },
       "category": "cost"
     },
+    "log10x_clickhouse_census": {
+      "title": "ClickHouse compute census",
+      "description": "WHERE CLICKHOUSE CPU GOES: reads a ClickHouse cluster's own system tables over `days` (default 7) and reports how much of its CPU is writes and how much is reads, with no 10x install. W is the CPU of INSERTs into the logs table (`database` and `table`, default `default.otel_logs`, the ClickStack logs table) plus the CPU of its merges, over node CPU, with TTL merges reported apart. Q is SELECT CPU over node CPU, with the ten query shapes (normalizeQuery) that cost the most CPU, each with its user and count. Also returns the peak hour over the mean and W in that hour, rows and bytes written per table, bytes stored and the compression ratio per table, and the tables in the database that no SELECT read in the window. Insert and SELECT CPU come from system.query_log, merge CPU from system.part_log, and node CPU from system.metric_log, else system.asynchronous_metric_log, else the sum the logs attribute; the report says which. On ClickHouse Cloud the system logs are read across replicas with clusterAllReplicas (`cluster`). A system table the user cannot read is named with the GRANT it needs, and the rest of the census still runs. Computes no dollars: the autoscaler's response and the bill are not in system tables. Pass the measured W as `compute_write_share` to log10x_estimate_savings. Every SQL statement sent is in the result. Read-only: CLICKHOUSE_URL with CLICKHOUSE_API_KEY, or with CLICKHOUSE_USER and CLICKHOUSE_PASSWORD. Writes nothing.",
+      "annotations": {
+        "title": "ClickHouse compute census",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": true
+      },
+      "category": "cost"
+    },
     "log10x_find_skew": {
       "title": "Find skew",
       "description": "Identify patterns where one slot value dominates the field (>= 60% of events by default). Surfaces sampling opportunities: \"slot `verb` is `get` 78% of events, sample the get case at 1/10 to cut its volume.\" Sampling is lossy: the other 9 in 10 of those events are discarded. Differentiated against analyzer field histograms because the engine groups by per-pattern field-set, so dominance is measured within the structural pattern, not globally. **Stage 1**: accepts events as a paste array (same shape as log10x_resolve_batch). **Calibration**: the 60% concentration floor and 1/10 sampling rate are hand-picked defaults tagged `unvalidated_default` in the output. The envelope surfaces the empirical `observed_dominant_pct_distribution` across all candidate slots so the agent can judge whether 0.6 is well above or below the noise floor for this dataset. See `docs/cross-pillar-primitives.md` for the agent behavior contract.",

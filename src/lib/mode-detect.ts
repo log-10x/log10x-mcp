@@ -422,6 +422,9 @@ export const TOOL_MODES: Record<string, ('analysis' | 'analysis_pending' | 'poc'
   // Reads Datadog's estimated usage metrics with the org's own keys: day one,
   // before any install, so every customer mode.
   log10x_datadog_spike_audit: ['poc', 'analysis', 'analysis_pending'],
+  // Reads the cluster's own system tables with CLICKHOUSE_URL credentials: day
+  // one, before any install, so every customer mode.
+  log10x_clickhouse_census: ['poc', 'analysis', 'analysis_pending'],
 
   // ── Registered but previously unlisted ──
   // These reached the registry through the unlisted-tool fallback, which

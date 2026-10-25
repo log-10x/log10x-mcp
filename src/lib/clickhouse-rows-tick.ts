@@ -82,7 +82,7 @@ export function splitTable(table: string): { db: string; tbl: string } {
   return { db, tbl };
 }
 
-function sysTable(name: string, cluster?: string): string {
+export function sysTable(name: string, cluster?: string): string {
   return cluster ? `clusterAllReplicas('${cluster.replace(/'/g, '')}', system.${name})` : `system.${name}`;
 }
 
@@ -112,7 +112,7 @@ export interface RowsReads {
   queries: string[];
 }
 
-function tsvRows(text: string): string[][] {
+export function tsvRows(text: string): string[][] {
   return text
     .split('\n')
     .filter((l) => l.length > 0)

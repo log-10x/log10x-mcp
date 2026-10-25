@@ -727,6 +727,31 @@ test('with no unit count the compute saving is a fraction and asks for the input
   assert.match(r.note, /supply current compute units or monthly compute spend to get dollars/);
 });
 
+test('compute_write_share: omitted leaves the compute line as it was; 0.6 moves only that share of compute', () => {
+  const before = projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 100 });
+  assert.equal(before.write_share, undefined);
+  assert.equal(before.node_cpu_fraction, undefined);
+  assert.equal(before.units_after, Math.ceil(100 * before.cpu_fraction));
+  assert.deepEqual(projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 100, write_share: undefined }), before);
+
+  const scaled = projectComputeSaving(CH_COMPUTE, 0.5, { current_units: 100, write_share: 0.6 });
+  const node = 1 - 0.6 * (1 - scaled.cpu_fraction);
+  assert.equal(scaled.cpu_fraction, before.cpu_fraction);
+  assert.equal(scaled.write_share, 0.6);
+  assert.ok(Math.abs(scaled.node_cpu_fraction! - node) < 1e-12);
+  assert.equal(scaled.units_after, Math.ceil(100 * node));
+  assert.ok(scaled.saving_usd_month! < before.saving_usd_month!);
+  assert.match(scaled.note, /compute_write_share 0\.6/);
+
+  // without units the fraction scales by W exactly
+  const f = projectComputeSaving(CH_COMPUTE, 0.5, { write_share: 0.6 });
+  assert.ok(Math.abs(f.saving_fraction - 0.6 * (1 - f.cpu_fraction)) < 1e-12);
+
+  // projectAction passes it through
+  const p = projectAction({ action: 'offload', bytes_in: GB, destination: 'clickhouse', rows_kept_fraction: 0.5, current_compute_units: 100, compute_write_share: 0.6 });
+  assert.equal(p.compute_saving!.units_after, scaled.units_after);
+});
+
 test('offload on clickhouse reports a modeled compute saving alongside the storage one', () => {
   const p = projectAction({
     action: 'offload',
