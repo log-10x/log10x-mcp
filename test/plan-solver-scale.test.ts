@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { solvePlan, type SolverPattern } from '../src/lib/plan-solver.js';
 
-/** A capture's worth of patterns: 2,600 across 30 containers, mostly INFO, sizes spread over four decades. */
+/** An hour's capture: 2,600 patterns across 30 containers, mostly INFO, sizes spread over four decades. */
 function capture(n = 2600): SolverPattern[] {
   const out: SolverPattern[] = [];
   for (let i = 0; i < n; i++) {
@@ -25,7 +25,7 @@ function capture(n = 2600): SolverPattern[] {
 for (const destination of ['datadog', 'cloudwatch'] as const) {
   test(`a 30% target on 2,600 patterns plans in seconds (${destination})`, () => {
     const t0 = Date.now();
-    const plan = solvePlan(capture(), { destination, retrieverInstalled: false, targetPct: 30 });
+    const plan = solvePlan(capture(), { destination, retrieverInstalled: false, targetPct: 30, spanSeconds: 3600 });
     const ms = Date.now() - t0;
     assert.ok(plan.planned.length > 0, 'expected planned rows');
     // Under 10 s alone; the bound leaves room for a loaded CI runner. The cubic version took many minutes.

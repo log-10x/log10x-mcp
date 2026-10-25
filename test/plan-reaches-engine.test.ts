@@ -74,31 +74,35 @@ test('three targets plan three different sets, and the caps follow the kept and 
   const names = (p: ReturnType<typeof at>) => p.planned.map((r) => r.name);
   const near = (a: number, b: number) => Math.abs(a - b) < 1e-6 * Math.max(1, Math.abs(b));
   // Each cap sits between the largest kept pattern and the smallest moved one, at their geometric mean.
+  // An INFO pattern keeps only its always-pass sample over the cap, 5 lines a window on one node.
   // 20%: Traces and Logs over sqrt(18 x 44) = 28.14 GB, between Metrics (kept) and Logs (moved), a
-  // margin of 1.56 each side: (46-28.14 + 44-28.14) x 0.9 = 30.3 of 134 = 23%.
+  // margin of 1.56 each side: 46-28.14 + 44-28.14 = 33.7 of 134 = 25%.
   assert.deepEqual(names(p20), ['Traces', 'Logs']);
   assert.ok(near(p20.containerCaps.collector.capBytesMonthly, Math.sqrt(18 * 44) * GB));
   assert.equal(p20.containerCaps.collector.keptMaxPattern, 'Metrics');
   assert.equal(p20.containerCaps.collector.movedMinPattern, 'Logs');
   assert.ok(near(p20.containerCaps.collector.margin!, Math.sqrt(44 / 18)));
-  assert.equal(Math.round(p20.achievedPct), 23);
+  assert.equal(Math.round(p20.achievedPct), 25);
   // 50%: Metrics joins; the cap is sqrt(4 x 18) = 8.49 GB, between the ERROR line and Metrics:
-  // (46+44+18 - 3 x 8.49) x 0.9 = 74.3 of 134 = 55%. The cart hosts no planned pattern, so it gets no row.
+  // 46+44+18 - 3 x 8.49 = 82.5 of 134 = 62%. The cart hosts no planned pattern, so it gets no row.
   assert.deepEqual(names(p50), ['Traces', 'Logs', 'Metrics']);
   assert.ok(near(p50.containerCaps.collector.capBytesMonthly, Math.sqrt(4 * 18) * GB));
   assert.equal(p50.containerCaps.collector.keptMaxPattern, 'failed to upload');
   assert.equal(p50.containerCaps.cart, undefined);
-  assert.equal(Math.round(p50.achievedPct), 55);
-  // 70%: both cart patterns join and the cart keeps nothing: its cap is 0 (1 byte on the wire),
-  // nothing separates, and (13+9) x 0.9 = 19.8 moves; 94.1 of 134 = 70%.
+  assert.equal(Math.round(p50.achievedPct), 62);
+  // 70%: both cart patterns join and the cart's cap is 0 (1 byte on the wire), nothing separates,
+  // and each keeps only its sample: 5 lines x 10,800 windows x 1,700 bytes = 0.09 GB, so
+  // 13+9 - 2 x 0.09 = 21.8 moves; 104.4 of 134 = 78%.
   assert.deepEqual(names(p70), ['Traces', 'Logs', 'Metrics', 'GetCartAsync', 'AddItemAsync']);
   assert.equal(p70.containerCaps.cart.capBytesMonthly, 0);
   assert.equal(p70.containerCaps.cart.separated, false);
-  assert.equal(Math.round(p70.achievedPct), 70);
-  // The plan states what the engine moves, the excess over the cap less the floor.
+  assert.equal(Math.round(p70.achievedPct), 78);
+  const sample = 5 * 10_800 * 1700;
+  assert.ok(near(p70.planned.find((r) => r.name === 'AddItemAsync')!.movedBytesMonthly!, 9 * GB - sample));
+  // The plan states what the engine moves, the excess over the cap; the sample sits under the cap.
   const traces50 = p50.planned.find((r) => r.name === 'Traces')!;
-  assert.ok(near(traces50.movedBytesMonthly!, (46 - Math.sqrt(4 * 18)) * GB * 0.9));
-  assert.ok(near(traces50.perEventMove!.events_moved, ((46 - Math.sqrt(4 * 18)) * GB * 0.9) / 1200));
+  assert.ok(near(traces50.movedBytesMonthly!, (46 - Math.sqrt(4 * 18)) * GB));
+  assert.ok(near(traces50.perEventMove!.events_moved, ((46 - Math.sqrt(4 * 18)) * GB) / 1200));
 });
 
 test('two templates under one hash merge their event size weighted by events', () => {

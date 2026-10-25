@@ -471,7 +471,7 @@ export function renderSpikeAuditMarkdown(
   );
   L.push(
     '- The hold figure is an upper bound: it counts every event above the limit as held, and the engine still passes the first lines of each ' +
-      'statement in every window and the share its severity floors pass.',
+      'statement in every window and up to 50 more lines of an error statement.',
   );
   L.push(
     '- The limit here is per service per hour; the engine\'s is per statement per node, in bytes, so the hold figure gives the scale, not a replay. ' +

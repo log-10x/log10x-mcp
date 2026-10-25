@@ -162,11 +162,12 @@ test('a Datadog percent plan counts volume out of the Standard index and states 
   // The cap sits between the largest pattern the container keeps, `payment
   // failed` (ERROR, 100 GB), and the smallest it moves, `request served`
   // (400 GB), at their geometric mean: 200 GB, a margin of 2 on each side.
-  // The INFO floor keeps a tenth of the excess. `heartbeat` alone sets the
-  // cap at sqrt(400 x 600) = 490 GB and moves 99 GB of 1,100, short of 45%,
-  // so `request served` is planned too: (600 - 200) x 0.9 = 360 GB and
-  // (400 - 200) x 0.9 = 180 GB, 540 GB of 1,100.
-  assert.equal(Math.round(pl.achievedPct), 49);
+  // INFO keeps only the always-pass sample, 5 lines a window (54 MB a month
+  // at 1,000-byte lines), which sits under the cap. `heartbeat` alone sets the
+  // cap at sqrt(400 x 600) = 490 GB and moves 110 GB of 1,100, short of 45%,
+  // so `request served` is planned too: 600 - 200 = 400 GB and
+  // 400 - 200 = 200 GB, 600 GB of 1,100.
+  assert.equal(Math.round(pl.achievedPct), 55);
   assert.deepEqual(pl.containerCaps, {
     api: {
       action: 'tier_down',
@@ -181,12 +182,12 @@ test('a Datadog percent plan counts volume out of the Standard index and states 
   });
   assert.equal(pl.landsAtUsd, undefined, 'a before/after pair would be a share of the bill');
   assert.ok(pl.perEventMove);
-  assert.equal(pl.perEventMove!.standard_indexing_avoided_usd, 918); // 540M events x $1.70/M
+  assert.equal(pl.perEventMove!.standard_indexing_avoided_usd, 1020); // 600M events x $1.70/M
   const row = pl.planned[0];
   assert.equal(row.action, 'tier_down');
-  assert.equal(row.movedBytesMonthly, 360 * GB);
-  assert.equal(row.savedUsd, 612); // 360M events x $1.70/M
-  assert.equal(row.addedUsd, 648); // 360M events x $0.60/M at Flex Starter, held 3 months
+  assert.equal(row.movedBytesMonthly, 400 * GB);
+  assert.equal(row.savedUsd, 680); // 400M events x $1.70/M
+  assert.equal(row.addedUsd, 720); // 400M events x $0.60/M at Flex Starter, held 3 months
   assert.match(pl.rateBasis, /per million events/);
   assert.ok(!/Flex Logs ingest \$[\d.]+\/GB/.test(pl.rateBasis), pl.rateBasis);
 });

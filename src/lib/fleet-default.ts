@@ -6,8 +6,9 @@
  * Engine semantics this states (config `pipelines/run/receive/rate/
  * rate-object-cap.js`): in each reset window, per statement per container per
  * node, the first `rateReceiverBaselineCount` lines pass; then lines pass while
- * the statement's bytes stay under the cap; above it a line passes with the
- * probability of its severity floor, and the rest take the action.
+ * the statement's bytes stay under the cap; above it an ERROR, CRITICAL or
+ * FATAL line passes while the statement is under its keep count, and the rest
+ * take the action.
  */
 
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS, SECONDS_PER_DAY, fmtLinesPerDay } from './report/user-units.js';
