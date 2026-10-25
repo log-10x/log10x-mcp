@@ -17,6 +17,7 @@ import { esDurationHours, ilmHotHours, planHotTier, readHotTierInputs, type EsRe
 import { receiverFleetValues, ELASTIC_HOT_TIER_FIELDS } from '../src/lib/fleet-default-install.js';
 import { RECEIVER_FORWARDER_SPECS, STANDALONE_SPEC } from '../src/lib/advisor/reporter-forwarders.js';
 import * as tick from '../src/lib/recurring-tick.js';
+import { elasticFrozenTierRecipe } from '../src/lib/offload-recipes.js';
 
 const GB = 1e9;
 const NOW = 1_792_660_000;
@@ -86,14 +87,15 @@ test('the standalone Reporter, on the same edge image, never renders the Elastic
   assert.match(yaml, /@run\/output\/metric\/datadog/);
 });
 
-/** A cluster with one hot node, one frozen node, the Receiver's aliases and three statements. */
-function fakeCluster(opts: { hotStore: number; hotDisk: number; passStore: number; passCounted: number; tdStore?: number; tdCounted?: number; statements: Array<{ c: string; h: string; r: string; bytes: number; n?: string; v?: string }>; spanHours?: number }) {
+/** A cluster with one hot, one warm and one frozen node, the Receiver's aliases and three statements; the tier_down write index sits on `tdNode`. */
+function fakeCluster(opts: { hotStore: number; hotDisk: number; passStore: number; passCounted: number; tdStore?: number; tdCounted?: number; tdNode?: string; statements: Array<{ c: string; h: string; r: string; bytes: number; n?: string; v?: string }>; spanHours?: number }) {
   const calls: string[] = [];
   const span = opts.spanHours ?? 24;
   const req: EsRequest = async (method, path, body: any) => {
     calls.push(`${method} ${path}`);
     const p = path.split('?')[0];
-    if (p === '/_nodes') return { nodes: { hot1: { name: 'hot1', roles: ['data_hot', 'data_content', 'ingest', 'master'] }, frz1: { name: 'frz1', roles: ['data_frozen'] } } };
+    if (p === '/_nodes') return { nodes: { hot1: { name: 'hot1', roles: ['data_hot', 'data_content', 'ingest', 'master'] }, wrm1: { name: 'wrm1', roles: ['data_warm'] }, frz1: { name: 'frz1', roles: ['data_frozen'] } } };
+    if (p === '/_cat/shards/tenx-tierdown-000003') return [{ index: 'tenx-tierdown-000003', node: opts.tdNode ?? 'hot1' }];
     if (p === '/_nodes/hot1/stats/fs,indices') return { nodes: { hot1: { fs: { total: { total_in_bytes: opts.hotDisk } }, indices: { store: { size_in_bytes: opts.hotStore } } } } };
     if (p === '/_alias/tenx-app,tenx-tierdown')
       return {
@@ -173,6 +175,26 @@ test('reads: hot store, the Receiver\'s split, retention from ILM, tier_down lif
   assert.ok(Math.abs(kept.bytesPerHour - (6 * GB) / day) < 1);
   assert.ok(Math.abs(moved.bytesPerHour - 6 * GB) < 1);
   assert.equal(r.spanHours, day);
+  assert.equal(r.tierDownOnHot, true);
+  assert.deepEqual(r.tierDownOffHot, { storeBytes: 0, indices: 0 });
+});
+
+test('reads: a tier_down index on warm is outside the hot store, the split and the moved lines in flight', async () => {
+  const statements = [
+    { c: 'cart', h: 'A', r: 'pass', bytes: 6 * GB },
+    { c: 'cart', h: 'A', r: 'tier_down', bytes: 6 * GB },
+  ];
+  const base = { hotStore: 8 * GB, hotDisk: 20 * GB, passStore: 6 * GB, passCounted: 4 * GB, tdStore: 1 * GB, tdCounted: 1 * GB, statements };
+  const onWarm = await readHotTierInputs(NOW, hot, fakeCluster({ ...base, tdNode: 'wrm1' }).req);
+  assert.equal(onWarm.tierDownOnHot, false);
+  assert.deepEqual(onWarm.tierDown, { storeBytes: 0, countedBytes: 0, indices: 0 });
+  assert.deepEqual(onWarm.tierDownOffHot, { storeBytes: 1 * GB, indices: 1 });
+  // the moved lines still count as the statement's intake
+  assert.ok(onWarm.statements.some((x) => x.route === 'tier_down' && x.bytesPerHour > 0));
+  // a shard relocating off hot is on hot until it lands
+  const moving = await readHotTierInputs(NOW, hot, fakeCluster({ ...base, tdNode: 'hot1 -> 10.0.0.9 Xy12 wrm1' }).req);
+  assert.equal(moving.tierDownOnHot, true);
+  assert.equal(moving.tierDown.indices, 1);
 });
 
 function reads(over: Partial<HotTierReads>): HotTierReads {
@@ -180,6 +202,7 @@ function reads(over: Partial<HotTierReads>): HotTierReads {
     hotNodes: 1, hotStoreBytes: 8 * GB, hotDiskBytes: 20 * GB,
     pass: { storeBytes: 5 * GB, countedBytes: 5 * GB, indices: 1 },
     tierDown: { storeBytes: 1 * GB, countedBytes: 1 * GB, indices: 1 },
+    tierDownOffHot: { storeBytes: 0, indices: 0 }, tierDownOnHot: true,
     retentionHours: 10, retentionSource: 'test', tierDownHotHours: 2, tierDownSource: 'test',
     statements: [], unsized: 0, spanHours: 24,
     ...over,
@@ -209,6 +232,30 @@ test('plan: over the size, the noisiest statement is held and hot settles at S',
   assert.equal(cart.action, 'tier_down');
   assert.equal(cart.cap, Math.floor((plan.levelPerHour! * 240) / 3600 / 2));
   assert.match(plan.heldLine, /of 10 GB/);
+});
+
+test('plan: tier_down in flight counts only while the tier_down write index sits on hot', () => {
+  const MBh = 1e6;
+  const statements = [
+    { container: 'cart', pattern: 'A', name: 'a', severity: 'INFO', route: 'pass', bytesPerHour: 600 * MBh, linesPerHour: (600 * MBh) / 300 },
+    { container: 'cart', pattern: 'B', name: 'b', severity: 'INFO', route: 'pass', bytesPerHour: 300 * MBh, linesPerHour: (300 * MBh) / 300 },
+    { container: 'kafka', pattern: 'C', name: 'c', severity: 'INFO', route: 'pass', bytesPerHour: 100 * MBh, linesPerHour: (100 * MBh) / 300 },
+  ];
+  const input = { hot, instances: { cart: 2, kafka: 1 }, nodesTotal: 3, exceptions: [], targetServices: [] };
+  // on hot: the numbers the run gave before placement was read (1.30.84)
+  const onHot = planHotTier({ ...input, reads: reads({ statements }) });
+  assert.equal(onHot.tierDownInFlightBytes, 499998719.9999999);
+  assert.equal(onHot.allowancePerHour, 750000128);
+  assert.equal(onHot.levelPerHour, 350000640.00000006);
+  assert.equal(onHot.projectedBytes, 10000005120);
+  assert.deepEqual(onHot.rows.map((r) => [r.container, r.cap, r.total]), [['cart', 11666688, 21666688], ['kafka', 23333376, 6666666]]);
+  // on warm: the same lines, the tier_down index off hot, so nothing of it counts against the size
+  const onWarm = planHotTier({ ...input, reads: reads({ statements, hotStoreBytes: 7 * GB, tierDown: { storeBytes: 0, countedBytes: 0, indices: 0 }, tierDownOffHot: { storeBytes: 1 * GB, indices: 1 }, tierDownOnHot: false }) });
+  assert.equal(onWarm.tierDownInFlightBytes, 0);
+  assert.equal(onWarm.outsideBytes, 2 * GB);
+  assert.ok(onWarm.allowancePerHour > onHot.allowancePerHour);
+  assert.ok(Math.abs(onWarm.projectedBytes - 10 * GB) <= 10 * GB * 0.001, `projected ${onWarm.projectedBytes}`);
+  assert.match(onWarm.lines.join('\n'), /1 GB in 1 off hot, outside the size/);
 });
 
 test('plan: under the size, every statement keeps its lines with headroom', () => {
@@ -305,4 +352,36 @@ test('the run writes byte limits to the policy ConfigMap, and refuses a Receiver
   assert.equal(failed.status, 'read_failed');
   assert.match(failed.message, /last run stay in force/);
   void mkdtempSync(join(tmpdir(), 'hot-tier-'));
+});
+
+/** The JSON body sent after `PUT <path>` in a recipe. */
+function recipeRequest(body: string, path: string): any {
+  const lines = body.split('\n');
+  const i = lines.indexOf(`PUT ${path}`);
+  assert.ok(i >= 0, `no PUT ${path}`);
+  let depth = 0;
+  const buf: string[] = [];
+  for (const l of lines.slice(i + 1)) {
+    buf.push(l);
+    for (const ch of l) depth += ch === '{' ? 1 : ch === '}' ? -1 : 0;
+    if (depth === 0) break;
+  }
+  return JSON.parse(buf.join('\n'));
+}
+
+test('recipe: the tier_down template prefers data_warm only when the placement is warm', () => {
+  const pref = 'index.routing.allocation.include._tier_preference';
+  const plain = elasticFrozenTierRecipe();
+  assert.equal(elasticFrozenTierRecipe({ tierDownPlacement: 'hot' }).body, plain.body);
+  assert.equal(recipeRequest(plain.body, '_index_template/tenx-tierdown-tpl').template.settings[pref], undefined);
+  assert.match(plain.note, /lands in hot first/);
+
+  const warm = elasticFrozenTierRecipe({ tierDownPlacement: 'warm' });
+  const td = recipeRequest(warm.body, '_index_template/tenx-tierdown-tpl');
+  assert.equal(td.template.settings[pref], 'data_warm,data_hot');
+  assert.equal(td.template.settings['index.lifecycle.name'], 'tenx-tier-down');
+  // the kept lines stay where they were
+  assert.equal(recipeRequest(warm.body, '_index_template/tenx-app-tpl').template.settings[pref], undefined);
+  assert.doesNotMatch(warm.body, /lands in hot first/);
+  assert.match(warm.note, /written on warm/);
 });

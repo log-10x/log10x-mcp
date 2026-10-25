@@ -1223,20 +1223,33 @@ export function fluentBitCoralogixRecipe(
  * same idea needs the routing key baked into the partition key.
  */
 export function elasticFrozenTierRecipe(
-  opts: { repository?: string; tierDownAlias?: string; keepAlias?: string; frozenMinAge?: string } = {}
+  opts: {
+    repository?: string;
+    tierDownAlias?: string;
+    keepAlias?: string;
+    frozenMinAge?: string;
+    /** Where the tier_down slice is written. `warm`: its template prefers data_warm (data_hot when the cluster has no warm node), so it waits for its mount off hot. Default `hot`. */
+    tierDownPlacement?: 'hot' | 'warm';
+  } = {}
 ): SiemTierRecipe {
   const repo = opts.repository ?? 'found-snapshots';
   const tdAlias = opts.tierDownAlias ?? 'tenx-tierdown';
   const keepAlias = opts.keepAlias ?? 'tenx-app';
   const minAge = opts.frozenMinAge ?? '1m';
+  const warm = opts.tierDownPlacement === 'warm';
   return {
     target: 'elasticsearch-frozen',
     language: 'text',
     body: `# 1) Policy for the tier_down slice: roll over hourly, then mount the rolled
 #    index as a PARTIALLY-MOUNTED searchable snapshot in the frozen tier as soon
-#    as ILM sees it. Every route into frozen lands in hot first. Measured with
+${warm
+  ? `#    as ILM sees it. The template in 3) writes the slice on warm, so it waits
+#    there for its mount and takes no room on hot. With the default 10-minute
+#    poll: rollover at the first poll past the hour, the snapshot and mount
+#    three polls later.`
+  : `#    as ILM sees it. Every route into frozen lands in hot first. Measured with
 #    the default 10-minute poll: rollover at the first poll past the hour, the
-#    snapshot and mount three polls later, about 110 minutes per index on hot.
+#    snapshot and mount three polls later, about 110 minutes per index on hot.`}
 PUT _ilm/policy/tenx-tier-down
 {
   "policy": { "phases": {
@@ -1263,7 +1276,8 @@ PUT _index_template/tenx-tierdown-tpl
   "template": {
     "settings": {
       "index.lifecycle.name": "tenx-tier-down",
-      "index.lifecycle.rollover_alias": "${tdAlias}",
+      "index.lifecycle.rollover_alias": "${tdAlias}",${warm ? `
+      "index.routing.allocation.include._tier_preference": "data_warm,data_hot",` : ''}
       "number_of_replicas": 0
     },
     "mappings": { "properties": {
@@ -1321,11 +1335,16 @@ PUT ${keepAlias}-000001
       'PREREQUISITE: searchable snapshots need an Enterprise licence (Elastic ' +
       'documents no lower tier for them), plus a registered snapshot repository ' +
       '(Elastic Cloud provides `found-snapshots` by default). ' +
-      'RESIDENCY: every route into the frozen tier lands in hot first, this one ' +
-      'included. The tier_down index rolls over hourly and mounts right after, so ' +
-      'with the default 10-minute ILM poll each index lived about 110 minutes on hot ' +
-      '(rollover at the first poll past the hour, snapshot and mount three polls later), ' +
-      'so a demoted line leaves hot 30 to 110 minutes after it arrives. ' +
+      (warm
+        ? 'RESIDENCY: the tier_down template prefers data_warm, so the slice is written ' +
+          'on warm and mounts on frozen from there, taking no room on hot. A cluster ' +
+          'with no data_warm node places it on hot instead (the preference falls back ' +
+          'to data_hot), and the hot-tier run counts it there. '
+        : 'RESIDENCY: every route into the frozen tier lands in hot first, this one ' +
+          'included. The tier_down index rolls over hourly and mounts right after, so ' +
+          'with the default 10-minute ILM poll each index lived about 110 minutes on hot ' +
+          '(rollover at the first poll past the hour, snapshot and mount three polls later), ' +
+          'so a demoted line leaves hot 30 to 110 minutes after it arrives. ') +
       'Hourly rollover means one frozen index per hour per alias; add a delete ' +
       'phase at the retention the account wants so the shard count on frozen ' +
       'stays bounded. ' +
