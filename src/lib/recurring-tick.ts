@@ -1282,7 +1282,7 @@ function autoOnHotRefusal(hot: HotTierBudget, tierDownOnHot: boolean): string | 
   return (
     `hot_tier_gb is auto (${Math.round(hot.capacity_share * 100)}% of the hot nodes' disk), and the tier_down write index sits on hot, ` +
     'where moved lines waiting for their mount can carry the hot tier past the disk watermarks under a step in load. ' +
-    "Place the tier_down index on warm (log10x_advise_retriever's Elasticsearch frozen-tier recipe with tierDownPlacement warm), or set hot_tier_gb to a size in GB. Nothing was written."
+    "Place the tier_down index on warm (log10x_advise_retriever's Elasticsearch frozen-tier recipe does when the cluster has a warm node), or set hot_tier_gb to a size in GB. Nothing was written."
   );
 }
 

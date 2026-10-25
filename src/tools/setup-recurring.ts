@@ -183,7 +183,7 @@ export const setupRecurringSchema = {
     .union([z.number().positive(), z.literal('auto')])
     .optional()
     .describe(
-      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk, refused while the tier_down write index sits on hot (place it on warm with the recipe\'s tierDownPlacement warm, or give a size). ' +
+      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk, refused while the tier_down write index sits on hot (the recipe from log10x_advise_retriever writes it on warm when the cluster has a warm node; otherwise give a size). ' +
         'Each run reads the hot nodes\' store and the Receiver\'s indices still on hot, and rewrites each statement\'s byte limit so lines over it go to the frozen tier and the hot tier settles at the size under steady load. ' +
         'Replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour (k8s_cron or github_actions). The Receiver is installed with log10x_advise_install and log_destination elasticsearch (it counts bytes and stamps utf8Size and tenx_hash on each record), and its indices follow the Elasticsearch frozen-tier recipe from log10x_advise_retriever.'
     ),
