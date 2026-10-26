@@ -594,7 +594,7 @@ test('policy_git: the pinned engine (1.1.146 or later) writes the git lane; belo
   const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
   const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
   const { manifestEngineVersion, engineReadsCeiling } = await import('../src/lib/fleet-default-install.js');
-  assert.equal(manifestEngineVersion(), '1.1.147');
+  assert.equal(manifestEngineVersion(), '1.1.150');
   // advise_install takes policy_git only where engineReadsCeiling holds for the pinned engine.
   assert.equal(engineReadsCeiling('1.1.145'), false);
   assert.equal(engineReadsCeiling('1.1.146'), true);

@@ -659,6 +659,9 @@ data:
   totals.csv: |
     container,total
     tenx-seed,1::install seed; replaced by the budget run
+  config-generation.csv: |
+    key,value
+    generation,seed
   ${REGULATOR_UNIT_KEY}: ${unit}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1885,7 +1888,7 @@ ${indent(destSink, 4)}
   'otel-collector': {
     label: 'OTel Collector',
     integrationMode:
-      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing OTel Collector pod via the upstream `open-telemetry/opentelemetry-collector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is deep-merged: we add an `otlp/tenx` exporter (handoff to sidecar at 127.0.0.1:4317), an `otlp/tenx` receiver (return path on 0.0.0.0:24225), rewire the `logs` pipeline through `otlp/tenx`, and add a `logs/from-tenx` pipeline that ships the returning events to the user\'s real destinations. Both directions are OTLP/gRPC over loopback.',
+      'Sidecar (`log10x/edge-10x`) injected into the user\'s existing OTel Collector pod via the upstream `open-telemetry/opentelemetry-collector` chart\'s `extraContainers` + `extraVolumes` hooks. The chart\'s `config:` is deep-merged: we add an `otlp/tenx` exporter (handoff to sidecar at 127.0.0.1:4317), an `otlp/tenx` receiver (return path on 0.0.0.0:24225), the `filelog` operators (the container parser, then `recombine` to join multi-line events), rewire the `logs` pipeline through `otlp/tenx`, and add a `logs/from-tenx` pipeline that ships the returning events to the user\'s real destinations. Both directions are OTLP/gRPC over loopback.',
     helmRepo: 'https://open-telemetry.github.io/opentelemetry-helm-charts',
     helmRepoAlias: 'open-telemetry',
     chartRef: 'open-telemetry/opentelemetry-collector',
@@ -1925,9 +1928,10 @@ ${sidecar}
 
 # config: is deep-merged with chart defaults and your existing values.
 # We add: an otlp/tenx exporter (handoff to the sidecar), an otlp/tenx
-# receiver (return path), rewire the logs pipeline through the sidecar,
-# and add a logs/from-tenx pipeline that ships returning events to
-# your real destinations.
+# receiver (return path), the filelog operators that join multi-line
+# events, rewire the logs pipeline through the sidecar, and add a
+# logs/from-tenx pipeline that ships returning events to your real
+# destinations.
 config:
   receivers:
     otlp/tenx:
@@ -1935,15 +1939,54 @@ config:
         grpc:
           endpoint: 0.0.0.0:24225
 
+    # Helm replaces this list wholesale, so it stands in for the operators
+    # your filelog receiver runs today (the chart's logsCollection preset runs
+    # the container parser alone). Keep any others you rely on.
+    filelog:
+      operators:
+        # Parses the container runtime's line format and rejoins the lines the
+        # runtime split. Every runtime line starts with a timestamp, so
+        # multi-line events are joined after this parser, on the parsed body.
+        - type: container
+        # A line that starts with whitespace or with "at " continues the event
+        # before it (stack frames); any other line starts a new event.
+        - type: recombine
+          combine_field: body
+          combine_with: "\\n"
+          is_first_entry: 'not (body matches "^(\\\\s|at )")'
+          # An event larger than the queue's batch max_size is dropped with its
+          # request, so a combined event stops growing well below it.
+          max_log_size: 512KiB
+
   exporters:
     otlp/tenx:
       endpoint: 127.0.0.1:4317
       tls:
         insecure: true
-      # One sender keeps records in the order they were read; the engine
-      # groups multi-line events from consecutive records.
+      # Log10x answers an export once its lines are written back and
+      # acknowledged, which can take its group flush timeout (5 s) plus its
+      # output flush interval (1 s). Below that, an export still being
+      # processed times out and is sent again.
+      timeout: 30s
+      # Retry for as long as Log10x is unreachable or refuses a request (it
+      # refuses with UNAVAILABLE when its queue is full).
+      retry_on_failure:
+        enabled: true
+        max_elapsed_time: 0
       sending_queue:
+        enabled: true
+        # One sender keeps records in the order they were read; the engine
+        # groups multi-line events from consecutive records.
         num_consumers: 1
+        # A full queue backs the receivers up instead of dropping a batch.
+        block_on_overflow: true
+        # Requests to Log10x stay under the 4 MiB gRPC message limit it
+        # accepts.
+        batch:
+          flush_timeout: 1s
+          sizer: bytes
+          min_size: 1048576
+          max_size: 2097152
 ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
   service:
     pipelines:

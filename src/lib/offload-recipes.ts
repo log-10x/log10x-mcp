@@ -1829,6 +1829,15 @@ function clickhouseOtelCollector(p: ClickhouseOffloadParams): ClickhouseOffloadR
 #   - the run's measurement tap (the \`file/wire\` exporter and the \`logs/wire\`
 #     pipeline) is dropped. It counted what the receiver returned and is not
 #     part of the design.
+#   - \`otlp/engine\` carries the settings the custody run gave the exporter
+#     into the receiver (benchmarks/clickstack-e2e-gaps/gap4_durable_handoff.sh,
+#     contrib 0.160.0): \`timeout\`, \`retry_on_failure\` and the queue's
+#     \`enabled\`, \`block_on_overflow\` and \`batch\`.
+#   - the placeholder \`filelog\` reads the pod log files through the container
+#     parser and joins multi-line events with \`recombine\`, as the Log10x
+#     OpenTelemetry Collector recipe does (modules
+#     input/forwarder/otel-collector/conf/tenx-sidecar.yaml). The run read one
+#     capture file through a JSON parser instead.
 #   - the comments are expanded here. The ones the harness file carries are
 #     kept word for word.
 #
@@ -1859,7 +1868,24 @@ receivers:
       grpc:
         endpoint: 0.0.0.0:4317
   filelog:
-    include: [ /var/log/containers/*.log ]
+    include: [ /var/log/pods/*/*/*.log ]
+    # The container parser reads the namespace, pod and container from this
+    # path.
+    include_file_path: true
+    operators:
+      # Parses the container runtime's line format and rejoins the lines the
+      # runtime split. Every runtime line starts with a timestamp, so
+      # multi-line events are joined after this parser, on the parsed body.
+      - type: container
+      # A line that starts with whitespace or with "at " continues the event
+      # before it (stack frames); any other line starts a new event.
+      - type: recombine
+        combine_field: body
+        combine_with: "\\n"
+        is_first_entry: 'not (body matches "^(\\\\s|at )")'
+        # An event larger than the queue's batch max_size is dropped with its
+        # request, so a combined event stops growing well below it.
+        max_log_size: 512KiB
 
 processors:
   # The capture's envelope carries no timestamp, so records arrive with none and
@@ -1908,10 +1934,30 @@ exporters:
     endpoint: ${engine}
     tls:
       insecure: true
-    # One sender keeps records in the order they were read; the engine
-    # groups multi-line events from consecutive records.
+    # The receiver answers an export once its lines are written back and
+    # acknowledged, which can take its group flush timeout (5 s) plus its
+    # output flush interval (1 s). Below that, an export still being
+    # processed times out and is sent again.
+    timeout: 30s
+    # Retry for as long as the receiver is unreachable or refuses a request
+    # (it refuses with UNAVAILABLE when its queue is full).
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
     sending_queue:
+      enabled: true
+      # One sender keeps records in the order they were read; the engine
+      # groups multi-line events from consecutive records.
       num_consumers: 1
+      # A full queue backs the file receiver up instead of dropping a batch.
+      block_on_overflow: true
+      # Requests to the receiver stay under the 4 MiB gRPC message limit it
+      # accepts.
+      batch:
+        flush_timeout: 1s
+        sizer: bytes
+        min_size: 1048576
+        max_size: 2097152
   otlp/clickstack:
     endpoint: ${clickstack}
     tls:

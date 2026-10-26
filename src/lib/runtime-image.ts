@@ -86,10 +86,16 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * reads service totals, keep counts for error lines, an events unit and `*`
  * rows, and pulls its policy files from a git branch; Datadog metrics post as
  * distributions. 1.1.147: with no licence the engine runs the built-in Free
- * tier, up to 10 nodes, no expiry. Pinned by digest.
+ * tier, up to 10 nodes, no expiry. 1.1.150: the OTLP input answers an export
+ * only once its lines are done and refuses with UNAVAILABLE when its queue is
+ * full, so a Collector that retries keeps every line across a Receiver
+ * restart; lookups reload only when their content changes (1.1.148), metric
+ * outputs evict the least recently used down to maxCardinality (1.1.149), and
+ * a service past its total passes at most rateReceiverBaselineMaxOverTotal
+ * (50) more sample lines a window. Pinned by index digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.147@sha256:a043ccd828742c4eccee09abb654ce6a7357b6123f73300ed04f8605e874b8c4';
+  'log10x/edge-10x:1.1.150@sha256:3e755bbc14780a27e643e09b76dfd7ec9616cab67833f70daf9420eff646d350';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

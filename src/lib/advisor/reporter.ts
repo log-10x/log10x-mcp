@@ -844,7 +844,7 @@ function buildInstallSteps(opts: {
     steps.push({
       title: 'Seed the engine-policy ConfigMap',
       rationale:
-        `The receiver reads its byte caps (caps.csv) and per-service actions (actions.csv) from the \`${POLICY_CONFIGMAP_NAME}\` ConfigMap via the engine's kubernetes pull lane. This seeds it with a no-op policy so the pod boots policy-ready (a missing ConfigMap aborts the engine launch by design), and grants every ServiceAccount in \`${namespace}\` read access to this one ConfigMap. \`log10x_configure_engine\` writes the real policy here later.`,
+        `The receiver reads its byte caps (caps.csv), per-service actions (actions.csv), service totals (totals.csv) and policy generation (config-generation.csv) from the \`${POLICY_CONFIGMAP_NAME}\` ConfigMap via the engine's kubernetes pull lane. This seeds it with a no-op policy so the pod boots policy-ready (a missing ConfigMap aborts the engine launch by design), and grants every ServiceAccount in \`${namespace}\` read access to this one ConfigMap. \`log10x_configure_engine\` writes the real policy here later.`,
       commands: [
         `cat <<'POLICY_EOF' | kubectl apply -f -\n${renderPolicyConfigMapManifest(namespace, seedUnit).trimEnd()}\nPOLICY_EOF`,
       ],

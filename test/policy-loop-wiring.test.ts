@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { mergeActionRows } from '../src/tools/configure-engine.js';
 import {
   renderPolicyConfigMapManifest,
+  renderPolicyPullEnvLines,
   POLICY_CONFIGMAP_NAME,
 } from '../src/lib/advisor/reporter-forwarders.js';
 import { writeOutputFiles, type PatternDecision } from '../src/lib/recurring-tick.js';
@@ -60,6 +61,17 @@ test('policy ConfigMap manifest: seeded files + scoped RBAC', () => {
   assert.match(m, /verbs: \["get"\]/);
   assert.match(m, /name: system:serviceaccounts:logging/);
   assert.equal(POLICY_CONFIGMAP_NAME, 'log10x-action-intent');
+});
+
+test('policy ConfigMap manifest: seeds every lookup file the Receiver is pointed at', () => {
+  const m = renderPolicyConfigMapManifest('logging');
+  const files = renderPolicyPullEnvLines('  ')
+    .map((l) => /value: .*\/([\w.-]+\.csv)$/.exec(l)?.[1])
+    .filter((f): f is string => !!f);
+  assert.ok(files.includes('config-generation.csv'));
+  for (const f of files) {
+    assert.match(m, new RegExp(`\\n  ${f.replace('.', '\\.')}: \\|\\n    \\S+\\n    \\S`), `${f} seeded with a header and a row`);
+  }
 });
 
 // ── 3. recurring-tick writes engine-conformant files ────────────────────
