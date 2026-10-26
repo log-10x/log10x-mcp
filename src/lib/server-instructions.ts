@@ -137,6 +137,10 @@ Cost investigation:
    \`lookback\` (default 90d); writes nothing.)
 - After a Datadog POC: "set the default for the other services" → log10x_advise_install
   with \`log_destination: "datadog"\` (the fleet-default step on a Receiver plan)
+- Elasticsearch: "hold the hot tier under N GB"                  → log10x_advise_retriever
+  with \`destination: "elasticsearch"\` (the frozen-tier recipe), log10x_advise_install with
+  \`log_destination: "elasticsearch"\` (the Receiver the run holds), then
+  log10x_setup_recurring with \`hot_tier_gb\`
 
 Offloaded cohort: RAW EVENTS the Receiver held back from the SIEM (the overflow bucket):
 - "show me what's being offloaded for <pattern>", "sample the held-back events",

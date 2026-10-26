@@ -41,7 +41,7 @@ import {
 } from '../lib/scheduler-manifest-emitter.js';
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import { serviceBudgetsProblem, serviceBudgetUsd, type ServiceBudgetInput } from '../lib/policy-loader.js';
-import { ELASTIC_HOT_TIER_FIELDS } from '../lib/fleet-default-install.js';
+import { ELASTIC_KEEP_HOT_DAYS } from '../lib/offload-recipes.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -183,9 +183,9 @@ export const setupRecurringSchema = {
     .union([z.number().positive(), z.literal('auto')])
     .optional()
     .describe(
-      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk, refused while the tier_down write index sits on hot (place it on warm with the recipe\'s tierDownPlacement warm, or give a size). ' +
+      'ELASTICSEARCH HOT TIER: GB of index store on the hot nodes to hold under, or `auto` for 80% of the hot nodes\' disk, refused while the tier_down write index sits on hot (the recipe from log10x_advise_retriever writes it on warm when the cluster has a warm node; otherwise give a size). ' +
         'Each run reads the hot nodes\' store and the Receiver\'s indices still on hot, and rewrites each statement\'s byte limit so lines over it go to the frozen tier and the hot tier settles at the size under steady load. ' +
-        'Replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour (k8s_cron or github_actions). The Receiver must count bytes (the default) and stamp utf8Size on each record, and its indices must follow the Elasticsearch frozen-tier recipe from log10x_advise_retriever.'
+        'Replaces target_percent, budget_gb_monthly, budget_usd_monthly and rows_per_hour (k8s_cron or github_actions). The Receiver is installed with log10x_advise_install and log_destination elasticsearch (it counts bytes and stamps utf8Size and tenx_hash on each record), and its indices follow the Elasticsearch frozen-tier recipe from log10x_advise_retriever.'
     ),
   elasticsearch_secret_name: z
     .string()
@@ -878,11 +878,11 @@ function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOpt
 
 function buildHotTierApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
   const install =
-    'Install (or re-install) the Receiver for Elasticsearch counting bytes, the default: the run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events (`regulator-unit`). ' +
-    `Every record it returns must carry \`utf8Size\`, the size the limits count, and \`tenx_hash\`: engine options \`symbolMessageHashField tenx_hash\` and \`outputEncodeField ${ELASTIC_HOT_TIER_FIELDS}\`.`;
+    'Install (or re-install) the Receiver with `log10x_advise_install` and `log_destination: "elasticsearch"`: it counts bytes, the default, stamps `utf8Size` (the size the limits count) and `tenx_hash` on every record it returns, and records `bytes` in the policy files (`regulator-unit`). The run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events.';
   const recipe =
-    'Apply the Elasticsearch frozen-tier recipe (`log10x_advise_retriever` with `destination: "elasticsearch"`): kept lines go to the `tenx-app` alias and `routeState: tier_down` lines to `tenx-tierdown`, which ILM mounts on the frozen tier. ' +
-    'The run reads how long a kept line stays on hot from the ILM policy on `tenx-app`, its rollover `max_age` plus the `min_age` of the first phase after hot. When that policy has no phase after hot, add one at the age a kept line leaves hot (`warm`, `cold`, `frozen` or `delete`), or set `hot_retention_hours` in policy.yaml.';
+    'Apply the Elasticsearch frozen-tier recipe (`log10x_advise_retriever` with `destination: "elasticsearch"`): kept lines go to the `tenx-app` alias and `routeState: tier_down` lines to `tenx-tierdown`, which ILM mounts on the frozen tier within hours. ' +
+    `Its \`tenx-keep\` policy rolls kept lines over daily and mounts them on frozen ${ELASTIC_KEEP_HOT_DAYS - 1} days later, ${ELASTIC_KEEP_HOT_DAYS} days on hot at most, and the run reads that from the ILM policy on \`tenx-app\`: its rollover \`max_age\` plus the \`min_age\` of the first phase after hot. ` +
+    'A policy of the account\'s own on `tenx-app` needs a phase after hot at the age a kept line leaves hot (`warm`, `cold`, `frozen` or `delete`), or `hot_retention_hours` in policy.yaml.';
   const reads = 'The run reads the cluster (node stats, ILM and the Receiver\'s indices) and writes nothing to it.';
   if (budgetDelivery(opts.scheduler) === 'configmap') {
     const ns = opts.namespace ?? 'log10x';
@@ -911,7 +911,7 @@ function buildHotTierApplyInstructions(opts: PolicyOptions, cronExpr: string): s
   return [
     `### Apply instructions: hot-tier run, GitHub Actions (gitops pull)`,
     ``,
-    `1. ${install} Give it the gitops pull of \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN), which \`log10x_advise_install\` renders from \`policy_git: { repo: "<owner/name>" }\`.`,
+    `1. ${install} Pass \`policy_git: { repo: "<owner/name>" }\` so the Receiver pulls \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN).`,
     `2. ${recipe}`,
     `3. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
     `4. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,

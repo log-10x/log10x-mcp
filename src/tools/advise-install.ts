@@ -208,10 +208,10 @@ export const adviseInstallSchema = {
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
   log_destination: z
-    .enum(['datadog', 'clickhouse'])
+    .enum(['datadog', 'clickhouse', 'elasticsearch'])
     .optional()
     .describe(
-      'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees.'
+      'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees. `clickhouse` installs the Receiver the rows run (log10x_setup_recurring `rows_per_hour`) holds: limits and totals in lines, `tenx_hash` on every record. `elasticsearch` installs the Receiver the hot-tier run (log10x_setup_recurring `hot_tier_gb`) holds: limits in bytes, and `tenx_hash` and `utf8Size` (the size the limits count) on every record it returns.'
     ),
   fleet_default: z
     .object({
@@ -2294,9 +2294,12 @@ async function renderInstallPlan(
   const datadogLogs = session.logDestination === 'datadog';
   // A ClickHouse Receiver the rows run holds: limits and totals in lines, the hash on every record.
   const clickhouseRows = session.logDestination === 'clickhouse' && app === 'receiver';
+  // An Elasticsearch Receiver the hot-tier run holds: limits in bytes, tenx_hash and utf8Size on every returned record.
+  const elasticHotTier = session.logDestination === 'elasticsearch' && app === 'receiver';
   const fleetValues = receiverFleetValues({
     datadog: datadogLogs && app === 'receiver',
     ...(clickhouseRows ? { clickhouseRows: true } : {}),
+    ...(elasticHotTier ? { elasticHotTier: true } : {}),
     ...(datadogLogs && app === 'receiver' && session.fleetDefault
       ? {
           fleetDefault: {
@@ -2379,6 +2382,16 @@ async function renderInstallPlan(
         'The fleet default routes lines above a limit to Flex or S3, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that step.'
       );
     }
+  }
+  if (session.logDestination === 'elasticsearch') {
+    plan.notes.push(
+      ...(elasticHotTier
+        ? [
+            'The Receiver counts bytes and stamps `tenx_hash` and `utf8Size` (the size its byte limits count) on every record it returns, which the hot-tier run (log10x_setup_recurring `hot_tier_gb`) reads from its indices. Send kept lines to the `tenx-app` alias and `routeState: tier_down` lines to `tenx-tierdown`, with the Elasticsearch frozen-tier recipe from log10x_advise_retriever (`destination: "elasticsearch"`).',
+            ...(session.regulatorUnit === 'events' ? ['The hot-tier run writes limits in bytes, so `regulator_unit: "events"` is not written for Elasticsearch.'] : []),
+          ]
+        : ['The hot-tier run holds lines above a limit off the hot tier, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that install.']),
+    );
   }
   lines.push(renderPlan(plan, action));
   return { markdown: lines.join('\n'), plan, action };
