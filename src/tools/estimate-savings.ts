@@ -383,6 +383,14 @@ export const estimateSavingsSchema = {
     .describe(
       "forecast mode, compute-billed destinations only (ClickHouse): the service's current monthly compute spend in dollars. Converted to units at the destination's unit price; ignored when current_compute_units is supplied."
     ),
+  compute_write_share: z
+    .number()
+    .min(0)
+    .max(1)
+    .optional()
+    .describe(
+      'forecast mode, compute-billed destinations only (ClickHouse): W, insert and merge CPU over node CPU, as log10x_clickhouse_census measures it (0 to 1). Scales totals.compute_saving so the rows-to-CPU curve moves only that share of compute. Omitted, all compute is treated as writes.'
+    ),
   // ── presentation ──────────────────────────────────────────────────
   enforcement_mode: z
     .enum(['engine', 'manual_report'])
@@ -980,6 +988,8 @@ export interface RunForecastArgs {
    * `current_compute_units` is absent.
    */
   monthly_compute_spend_usd?: number;
+  /** Compute-billed destinations only. W, the write share of node CPU, from log10x_clickhouse_census. */
+  compute_write_share?: number;
   /**
    * Maximum per_pattern rows to return. Default 50 when service is omitted;
    * unlimited when service is set. Totals computed over full result before slice.
@@ -1727,6 +1737,7 @@ export async function runEstimateForecast(
           {
             current_units: args.current_compute_units,
             monthly_spend_usd: args.monthly_compute_spend_usd,
+            write_share: args.compute_write_share,
             basis: useEventBasis ? 'rows-inserted' : 'bytes-removed-as-rows-proxy',
           },
         )
@@ -2587,6 +2598,7 @@ export async function executeEstimateSavings(
           effective_ingest_per_gb: args.effective_ingest_per_gb,
           current_compute_units: args.current_compute_units,
           monthly_compute_spend_usd: args.monthly_compute_spend_usd,
+          compute_write_share: args.compute_write_share,
           observation_window: explicitObservationWindow,
           monthly_volume_gb: args.monthly_volume_gb,
         },

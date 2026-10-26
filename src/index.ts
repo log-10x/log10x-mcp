@@ -117,6 +117,7 @@ import {
 import { patternMitigateSchema, executePatternMitigate } from './tools/pattern-mitigate.js';
 import { datadogChangeReportSchema, executeDatadogChangeReport } from './tools/datadog-change-report.js';
 import { datadogSpikeAuditSchema, executeDatadogSpikeAudit } from './tools/datadog-spike-audit.js';
+import { clickhouseCensusSchema, executeClickhouseCensus } from './tools/clickhouse-census.js';
 import { loginStatusSchema, executeLoginStatus } from './tools/login-status.js';
 import {
   signinStartSchema,
@@ -1758,6 +1759,15 @@ registerLog10xTool('log10x_datadog_spike_audit', datadogSpikeAuditSchema, (args)
   wrap('log10x_datadog_spike_audit', () => executeDatadogSpikeAudit(args))
 );
 
+// ── Tool: log10x_clickhouse_census (where a ClickHouse cluster's CPU goes) ──
+//
+// Reads the cluster's own system tables with CLICKHOUSE_URL and its
+// credentials, so it works before any 10x install.
+
+registerLog10xTool('log10x_clickhouse_census', clickhouseCensusSchema, (args) =>
+  wrap('log10x_clickhouse_census', () => executeClickhouseCensus(args))
+);
+
 // ── Tool: log10x_pattern_mitigate (cost-reduction menu) ──
 
 registerLog10xTool('log10x_pattern_mitigate', patternMitigateSchema, (args) =>
@@ -1836,6 +1846,7 @@ const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_commitment_report', intent: 'CFO-facing weekly aggregate against a commitment record: Bayesian Beta(2,2) confidence prior on realized savings, markdown report suitable for sharing.' },
   { name: 'log10x_datadog_change_report', intent: 'Weekly Datadog change report from the per-pattern series: statements new since a date, lines a day, estimated Standard cost a month, the rule that held each, proposed per-service rows; view=monitors renders the route-change and weekly-baseline Datadog monitors as JSON. Read-only.' },
   { name: 'log10x_datadog_spike_audit', intent: 'Datadog log spike audit from the account\'s estimated usage metrics (no 10x install): per service, hours above 3x the same hour\'s 7-day median, each spike\'s excess events and bytes priced at Standard and ingestion rates, the total a year, and what a fleet default limit (2x the largest normal hour) would have held. Read-only.' },
+  { name: 'log10x_clickhouse_census', intent: 'ClickHouse compute census from the cluster\'s own system tables (no 10x install): W, the logs table\'s insert and merge CPU over node CPU with TTL merges apart; Q, SELECT CPU with the top query shapes; peak hour over mean; rows and bytes per table; tables no SELECT read. No dollars. Read-only.' },
   { name: 'log10x_pattern_mitigate', intent: 'Return the env-gated mitigation options + exact configs for a pattern (drop @ analyzer, drop @ forwarder, mute @ 10x, compact @ 10x) in user terms with env-capability gating' },
   { name: 'log10x_overflow_contents', intent: 'Contents view of the customer-owned offload S3 bucket: per-pattern bytes, event count, time-first/last-seen, growth-rate; filtered to action=offload via the cap-CSV. Routes the agent to retriever_query to inspect the offloaded cohort.' },
   { name: 'log10x_setup_recurring', intent: 'Progressive wizard to configure a recurring cost-reduction agent: target services, savings %, schedule, scheduler (k8s/GHA/crontab), gitops repo, emits policy.yaml + scheduler manifest' },

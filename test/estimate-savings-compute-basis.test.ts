@@ -163,3 +163,24 @@ test('a metered destination carries no compute saving on its totals', async () =
   assert.equal(result.totals.compute_saving, undefined);
   assert.equal(result.totals.modeled, false);
 });
+
+test('compute_write_share scales the estate compute saving and shows in the envelope; omitted, nothing changes', async () => {
+  const base = {
+    destination: 'clickhouse' as const,
+    retention_months: 1,
+    observation_window: '30d',
+    proposed_config: [{ pattern_hash: NOISY.hash, action: 'offload' as const }],
+  };
+  const plain = (await runEstimateForecast({ ...base, current_compute_units: 100 }, stubEnv())).totals.compute_saving!;
+  assert.equal(plain.write_share, undefined);
+  assert.equal(plain.units_after, Math.ceil(100 * plain.cpu_fraction));
+
+  const scaled = (await runEstimateForecast({ ...base, current_compute_units: 100, compute_write_share: 0.6 }, stubEnv())).totals.compute_saving!;
+  assert.equal(scaled.write_share, 0.6);
+  assert.equal(scaled.rows_kept_fraction, plain.rows_kept_fraction);
+  assert.equal(scaled.units_after, Math.ceil(100 * (1 - 0.6 * (1 - scaled.cpu_fraction))));
+
+  const frac = (await runEstimateForecast({ ...base, compute_write_share: 0.6 }, stubEnv())).totals.compute_saving!;
+  const fracPlain = (await runEstimateForecast(base, stubEnv())).totals.compute_saving!;
+  assert.ok(Math.abs(frac.saving_fraction - 0.6 * fracPlain.saving_fraction) < 1e-12);
+});

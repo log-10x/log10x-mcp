@@ -324,10 +324,19 @@ export interface ComputeSavingProjection {
   /**
    * Share of today's compute bill this action removes. When units are known
    * this is (units_before - units_after) / units_before, which is the stepped
-   * answer and can be 0 at the floor. When they are not, it is 1 - cpu_fraction,
-   * which is the unstepped shape of the curve and nothing more.
+   * answer and can be 0 at the floor. When they are not, it is 1 - cpu_fraction
+   * (1 - node_cpu_fraction with a write share), the unstepped shape of the curve
+   * and nothing more.
    */
   saving_fraction: number;
+  /**
+   * Insert-plus-merge CPU over node CPU (W), when the caller supplied one,
+   * usually measured by log10x_clickhouse_census. Absent means all compute is
+   * treated as writes.
+   */
+  write_share?: number;
+  /** Node CPU after the action as a fraction of today's: 1 - W x (1 - cpu_fraction). Present with write_share. */
+  node_cpu_fraction?: number;
   /** Always true. No ClickHouse compute dollar in this codebase is measured on the customer's estate. */
   modeled: true;
   note: string;
@@ -1307,6 +1316,8 @@ export function projectComputeSaving(
     monthly_spend_usd?: number;
     /** What the fraction came from. Defaults to the curve's own basis. */
     basis?: ComputeBasis;
+    /** W, the write share of node CPU (0 to 1). The curve moves only this share. */
+    write_share?: number;
   },
 ): ComputeSavingProjection {
   const kept = Math.max(0, Math.min(1, rowsKeptFraction));
@@ -1318,6 +1329,14 @@ export function projectComputeSaving(
       ? ' Rows kept is derived from bytes removed, not from a row count, so it skews when the removed patterns differ in average event size from the rest.'
       : '';
   const cpuFraction = cpuFractionForRowsKept(compute.curve, kept);
+  const writeShare =
+    opts?.write_share != null && Number.isFinite(opts.write_share) ? Math.max(0, Math.min(1, opts.write_share)) : undefined;
+  const nodeFraction = writeShare === undefined ? cpuFraction : 1 - writeShare * (1 - cpuFraction);
+  const shareFields = writeShare === undefined ? {} : { write_share: writeShare, node_cpu_fraction: nodeFraction };
+  const shareNote =
+    writeShare === undefined
+      ? ''
+      : ` Scaled by compute_write_share ${writeShare}: the curve moves only the write share of compute, so node CPU goes to ${(nodeFraction * 100).toFixed(1)}% of today's.`;
   const monthlyPerUnit = compute.unit_usd_per_hour * HOURS_PER_MONTH;
 
   let currentUnits: number | undefined = opts?.current_units;
@@ -1330,23 +1349,26 @@ export function projectComputeSaving(
       basis,
       rows_kept_fraction: kept,
       cpu_fraction: cpuFraction,
-      saving_fraction: 1 - cpuFraction,
+      ...shareFields,
+      saving_fraction: 1 - nodeFraction,
       modeled: true,
       note:
         'modeled compute saving: supply current compute units or monthly compute spend to get dollars.' +
+        shareNote +
         proxyCaveat,
     };
   }
 
   const step = (u: number): number => (compute.unit_step ? Math.ceil(u) : u);
   const units_before = Math.max(compute.min_units, step(currentUnits));
-  const units_after = Math.max(compute.min_units, step(units_before * cpuFraction));
+  const units_after = Math.max(compute.min_units, step(units_before * nodeFraction));
   const saving_usd_month = (units_before - units_after) * compute.unit_usd_per_hour * HOURS_PER_MONTH;
 
   return {
     basis,
     rows_kept_fraction: kept,
     cpu_fraction: cpuFraction,
+    ...shareFields,
     units_before,
     units_after,
     saving_usd_month,
@@ -1356,6 +1378,7 @@ export function projectComputeSaving(
       (units_after === units_before
         ? `modeled compute saving: ${units_before} units before and after. Compute is billed in whole units with a floor of ${compute.min_units}, so this much row reduction sheds none.`
         : `modeled compute saving: ${units_before} units to ${units_after}, at $${compute.unit_usd_per_hour}/unit-hour over ${HOURS_PER_MONTH} hours.`) +
+      shareNote +
       proxyCaveat,
   };
 }
@@ -1476,6 +1499,8 @@ export interface ProjectActionArgs {
    * takes today and reads rows kept off the byte reduction.
    */
   rows_kept_fraction?: number;
+  /** Compute-billed destinations only. W, the write share of node CPU, as log10x_clickhouse_census measures it. */
+  compute_write_share?: number;
 }
 
 /**
@@ -2034,6 +2059,7 @@ function projectActionWithRatio(
     compute_saving = projectComputeSaving(model.compute, rowsKept, {
       current_units: args.current_compute_units,
       monthly_spend_usd: args.monthly_compute_spend_usd,
+      write_share: args.compute_write_share,
       // A caller that states rows_kept_fraction is asserting a row count.
       // Anything else here is bytes wearing a row's name, and the projection
       // says which it got.
