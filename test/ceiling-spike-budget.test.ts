@@ -85,7 +85,7 @@ test('review 10 gate: the budget section is an estimate and states what a ceilin
   const md = renderSpikeAuditMarkdown(buildSpikeAudit(input, { budgetUsdMonthly: 4, standardIndexes: ['main'] } as never));
   assert.doesNotMatch(md, /was paid/);
   assert.match(md, /This is an estimate: Datadog's estimated usage differs from billable usage\./);
-  assert.match(md, /does not hold error lines up to K per statement per node per window, the first lines of each statement in every window, or lines that do not pass the Receiver\./);
+  assert.match(md, /does not hold error lines up to K per statement per node per window, the first lines of each statement in every window \(past a service's total at most 50 sample lines and 500 error lines a window on each node\), or lines that do not pass the Receiver\./);
 });
 
 test('review 11 gate: a partial month is held to X prorated by its hours in the window', () => {

@@ -48,6 +48,12 @@ test('what an error monitor sees, per action and floor', () => {
   assert.equal(alwaysPassSentence(), 'Up to 1,800 lines a day of every statement always reach Standard on each node.');
 });
 
+test('the fleet default writes no service total, so its keep count stays per statement with no service bound', () => {
+  const s = errorMonitorVisibility('tier_down', 0, 5, 50);
+  assert.ok(s.includes('the first 50 lines of each error statement on each node'), s);
+  assert.ok(!/500|total/.test(s), s);
+});
+
 test('tier_down step: the Flex index with its routeState filter, the sample, the error monitors', () => {
   const s = buildFleetDefaultStep();
   assert.equal(s.action, 'tier_down');

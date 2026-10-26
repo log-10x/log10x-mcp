@@ -1,7 +1,7 @@
 # Verbatim copy of log-10x/config pipelines/run/receive/rate/config.yaml at
-# commit 71f1d80132b99564d32be62f062bd5e2c6ded09f (origin/main, 2026-10-23).
-# test/regulator-defaults-pin.test.ts pins the plan solver to it. Refresh
-# by copying the file again below this header.
+# commit 63d77a7a2487128c54baa14810e2f5971e8f25b9 (origin/main, 2026-10-25).
+# test/regulator-defaults-pin.test.ts pins the plan solver and the runs' keep
+# bound to it. Refresh by copying the file again below this header.
 
 # yaml-language-server: $schema=https://schema.log10x.com/pipelines/run/receive/rate/schema.json
 
@@ -83,7 +83,9 @@ rateReceiver:
   # 'keepCounts' is the number of lines per pattern per window a level passes once
   #  the pattern is over its cap or its service over its total, also under a mute
   #  entry, in place of its 'severityFloors' draw. ERROR, CRITICAL and FATAL keep
-  #  a count of 50 even when removed here; -1 gives a level its floor instead.
+  #  a count of 50 even when removed here; -1 gives a level its floor instead. In
+  #  a service with a total, the lines count toward it and 'keepMaxOverTotal'
+  #  bounds them past it.
   keepCounts:
     - ERROR=50
     - CRITICAL=50    # the level enrichment maps fatal/critical -> CRITICAL
@@ -122,6 +124,13 @@ rateReceiver:
   #  patterns in one window. Counted in lines whatever 'unit' is. 0 removes the
   #  bound, so every sample line passes.
   baselineMaxOverTotal: 50
+
+  # 'keepMaxOverTotal' is the most 'keepCounts' lines a service passes per window
+  #  once it has passed its total; the rest take the service's action. Within the
+  #  total they pass like any line. It bounds a service that prints many new
+  #  error patterns in one window. Counted in lines whatever 'unit' is. 0 removes
+  #  the bound, so every keep-count line passes.
+  keepMaxOverTotal: 500
 
   # 'ingestionCostPerGB' is used only to render savings metrics in dollars; it does
   #  not affect the keep/drop decision (the decision is share-based).
@@ -267,12 +276,13 @@ rateReceiver:
   # takes the service's action. The 'baselineCount' sample counts toward the
   # total like any line, and once the total is spent the service passes at most
   # 'baselineMaxOverTotal' more sample lines in the window. The 'keepCounts'
-  # lines and the lines a mute entry passes still pass and count toward the
-  # total, so an error storm or a muted pattern can exceed it by that much. Read
-  # by the cap-file regulators, for containers with a cap. A row keyed '*'
-  # applies to every service without a row of its own; a row of 0 exempts its
-  # service, and a '*' row of 0 gives every unlisted service no total. A missing
-  # file loads as an empty table.
+  # lines count toward the total the same way, and once it is spent the service
+  # passes at most 'keepMaxOverTotal' more of them in the window. The lines a
+  # mute entry passes still pass and count toward the total, so a muted pattern
+  # can exceed it by that much. Read by the cap-file regulators, for containers
+  # with a cap. A row keyed '*' applies to every service without a row of its
+  # own; a row of 0 exempts its service, and a '*' row of 0 gives every unlisted
+  # service no total. A missing file loads as an empty table.
   #
   # File format (CSV; header row + one comma-separated entry per row):
   #   container,total

@@ -21,6 +21,20 @@ export const CEILING_MIN_ENGINE = '1.1.146';
 
 /** Error lines over a limit that still pass, per statement per node per window. */
 export const KEEP_COUNT_DEFAULT = 50;
+/**
+ * Sample lines (the first `baselineCount` of each statement) a service with a
+ * total passes past it, per node per window (receiver config
+ * `baselineMaxOverTotal`); within the total they count like any line. 0
+ * removes the bound. A service with no total passes every statement's sample.
+ */
+export const BASELINE_MAX_OVER_TOTAL_DEFAULT = 50;
+/**
+ * Keep-count lines a service with a total passes past it, per node per window
+ * (receiver config `keepMaxOverTotal`); within the total they count like any
+ * line. 0 removes the bound. A service with no total keeps the per-statement
+ * count alone.
+ */
+export const KEEP_MAX_OVER_TOTAL_DEFAULT = 500;
 /** The returned record's fields for the hot-tier run: identity, route, name, level and the counted size. */
 export const ELASTIC_HOT_TIER_FIELDS = 'fullText("tenx_hash","routeState","message_pattern","severity_level","utf8Size")';
 

@@ -594,7 +594,7 @@ test('policy_git: the pinned engine (1.1.146 or later) writes the git lane; belo
   const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
   const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
   const { manifestEngineVersion, engineReadsCeiling } = await import('../src/lib/fleet-default-install.js');
-  assert.equal(manifestEngineVersion(), '1.1.150');
+  assert.equal(manifestEngineVersion(), '1.1.151');
   // advise_install takes policy_git only where engineReadsCeiling holds for the pinned engine.
   assert.equal(engineReadsCeiling('1.1.145'), false);
   assert.equal(engineReadsCeiling('1.1.146'), true);
@@ -846,6 +846,64 @@ test('new-service gate: the `*` row is divided by the median known service\'s no
   assert.equal(plan.star.cap, checkout.cap);
   assert.equal(plan.star.cap, 430);
   assert.match(plan.lines.join('\n'), /6 Receivers\. The `\*` row is divided by 2 nodes, the median known service's count\./);
+});
+
+/**
+ * One service on one node with `n` ERROR statements of 20 lines a window, under
+ * a budget that leaves `perWindow` events a window for the rest of the month
+ * (1,000 events an hour spent so far, all through the Receiver).
+ */
+async function floorPlan(n: number, perWindow: number) {
+  const { planBudget } = await import('../src/lib/budget-tick.js');
+  const usd = (perWindow * 15 * 396 + 348 * 1_000) * 1.7e-6;
+  const p = parsePolicyYaml(policy().replace('budget_usd_monthly: 20', `budget_usd_monthly: ${usd}`));
+  return planBudget({
+    budget: p.budget_usd!,
+    nowSec: NOW,
+    usage: [hourly({ service: 'migrator', datadog_index: 'main' }, OCT1, NOW, 1_000)],
+    routes: [hourly({ routestate: 'pass' }, OCT1, NOW, 1_000)],
+    patterns: Array.from({ length: n }, (_, i) => ({ container: 'migrator', pattern: `m${i}`, name: `migration ${i} failed`, severity: 'ERROR', eventsPerHour: 20 * 15 })),
+    instances: { migrator: 1 },
+    nodesTotal: 1,
+    instanceBasis: 'policy',
+    exceptions: [],
+    targetServices: [],
+  });
+}
+
+test('floor gate: a service held to a total of 1,000 a window keeps the total, 50 sample and 500 keep-count lines past it', async () => {
+  // 250 new error statements: a limit of 4 lines each fills the total of 1,000; each statement's fifth
+  // sample line passes past it, 50 for the service, and its keep count, 500 for the service.
+  const plan = await floorPlan(250, 1_550);
+  assert.equal(plan.overBudget, true);
+  assert.equal(plan.floorExceedsBudget, false);
+  const row = plan.rows.find((r) => r.container === 'migrator')!;
+  assert.ok(Math.abs(row.totalPerHour / 15 - 1_000) < 1e-6, String(row.totalPerHour / 15));
+  assert.ok(row.total === 1_000 || row.total === 999, String(row.total));
+  assert.ok(Math.abs(row.allowancePerHour / 15 - (1_000 + 50 + 500)) < 1e-6, String(row.allowancePerHour / 15));
+  assert.ok(Math.abs(plan.statementLevelPerHour! / 15 - 4) < 1e-9, String(plan.statementLevelPerHour));
+});
+
+test('floor gate: with 200 error statements the sample fits a total of 1,000, so only the 500 keep-count lines pass past it', async () => {
+  // The run used to write the whole 1,500 as the total, which the keep count would then pass 500 past.
+  const plan = await floorPlan(200, 1_500);
+  const row = plan.rows.find((r) => r.container === 'migrator')!;
+  assert.ok(Math.abs(row.allowancePerHour / 15 - 1_500) < 1e-6, String(row.allowancePerHour / 15));
+  assert.ok(row.total <= 1_000, String(row.total));
+  // the limit leaves each statement's 5-line sample to the total and past it
+  assert.ok(plan.statementLevelPerHour! / 15 <= 5 + 1e-9, String(plan.statementLevelPerHour));
+});
+
+test('floor gate: when the sample and the error keeps alone exceed the budget, the run says so and writes a total of 1', async () => {
+  const plan = await floorPlan(200, 100);
+  assert.equal(plan.floorExceedsBudget, true);
+  // 200 samples of 5: 50 past a total of 1; 200 keep counts of 50: 500
+  assert.ok(Math.abs(plan.floorPerHour / 15 - 550) < 1e-6, String(plan.floorPerHour / 15));
+  const row = plan.rows.find((r) => r.container === 'migrator')!;
+  assert.equal(row.total, 1);
+  assert.ok(Math.abs(row.allowancePerHour / 15 - 550) < 1e-6);
+  assert.match(plan.lines.join('\n'), /The always-pass sample \(5 lines a statement a window on every node and 50 more for an error statement over its limit, at most 50 sample lines and 500 error lines a service past its total\) keeps about 198,000 events a day in Standard whatever the limits/);
+  assert.ok(plan.warnings.some((w) => /^The always-pass sample alone keeps about 8,250 events an hour in Standard, more than the 1,500 an hour the budget leaves/.test(w)), plan.warnings.join(' | '));
 });
 
 test('route guard gate: a route series grouped without the routestate tag writes nothing and is a read failure', async () => {

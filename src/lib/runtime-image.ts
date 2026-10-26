@@ -92,10 +92,13 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * restart; lookups reload only when their content changes (1.1.148), metric
  * outputs evict the least recently used down to maxCardinality (1.1.149), and
  * a service past its total passes at most rateReceiverBaselineMaxOverTotal
- * (50) more sample lines a window. Pinned by index digest.
+ * (50) more sample lines a window. 1.1.151: forwarder inputs group multi-line
+ * events by container and stream within a tag (E103), and the error keep-count
+ * lines a service passes past its total are bounded at
+ * rateReceiverKeepMaxOverTotal (500) a window (E90). Pinned by index digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.150@sha256:3e755bbc14780a27e643e09b76dfd7ec9616cab67833f70daf9420eff646d350';
+  'log10x/edge-10x:1.1.151@sha256:1a23cdff83e69b0e2069e648c310a2e77448d03953d34dcacdf604f2374239f0';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

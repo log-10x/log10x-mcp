@@ -11,6 +11,7 @@
 import type { DdPointSeries } from './datadog-metrics-read.js';
 import { DATADOG_FLEX_LIST_PRICING, DATADOG_INGEST_LIST_PRICING, fmtEventCount, fmtListRate } from './cost.js';
 import { FLEET_DEFAULT_HEADROOM, fleetDefaultLimit } from './fleet-default.js';
+import { BASELINE_MAX_OVER_TOTAL_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT } from './fleet-default-install.js';
 import { fmtAboutUsd } from './report/user-units.js';
 
 export const SPIKE_MULTIPLIER = 3;
@@ -367,8 +368,8 @@ function renderBudgetOverage(b: BudgetOverage): string[] {
       : `By the account's usage metrics, ${scope} went over the budget in ${b.monthsOver} of ${b.months.length} months, ` +
           `by about ${fmtEventCount(b.overEvents)} events, about ${fmtAboutUsd(b.overUsd)} at the rate above.`) +
       ' This is an estimate: Datadog\'s estimated usage differs from billable usage. A ceiling at the budget would have moved most of those lines ' +
-      'to Flex or S3, but it does not hold error lines up to K per statement per node per window, the first lines of each statement in every window, ' +
-      'or lines that do not pass the Receiver.',
+      `to Flex or S3, but it does not hold error lines up to K per statement per node per window, the first lines of each statement in every window ` +
+      `(past a service's total at most ${BASELINE_MAX_OVER_TOTAL_DEFAULT} sample lines and ${KEEP_MAX_OVER_TOTAL_DEFAULT} error lines a window on each node), or lines that do not pass the Receiver.`,
   );
   L.push('');
   L.push('| Month | Events | Cost | Budget | Over the budget | Crossed it (UTC) |');

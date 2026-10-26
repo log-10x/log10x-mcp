@@ -1,8 +1,8 @@
 /**
- * The plan solver counts what tier_down moves with the shipped Receiver
- * regulator's defaults. test/fixtures/engine/rate-config.yaml is a verbatim
- * copy of the config repo's pipelines/run/receive/rate/config.yaml; the pin
- * fails when the shipped file and the solver's constants part.
+ * The plan solver and the runs count what passes over a limit with the shipped
+ * Receiver regulator's defaults. test/fixtures/engine/rate-config.yaml is a
+ * verbatim copy of the config repo's pipelines/run/receive/rate/config.yaml;
+ * the pin fails when the shipped file and the MCP's constants part.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { keptOverCapLines, solvePlan, type SolverPattern } from '../src/lib/plan-solver.js';
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from '../src/lib/report/user-units.js';
-import { ERROR_CLASS_LEVELS } from '../src/lib/fleet-default-install.js';
+import { BASELINE_MAX_OVER_TOTAL_DEFAULT, ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT } from '../src/lib/fleet-default-install.js';
+import { servicePass, sharePastTotal } from '../src/lib/regulator-pass.js';
 
 const yaml = readFileSync(join(process.cwd(), 'test', 'fixtures', 'engine', 'rate-config.yaml'), 'utf8');
 
@@ -43,6 +44,9 @@ test('the solver\'s regulator constants are the shipped config\'s', () => {
   assert.deepEqual(Object.keys(keep).sort(), [...ERROR_CLASS_LEVELS].sort());
   for (const [level, k] of Object.entries(keep)) assert.equal(keptOverCapLines(level), k, level);
   for (const level of Object.keys(floors)) if (!(level in keep)) assert.equal(keptOverCapLines(level), 0, level);
+  // Past a service's total: at most this many sample and keep-count lines per window per node.
+  assert.equal(Number(scalar('baselineMaxOverTotal')), BASELINE_MAX_OVER_TOTAL_DEFAULT);
+  assert.equal(Number(scalar('keepMaxOverTotal')), KEEP_MAX_OVER_TOTAL_DEFAULT);
   // The always-pass sample and the window it counts in.
   assert.equal(Number(scalar('baselineCount')), ALWAYS_PASS_LINES);
   const d = /^\$=parseDuration\("(\d+)([smh])"\)$/.exec(scalar('resetIntervalMs'));
@@ -112,4 +116,59 @@ test('the plan states what stays over each cap and the node count it counted', (
     destination: 'cloudwatch', retrieverInstalled: false, targetPct: 99, unprotectPatterns: ['e'], nodesByContainer: { checkout: 3 },
   });
   assert.ok(!known.notes?.some((n) => /Node count unknown/.test(n)), known.notes?.join(' | '));
+});
+
+const sum = (a: number[]): number => a.reduce((x, y) => x + y, 0);
+
+test('a bound past the total is shared evenly, no ask given more than it asked; 0 removes it', () => {
+  assert.ok(Math.abs(sum(sharePastTotal(Array(1422).fill(50), 500)) - 500) < 1e-9);
+  assert.deepEqual(sharePastTotal([50, 50, 50], 500), [50, 50, 50]);
+  assert.deepEqual(sharePastTotal([2, 50, 50], 60), [2, 29, 29]);
+  assert.deepEqual(sharePastTotal([-3, 20], 500), [0, 20]);
+  assert.equal(sum(sharePastTotal(Array(1422).fill(50), 0)), 71_100);
+});
+
+/** One node, lines as the unit: n statements of `perWindow` lines a window, an hour of 15 windows. */
+const W15 = 3600 / REGULATOR_WINDOW_SECONDS;
+const burst = (n: number, perWindow: number, error: boolean) => Array.from({ length: n }, () => ({ rate: perWindow * W15, lines: perWindow * W15, error }));
+const opts = { windowsPerHour: W15, nodes: 1, keepCount: KEEP_COUNT_DEFAULT };
+
+test('the regulator gate burst: 1,422 new ERROR patterns of 7 lines under a total of 100 keep 100 + 50 + 500', () => {
+  const sts = burst(1422, 7, true);
+  // The per-statement limit that leaves the service a total of 100 lines a window.
+  const level = (100 / 1422) * W15;
+  const p = servicePass(sts, level, opts);
+  assert.ok(Math.abs(p.total / W15 - 100) < 1e-9, String(p.total / W15));
+  assert.ok(Math.abs(p.kept / W15 - 650) < 1e-9, String(p.kept / W15));
+  // At no limit at all, the floor past the total: 50 sample and 500 keep-count lines, where 5 + 2 a statement kept 9,954.
+  assert.ok(Math.abs(servicePass(sts, 0, opts).kept / W15 - 550) < 1e-9);
+  // Three busy error statements: 15 sample and 150 keep-count lines.
+  assert.ok(Math.abs(servicePass(burst(3, 1000, true), 0, opts).kept / W15 - 165) < 1e-9);
+  // Sample lines past their bound take the keep count next: 100 ERROR patterns of 5 lines keep 50 + 450.
+  assert.ok(Math.abs(servicePass(burst(100, 5, true), 0, opts).kept / W15 - 500) < 1e-9);
+  // INFO patterns: the sample alone, at most 50.
+  assert.ok(Math.abs(servicePass(burst(1422, 7, false), 0, opts).kept / W15 - 50) < 1e-9);
+  assert.ok(Math.abs(servicePass(burst(3, 1000, false), 0, opts).kept / W15 - 15) < 1e-9);
+});
+
+test('the plan writes caps and no total, so each error pattern keeps its 50 over the cap with no service bound', () => {
+  // 20 ERROR patterns in one container keep 1,000 lines a window a node over the cap, past the 500 a total would allow.
+  const ps: SolverPattern[] = [
+    { hash: 'w', name: 'retrying', severity: 'WARN', services: { burst: 1 * GB }, bytes: 1 * GB, avgEventBytes: 500 },
+    ...Array.from({ length: 20 }, (_, i): SolverPattern => ({
+      hash: `e${i}`, name: `migration ${i} failed`, severity: 'ERROR', services: { burst: 10 * GB }, bytes: 10 * GB, avgEventBytes: 500,
+    })),
+  ];
+  const pl = solvePlan(ps, {
+    destination: 'cloudwatch',
+    retrieverInstalled: false,
+    targetPct: 99,
+    unprotectPatterns: ps.filter((p) => p.severity === 'ERROR').map((p) => p.hash),
+    nodesByContainer: { burst: 2 },
+  });
+  const cap = pl.containerCaps.burst.capBytesMonthly;
+  for (let i = 0; i < 20; i++) {
+    const moved = pl.planned.find((r) => r.hash === `e${i}`)?.movedBytesMonthly;
+    assert.ok(moved !== undefined && Math.abs(moved - (10 * GB - cap - 50 * WINDOWS * 2 * 500)) < 1, `e${i}: ${moved}`);
+  }
 });

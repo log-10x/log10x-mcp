@@ -244,7 +244,7 @@ test('plan: tier_down in flight counts only while the tier_down write index sits
   const input = { hot, instances: { cart: 2, kafka: 1 }, nodesTotal: 3, exceptions: [], targetServices: [] };
   // on hot: tier_down in flight counts against the size
   const onHot = planHotTier({ ...input, reads: reads({ statements }) });
-  assert.equal(onHot.tierDownInFlightBytes, 499998719.9999999);
+  assert.equal(onHot.tierDownInFlightBytes, 499998720);
   assert.equal(onHot.allowancePerHour, 750000128);
   assert.equal(onHot.levelPerHour, 350000640.00000006);
   assert.equal(onHot.projectedBytes, 10000005120);
@@ -311,6 +311,44 @@ test('plan: the floor is part of the kept total, so a binding size still project
   assert.ok(plan.projectedBytes <= 10 * GB * 1.001, String(plan.projectedBytes));
   // each statement's sample: 5 lines x 15 windows x 300 bytes
   assert.ok(Math.abs(plan.floorPerHour - 3 * 5 * 15 * 300) < 1, String(plan.floorPerHour));
+});
+
+test('plan: past its total a service keeps at most 50 sample and 500 keep-count lines a window a node, in the floor', () => {
+  // burst: 1,422 ERROR statements of 7 lines a window (the regulator gate's burst); pay: 3 busy ERROR statements. One node, 300-byte lines.
+  const W = 15;
+  const st = (c: string, p: string, perWindow: number) => ({ container: c, pattern: p, name: p, severity: 'ERROR', route: 'pass', bytesPerHour: perWindow * W * 300, linesPerHour: perWindow * W });
+  const statements = [...Array.from({ length: 1422 }, (_, i) => st('burst', `m${i}`, 7)), ...['a', 'b', 'c'].map((p) => st('pay', p, 1000))];
+  // 10 MB of room over 10 hours, under the floor: every statement is held to it.
+  const plan = planHotTier({ hot, reads: reads({ hotStoreBytes: 10 * GB, pass: { storeBytes: 0.01 * GB, countedBytes: 0.01 * GB, indices: 1 }, tierDown: { storeBytes: 0, countedBytes: 0, indices: 0 }, tierDownOnHot: false, statements }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.floorExceedsSize, true);
+  const linesPerWindow = (c: string): number => plan.rows.find((r) => r.container === c)!.keptPerHour / W / 300;
+  // burst: 50 sample and 500 keep-count lines past its total, where 5 + 2 a statement kept all 9,954.
+  assert.ok(Math.abs(linesPerWindow('burst') - 550) < 1e-6, String(linesPerWindow('burst')));
+  // pay: its 15 sample lines and 50 keep-count lines each, 150.
+  assert.ok(Math.abs(linesPerWindow('pay') - (15 + 150)) < 1e-6, String(linesPerWindow('pay')));
+  assert.ok(Math.abs(plan.floorPerHour / (W * 300) - (550 + 165)) < 1e-6, String(plan.floorPerHour));
+  assert.equal(plan.rows.find((r) => r.container === 'burst')!.total, 1);
+  assert.match(plan.lines.join('\n'), /at most 50 sample lines and 500 error lines a service past its total/);
+});
+
+test('plan: the regulator gate burst under a total of 100 keeps 100 + 50 + 500 lines a window', () => {
+  // 1,422 new ERROR patterns of 7 lines a window on one node, 300-byte lines; the size leaves room for 650 lines a window.
+  const W = 15;
+  const statements = Array.from({ length: 1422 }, (_, i) => ({ container: 'burst', pattern: `m${i}`, name: `m${i}`, severity: 'ERROR', route: 'pass', bytesPerHour: 7 * W * 300, linesPerHour: 7 * W }));
+  const room = 650 * W * 300 * 10; // R = 10 hours
+  const plan = planHotTier({
+    hot,
+    reads: reads({ hotStoreBytes: 10 * GB - room + 0.01 * GB, pass: { storeBytes: 0.01 * GB, countedBytes: 0.01 * GB, indices: 1 }, tierDown: { storeBytes: 0, countedBytes: 0, indices: 0 }, tierDownOnHot: false, statements }),
+    instances: {}, nodesTotal: 1, exceptions: [], targetServices: [],
+  });
+  assert.equal(plan.floorExceedsSize, false);
+  assert.ok(Math.abs(plan.allowancePerHour - 650 * W * 300) < 1e-3, String(plan.allowancePerHour));
+  const burst = plan.rows.find((r) => r.container === 'burst')!;
+  // the total written: every statement's bytes under the limit, 100 lines
+  assert.ok(Math.abs((1422 * plan.levelPerHour!) / W / 300 - 100) < 1e-6, String(plan.levelPerHour));
+  assert.ok(burst.total === 30000 || burst.total === 29999, String(burst.total));
+  // kept: the total, 50 sample lines and 500 keep-count lines past it
+  assert.ok(Math.abs(burst.keptPerHour / W / 300 - 650) < 1e-6, String(burst.keptPerHour / W / 300));
 });
 
 const seams = tick as unknown as { _setBudgetDeps?: (d: unknown) => void; _resetBudgetDeps?: () => void };
