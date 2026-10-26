@@ -70,7 +70,7 @@
     "hono": "^4.13.11",
     "protobufjs": "^8.0.3",
     "snappyjs": "^0.7.0",
-    "zod": "^3.24.4"
+    "zod": "^4.6.7"
   },
   "peerDependencies": {
     "@azure/app-configuration": "^1.11.0",
