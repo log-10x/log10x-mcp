@@ -1829,6 +1829,10 @@ function clickhouseOtelCollector(p: ClickhouseOffloadParams): ClickhouseOffloadR
 #   - the run's measurement tap (the \`file/wire\` exporter and the \`logs/wire\`
 #     pipeline) is dropped. It counted what the receiver returned and is not
 #     part of the design.
+#   - \`otlp/engine\` carries the settings the custody run gave the exporter
+#     into the receiver (benchmarks/clickstack-e2e-gaps/gap4_durable_handoff.sh,
+#     contrib 0.160.0): \`timeout\`, \`retry_on_failure\` and the queue's
+#     \`enabled\` and \`block_on_overflow\`.
 #   - the comments are expanded here. The ones the harness file carries are
 #     kept word for word.
 #
@@ -1908,10 +1912,23 @@ exporters:
     endpoint: ${engine}
     tls:
       insecure: true
-    # One sender keeps records in the order they were read; the engine
-    # groups multi-line events from consecutive records.
+    # The receiver answers an export once its lines are written back and
+    # acknowledged, which can take its group flush timeout (5 s) plus its
+    # output flush interval (1 s). Below that, an export still being
+    # processed times out and is sent again.
+    timeout: 30s
+    # Retry for as long as the receiver is unreachable or refuses a request
+    # (it refuses with UNAVAILABLE when its queue is full).
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
     sending_queue:
+      enabled: true
+      # One sender keeps records in the order they were read; the engine
+      # groups multi-line events from consecutive records.
       num_consumers: 1
+      # A full queue backs the file receiver up instead of dropping a batch.
+      block_on_overflow: true
   otlp/clickstack:
     endpoint: ${clickstack}
     tls:

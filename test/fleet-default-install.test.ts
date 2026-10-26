@@ -61,7 +61,7 @@ test('the engine gate: the first release that reads rateReceiverDefaultAction is
   assert.equal(manifestEngineVersion(), imageEngineVersion(EDGE_MANIFEST_IMAGE));
   // The install manifest pins a release that reads the fleet default (1.1.141 or later), by digest, so the gate opens.
   assert.equal(imageEngineVersion('log10x/edge-10x:1.1.141@sha256:45157d0b'), '1.1.141');
-  assert.equal(EDGE_MANIFEST_IMAGE, 'log10x/edge-10x:1.1.147@sha256:a043ccd828742c4eccee09abb654ce6a7357b6123f73300ed04f8605e874b8c4');
+  assert.equal(EDGE_MANIFEST_IMAGE, 'log10x/edge-10x:1.1.150@sha256:3e755bbc14780a27e643e09b76dfd7ec9616cab67833f70daf9420eff646d350');
   assert.equal(engineReadsFleetDefault(manifestEngineVersion()), true);
 });
 
@@ -332,7 +332,7 @@ test('advise_install: with the limit given, the pinned engine writes the fleet v
   assert.equal(data.mode, 'plan');
   const md = String(data.markdown);
   const pinned = manifestEngineVersion()!;
-  assert.equal(pinned, '1.1.147');
+  assert.equal(pinned, '1.1.150');
   if (engineReadsFleetDefault(pinned)) {
     assert.ok(md.includes('- "rateReceiverAbsoluteCap"\n      - "6000"'));
     assert.ok(md.includes('- "rateReceiverDefaultAction"\n      - "tier_down"'));

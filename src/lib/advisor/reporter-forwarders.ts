@@ -1940,10 +1940,23 @@ config:
       endpoint: 127.0.0.1:4317
       tls:
         insecure: true
-      # One sender keeps records in the order they were read; the engine
-      # groups multi-line events from consecutive records.
+      # Log10x answers an export once its lines are written back and
+      # acknowledged, which can take its group flush timeout (5 s) plus its
+      # output flush interval (1 s). Below that, an export still being
+      # processed times out and is sent again.
+      timeout: 30s
+      # Retry for as long as Log10x is unreachable or refuses a request (it
+      # refuses with UNAVAILABLE when its queue is full).
+      retry_on_failure:
+        enabled: true
+        max_elapsed_time: 0
       sending_queue:
+        enabled: true
+        # One sender keeps records in the order they were read; the engine
+        # groups multi-line events from consecutive records.
         num_consumers: 1
+        # A full queue backs the receivers up instead of dropping a batch.
+        block_on_overflow: true
 ${exporterBlock ? `${indent(exporterBlock, 4)}\n` : ''}
   service:
     pipelines:
