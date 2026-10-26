@@ -95,10 +95,13 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * (50) more sample lines a window. 1.1.151: forwarder inputs group multi-line
  * events by container and stream within a tag (E103), and the error keep-count
  * lines a service passes past its total are bounded at
- * rateReceiverKeepMaxOverTotal (500) a window (E90). Pinned by index digest.
+ * rateReceiverKeepMaxOverTotal (500) a window (E90). 1.1.152: regulator
+ * windows start on epoch multiples of their interval on every node, so
+ * per-window counts line up with the clock, and a counter is reset only at
+ * multiples of its own interval (E91). Pinned by index digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.151@sha256:1a23cdff83e69b0e2069e648c310a2e77448d03953d34dcacdf604f2374239f0';
+  'log10x/edge-10x:1.1.152@sha256:ab3345e4c8a64595f4efaa7f32839dc73abe8fdd539bbabed24ea8ef6618a4dc';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
