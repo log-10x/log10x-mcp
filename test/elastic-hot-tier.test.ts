@@ -313,6 +313,23 @@ test('plan: the floor is part of the kept total, so a binding size still project
   assert.ok(Math.abs(plan.floorPerHour - 3 * 5 * 15 * 300) < 1, String(plan.floorPerHour));
 });
 
+test('plan: an error statement keeps 50 over its limit, at most 500 a service past its total, in the floor', () => {
+  // burst: 1,422 ERROR statements of 7 lines a window (the regulator gate's burst); pay: 3 busy ERROR statements. One node, 300-byte lines.
+  const W = 15;
+  const st = (c: string, p: string, perWindow: number) => ({ container: c, pattern: p, name: p, severity: 'ERROR', route: 'pass', bytesPerHour: perWindow * W * 300, linesPerHour: perWindow * W });
+  const statements = [...Array.from({ length: 1422 }, (_, i) => st('burst', `m${i}`, 7)), ...['a', 'b', 'c'].map((p) => st('pay', p, 1000))];
+  // Almost nothing fits, so every statement is held to its floor.
+  const plan = planHotTier({ hot, reads: reads({ hotStoreBytes: 10.2 * GB, pass: { storeBytes: 0.4 * GB, countedBytes: 0.4 * GB, indices: 1 }, tierDown: { storeBytes: 0, countedBytes: 0, indices: 0 }, statements }), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.floorExceedsSize, true);
+  const linesPerWindow = (c: string): number => plan.rows.find((r) => r.container === c)!.keptPerHour / W / 300;
+  // burst: every statement's 5-line sample and 500 keep-count lines, where 50 a statement kept all 9,954.
+  assert.ok(Math.abs(linesPerWindow('burst') - (1422 * 5 + 500)) < 1e-6, String(linesPerWindow('burst')));
+  // pay: 50 each, 150.
+  assert.ok(Math.abs(linesPerWindow('pay') - (3 * 5 + 150)) < 1e-6, String(linesPerWindow('pay')));
+  assert.ok(Math.abs(plan.floorPerHour / (W * 300) - (1422 * 5 + 500 + 3 * 55)) < 1e-6, String(plan.floorPerHour));
+  assert.match(plan.lines.join('\n'), /50 more for an error statement over its limit, at most 500 a service past its total/);
+});
+
 const seams = tick as unknown as { _setBudgetDeps?: (d: unknown) => void; _resetBudgetDeps?: () => void };
 afterEach(() => seams._resetBudgetDeps?.());
 

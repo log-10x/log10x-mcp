@@ -228,6 +228,27 @@ test('plan: when the floor alone exceeds the rate, the run says so and holds not
   assert.ok(plan.projectedPerHour >= plan.floorPerHour);
 });
 
+test('plan: an error statement keeps 50 over its limit, at most 500 a service past its total, in the floor', () => {
+  const rows = parsePolicyYaml(policyText('  rows_per_hour: 100')).rows!;
+  // burst: 1,422 ERROR statements of 7 lines a window (the regulator gate's burst); pay: 3 busy ERROR statements. One node.
+  const statements = [
+    ...Array.from({ length: 1422 }, (_, i) => st('burst', `m${i}`, 7 * WINDOWS, 'ERROR')),
+    ...['a', 'b', 'c'].map((h) => st('pay', h, 1000 * WINDOWS, 'ERROR')),
+  ];
+  const lines = statements.reduce((a, s) => a + s.linesPerHour, 0);
+  const plan = planRows({ rows, reads: reads(lines, lines, statements), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.floorExceedsRate, true);
+  const perWindow = (c: string): number => plan.rows.find((r) => r.container === c)!.keptPerHour / WINDOWS;
+  // burst: every statement's 5-line sample and 500 keep-count lines, where 50 a statement kept all 9,954.
+  assert.ok(Math.abs(perWindow('burst') - (1422 * 5 + 500)) < 1e-6, String(perWindow('burst')));
+  // pay: 50 each, 150.
+  assert.ok(Math.abs(perWindow('pay') - (3 * 5 + 150)) < 1e-6, String(perWindow('pay')));
+  assert.ok(Math.abs(plan.floorPerHour / WINDOWS - (1422 * 5 + 500 + 3 * 55)) < 1e-6, String(plan.floorPerHour));
+  const report = renderRowsReport(plan, rows, NOW);
+  assert.match(report, /50 more for an error statement over its limit, at most 500 a service past its total/);
+  assert.match(report, /Error lines pass 50 over a limit per statement per node per window, at most 500 per service past its total\./);
+});
+
 test('plan: auto takes the meter at the first run and the recorded rate after it', () => {
   const rows = parsePolicyYaml(policyText('  rows_per_hour: auto')).rows!;
   const rd = reads(7777, 7000, [st('kafka', 'k1', 7000)]);

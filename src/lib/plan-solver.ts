@@ -55,6 +55,7 @@ import { ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT } from './fleet-default-install.
  * Lines of a statement over its cap that the shipped Receiver still passes per
  * window per node: the keep count for an error-class level, none for the rest
  * (config/pipelines/run/receive/rate/config.yaml keepCounts and severityFloors).
+ * The plan writes caps and no service total, so keepMaxOverTotal never binds.
  */
 export function keptOverCapLines(severity?: string | null): number {
   return (ERROR_CLASS_LEVELS as readonly string[]).includes((severity ?? '').toUpperCase()) ? KEEP_COUNT_DEFAULT : 0;

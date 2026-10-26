@@ -1,8 +1,8 @@
 /**
- * The plan solver counts what tier_down moves with the shipped Receiver
- * regulator's defaults. test/fixtures/engine/rate-config.yaml is a verbatim
- * copy of the config repo's pipelines/run/receive/rate/config.yaml; the pin
- * fails when the shipped file and the solver's constants part.
+ * The plan solver and the runs count what passes over a limit with the shipped
+ * Receiver regulator's defaults. test/fixtures/engine/rate-config.yaml is a
+ * verbatim copy of the config repo's pipelines/run/receive/rate/config.yaml;
+ * the pin fails when the shipped file and the MCP's constants part.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { keptOverCapLines, solvePlan, type SolverPattern } from '../src/lib/plan-solver.js';
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from '../src/lib/report/user-units.js';
-import { ERROR_CLASS_LEVELS } from '../src/lib/fleet-default-install.js';
+import { ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT, keepLinesPerStatement } from '../src/lib/fleet-default-install.js';
 
 const yaml = readFileSync(join(process.cwd(), 'test', 'fixtures', 'engine', 'rate-config.yaml'), 'utf8');
 
@@ -43,6 +43,8 @@ test('the solver\'s regulator constants are the shipped config\'s', () => {
   assert.deepEqual(Object.keys(keep).sort(), [...ERROR_CLASS_LEVELS].sort());
   for (const [level, k] of Object.entries(keep)) assert.equal(keptOverCapLines(level), k, level);
   for (const level of Object.keys(floors)) if (!(level in keep)) assert.equal(keptOverCapLines(level), 0, level);
+  // Past a service's total: at most this many keep-count lines per window per node.
+  assert.equal(Number(scalar('keepMaxOverTotal')), KEEP_MAX_OVER_TOTAL_DEFAULT);
   // The always-pass sample and the window it counts in.
   assert.equal(Number(scalar('baselineCount')), ALWAYS_PASS_LINES);
   const d = /^\$=parseDuration\("(\d+)([smh])"\)$/.exec(scalar('resetIntervalMs'));
@@ -112,4 +114,42 @@ test('the plan states what stays over each cap and the node count it counted', (
     destination: 'cloudwatch', retrieverInstalled: false, targetPct: 99, unprotectPatterns: ['e'], nodesByContainer: { checkout: 3 },
   });
   assert.ok(!known.notes?.some((n) => /Node count unknown/.test(n)), known.notes?.join(' | '));
+});
+
+const sum = (a: number[]): number => a.reduce((x, y) => x + y, 0);
+
+test('past its total a service passes at most 500 keep-count lines a window a node, shared by its error statements', () => {
+  // 1,422 busy error statements: 500 for the service, not 71,100.
+  assert.ok(Math.abs(sum(keepLinesPerStatement(Array(1422).fill(1000), KEEP_COUNT_DEFAULT)) - 500) < 1e-9);
+  // 1,422 statements of 7 lines a window (the regulator gate's burst): 2 asked each past the sample, 500 for the service.
+  assert.ok(Math.abs(sum(keepLinesPerStatement(Array(1422).fill(7 - ALWAYS_PASS_LINES), KEEP_COUNT_DEFAULT)) - 500) < 1e-9);
+  // Three: 150, each its full count.
+  assert.deepEqual(keepLinesPerStatement([1000, 1000, 1000], KEEP_COUNT_DEFAULT), [50, 50, 50]);
+  // No statement gets more than it asks; the rest is shared.
+  assert.deepEqual(keepLinesPerStatement([2, 1000, 1000], KEEP_COUNT_DEFAULT, 60), [2, 29, 29]);
+  assert.deepEqual(keepLinesPerStatement([-3, 20], KEEP_COUNT_DEFAULT), [0, 20]);
+  // 0 removes the bound.
+  assert.equal(sum(keepLinesPerStatement(Array(1422).fill(1000), KEEP_COUNT_DEFAULT, 0)), 71_100);
+});
+
+test('the plan writes caps and no total, so each error pattern keeps its 50 over the cap with no service bound', () => {
+  // 20 ERROR patterns in one container keep 1,000 lines a window a node over the cap, past the 500 a total would allow.
+  const ps: SolverPattern[] = [
+    { hash: 'w', name: 'retrying', severity: 'WARN', services: { burst: 1 * GB }, bytes: 1 * GB, avgEventBytes: 500 },
+    ...Array.from({ length: 20 }, (_, i): SolverPattern => ({
+      hash: `e${i}`, name: `migration ${i} failed`, severity: 'ERROR', services: { burst: 10 * GB }, bytes: 10 * GB, avgEventBytes: 500,
+    })),
+  ];
+  const pl = solvePlan(ps, {
+    destination: 'cloudwatch',
+    retrieverInstalled: false,
+    targetPct: 99,
+    unprotectPatterns: ps.filter((p) => p.severity === 'ERROR').map((p) => p.hash),
+    nodesByContainer: { burst: 2 },
+  });
+  const cap = pl.containerCaps.burst.capBytesMonthly;
+  for (let i = 0; i < 20; i++) {
+    const moved = pl.planned.find((r) => r.hash === `e${i}`)?.movedBytesMonthly;
+    assert.ok(moved !== undefined && Math.abs(moved - (10 * GB - cap - 50 * WINDOWS * 2 * 500)) < 1, `e${i}: ${moved}`);
+  }
 });

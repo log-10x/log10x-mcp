@@ -26,6 +26,7 @@
 
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from './report/user-units.js';
 import { FLEET_DEFAULT_HEADROOM } from './fleet-default.js';
+import { KEEP_MAX_OVER_TOTAL_DEFAULT, keepLinesPerStatement } from './fleet-default-install.js';
 import { perWindowPerNode, type BudgetAction } from './budget-tick.js';
 import type { HotTierBudget } from './policy-loader.js';
 
@@ -389,8 +390,9 @@ export interface HotTierPlanInput {
 /**
  * The level L at which the kept total, sum(max(min(rate, L), floor)), equals the
  * allowance: the regulator passes each statement's always-pass sample (and an
- * error statement's keep count) whatever its limit, so no statement keeps less
- * than its floor. Undefined when the floors alone exceed the allowance.
+ * error statement's share of its service's keep count) whatever its limit, so
+ * no statement keeps less than its floor. Undefined when the floors alone
+ * exceed the allowance.
  */
 export function waterLevelWithFloor(items: Array<{ rate: number; floor: number }>, allowance: number): number | undefined {
   const kept = (L: number): number => items.reduce((a, x) => a + Math.max(Math.min(x.rate, L), Math.min(x.floor, x.rate)), 0);
@@ -446,8 +448,9 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   const L = reads.tierDownHotHours;
 
   // statements by container, all routes summed: the Receiver's intake, and the floor each keeps
-  // whatever its limit: the always-pass sample per window per node, plus the keep count for an
-  // error statement, in bytes at the statement's own line size.
+  // whatever its limit: the always-pass sample per window per node, plus an error statement's
+  // keep count, at most KEEP_MAX_OVER_TOTAL_DEFAULT lines a service past the total this run
+  // writes, in bytes at the statement's own line size.
   const windowsPerHour = HOUR / REGULATOR_WINDOW_SECONDS;
   const agg = new Map<string, Map<string, { rate: number; lines: number; error: boolean }>>();
   for (const s of input.reads.statements) {
@@ -460,10 +463,17 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
     m.set(s.pattern, x);
     agg.set(s.container, m);
   }
-  const floorOf = (c: string, x: { rate: number; lines: number; error: boolean }): number => {
+  const nodesOf = (c: string): number => Math.max(1, input.instances[c] ?? 1);
+  const keepOf = new Map<string, Map<string, number>>();
+  for (const [c, m] of agg) {
+    const errors = [...m].filter(([, x]) => x.error);
+    const kept = keepLinesPerStatement(errors.map(([, x]) => x.lines / windowsPerHour / nodesOf(c) - ALWAYS_PASS_LINES), hot.keep_count);
+    keepOf.set(c, new Map(errors.map(([p], i) => [p, kept[i]])));
+  }
+  const floorOf = (c: string, p: string, x: { rate: number; lines: number }): number => {
     const lineBytes = x.lines > 0 ? x.rate / x.lines : 0;
-    const perWindow = ALWAYS_PASS_LINES + (x.error ? hot.keep_count : 0);
-    return Math.min(x.rate, perWindow * windowsPerHour * Math.max(1, input.instances[c] ?? 1) * lineBytes);
+    const perWindow = ALWAYS_PASS_LINES + (keepOf.get(c)?.get(p) ?? 0);
+    return Math.min(x.rate, perWindow * windowsPerHour * nodesOf(c) * lineBytes);
   };
   const byContainer = new Map<string, Map<string, number>>();
   for (const [c, m] of agg) byContainer.set(c, new Map([...m].map(([p, x]) => [p, x.rate])));
@@ -473,8 +483,8 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
   let exemptPerHour = 0;
   const budgeted: Array<{ c: string; rate: number; floor: number }> = [];
   for (const [c, m] of agg) {
-    for (const x of m.values()) {
-      if (inScope(c)) budgeted.push({ c, rate: x.rate, floor: floorOf(c, x) });
+    for (const [p, x] of m) {
+      if (inScope(c)) budgeted.push({ c, rate: x.rate, floor: floorOf(c, p, x) });
       else exemptPerHour += x.rate;
     }
   }
@@ -570,14 +580,14 @@ export function planHotTier(input: HotTierPlanInput): HotTierPlan {
       : `The Receiver's statements send ${fmtGB(budgetedPerHour * 24)} a day, under the ${fmtGB(allowance * 24)} a day that fits the size; every statement keeps its lines, with room to grow ${headroom.toFixed(1)} times.`,
   );
   lines.push(
-    `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit) keeps about ${fmtGB(floorPerHour * 24)} a day on hot whatever the limits; the size holds down to that floor.`,
+    `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} a service past its total) keeps about ${fmtGB(floorPerHour * 24)} a day on hot whatever the limits; the size holds down to that floor.`,
   );
   if (overSize) {
     lines.push(`Hot is above the size now; the allowance is held at ${Math.round((S / H) * 100)}% until it drains, which takes up to ${Math.round(R)} hours as the indices on hot age out.`);
   }
   if (infeasible) {
     warnings.push(
-      `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit) alone keeps about ${fmtGB(floorPerHour * 24)} a day on hot, more than the ${fmtGB(Math.max(0, allowance - exemptPerHour) * 24)} a day that fits, so hot settles above ${fmtGB(S)} at about ${fmtGB(projected)}. Raise the size, move the noisiest services to offload, or lower the sample.`,
+      `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${hot.keep_count} more for an error statement over its limit, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} a service past its total) alone keeps about ${fmtGB(floorPerHour * 24)} a day on hot, more than the ${fmtGB(Math.max(0, allowance - exemptPerHour) * 24)} a day that fits, so hot settles above ${fmtGB(S)} at about ${fmtGB(projected)}. Raise the size, move the noisiest services to offload, or lower the sample.`,
     );
   }
   if (outside + inFlight >= S) {
@@ -626,7 +636,7 @@ export function renderHotTierReport(plan: HotTierPlan, hot: HotTierBudget, nowSe
     ),
     `| \`*\` (any other service) | ${elasticDestination(hot.default_action)} | ${plan.star.instances} | | ${fmtGB(plan.star.keptPerHour * 24)} | ${plan.star.cap} | ${plan.star.total} |`,
     '',
-    `Limits and totals are bytes per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node, counted the way the Receiver counts them (utf8Size). Error lines pass ${hot.keep_count} over a limit per statement per node per window.`,
+    `Limits and totals are bytes per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node, counted the way the Receiver counts them (utf8Size). Error lines pass ${hot.keep_count} over a limit per statement per node per window, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} per service past its total.`,
     '',
   ].join('\n');
 }
