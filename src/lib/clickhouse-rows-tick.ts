@@ -13,13 +13,15 @@
  * which is why the rates come from the Receiver and not from the table.
  *
  * The plan works in events with no residency:
- * allowance A = R - O - (nothing in flight), floors subtracted through
- * waterLevelWithFloor, so the criterion is the meter at or under R.
+ * allowance A = R - O - (nothing in flight), each service's floor past its
+ * total counted through regulator-pass.ts, so the criterion is the meter at or
+ * under R.
  */
 
-import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from './report/user-units.js';
+import { REGULATOR_WINDOW_SECONDS } from './report/user-units.js';
 import { FLEET_DEFAULT_HEADROOM } from './fleet-default.js';
-import { KEEP_MAX_OVER_TOTAL_DEFAULT, keepLinesPerStatement } from './fleet-default-install.js';
+import { BASELINE_MAX_OVER_TOTAL_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT } from './fleet-default-install.js';
+import { levelFor, pastTotalWords, servicePass, type PassStatement } from './regulator-pass.js';
 import { perWindowPerNode, type BudgetAction } from './budget-tick.js';
 import type { RowsBudget } from './policy-loader.js';
 import type { CustomerMetricsBackend } from './customer-metrics.js';
@@ -249,26 +251,6 @@ export interface RowsPlanInput {
   recordedRate?: number;
 }
 
-/**
- * The level L at which the kept total, sum(max(min(rate, L), floor)), equals the
- * allowance: the regulator passes each statement's always-pass sample (and an
- * error statement's share of its service's keep count) whatever its limit, so
- * no statement keeps less than its floor. Undefined when the floors alone
- * exceed the allowance.
- */
-export function waterLevelWithFloor(items: Array<{ rate: number; floor: number }>, allowance: number): number | undefined {
-  const kept = (L: number): number => items.reduce((a, x) => a + Math.max(Math.min(x.rate, L), Math.min(x.floor, x.rate)), 0);
-  if (kept(0) > allowance) return undefined;
-  let lo = 0;
-  let hi = Math.max(0, ...items.map((x) => x.rate));
-  for (let i = 0; i < 80; i++) {
-    const mid = (lo + hi) / 2;
-    if (kept(mid) > allowance) hi = mid;
-    else lo = mid;
-  }
-  return lo;
-}
-
 function median(values: number[]): number | undefined {
   if (values.length === 0) return undefined;
   const v = [...values].sort((a, b) => a - b);
@@ -305,10 +287,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
   const receiverRows = Math.max(0, W - O);
   const counterScale = reads.passLinesPerHour > 0 && receiverRows > 0 ? Math.max(1, receiverRows / reads.passLinesPerHour) : 1;
 
-  // statements by container, all routes summed: the Receiver's intake, and the floor each keeps
-  // whatever its limit: the always-pass sample per window per node, plus an error statement's
-  // keep count, at most KEEP_MAX_OVER_TOTAL_DEFAULT lines a service past the total this run
-  // writes, in lines.
+  // statements by container, all routes summed: the Receiver's intake, in lines.
   const windowsPerHour = HOUR / REGULATOR_WINDOW_SECONDS;
   const agg = new Map<string, Map<string, { rate: number; error: boolean }>>();
   for (const s of reads.statements) {
@@ -321,31 +300,31 @@ export function planRows(input: RowsPlanInput): RowsPlan {
     m.set(key, x);
     agg.set(s.container, m);
   }
-  const nodesOf = (c: string): number => Math.max(1, input.instances[c] ?? 1);
-  const keepOf = new Map<string, Map<string, number>>();
-  for (const [c, m] of agg) {
-    const errors = [...m].filter(([, x]) => x.error);
-    const kept = keepLinesPerStatement(errors.map(([, x]) => x.rate / windowsPerHour / nodesOf(c) - ALWAYS_PASS_LINES), rows.keep_count);
-    keepOf.set(c, new Map(errors.map(([k], i) => [k, kept[i]])));
-  }
-  const floorOf = (c: string, k: string, x: { rate: number }): number => {
-    const perWindow = ALWAYS_PASS_LINES + (keepOf.get(c)?.get(k) ?? 0);
-    return Math.min(x.rate, perWindow * windowsPerHour * nodesOf(c));
-  };
   const exempt = new Set(input.exceptions);
   const inScope = (c: string): boolean => !exempt.has(c) && (input.targetServices.length === 0 || input.targetServices.includes(c));
   const actionOf = (c: string): BudgetAction => rows.service_actions[c] ?? rows.default_action;
   let exemptPerHour = 0;
-  const budgeted: Array<{ c: string; rate: number; floor: number }> = [];
+  const held = new Map<string, { nodes: number; rate: number; sts: PassStatement[] }>();
+  let maxRate = 0;
   for (const [c, m] of agg) {
-    for (const [k, x] of m) {
-      if (inScope(c)) budgeted.push({ c, rate: x.rate, floor: floorOf(c, k, x) });
-      else exemptPerHour += x.rate;
+    const sts = [...m.values()].map((x) => ({ rate: x.rate, lines: x.rate, error: x.error }));
+    const rate = sts.reduce((a, x) => a + x.rate, 0);
+    if (!inScope(c)) {
+      exemptPerHour += rate;
+      continue;
     }
+    held.set(c, { nodes: Math.max(1, input.instances[c] ?? 1), rate, sts });
+    for (const x of sts) maxRate = Math.max(maxRate, x.rate);
   }
-  const budgetedPerHour = budgeted.reduce((a, x) => a + x.rate, 0);
-  const floorPerHour = budgeted.reduce((a, x) => a + x.floor, 0);
-  const keptOf = (x: { rate: number; floor: number }, L: number | undefined): number => (L === undefined ? x.rate : Math.max(Math.min(x.rate, L), x.floor));
+  // A held service at level L: the total this run writes and what it keeps, the total plus
+  // the sample and keep-count lines the regulator passes past it (regulator-pass.ts).
+  const passOf = (c: string, L: number | undefined): { total: number; kept: number } => {
+    const g = held.get(c)!;
+    return L === undefined ? { total: g.rate, kept: g.rate } : servicePass(g.sts, L, { windowsPerHour, nodes: g.nodes, keepCount: rows.keep_count });
+  };
+  const keptAt = (L: number | undefined): number => [...held.keys()].reduce((a, c) => a + passOf(c, L).kept, 0);
+  const budgetedPerHour = [...held.values()].reduce((a, g) => a + g.rate, 0);
+  const floorPerHour = keptAt(0);
 
   // A = R - O, less the exempt services' lines; no residency and nothing in flight on this route.
   const allowance = Math.max(0, R - O);
@@ -353,7 +332,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
   let level: number | undefined;
   let infeasible = false;
   if (budgetedPerHour > forBudgeted) {
-    const L = waterLevelWithFloor(budgeted, forBudgeted);
+    const L = levelFor(keptAt, forBudgeted, maxRate);
     if (L === undefined) {
       level = 0;
       infeasible = true;
@@ -361,8 +340,8 @@ export function planRows(input: RowsPlanInput): RowsPlan {
       level = L;
     }
   }
-  const moved = budgeted.reduce((a, x) => a + (x.rate - keptOf(x, level)), 0);
-  const keptBudgeted = budgeted.reduce((a, x) => a + keptOf(x, level), 0);
+  const keptBudgeted = keptAt(level);
+  const moved = budgetedPerHour - keptBudgeted;
   const headroom = budgetedPerHour > 0 ? Math.min(FLEET_DEFAULT_HEADROOM, Math.max(1, forBudgeted / budgetedPerHour)) : FLEET_DEFAULT_HEADROOM;
 
   const byContainer = new Map<string, number[]>();
@@ -370,6 +349,7 @@ export function planRows(input: RowsPlanInput): RowsPlan {
   const out: RowsRow[] = [];
   const knownCaps: number[] = [];
   const knownTotals: number[] = [];
+  const knownKept: number[] = [];
   const knownNodes: number[] = [];
   for (const c of [...byContainer.keys()].sort()) {
     const ps = byContainer.get(c)!;
@@ -379,13 +359,13 @@ export function planRows(input: RowsPlanInput): RowsPlan {
       out.push({ container: c, action: 'pass', instances: n, linesPerHour: rate, keptPerHour: rate, cap: 0, total: perWindowPerNode(rate * FLEET_DEFAULT_HEADROOM, n) });
       continue;
     }
-    const items = budgeted.filter((x) => x.c === c);
     const capPerHour = level !== undefined ? level : Math.max(...ps) * headroom;
-    const keptPerHour = level !== undefined ? items.reduce((a, x) => a + keptOf(x, level), 0) : rate * headroom;
+    const pass = level !== undefined ? passOf(c, level) : { total: rate * headroom, kept: rate * headroom };
     knownCaps.push(capPerHour);
-    knownTotals.push(keptPerHour);
+    knownTotals.push(pass.total);
+    knownKept.push(pass.kept);
     if (input.instances[c] !== undefined) knownNodes.push(n);
-    out.push({ container: c, action: actionOf(c), instances: n, linesPerHour: rate, keptPerHour, cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(keptPerHour, n) });
+    out.push({ container: c, action: actionOf(c), instances: n, linesPerHour: rate, keptPerHour: pass.kept, cap: perWindowPerNode(capPerHour, n), total: perWindowPerNode(pass.total, n) });
   }
   for (const c of input.exceptions) {
     if (!byContainer.has(c)) out.push({ container: c, action: 'pass', instances: Math.max(1, input.instances[c] ?? 1), linesPerHour: 0, keptPerHour: 0, cap: 0, total: 1 });
@@ -395,12 +375,11 @@ export function planRows(input: RowsPlanInput): RowsPlan {
   // A service the run has not seen: the level the others get, and the median total.
   const leftover = Math.max(0, forBudgeted - keptBudgeted);
   const mCap = median(knownCaps);
-  const mTotal = median(knownTotals);
-  const starCap = mCap === undefined ? leftover : level !== undefined ? level : Math.max(leftover, mCap);
-  const starTotal = mTotal === undefined ? leftover : level !== undefined ? mTotal : Math.max(leftover, mTotal);
+  const starOf = (m: number | undefined): number => (m === undefined ? leftover : level !== undefined ? m : Math.max(leftover, m));
+  const starCap = starOf(mCap);
   const mNodes = median(knownNodes);
   const starNodes = mNodes !== undefined ? Math.max(1, Math.round(mNodes)) : Math.max(1, input.nodesTotal);
-  const star = { action: rows.default_action as BudgetAction, instances: starNodes, cap: perWindowPerNode(starCap, starNodes), total: perWindowPerNode(starTotal, starNodes), keptPerHour: starTotal };
+  const star = { action: rows.default_action as BudgetAction, instances: starNodes, cap: perWindowPerNode(starCap, starNodes), total: perWindowPerNode(starOf(median(knownTotals)), starNodes), keptPerHour: starOf(median(knownKept)) };
 
   const projected = O + keptBudgeted + exemptPerHour;
   const overRate = W > R;
@@ -413,16 +392,16 @@ export function planRows(input: RowsPlanInput): RowsPlan {
       (level !== undefined
         ? `; ${fmtRows(forBudgeted)} an hour fits the rate, so each statement keeps up to ${fmtRows(level)} an hour and the noisiest give way first.`
         : `, under the ${fmtRows(forBudgeted)} an hour that fits the rate; every statement keeps its lines, with room to grow ${headroom.toFixed(1)} times.`),
-    `The always-pass sample (${ALWAYS_PASS_LINES} lines a statement a window on every node, ${rows.keep_count} more for an error statement over its limit, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} a service past its total) keeps about ${fmtRows(floorPerHour)} lines an hour whatever the limits; the rate holds down to that floor.`,
+    `The always-pass sample (${pastTotalWords(rows.keep_count)}) keeps about ${fmtRows(floorPerHour)} lines an hour whatever the limits; the rate holds down to that floor.`,
   );
   if (overRate) lines.push(`The meter read above the rate last hour; the limits below hold the next hour at the rate, and each node's totals bind inside every window.`);
   if (infeasible) {
     warnings.push(
-      `The always-pass sample alone keeps about ${fmtRows(floorPerHour)} lines an hour, more than the ${fmtRows(forBudgeted)} an hour that fits, so the table takes about ${fmtRows(projected)} an hour above the rate. Raise the rate, lower rateReceiverBaselineCount, or add the noisiest services to the Receiver's scope.`,
+      `The always-pass sample (${pastTotalWords(rows.keep_count)}) alone keeps about ${fmtRows(floorPerHour)} lines an hour, more than the ${fmtRows(forBudgeted)} an hour that fits, so the table takes about ${fmtRows(projected)} an hour above the rate. Raise the rate, lower rateReceiverBaselineCount, or add the noisiest services to the Receiver's scope.`,
     );
   }
   if (counterScale > 1.5) warnings.push(`The Receiver's counters read ${fmtRows(reads.passLinesPerHour)} pass lines an hour against ${fmtRows(receiverRows)} rows on the meter; rates are scaled by ${counterScale.toFixed(2)}, which assumes the counters miss lines evenly across statements.`);
-  if (O >= R) warnings.push(`Rows from writers outside the Receiver already reach ${fmtRows(O)} an hour, at or above the rate, so the Receiver's services keep nothing beyond the always-pass sample.`);
+  if (O >= R) warnings.push(`Rows from writers outside the Receiver already reach ${fmtRows(O)} an hour, at or above the rate, so the Receiver's services keep nothing beyond what passes past their totals: at most ${BASELINE_MAX_OVER_TOTAL_DEFAULT} sample lines and ${KEEP_MAX_OVER_TOTAL_DEFAULT} error lines a service a window on each node.`);
   return {
     targetRows: R,
     targetSource,
@@ -461,7 +440,7 @@ export function renderRowsReport(plan: RowsPlan, rows: RowsBudget, nowSec: numbe
     ),
     `| \`*\` (any other service) | the account's bucket | ${plan.star.instances} | | ${fmtRows(plan.star.keptPerHour)} | ${plan.star.cap} | ${plan.star.total} |`,
     '',
-    `Limits and totals are lines per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node. Error lines pass ${rows.keep_count} over a limit per statement per node per window, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} per service past its total. The meter is \`system.part_log\` NewPart rows on ${rows.table}, read by the event's own time.`,
+    `Limits and totals are lines per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node. Past its total a service still passes up to ${BASELINE_MAX_OVER_TOTAL_DEFAULT} sample lines and ${KEEP_MAX_OVER_TOTAL_DEFAULT} error lines a window on each node, which Kept counts and Total does not; error lines pass ${rows.keep_count} over a limit per statement per node per window. The meter is \`system.part_log\` NewPart rows on ${rows.table}, read by the event's own time.`,
     '',
   ].join('\n');
 }

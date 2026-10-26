@@ -33,7 +33,7 @@ import { HELD_ROUTES, datadogMetricsCredsFromEnv, ddQueryPoints, type DatadogMet
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS, fmtAboutUsd } from './report/user-units.js';
 import { DATADOG_FLEX_LIST_PRICING, fmtEventCount, fmtListRate } from './cost.js';
 import { FLEET_DEFAULT_HEADROOM, fleetDestination } from './fleet-default.js';
-import { KEEP_MAX_OVER_TOTAL_DEFAULT } from './fleet-default-install.js';
+import { BASELINE_MAX_OVER_TOTAL_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT } from './fleet-default-install.js';
 import type { DollarBudget } from './policy-loader.js';
 import type { K8sApi } from './k8s-in-cluster.js';
 import { DATADOG_FLEX_INDEX_NAME } from './offload-recipes.js';
@@ -468,7 +468,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
       `Lines that do not pass the Receiver alone reach ${usd(outsideProjectedMonth)} of the ${fmtAboutUsd(poolUsd)} ${named.length > 0 ? 'left for the rest of the account' : 'budget'} by the month's end; the Receiver cannot hold those.`,
     );
   }
-  const sample = `every line past its ${ALWAYS_PASS_LINES}-line sample moves to ${where}, except up to ${b.keep_count} error lines per statement per node per window, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} per service past its total.`;
+  const sample = `every line past its ${ALWAYS_PASS_LINES}-line sample moves to ${where}, except up to ${b.keep_count} error lines per statement per node per window; past a service's total at most ${BASELINE_MAX_OVER_TOTAL_DEFAULT} sample lines and ${KEEP_MAX_OVER_TOTAL_DEFAULT} error lines a window pass on each node.`;
   if (exhausted) {
     lines.push(
       named.length > 0
@@ -614,7 +614,7 @@ export function renderBudgetReport(plan: BudgetPlan, budget: DollarBudget, nowSe
     ),
     `| \`*\` (any other service) | ${fleetDestination(budget.default_action)} | ${plan.star.instances} | | ${fmtEventCount(plan.star.allowancePerHour)} | ${plan.star.cap} | ${plan.star.total} |`,
     '',
-    `Limits and totals are events per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node. Error lines pass ${budget.keep_count} over a limit per statement per node per window, at most ${KEEP_MAX_OVER_TOTAL_DEFAULT} per service past its total.`,
+    `Limits and totals are events per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node. Past its total a service still passes up to ${BASELINE_MAX_OVER_TOTAL_DEFAULT} sample lines and ${KEEP_MAX_OVER_TOTAL_DEFAULT} error lines a window on each node; error lines pass ${budget.keep_count} over a limit per statement per node per window.`,
     '',
   ];
   return out.join('\n');

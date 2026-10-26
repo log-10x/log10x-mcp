@@ -223,12 +223,13 @@ test('plan: when the floor alone exceeds the rate, the run says so and holds not
   const plan = planRows({ rows, reads: rd, instances: { svc: 10 }, nodesTotal: 10, exceptions: [], targetServices: [] });
   assert.equal(plan.floorExceedsRate, true);
   assert.equal(plan.levelPerHour, 0);
-  assert.equal(plan.floorPerHour, 40 * ALWAYS_PASS_LINES * WINDOWS * 10);
+  // 40 samples of 5 lines a window on each node, at most 50 a service past its total
+  assert.equal(plan.floorPerHour, Math.min(40 * ALWAYS_PASS_LINES, 50) * WINDOWS * 10);
   assert.ok(plan.warnings.some((w) => w.includes('always-pass sample') && w.includes('rateReceiverBaselineCount')));
   assert.ok(plan.projectedPerHour >= plan.floorPerHour);
 });
 
-test('plan: an error statement keeps 50 over its limit, at most 500 a service past its total, in the floor', () => {
+test('plan: past its total a service keeps at most 50 sample and 500 keep-count lines a window a node, in the floor', () => {
   const rows = parsePolicyYaml(policyText('  rows_per_hour: 100')).rows!;
   // burst: 1,422 ERROR statements of 7 lines a window (the regulator gate's burst); pay: 3 busy ERROR statements. One node.
   const statements = [
@@ -239,14 +240,31 @@ test('plan: an error statement keeps 50 over its limit, at most 500 a service pa
   const plan = planRows({ rows, reads: reads(lines, lines, statements), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
   assert.equal(plan.floorExceedsRate, true);
   const perWindow = (c: string): number => plan.rows.find((r) => r.container === c)!.keptPerHour / WINDOWS;
-  // burst: every statement's 5-line sample and 500 keep-count lines, where 50 a statement kept all 9,954.
-  assert.ok(Math.abs(perWindow('burst') - (1422 * 5 + 500)) < 1e-6, String(perWindow('burst')));
-  // pay: 50 each, 150.
-  assert.ok(Math.abs(perWindow('pay') - (3 * 5 + 150)) < 1e-6, String(perWindow('pay')));
-  assert.ok(Math.abs(plan.floorPerHour / WINDOWS - (1422 * 5 + 500 + 3 * 55)) < 1e-6, String(plan.floorPerHour));
+  // burst: 50 sample and 500 keep-count lines past its total, where 5 + 2 a statement kept all 9,954.
+  assert.ok(Math.abs(perWindow('burst') - 550) < 1e-6, String(perWindow('burst')));
+  // pay: its 15 sample lines and 50 keep-count lines each, 150.
+  assert.ok(Math.abs(perWindow('pay') - (15 + 150)) < 1e-6, String(perWindow('pay')));
+  assert.ok(Math.abs(plan.floorPerHour / WINDOWS - (550 + 165)) < 1e-6, String(plan.floorPerHour));
+  // the totals written leave the floor out
+  assert.equal(plan.rows.find((r) => r.container === 'burst')!.total, 1);
   const report = renderRowsReport(plan, rows, NOW);
-  assert.match(report, /50 more for an error statement over its limit, at most 500 a service past its total/);
-  assert.match(report, /Error lines pass 50 over a limit per statement per node per window, at most 500 per service past its total\./);
+  assert.match(report, /at most 50 sample lines and 500 error lines a service past its total/);
+  assert.match(report, /Past its total a service still passes up to 50 sample lines and 500 error lines a window on each node, which Kept counts and Total does not/);
+});
+
+test('plan: the regulator gate burst under a total of 100 keeps 100 + 50 + 500 lines a window', () => {
+  // 1,422 new ERROR patterns of 7 lines a window on one node, held to 650 lines a window.
+  const statements = Array.from({ length: 1422 }, (_, i) => st('burst', `m${i}`, 7 * WINDOWS, 'ERROR'));
+  const lines = statements.reduce((a, s) => a + s.linesPerHour, 0);
+  const rows = parsePolicyYaml(policyText(`  rows_per_hour: ${650 * WINDOWS}`)).rows!;
+  const plan = planRows({ rows, reads: reads(lines, lines, statements), instances: {}, nodesTotal: 1, exceptions: [], targetServices: [] });
+  assert.equal(plan.floorExceedsRate, false);
+  const burst = plan.rows.find((r) => r.container === 'burst')!;
+  // the total written: every statement's lines under the limit
+  assert.ok(Math.abs((1422 * plan.levelPerHour!) / WINDOWS - 100) < 1e-6, String(plan.levelPerHour));
+  assert.ok(burst.total === 100 || burst.total === 99, String(burst.total));
+  // kept: the total, 50 sample lines and 500 keep-count lines past it
+  assert.ok(Math.abs(burst.keptPerHour / WINDOWS - 650) < 1e-6, String(burst.keptPerHour / WINDOWS));
 });
 
 test('plan: auto takes the meter at the first run and the recorded rate after it', () => {

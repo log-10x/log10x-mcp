@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { keptOverCapLines, solvePlan, type SolverPattern } from '../src/lib/plan-solver.js';
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from '../src/lib/report/user-units.js';
-import { ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT, keepLinesPerStatement } from '../src/lib/fleet-default-install.js';
+import { BASELINE_MAX_OVER_TOTAL_DEFAULT, ERROR_CLASS_LEVELS, KEEP_COUNT_DEFAULT, KEEP_MAX_OVER_TOTAL_DEFAULT } from '../src/lib/fleet-default-install.js';
+import { servicePass, sharePastTotal } from '../src/lib/regulator-pass.js';
 
 const yaml = readFileSync(join(process.cwd(), 'test', 'fixtures', 'engine', 'rate-config.yaml'), 'utf8');
 
@@ -43,7 +44,8 @@ test('the solver\'s regulator constants are the shipped config\'s', () => {
   assert.deepEqual(Object.keys(keep).sort(), [...ERROR_CLASS_LEVELS].sort());
   for (const [level, k] of Object.entries(keep)) assert.equal(keptOverCapLines(level), k, level);
   for (const level of Object.keys(floors)) if (!(level in keep)) assert.equal(keptOverCapLines(level), 0, level);
-  // Past a service's total: at most this many keep-count lines per window per node.
+  // Past a service's total: at most this many sample and keep-count lines per window per node.
+  assert.equal(Number(scalar('baselineMaxOverTotal')), BASELINE_MAX_OVER_TOTAL_DEFAULT);
   assert.equal(Number(scalar('keepMaxOverTotal')), KEEP_MAX_OVER_TOTAL_DEFAULT);
   // The always-pass sample and the window it counts in.
   assert.equal(Number(scalar('baselineCount')), ALWAYS_PASS_LINES);
@@ -118,18 +120,35 @@ test('the plan states what stays over each cap and the node count it counted', (
 
 const sum = (a: number[]): number => a.reduce((x, y) => x + y, 0);
 
-test('past its total a service passes at most 500 keep-count lines a window a node, shared by its error statements', () => {
-  // 1,422 busy error statements: 500 for the service, not 71,100.
-  assert.ok(Math.abs(sum(keepLinesPerStatement(Array(1422).fill(1000), KEEP_COUNT_DEFAULT)) - 500) < 1e-9);
-  // 1,422 statements of 7 lines a window (the regulator gate's burst): 2 asked each past the sample, 500 for the service.
-  assert.ok(Math.abs(sum(keepLinesPerStatement(Array(1422).fill(7 - ALWAYS_PASS_LINES), KEEP_COUNT_DEFAULT)) - 500) < 1e-9);
-  // Three: 150, each its full count.
-  assert.deepEqual(keepLinesPerStatement([1000, 1000, 1000], KEEP_COUNT_DEFAULT), [50, 50, 50]);
-  // No statement gets more than it asks; the rest is shared.
-  assert.deepEqual(keepLinesPerStatement([2, 1000, 1000], KEEP_COUNT_DEFAULT, 60), [2, 29, 29]);
-  assert.deepEqual(keepLinesPerStatement([-3, 20], KEEP_COUNT_DEFAULT), [0, 20]);
-  // 0 removes the bound.
-  assert.equal(sum(keepLinesPerStatement(Array(1422).fill(1000), KEEP_COUNT_DEFAULT, 0)), 71_100);
+test('a bound past the total is shared evenly, no ask given more than it asked; 0 removes it', () => {
+  assert.ok(Math.abs(sum(sharePastTotal(Array(1422).fill(50), 500)) - 500) < 1e-9);
+  assert.deepEqual(sharePastTotal([50, 50, 50], 500), [50, 50, 50]);
+  assert.deepEqual(sharePastTotal([2, 50, 50], 60), [2, 29, 29]);
+  assert.deepEqual(sharePastTotal([-3, 20], 500), [0, 20]);
+  assert.equal(sum(sharePastTotal(Array(1422).fill(50), 0)), 71_100);
+});
+
+/** One node, lines as the unit: n statements of `perWindow` lines a window, an hour of 15 windows. */
+const W15 = 3600 / REGULATOR_WINDOW_SECONDS;
+const burst = (n: number, perWindow: number, error: boolean) => Array.from({ length: n }, () => ({ rate: perWindow * W15, lines: perWindow * W15, error }));
+const opts = { windowsPerHour: W15, nodes: 1, keepCount: KEEP_COUNT_DEFAULT };
+
+test('the regulator gate burst: 1,422 new ERROR patterns of 7 lines under a total of 100 keep 100 + 50 + 500', () => {
+  const sts = burst(1422, 7, true);
+  // The per-statement limit that leaves the service a total of 100 lines a window.
+  const level = (100 / 1422) * W15;
+  const p = servicePass(sts, level, opts);
+  assert.ok(Math.abs(p.total / W15 - 100) < 1e-9, String(p.total / W15));
+  assert.ok(Math.abs(p.kept / W15 - 650) < 1e-9, String(p.kept / W15));
+  // At no limit at all, the floor past the total: 50 sample and 500 keep-count lines, where 5 + 2 a statement kept 9,954.
+  assert.ok(Math.abs(servicePass(sts, 0, opts).kept / W15 - 550) < 1e-9);
+  // Three busy error statements: 15 sample and 150 keep-count lines.
+  assert.ok(Math.abs(servicePass(burst(3, 1000, true), 0, opts).kept / W15 - 165) < 1e-9);
+  // Sample lines past their bound take the keep count next: 100 ERROR patterns of 5 lines keep 50 + 450.
+  assert.ok(Math.abs(servicePass(burst(100, 5, true), 0, opts).kept / W15 - 500) < 1e-9);
+  // INFO patterns: the sample alone, at most 50.
+  assert.ok(Math.abs(servicePass(burst(1422, 7, false), 0, opts).kept / W15 - 50) < 1e-9);
+  assert.ok(Math.abs(servicePass(burst(3, 1000, false), 0, opts).kept / W15 - 15) < 1e-9);
 });
 
 test('the plan writes caps and no total, so each error pattern keeps its 50 over the cap with no service bound', () => {
