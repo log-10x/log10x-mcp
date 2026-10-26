@@ -659,6 +659,9 @@ data:
   totals.csv: |
     container,total
     tenx-seed,1::install seed; replaced by the budget run
+  config-generation.csv: |
+    key,value
+    generation,seed
   ${REGULATOR_UNIT_KEY}: ${unit}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
