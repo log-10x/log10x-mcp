@@ -1,5 +1,5 @@
 # Verbatim copy of log-10x/config pipelines/run/receive/rate/config.yaml at
-# commit 63d77a7a2487128c54baa14810e2f5971e8f25b9 (origin/main, 2026-10-25).
+# commit 4f057f275ef7a0d9e3aa39fdc01b03a0176819ae (origin/main, 2026-10-26).
 # test/regulator-defaults-pin.test.ts pins the plan solver and the runs' keep
 # bound to it. Refresh by copying the file again below this header.
 
@@ -38,11 +38,11 @@ rateReceiver:
   #  event (non-k8s input), the regulator falls back to a single node-wide bucket.
   containerField: $=yield TenXEnv.get("k8sContainerNameField")
 
-  # 'resetIntervalMs' is the window over which recent share is measured. A
-  #  regulator instance starts its first window at the first line it regulates
-  #  and a new one every interval after that, the same windows for all its
-  #  patterns and services. They do not follow the clock, and a policy file
-  #  reload does not start a new window.
+  # 'resetIntervalMs' is the window over which recent share is measured.
+  #  Windows start at each multiple of the interval since the Unix epoch, so
+  #  every node's windows line up with the clock, the same windows for all
+  #  patterns and services. The first window after a start is partial, and a
+  #  policy file reload does not start a new window.
   resetIntervalMs: $=parseDuration("4m")
 
   # 'unit' is what the caps, the totals and the share guard count: 'bytes' (each
