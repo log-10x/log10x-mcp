@@ -1,8 +1,3 @@
-# Verbatim copy of log-10x/config pipelines/run/receive/rate/config.yaml at
-# commit 4f057f275ef7a0d9e3aa39fdc01b03a0176819ae (origin/main, 2026-10-26).
-# test/regulator-defaults-pin.test.ts pins the plan solver and the runs' keep
-# bound to it. Refresh by copying the file again below this header.
-
 # yaml-language-server: $schema=https://schema.log10x.com/pipelines/run/receive/rate/schema.json
 
 # 🔟❎ 'run' rate regulator configuration
@@ -90,6 +85,18 @@ rateReceiver:
     - ERROR=50
     - CRITICAL=50    # the level enrichment maps fatal/critical -> CRITICAL
     - FATAL=50       # kept for forwarders whose level vocabulary emits FATAL
+
+  # 'keepCountSlices' is how many equal slices of the window release each
+  #  pattern's 'keepCounts' lines. The allowance accumulates: by the end of
+  #  slice i of S the pattern may have passed the count x i / S, rounded down,
+  #  so with ERROR=50 and the 4-minute window, 4 slices pass 12, 13, 12 and 13
+  #  lines of a sustained storm in its four minutes. Lines a slice leaves unused
+  #  carry to the next, so a burst late in the window passes more than one
+  #  early in it, never more than the count, and lines under a mute entry share
+  #  the same count. 1 passes the whole count at the window start; below 1 or
+  #  not a number acts as 1, and a fraction is rounded down. Read by the
+  #  regulators that consult 'capLookup.file'.
+  keepCountSlices: 4
 
   # 'severityFloors' is the fraction of each level kept at random once a pattern is
   #  over its cap, for levels not in 'keepCounts'. 0 keeps none, so the cap holds.

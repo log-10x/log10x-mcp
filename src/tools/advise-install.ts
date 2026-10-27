@@ -255,7 +255,7 @@ export const adviseInstallSchema = {
     .int()
     .min(0)
     .optional()
-    .describe('Datadog Receiver: error lines over a limit that still pass, per statement per node per 4-minute window (`rateReceiverKeepCounts`, one entry each for ERROR, CRITICAL and FATAL), on engine 1.1.146 or later. Default 50.'),
+    .describe('Datadog Receiver: error lines over a limit that still pass, per statement per node per 4-minute window (`rateReceiverKeepCounts`, one entry each for ERROR, CRITICAL and FATAL), on engine 1.1.146 or later. Default 50, released across the window.'),
   service_actions: z
     .record(z.string(), z.enum(['tier_down', 'offload']))
     .optional()
@@ -2365,7 +2365,7 @@ async function renderInstallPlan(
           ? ['The Receiver runs with no warm-up and no share guard, and every level below ERROR has a 0 floor, so a statement over its limit moves from its first window.']
           : []),
         ...(fleetValues.keepCountsWritten
-          ? ['Error lines over a limit pass at a fixed count per statement per node per window (`rateReceiverKeepCounts`); the rest take the service\'s action.']
+          ? ['Error lines over a limit pass up to a fixed count per statement per node per window, released across the window (`rateReceiverKeepCounts`); the rest take the service\'s action.']
           : []),
       );
       plan.fleetDefault = buildFleetDefaultStep({

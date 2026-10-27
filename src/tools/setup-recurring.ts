@@ -157,7 +157,7 @@ export const setupRecurringSchema = {
     .int()
     .min(0)
     .optional()
-    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb: error lines over a limit that pass per statement per node per window, at most 500 per service past its total. Default 50.'),
+    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb: error lines over a limit that pass per statement per node per window, released across the window, at most 500 per service past its total. Default 50.'),
   datadog_secret_name: z
     .string()
     .optional()
