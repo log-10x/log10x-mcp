@@ -98,10 +98,14 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * rateReceiverKeepMaxOverTotal (500) a window (E90). 1.1.152: regulator
  * windows start on epoch multiples of their interval on every node, so
  * per-window counts line up with the clock, and a counter is reset only at
- * multiples of its own interval (E91). Pinned by index digest.
+ * multiples of its own interval (E91). 1.1.153: each pattern's error keep
+ * count is released across the window in rateReceiverKeepCountSlices (4)
+ * slices, 12 or 13 lines a minute at the defaults, so a sustained storm keeps
+ * error lines on the destination through the window (E93). Pinned by index
+ * digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.152@sha256:ab3345e4c8a64595f4efaa7f32839dc73abe8fdd539bbabed24ea8ef6618a4dc';
+  'log10x/edge-10x:1.1.153@sha256:439f728a748d363b73baf004bb9817f5d7c610e0563a8208161c0443a135cedd';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);

@@ -44,6 +44,8 @@ test('the solver\'s regulator constants are the shipped config\'s', () => {
   assert.deepEqual(Object.keys(keep).sort(), [...ERROR_CLASS_LEVELS].sort());
   for (const [level, k] of Object.entries(keep)) assert.equal(keptOverCapLines(level), k, level);
   for (const level of Object.keys(floors)) if (!(level in keep)) assert.equal(keptOverCapLines(level), 0, level);
+  // advise_install and setup_recurring say the count is released across the window.
+  assert.ok(Number(scalar('keepCountSlices')) > 1, 'keepCountSlices');
   // Past a service's total: at most this many sample and keep-count lines per window per node.
   assert.equal(Number(scalar('baselineMaxOverTotal')), BASELINE_MAX_OVER_TOTAL_DEFAULT);
   assert.equal(Number(scalar('keepMaxOverTotal')), KEEP_MAX_OVER_TOTAL_DEFAULT);
