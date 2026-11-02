@@ -108,11 +108,11 @@ test('advise_install elasticsearch on the Reporter writes no Receiver option', a
   assert.match(md, /the Reporter only reports/);
 });
 
-/** The JSON body of `PUT <path>` in the recipe. */
-function recipeRequest(body: string, path: string): any {
+/** The JSON body of `<verb> <path>` in the recipe. */
+function recipeRequest(body: string, path: string, verb = 'PUT'): any {
   const lines = body.split('\n');
-  const at = lines.findIndex((l) => l.trim() === `PUT ${path}`);
-  assert.ok(at >= 0, `no PUT ${path}`);
+  const at = lines.findIndex((l) => l.trim() === `${verb} ${path}`);
+  assert.ok(at >= 0, `no ${verb} ${path}`);
   const buf: string[] = [];
   let depth = 0;
   for (const l of lines.slice(at + 1)) {
@@ -152,6 +152,47 @@ test('recipe: keepHotDays sets the frozen min_age the run reads; the tier_down p
   }
   const td = recipeRequest(elasticFrozenTierRecipe().body, '_index_template/tenx-tierdown-tpl');
   assert.equal(td.template.settings['index.routing.allocation.include._tier_preference'], 'data_warm,data_hot');
+});
+
+test('recipe: one Kibana data view covers both aliases, and an existing one gains the tier_down pattern', () => {
+  const r = elasticFrozenTierRecipe();
+  const dv = recipeRequest(r.body, 'kbn:/api/data_views/data_view', 'POST').data_view;
+  assert.equal(dv.title, 'tenx-app-*,tenx-tierdown-*');
+  assert.equal(dv.timeFieldName, '@timestamp');
+  assert.equal(dv.name, 'tenx kept and moved lines');
+  // a data view id is unique across spaces, so the recipe leaves it to Kibana
+  assert.equal(dv.id, undefined);
+  // the title covers both index templates' patterns
+  for (const tpl of ['tenx-app-tpl', 'tenx-tierdown-tpl']) {
+    for (const p of recipeRequest(r.body, `_index_template/${tpl}`).index_patterns) assert.ok(dv.title.split(',').includes(p), p);
+  }
+  assert.match(r.body, /Saved searches, Lens visualizations\n#\s+and alert rules built on this data view read kept and moved lines alike/);
+  assert.match(r.body, /moved lines answer from the frozen tier at the frozen tier's speed/);
+  assert.match(r.body, /kbn:\/s\/<space id>\/api\/data_views\/data_view/);
+  assert.match(r.body, /kbn-xsrf header/);
+  assert.match(r.body, /POST kbn:\/api\/data_views\/data_view\/<its id>\n#\s+\{ "data_view": \{ "title": "<its title>,tenx-tierdown-\*" \} \}/);
+  assert.match(r.note, /Data View Management privilege .* and `view_index_metadata` on `tenx-app-\*` and `tenx-tierdown-\*`/);
+  assert.match(r.note, /no data view yet, Kibana also makes it the default, which needs the Advanced Settings privilege/);
+  assert.match(r.body, /POST tenx-app-\*,tenx-tierdown-\*\/_search\n.*\n#\s+\.\.\.lists partial-tenx-tierdown-000001 beside the hot indices/);
+
+  const custom = elasticFrozenTierRecipe({ keepAlias: 'logs-keep', tierDownAlias: 'logs-cold' });
+  assert.equal(recipeRequest(custom.body, 'kbn:/api/data_views/data_view', 'POST').data_view.title, 'logs-keep-*,logs-cold-*');
+  assert.match(custom.body, /"<its title>,logs-cold-\*"/);
+});
+
+test('an elasticsearch tier_down plan requires Kibana access for the data view', async () => {
+  const { solvePlan } = await import('../src/lib/plan-solver.js');
+  const pl = solvePlan(
+    [
+      { hash: 'p1', name: 'Transaction complete', services: { payment: 100_000_000_000 }, severity: 'INFO', bytes: 100_000_000_000 },
+      { hash: 'p2', name: 'Charge received', services: { payment: 90_000_000_000 }, severity: 'INFO', bytes: 90_000_000_000 },
+      { hash: 'c1', name: 'GetCart', services: { cart: 80_000_000_000 }, severity: 'INFO', bytes: 80_000_000_000 },
+      { hash: 'e1', name: 'Charge FAILED', services: { payment: 60_000_000_000 }, severity: 'ERROR', bytes: 60_000_000_000 },
+    ],
+    { destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40 },
+  );
+  assert.ok(pl.planned.some((p) => p.action === 'tier_down'));
+  assert.ok(pl.prerequisites.some((x) => /Kibana access with the Data View Management privilege/.test(x)), pl.prerequisites.join(' | '));
 });
 
 test('setup_recurring hot tier: the instructions point at advise_install and name no hand-set engine option', async () => {

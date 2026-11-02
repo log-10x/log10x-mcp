@@ -24,12 +24,12 @@
       ]
     }
   ],
-  "version": "1.30.97",
+  "version": "1.30.98",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "log10x-mcp",
-      "version": "1.30.97",
+      "version": "1.30.98",
       "transport": {
         "type": "stdio"
       },
