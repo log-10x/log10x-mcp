@@ -420,8 +420,12 @@ them, and compact is not offered there. ClickHouse is refused because compaction
 of table bytes, which is not the ClickHouse bill, and offload is the lever there. When the user names Elasticsearch or
 OpenSearch, ASK whether they run it themselves before pricing compaction, and pass
 \`deployment: "self_managed"\` once they confirm; with the deployment unknown the plan prices only
-the levers that hold either way, and says so. Never infer self-managed from silence, and never pass
-it to make a target reachable.
+the levers that hold either way, and says so. On self-managed Elasticsearch also ASK the version and
+pass it as \`elasticsearch_version\`: the l1es plugin loads only on 8.17.0, so compact is priced only
+on a stated 8.17.0, and any other or unknown version prices tier_down and offload. Elastic Cloud
+Serverless has no cheaper searchable tier and no plugin surface: offload is its lever.
+Never infer self-managed from silence or a version from a guess, and never pass either to make a
+target reachable.
 
 AUDIT BEFORE PLAN: when the user asks where the money goes ("what is driving the bill", "show me
 cost by service/type", "why is logging so expensive") WITHOUT stating a target, the answer is

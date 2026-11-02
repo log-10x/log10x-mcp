@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { solvePlan, keepEverythingLever, type SolverPattern } from '../src/lib/plan-solver.js';
+import type { SiemId } from '../src/lib/siem/pricing.js';
 
 // A small synthetic estate: two big INFO patterns per service, one ERROR.
 function estate(): SolverPattern[] {
@@ -87,12 +88,11 @@ test('reconciliation: same method on two different windows both hit the target',
   assert.equal(a.keepEverythingLever, b.keepEverythingLever);
 });
 
-test('tier_down is priced on its destinations (regression: Datadog was $0, Serverless absent)', async () => {
+test('tier_down is priced on its destinations (regression: Datadog was $0)', async () => {
   const { projectAction } = await import('../src/lib/cost.js');
   // The exact bug surface: tier_down must produce a real dollar cut where it is
-  // the destination lever. Datadog (Flex) had no tier and returned $0; Elastic
-  // Serverless had no tier at all.
-  for (const destination of ['cloudwatch', 'elastic-serverless'] as const) {
+  // the destination lever. Datadog (Flex) had no tier and returned $0.
+  for (const destination of ['cloudwatch'] as const) {
     const bill = projectAction({ action: 'pass', bytes_in: 1e9, destination }).total_dollars ?? 0;
     const after = projectAction({ action: 'tier_down', bytes_in: 1e9, destination }).total_dollars ?? bill;
     assert.ok(bill > 0, `${destination} should have a bill`);
@@ -335,12 +335,14 @@ test('skeleton passes through from source pattern to planned row', () => {
 
 // ── Lever availability: what a platform can actually do ─────────────
 
-test('serverless cannot compact: no plugin surface, so the confirmed tier is used', () => {
+test('serverless is offload-only: no cheaper tier, no plugin surface', () => {
   const pl = solvePlan(estate(), { destination: 'elastic-serverless', retrieverInstalled: true, targetPct: 40 });
-  assert.ok(pl.planned.every((r) => r.action !== 'compact'),
-    'compact must never appear on a platform with nowhere to install the expander');
-  assert.equal(pl.keepEverythingLever, 'tier_down');
-  assert.ok(pl.prerequisites.some((x) => /cost-efficient tier/i.test(x)), pl.prerequisites.join(' | '));
+  assert.ok(pl.planned.every((r) => r.action !== 'compact' && r.action !== 'tier_down'),
+    'neither in-SIEM lever exists on Serverless');
+  assert.equal(pl.keepEverythingLever, 'offload');
+  assert.ok(!pl.prerequisites.some((x) => /tier/i.test(x)), pl.prerequisites.join(' | '));
+  const noRetr = solvePlan(estate(), { destination: 'elastic-serverless', retrieverInstalled: false, targetPct: 40 });
+  assert.equal(noRetr.keepEverythingLever, null, 'without the retriever Serverless has no keep-everything lever');
 });
 
 test('generic elasticsearch prices only deployment-independent levers', () => {
@@ -351,13 +353,38 @@ test('generic elasticsearch prices only deployment-independent levers', () => {
   assert.ok(pl.prerequisites.some((x) => /searchable snapshots/i.test(x)), pl.prerequisites.join(' | '));
 });
 
-test('a CONFIRMED self-managed cluster unlocks compact, and says what it needs', () => {
+test('a CONFIRMED self-managed 8.17.0 cluster unlocks compact, and says what it needs', () => {
   const pl = solvePlan(estate(), {
     destination: 'elasticsearch', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+    elasticsearchVersion: '8.17.0',
   });
   assert.equal(pl.keepEverythingLever, 'compact');
   assert.ok(pl.prerequisites.some((x) => /l1es plugin/i.test(x) && /8\.17\.0/.test(x)),
     'the plugin prerequisite must carry its version constraint: ' + pl.prerequisites.join(' | '));
+});
+
+test('self-managed without a confirmed 8.17.0 prices tier_down, never compact', () => {
+  for (const elasticsearchVersion of [undefined, '9.1.0', '8.17', '8.18.0']) {
+    for (const destination of ['elasticsearch', 'elasticsearch_self'] as SiemId[]) {
+      const pl = solvePlan(estate(), {
+        destination, retrieverInstalled: true, targetPct: 40, selfManaged: true,
+        ...(elasticsearchVersion ? { elasticsearchVersion } : {}),
+      });
+      assert.equal(pl.keepEverythingLever, 'tier_down', `${destination} ${elasticsearchVersion}`);
+      assert.ok(pl.planned.every((r) => r.action !== 'compact'), `${destination} ${elasticsearchVersion}`);
+      assert.ok(pl.prerequisites.some((x) => /searchable snapshots/i.test(x) && /Enterprise/.test(x)),
+        pl.prerequisites.join(' | '));
+    }
+  }
+});
+
+test('a volume budget on unconfirmed Elasticsearch never reaches for compact', () => {
+  for (const opts of [{}, { selfManaged: true }, { selfManaged: true, elasticsearchVersion: '9.1.0' }]) {
+    const pl = solvePlan(estate(), {
+      destination: 'elasticsearch', retrieverInstalled: false, target: { kind: 'gb_budget', value: 1 }, ...opts,
+    });
+    assert.ok(pl.planned.every((r) => r.action !== 'compact'), JSON.stringify(opts));
+  }
 });
 
 test('managed, or unstated, never unlocks compact: silence is not consent', () => {
@@ -373,8 +400,9 @@ test('managed, or unstated, never unlocks compact: silence is not consent', () =
 test('self-managed does NOT resurrect compact on serverless: there is no plugin surface', () => {
   const pl = solvePlan(estate(), {
     destination: 'elastic-serverless', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+    elasticsearchVersion: '8.17.0',
   });
-  assert.equal(pl.keepEverythingLever, 'tier_down');
+  assert.equal(pl.keepEverythingLever, 'offload');
   assert.ok(pl.planned.every((r) => r.action !== 'compact'));
 });
 

@@ -224,6 +224,15 @@ export const estimateSavingsSchema = {
         + 'unknown deployment prices only the levers that hold either way. Irrelevant on destinations '
         + 'whose levers do not depend on it (Datadog, CloudWatch, Azure, Coralogix).'
     ),
+  elasticsearch_version: z
+    .string()
+    .optional()
+    .describe(
+      'Elasticsearch only: the version the user stated, e.g. "8.17.0". Compaction on Elasticsearch needs '
+        + 'the l1es plugin, which loads only on 8.17.0, so compact is priced only with this set to 8.17.0 '
+        + 'and deployment self_managed. Set only from what the user said: absent means unknown, and the '
+        + 'plan prices tier_down and offload, which hold on every version.'
+    ),
   splunk_pricing: z
     .enum(['ingest', 'workload'])
     .optional()
@@ -964,6 +973,7 @@ export interface RunForecastArgs {
   retriever_installed?: boolean;
   allow_lossy?: boolean;
   deployment?: 'self_managed' | 'managed';
+  elasticsearch_version?: string;
   splunk_pricing?: 'ingest' | 'workload';
   enterprise_security?: boolean;
   exception_services?: string[];
@@ -1387,6 +1397,7 @@ export async function runEstimateForecast(
       ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
       ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
       ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
+      ...(args.elasticsearch_version ? { elasticsearchVersion: args.elasticsearch_version } : {}),
       ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
       ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
     });
@@ -1417,6 +1428,7 @@ export async function runEstimateForecast(
           ...(args.exception_services ? { exceptionServices: args.exception_services } : {}),
           ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
           ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
+          ...(args.elasticsearch_version ? { elasticsearchVersion: args.elasticsearch_version } : {}),
       ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
       ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
         }, planDeps);
@@ -2590,6 +2602,7 @@ export async function executeEstimateSavings(
           retriever_installed: args.retriever_installed,
           allow_lossy: args.allow_lossy,
           deployment: args.deployment,
+          elasticsearch_version: args.elasticsearch_version,
           exception_services: args.exception_services,
           unprotect_patterns: args.unprotect_patterns,
           check_dependencies: args.check_dependencies,
