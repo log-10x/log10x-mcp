@@ -715,7 +715,8 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     compact_requires:
       'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0)',
     tier_down_requires:
-      'frozen searchable snapshots: an Enterprise licence, self-managed or on Elastic Cloud Hosted',
+      'frozen searchable snapshots: an Enterprise licence, self-managed or on Elastic Cloud Hosted; ' +
+      'Kibana access with the Data View Management privilege and view_index_metadata on both indices, for the data view that searches them',
     // The one Elasticsearch measurement, taken without pruning, stands in for
     // the pruned mode as a floor: pruning removes more, and that is unmeasured.
     // The unpruned variant (getDestinationCostModel) carries the same figure

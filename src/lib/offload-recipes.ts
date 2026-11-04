@@ -1331,7 +1331,29 @@ PUT ${tdAlias}-000001
 PUT ${keepAlias}-000001
 { "aliases": { "${keepAlias}": { "is_write_index": true } } }
 
-# 5) Verify, once data has rolled over and aged past min_age. The frozen index
+# 5) Kibana data view over both aliases. Saved searches, Lens visualizations
+#    and alert rules built on this data view read kept and moved lines alike;
+#    moved lines answer from the frozen tier at the frozen tier's speed. For a
+#    space other than Default the path is kbn:/s/<space id>/api/data_views/data_view.
+#    Outside Dev Tools Console, send the same path to the Kibana URL with a
+#    kbn-xsrf header.
+POST kbn:/api/data_views/data_view
+{
+  "data_view": {
+    "name": "tenx kept and moved lines",
+    "title": "${keepAlias}-*,${tdAlias}-*",
+    "timeFieldName": "@timestamp"
+  }
+}
+
+#    Where the team already has a data view over ${keepAlias}-*, add ${tdAlias}-*
+#    to its title instead of creating a second one, and the searches built on
+#    it return moved lines too:
+#
+#   POST kbn:/api/data_views/data_view/<its id>
+#   { "data_view": { "title": "<its title>,${tdAlias}-*" } }
+
+# 6) Verify, once data has rolled over and aged past min_age. The frozen index
 #    is RENAMED with a partial- prefix, which is how you know it mounted:
 #
 #   GET _cat/indices/*${tdAlias}*?h=index,docs.count,store.size
@@ -1341,7 +1363,12 @@ PUT ${keepAlias}-000001
 #   POST partial-${tdAlias}-000001/_search
 #     { "query": { "term": { "tenx_hash": "<a hash you indexed>" } } }
 #   ...must still return the documents. If it does not, STOP: the slice is
-#   cheap but unretrievable and the down-tier is not worth doing.`,
+#   cheap but unretrievable and the down-tier is not worth doing.
+#
+#   POST ${keepAlias}-*,${tdAlias}-*/_search
+#     { "size": 0, "aggs": { "i": { "terms": { "field": "_index" } } } }
+#   ...lists partial-${tdAlias}-000001 beside the hot indices: the data view's
+#   title reaches the mounted index through the alias ILM gives it.`,
     note:
       'Elasticsearch tiering is INDEX-level, so the shipper routes the marked ' +
       'slice to its own index and ILM does the rest. Verified live: the frozen ' +
@@ -1352,6 +1379,10 @@ PUT ${keepAlias}-000001
       'PREREQUISITE: searchable snapshots need an Enterprise licence (Elastic ' +
       'documents no lower tier for them), plus a registered snapshot repository ' +
       '(Elastic Cloud provides `found-snapshots` by default). ' +
+      'KIBANA: step 5 creates a data view, which needs the Data View Management ' +
+      'privilege in the space that holds the team\'s searches and `view_index_metadata` ' +
+      `on \`${keepAlias}-*\` and \`${tdAlias}-*\`. In a space with no data view yet, Kibana ` +
+      'also makes it the default, which needs the Advanced Settings privilege too. ' +
       (warm
         ? 'RESIDENCY: the tier_down template prefers data_warm, so the slice is written ' +
           'on warm and mounts on frozen from there, taking no room on hot. A cluster ' +

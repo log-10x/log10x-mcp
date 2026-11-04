@@ -255,7 +255,7 @@ const BASELINE: Record<string, string> = {
   cloudwatchIaRecipe: '633b8867c697a37c',
   'azureLogsTierRecipe.basic': '9a0c878895b4dfca',
   'azureLogsTierRecipe.aux': 'de87bc671d7264ff',
-  elasticFrozenTierRecipe: 'bf622778dfc2cf46',
+  elasticFrozenTierRecipe: '6a71c0f6c5acf65d',
   coralogixMonitoringRecipe: 'fe5e4e08051e9336',
   coralogixTcoApiContract: 'e998aad4c0143e5e',
   'offloadRecipe.vector': '27371df4724db204',
@@ -274,8 +274,8 @@ const BASELINE: Record<string, string> = {
   'renderOffloadSection.nofwd.azure-monitor': '29ee0e06a38c0fa0',
   'renderOffloadSection.coralogix': 'cbd0816e3de16738',
   'renderOffloadSection.nofwd.coralogix': '1c214bf75dad4950',
-  'renderOffloadSection.elasticsearch': 'fa5fdc39c0effa2e',
-  'renderOffloadSection.nofwd.elasticsearch': '0a90d008ece8fb67',
+  'renderOffloadSection.elasticsearch': 'be13bf3d95e5a164',
+  'renderOffloadSection.nofwd.elasticsearch': '23f828e50ac34d9a',
   'renderOffloadSection.splunk': 'b228f32520e619bf',
   'renderOffloadSection.nofwd.splunk': '4b35bf28548f2461',
   forwarderWriteTerraform: '91968b63922ff7b0',
@@ -334,6 +334,12 @@ const BASELINE: Record<string, string> = {
 // rolls over daily and mounts kept lines on frozen 6 days later (7 days on hot
 // at most, the hours the hot-tier run reads), with no delete phase. Every other
 // recipe is byte-identical.
+//
+// REBASELINED 2026-11-02, deliberately. elasticFrozenTierRecipe and the two
+// elasticsearch renderOffloadSection entries moved: the recipe gains step 5, a
+// Kibana data view over both aliases; its note names the Kibana and index
+// privileges that step needs, and verify, now step 6, searches the data view's
+// title. Every other recipe is byte-identical.
 test('every pre-existing recipe is byte-identical to the parent commit', () => {
   const P = { bucket: 'tenx-demo-cloud-retriever-351939435334', region: 'us-east-1' };
   const h = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 16);
