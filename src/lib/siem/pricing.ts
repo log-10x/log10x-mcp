@@ -19,7 +19,8 @@ export type SiemId =
   | 'splunk'
   | 'clickhouse'
   | 'coralogix'
-  | 'elastic-serverless';
+  | 'elastic-serverless'
+  | 'opensearch';
 
 export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   // vendors.json: CloudWatch cost=0.5
@@ -30,6 +31,10 @@ export const DEFAULT_ANALYZER_COST_PER_GB: Record<SiemId, number> = {
   splunk: 6,
   // vendors.json: Elasticsearch cost=1
   elasticsearch: 1,
+  // Not in vendors.json. PRICING.md lists "AWS OpenSearch | $1.00", the same
+  // infrastructure estimate as Elasticsearch: the service bills instance-hours
+  // and storage, not GB ingested.
+  opensearch: 1,
   // vendors.json: Azure Logs cost=2.3
   'azure-monitor': 2.3,
   // vendors.json: Google Cloud / GCP Logging cost=0.5
@@ -80,6 +85,7 @@ export const SIEM_DISPLAY_NAMES: Record<SiemId, string> = {
   'gcp-logging': 'GCP Cloud Logging',
   elasticsearch: 'Elasticsearch',
   'elastic-serverless': 'Elastic Cloud Serverless',
+  opensearch: 'OpenSearch',
   'azure-monitor': 'Azure Monitor / Log Analytics',
   splunk: 'Splunk',
   clickhouse: 'ClickHouse',
@@ -103,6 +109,7 @@ export const DEFAULT_RATE_BASIS: Record<SiemId, DefaultRateBasis> = {
   datadog: 'default',
   splunk: 'default',
   elasticsearch: 'default',
+  opensearch: 'default',
   sumo: 'default',
   clickhouse: 'default',
 };
@@ -112,6 +119,7 @@ const DEFAULT_RATE_NOTES: Partial<Record<SiemId, string>> = {
   datadog:
     'a blend of Datadog\'s two meters, which datadoghq.com/pricing/list gives as $0.10 per GB ingested and $2.50 per million events indexed at 30-day retention, billed annually',
   elasticsearch: 'an estimate of self-managed infrastructure per GB',
+  opensearch: 'an estimate of infrastructure per GB; Amazon OpenSearch Service bills instance-hours and storage',
   clickhouse: 'a storage stand-in; the ClickHouse bill is compute',
 };
 

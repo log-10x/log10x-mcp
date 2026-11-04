@@ -7,7 +7,7 @@ import {
   getAnalyzerCostForSiem,
 } from '../../src/lib/siem/pricing.js';
 
-test('all 10 SIEMs have pricing defined', () => {
+test('all 11 SIEMs have pricing defined', () => {
   const ids = Object.keys(DEFAULT_ANALYZER_COST_PER_GB).sort();
   assert.deepEqual(ids, [
     'azure-monitor',
@@ -18,9 +18,16 @@ test('all 10 SIEMs have pricing defined', () => {
     'elastic-serverless',
     'elasticsearch',
     'gcp-logging',
+    'opensearch',
     'splunk',
     'sumo',
   ]);
+});
+
+test('opensearch shares the $1.00 infrastructure default, labelled a default, not a list price', () => {
+  assert.equal(DEFAULT_ANALYZER_COST_PER_GB.opensearch, 1);
+  assert.equal(DEFAULT_ANALYZER_COST_PER_GB.opensearch, DEFAULT_ANALYZER_COST_PER_GB.elasticsearch);
+  assert.equal(getAnalyzerCostForSiem('opensearch'), 1);
 });
 
 test('pricing matches vendors.json values for the primary SIEMs', () => {

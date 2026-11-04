@@ -65,6 +65,7 @@ import {
   annualizeDollars,
   projectComputeSaving,
   expectedCompactRatio,
+  OPENSEARCH_DEPLOYMENT_UNKNOWN_NOTE,
   type Action,
   type ComputeSavingProjection,
 } from '../lib/cost.js';
@@ -139,6 +140,7 @@ const DEST_ENUM = z.enum([
   'sumo',
   'coralogix',
   'elastic-serverless',
+  'opensearch',
 ]);
 
 export const estimateSavingsSchema = {
@@ -221,7 +223,8 @@ export const estimateSavingsSchema = {
         + 'the expander is software they install (the l1es Elasticsearch/OpenSearch plugin, the 10x '
         + 'Splunk app), so a managed or serverless platform can carry compacted bytes but has nowhere '
         + 'to expand them. Set only from what the user actually said: absent means unknown, and an '
-        + 'unknown deployment prices only the levers that hold either way. Irrelevant on destinations '
+        + 'unknown deployment prices only the levers that hold either way. On OpenSearch it also decides '
+        + 'tier_down: `managed` (Amazon OpenSearch Service) adds UltraWarm. Irrelevant on destinations '
         + 'whose levers do not depend on it (Datadog, CloudWatch, Azure, Coralogix).'
     ),
   elasticsearch_version: z
@@ -232,6 +235,14 @@ export const estimateSavingsSchema = {
         + 'the l1es plugin, which loads only on 8.17.0, so compact is priced only with this set to 8.17.0 '
         + 'and deployment self_managed. Set only from what the user said: absent means unknown, and the '
         + 'plan prices tier_down and offload, which hold on every version.'
+    ),
+  opensearch_version: z
+    .string()
+    .optional()
+    .describe(
+      'OpenSearch only: the version the user stated, e.g. "2.19.0". The l1es plugin loads only on 2.19.0, '
+        + 'so compact is priced only with this set to 2.19.0 and deployment self_managed. Set only from '
+        + 'what the user said: absent means unknown.'
     ),
   splunk_pricing: z
     .enum(['ingest', 'workload'])
@@ -974,6 +985,7 @@ export interface RunForecastArgs {
   allow_lossy?: boolean;
   deployment?: 'self_managed' | 'managed';
   elasticsearch_version?: string;
+  opensearch_version?: string;
   splunk_pricing?: 'ingest' | 'workload';
   enterprise_security?: boolean;
   exception_services?: string[];
@@ -1398,6 +1410,7 @@ export async function runEstimateForecast(
       ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
       ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
       ...(args.elasticsearch_version ? { elasticsearchVersion: args.elasticsearch_version } : {}),
+      ...(args.opensearch_version ? { opensearchVersion: args.opensearch_version } : {}),
       ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
       ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
     });
@@ -1429,6 +1442,7 @@ export async function runEstimateForecast(
           ...(args.unprotect_patterns ? { unprotectPatterns: args.unprotect_patterns } : {}),
           ...(args.deployment ? { selfManaged: args.deployment === 'self_managed' } : {}),
           ...(args.elasticsearch_version ? { elasticsearchVersion: args.elasticsearch_version } : {}),
+      ...(args.opensearch_version ? { opensearchVersion: args.opensearch_version } : {}),
       ...(args.splunk_pricing ? { splunkPricing: args.splunk_pricing } : {}),
       ...(args.enterprise_security !== undefined ? { enterpriseSecurity: args.enterprise_security } : {}),
         }, planDeps);
@@ -2412,7 +2426,7 @@ export async function executeEstimateSavings(
   const VALID_DESTS = [
     'splunk', 'datadog', 'elasticsearch', 'clickhouse',
     'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix',
-    'elastic-serverless',
+    'elastic-serverless', 'opensearch',
   ] as const;
   type ValidDest = typeof VALID_DESTS[number];
 
@@ -2603,6 +2617,7 @@ export async function executeEstimateSavings(
           allow_lossy: args.allow_lossy,
           deployment: args.deployment,
           elasticsearch_version: args.elasticsearch_version,
+          opensearch_version: args.opensearch_version,
           exception_services: args.exception_services,
           unprotect_patterns: args.unprotect_patterns,
           check_dependencies: args.check_dependencies,
@@ -2760,6 +2775,10 @@ export async function executeEstimateSavings(
         headline = leadDollar
           ? `Forecast (${destination}): ${fmtDollar(result.totals.dollars_expected_monthly)}/mo expected savings (at ${rateTag})${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`
           : `Forecast (${destination}): ${savedVol}/mo (${bytePctReduced}) expected reduction${solverActionTag}${serviceTag} on ${patternCountLabel} (${(result.coverage_of_env_pct * 100).toFixed(0)}% of monthly env bytes).`;
+      }
+
+      if (destination === 'opensearch' && !args.deployment) {
+        headline += ` ${OPENSEARCH_DEPLOYMENT_UNKNOWN_NOTE}`;
       }
 
       // Volume projection lens: mark the headline so a lensed run is never

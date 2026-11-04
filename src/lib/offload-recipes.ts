@@ -1410,6 +1410,177 @@ POST kbn:/api/data_views/data_view
   };
 }
 
+/**
+ * Amazon OpenSearch Service UltraWarm. VERIFIED END TO END on a live domain
+ * (OpenSearch 2.19.0, two ultrawarm1.medium.search nodes) on 2026-11-04,
+ * log-10x/benchmarks opensearch-ultrawarm-tierdown: the templates, ISM
+ * policies, bootstrap indices and index pattern are the ones that run used.
+ *
+ * What was observed: ISM `rollover` then `warm_migration` moved
+ * tenx-tierdown-000001 to a warm node; its hot store went from 156,282 b to 0;
+ * 400 of 400 held hashes answered one hit each with `_source` intact, right
+ * after the move and an hour later; the index pattern over both aliases
+ * returned all 600 lines. The run rolled over on a document count; this recipe
+ * rolls over hourly.
+ *
+ * UltraWarm and `warm_migration` exist on Amazon OpenSearch Service only, so
+ * self-managed OpenSearch has no recipe here.
+ */
+export function opensearchUltrawarmRecipe(
+  opts: { tierDownAlias?: string; keepAlias?: string } = {},
+): SiemTierRecipe {
+  const tdAlias = opts.tierDownAlias ?? 'tenx-tierdown';
+  const keepAlias = opts.keepAlias ?? 'tenx-app';
+  return {
+    target: 'opensearch-ultrawarm',
+    language: 'text',
+    body: `# Run 1) to 4) in OpenSearch Dashboards Dev Tools, or send them to the domain
+# endpoint with the domain's own auth. 5) goes to the Dashboards path instead.
+
+# 1) Templates. The marker decides WHICH INDEX an event lands in; the index
+#    decides which policy governs it. tenx_hash and routeState are mapped as
+#    keyword so both stay queryable on warm. The templates set only the
+#    rollover alias: AWS: "You can no longer use index templates to apply ISM
+#    policies to newly created indexes", so each policy attaches itself
+#    through its ism_template.
+PUT _index_template/tenx-tierdown-tpl
+{
+  "index_patterns": ["${tdAlias}-*"],
+  "template": {
+    "settings": {
+      "plugins.index_state_management.rollover_alias": "${tdAlias}",
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": { "properties": {
+      "tenx_hash":  { "type": "keyword" },
+      "routeState": { "type": "keyword" },
+      "@timestamp": { "type": "date" }
+    }}
+  }
+}
+
+PUT _index_template/tenx-app-tpl
+{
+  "index_patterns": ["${keepAlias}-*"],
+  "template": {
+    "settings": {
+      "plugins.index_state_management.rollover_alias": "${keepAlias}",
+      "number_of_shards": 1,
+      "number_of_replicas": 0
+    },
+    "mappings": { "properties": {
+      "tenx_hash":  { "type": "keyword" },
+      "routeState": { "type": "keyword" },
+      "@timestamp": { "type": "date" }
+    }}
+  }
+}
+
+# 2) ISM policies. They must exist before the bootstrap indices in 3), which
+#    ism_template attaches them to. tenx-tier-down rolls the slice over, then
+#    migrates the rolled index to UltraWarm. tenx-keep is the control: kept
+#    lines roll over daily and stay hot.
+PUT _plugins/_ism/policies/tenx-tier-down
+{
+  "policy": {
+    "description": "tier_down slice: roll over, then migrate the rolled index to UltraWarm.",
+    "default_state": "hot",
+    "states": [
+      {
+        "name": "hot",
+        "actions": [ { "rollover": { "min_index_age": "1h" } } ],
+        "transitions": [ { "state_name": "warm" } ]
+      },
+      {
+        "name": "warm",
+        "actions": [ { "warm_migration": {}, "retry": { "count": 5, "delay": "10m" } } ],
+        "transitions": []
+      }
+    ],
+    "ism_template": { "index_patterns": ["${tdAlias}-*"], "priority": 100 }
+  }
+}
+
+PUT _plugins/_ism/policies/tenx-keep
+{
+  "policy": {
+    "description": "Kept lines stay hot: rollover alone, daily.",
+    "default_state": "hot",
+    "states": [
+      {
+        "name": "hot",
+        "actions": [ { "rollover": { "min_index_age": "1d" } } ],
+        "transitions": []
+      }
+    ],
+    "ism_template": { "index_patterns": ["${keepAlias}-*"], "priority": 100 }
+  }
+}
+
+# 3) Bootstrap the write indices. Both policies use rollover, so each alias
+#    needs an initial backing index flagged is_write_index.
+PUT ${tdAlias}-000001
+{ "aliases": { "${tdAlias}": { "is_write_index": true } } }
+
+PUT ${keepAlias}-000001
+{ "aliases": { "${keepAlias}": { "is_write_index": true } } }
+
+#    GET _plugins/_ism/explain/tenx-*   -> both indices show their policy
+
+# 4) Verify, once the tier_down index has rolled over and ISM has run the
+#    migration. The moved index is listed under _warm, and _cat/shards puts
+#    its one copy on a warm node. _cat/indices is not a tier measure: AWS says
+#    Dashboards and _cat/indices "still report UltraWarm index size".
+#
+#   GET _warm
+#   GET _cat/shards/${tdAlias}-*?v&h=index,shard,prirep,state,docs,store,node
+#   GET _cat/nodes?v&h=name,node.role
+#   POST ${tdAlias}-000001/_search
+#     { "query": { "term": { "tenx_hash": "<a hash you indexed>" } } }
+#   ...must still return the documents. If it does not, STOP: the slice is
+#   cheap but unretrievable and the down-tier is not worth doing.
+
+# 5) OpenSearch Dashboards index pattern over both aliases, through the
+#    saved-objects API on the Dashboards path of the domain endpoint, with
+#    the osd-xsrf header. Searches built on it read kept and moved lines alike.
+#
+#   POST https://<domain endpoint>/_dashboards/api/saved_objects/index-pattern/tenx-all
+#   osd-xsrf: true
+#   Content-Type: application/json
+#
+#   { "attributes": { "title": "${keepAlias}-*,${tdAlias}-*", "timeFieldName": "@timestamp" } }
+#
+#   POST ${keepAlias}-*,${tdAlias}-*/_search
+#     { "size": 0, "aggs": { "i": { "terms": { "field": "_index" } } } }
+#   ...lists ${tdAlias}-000001 beside the hot indices.`,
+    note:
+      'OpenSearch tiering is INDEX-level, so the shipper routes the marked slice to ' +
+      'its own index and ISM does the rest. Verified live on Amazon OpenSearch ' +
+      'Service 2.19.0: after `warm_migration` the tier_down index held 0 b on the hot ' +
+      'nodes, a term query on `tenx_hash` returned 400 of 400 held hashes with ' +
+      '`_source` intact right after the move and an hour later, and the index pattern ' +
+      'over both aliases returned all 600 lines. ' +
+      'PREREQUISITE: UltraWarm enabled on the domain, which AWS says requires ' +
+      'dedicated master nodes and no T2 or T3 data nodes; the ISM plugin, which runs ' +
+      '`warm_migration`; and OpenSearch Dashboards access for the index pattern in 5). ' +
+      'With fine-grained access control on, the user running the migration must be ' +
+      'mapped to the `ultrawarm_manager` role. ' +
+      'TIMING: ISM runs every 5 to 8 minutes. In the verified run the bytes were on ' +
+      'warm about 27 minutes after the load, 11.5 of them between rollover and ISM ' +
+      'starting the migration, and the migration took 8.5 seconds. With the hourly ' +
+      'rollover above, a tier_down line leaves hot within about an hour plus that ' +
+      'pickup of arriving. Warm indices are read-only. ' +
+      'BILLING: warm storage is $0.024/GB-month against $0.122/GB-month for hot gp3 ' +
+      '(AWS Price List, us-east-1 on demand), and each warm node bills by the hour ' +
+      '(ultrawarm1.medium.search $0.238/h). Hot storage is billed as provisioned, so ' +
+      'moving data to warm creates headroom and the data nodes\' volumes must be ' +
+      'resized to bank it. ' +
+      'NOT SHOWN: warm search latency under query load, and cold storage (AWS: cold ' +
+      'indexes cannot be read until migrated back to warm).',
+  };
+}
+
 /** Coralogix: move the `tier_down` slice from High (Frequent Search) to Medium
  * (Monitoring). Two policy forms, because which one is available depends on the
  * provider version. */
@@ -2771,7 +2942,12 @@ export function renderOffloadSection(
           dd: 'datadog',
           cw: 'cloudwatch',
           es: 'elasticsearch',
-          opensearch: 'elasticsearch',
+          'opensearch-managed': 'opensearch_managed',
+          'amazon-opensearch': 'opensearch_managed',
+          'amazon-opensearch-service': 'opensearch_managed',
+          'aws-opensearch': 'opensearch_managed',
+          'opensearch-self': 'opensearch_self',
+          'opensearch-self-managed': 'opensearch_self',
           ch: 'clickhouse',
           // ClickStack is ClickHouse with HyperDX and a collector in front of
           // it, and it is the estate the recipe was measured on, so a caller
@@ -2935,7 +3111,21 @@ export function renderOffloadSection(
     destination === 'elasticsearch' &&
     getAllowedActionsForDestination('elasticsearch').includes('tier_down');
 
-  if (showDatadog || showCloudWatch || showAzure || showCoralogix || showElastic) {
+  // UltraWarm is an Amazon OpenSearch Service feature: self-managed OpenSearch
+  // offloads, and an unstated deployment gets the question instead of a recipe.
+  const showOpenSearch =
+    destination === 'opensearch_managed' &&
+    getAllowedActionsForDestination('opensearch_managed').includes('tier_down');
+  if (destination === 'opensearch') {
+    lines.push(
+      'OpenSearch deployment not stated, so this section covers offload alone. On Amazon OpenSearch ' +
+        'Service the slice can tier down to UltraWarm instead: pass destination `opensearch_managed` ' +
+        'for that recipe. Self-managed OpenSearch has no UltraWarm, and offload is its lever.',
+      '',
+    );
+  }
+
+  if (showDatadog || showCloudWatch || showAzure || showCoralogix || showElastic || showOpenSearch) {
     lines.push(
       '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
@@ -3026,6 +3216,21 @@ export function renderOffloadSection(
           '`routeState == "tier_down"`, and at `tenx-app` for everything else. ' +
           'There is no separate cheap-tier endpoint to configure: on Elasticsearch ' +
           'the index IS the tier selector.',
+        ''
+      );
+    }
+    if (showOpenSearch) {
+      const os = opensearchUltrawarmRecipe();
+      lines.push(
+        `_Amazon OpenSearch Service UltraWarm_: ${os.note}`,
+        '',
+        '```text',
+        os.body,
+        '```',
+        '',
+        'Point the forwarder at the `tenx-tierdown` alias for events where ' +
+          '`routeState == "tier_down"`, and at `tenx-app` for everything else. ' +
+          'On OpenSearch the index is the tier selector, and ISM moves it.',
         ''
       );
     }

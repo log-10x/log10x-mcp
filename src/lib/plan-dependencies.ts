@@ -90,7 +90,9 @@ export function depVendorForDestination(destination: SiemId): SiemId | null {
   if (d === 'splunk' || d === 'splunk_cloud') return 'splunk';
   if (d === 'datadog') return 'datadog';
   if (d === 'cloudwatch') return 'cloudwatch';
-  if (d === 'elasticsearch' || d === 'elasticsearch_self' || d === 'elastic-serverless' || d === 'opensearch_self') {
+  // The Elasticsearch scanner reads Kibana saved objects; OpenSearch keeps
+  // its own in Dashboards, so it has no scanner.
+  if (d === 'elasticsearch' || d === 'elasticsearch_self' || d === 'elastic-serverless') {
     return 'elasticsearch';
   }
   return DEP_CHECK_VENDORS.includes(destination) ? destination : null;

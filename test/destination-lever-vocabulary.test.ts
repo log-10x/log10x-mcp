@@ -59,6 +59,7 @@ const ALL_SIEMS: SiemId[] = [
   'clickhouse',
   'coralogix',
   'elastic-serverless',
+  'opensearch',
 ];
 
 /**
@@ -70,13 +71,13 @@ const ALL_SIEMS: SiemId[] = [
  *
  * The tier_down alternates cover the in-platform tier names the renderer
  * reaches for by destination (CloudWatch IA, Datadog Flex, Azure Basic /
- * Auxiliary, Elastic frozen), because naming the tier is the same claim as
+ * Auxiliary, Elastic frozen, OpenSearch UltraWarm), because naming the tier is the same claim as
  * naming the lever.
  */
 const LEVER_VOCABULARY: Record<'compact' | 'tier_down', RegExp> = {
   compact: /\bcompact(?:s|ed|ing|ion)?\b/i,
   tier_down:
-    /\btier[ _-]?down\b|\bcheaper (?:retained |in-platform |searchable )?tier\b|\binfrequent access\b|\bflex logs?\b|\bfrozen tier\b|\bauxiliary (?:table|plan|tier)\b/i,
+    /\btier[ _-]?down\b|\bcheaper (?:retained |in-platform |searchable )?tier\b|\binfrequent access\b|\bflex logs?\b|\bfrozen tier\b|\bauxiliary (?:table|plan|tier)\b|\bultrawarm\b/i,
 };
 
 /**
