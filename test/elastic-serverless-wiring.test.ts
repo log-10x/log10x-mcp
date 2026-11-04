@@ -55,22 +55,12 @@ test('elastic-serverless bills on ingest, self-hosted on indexed volume', () => 
   assert.equal(COST_MODEL_BY_DESTINATION.elasticsearch.billing_basis, 'indexed-uncompressed');
 });
 
-test('serverless offers tier_down, never compact: there is nowhere to install the expander', () => {
-  // 2026-08-19 with product: Serverless DOES have a cheaper searchable tier,
-  // so tier_down is real and comes before offload.
-  // 2026-08-23, corrected again: this entry ALSO claimed compact, inherited
-  // from the Elasticsearch row. It cannot hold. Compacted events are expanded
-  // by the l1es ELASTICSEARCH PLUGIN, installed with
-  // `bin/elasticsearch-plugin install` or baked into a node image, and Elastic
-  // Serverless has no plugin surface at all. The bytes would shrink and the
-  // customer would be left reading `~hash,val,val`.
-  const actions = getAllowedActionsForDestination('elastic-serverless');
-  assert.ok(actions.includes('tier_down'), 'the Serverless cost-efficient tier is a real tier_down target');
-  assert.ok(!actions.includes('compact'), 'no plugin surface on Serverless: compact must not be offered');
-  assert.ok(
-    actions.indexOf('tier_down') < actions.indexOf('offload'),
-    'the in-SIEM lever comes before offload'
-  );
+test('serverless is offload-only: no cheaper searchable tier, no plugin surface', () => {
+  // Elastic's Serverless price page bills ingest and retention per GB and lists
+  // no cheaper searchable tier, so there is no tier_down target. Compacted
+  // events are expanded by the l1es ELASTICSEARCH PLUGIN, and Serverless has no
+  // plugin surface, so compact would leave the customer reading `~hash,val,val`.
+  assert.deepEqual(getAllowedActionsForDestination('elastic-serverless'), ['offload']);
   assert.equal(
     COST_MODEL_BY_DESTINATION['elastic-serverless'].compact_mode,
     'no-op',
@@ -137,13 +127,11 @@ test('elasticsearch offers tier_down with a genuinely cheaper target', () => {
   assert.match(t.name, /frozen/i, 'target tier should name the frozen tier');
 });
 
-test('serverless tier_down is priced (cheaper than its baseline)', () => {
+test('serverless carries no tier_down target or prerequisite', () => {
   const m = COST_MODEL_BY_DESTINATION['elastic-serverless'];
-  assert.ok(m.tier_down_target_tier, 'serverless carries a tier_down target');
-  assert.ok(
-    m.tier_down_target_tier!.ingest_rate_usd_per_gb < m.ingest_per_gb,
-    'the tier must be cheaper than the baseline or tier_down saves nothing'
-  );
+  assert.equal(m.tier_down_target_tier, undefined, 'no cheaper Serverless tier exists to price');
+  assert.equal(m.tier_down_requires, undefined, 'no prerequisite names a tier that does not exist');
+  assert.equal(m.storage_per_gb_month, 0.017, 'Logs Essentials retention per GB-month');
 });
 
 test('the frozen recipe emits the artifacts the live run actually used', async () => {

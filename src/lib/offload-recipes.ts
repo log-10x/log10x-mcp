@@ -2898,8 +2898,8 @@ export function renderOffloadSection(
     getAllowedActionsForDestination('coralogix').includes('tier_down');
 
   // Self-hosted Elasticsearch and Elastic Cloud Hosted both reach the frozen
-  // tier through ILM. Serverless is excluded on purpose: its retention is
-  // already at roughly object-storage cost, so there is no premium to escape.
+  // tier through ILM. Serverless is excluded: it has no cheaper searchable
+  // tier, so offload is its lever.
   const showElastic =
     destination === 'elasticsearch' &&
     getAllowedActionsForDestination('elasticsearch').includes('tier_down');

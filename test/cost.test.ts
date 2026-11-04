@@ -28,6 +28,7 @@ import {
   projectActionRange,
   resolveTierDownTier,
   getAllowedActionsForDestination,
+  getAvailableActions,
   degradeRatioForSmallEvents,
   annualizeDollars,
   percentReduction,
@@ -39,6 +40,7 @@ import {
   describeCompactFigure,
   tierDownRateDelta,
 } from '../src/lib/cost.js';
+import type { SiemId } from '../src/lib/siem/pricing.js';
 
 // GB = 10^9 bytes (decimal), matching src/lib/cost.ts. This is the unit
 // CloudWatch / Datadog / Splunk / Azure / GCP / Sumo all bill in, so the
@@ -615,6 +617,26 @@ test('azure-monitor default action leads with tier_down', () => {
     'tier_down',
     'offload',
   ]);
+});
+
+test('elasticsearch_self leads with tier_down; compact needs self-managed and a stated 8.17.0', () => {
+  const self = 'elasticsearch_self' as SiemId;
+  assert.deepEqual(getAllowedActionsForDestination(self), ['tier_down', 'compact', 'offload']);
+  for (const opts of [
+    undefined,
+    { selfManaged: true },
+    { selfManaged: true, elasticsearchVersion: '9.1.0' },
+    { selfManaged: true, elasticsearchVersion: '8.17' },
+    { selfManaged: false, elasticsearchVersion: '8.17.0' },
+    { elasticsearchVersion: '8.17.0' },
+  ]) {
+    assert.deepEqual(getAvailableActions(self, opts), ['tier_down', 'offload'], JSON.stringify(opts));
+  }
+  const confirmed = { selfManaged: true, elasticsearchVersion: '8.17.0' };
+  assert.deepEqual(getAvailableActions(self, confirmed), ['tier_down', 'compact', 'offload']);
+  assert.deepEqual(getAvailableActions('elasticsearch', confirmed), ['tier_down', 'offload', 'compact']);
+  assert.deepEqual(getAvailableActions('elasticsearch', { selfManaged: true }), ['tier_down', 'offload']);
+  assert.deepEqual(getAvailableActions('elastic-serverless', confirmed), ['offload']);
 });
 
 test('projectAction tier_down on azure-monitor bills the Basic tier rate, not Analytics', () => {

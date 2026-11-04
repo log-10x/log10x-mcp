@@ -170,6 +170,12 @@ export interface SolveOpts {
    */
   selfManaged?: boolean;
   /**
+   * Elasticsearch only: the version the user stated. Compact needs the l1es
+   * plugin, which loads only on 8.17.0, so it is priced only when this is
+   * 8.17.0 and selfManaged is true. Absent = unknown. Never inferred.
+   */
+  elasticsearchVersion?: string;
+  /**
    * Splunk only. `workload`: the licence meters vCPU, not bytes, and compact
    * leaves the lever set. Absent means ingest pricing, Splunk's common case.
    */
@@ -364,7 +370,7 @@ export interface Plan {
 export function keepEverythingLever(
   destination: SiemId,
   retrieverInstalled: boolean,
-  opts?: { selfManaged?: boolean; splunkPricing?: SplunkPricing },
+  opts?: { selfManaged?: boolean; elasticsearchVersion?: string; splunkPricing?: SplunkPricing },
 ): Action | null {
   const allowed = new Set(getAvailableActions(destination, opts));
   // in-SIEM rungs, in ladder order, gated by whether compact is real here
@@ -487,6 +493,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
     opts.scope && opts.scope !== 'all' ? new Set(opts.scope) : null;
   const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled, {
     selfManaged: opts.selfManaged,
+    elasticsearchVersion: opts.elasticsearchVersion,
     splunkPricing: opts.splunkPricing,
   });
   // Splunk sources that stay raw whatever the target: the add-on sourcetypes
@@ -677,7 +684,10 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   /** Events a month the final plan moves to the per-event tier; set once selection ends. */
   let planFlexEvents = 0;
 
-  const allowed = new Set(getAvailableActions(opts.destination, { selfManaged: opts.selfManaged }));
+  const allowed = new Set(getAvailableActions(opts.destination, {
+    selfManaged: opts.selfManaged,
+    elasticsearchVersion: opts.elasticsearchVersion,
+  }));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
   // The in-SIEM keep-everything lever (compact/tier_down), separate from offload
   // so the two can be applied as an escalation, not an either/or. For a VOLUME
@@ -685,7 +695,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   let inSiem: Action | null =
     lever === 'compact' || lever === 'tier_down' ? lever : null;
   if (denom === 'bytes' && inSiem === 'tier_down') {
-    inSiem = compactsInPlace(opts.destination) ? 'compact' : null;
+    inSiem = allowed.has('compact') && compactsInPlace(opts.destination) ? 'compact' : null;
   }
 
   // Keep-everything ceiling = the DEEPEST keep-everything rung on every

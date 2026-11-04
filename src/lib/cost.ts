@@ -708,14 +708,14 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // compact_mode describes the MECHANISM (encoded events shrink the _source
     // footprint ES bills on). Whether it is AVAILABLE depends on the
     // deployment: the l1es plugin installs on self-managed nodes only, and is
-    // built against specific versions. So this generic key does not offer
-    // compact — a confirmed `deployment: 'self_managed'` does. Ask which
-    // deployment before pricing compact on Elasticsearch.
+    // built against one version. So this generic key does not offer compact —
+    // a confirmed `deployment: 'self_managed'` on Elasticsearch 8.17.0 does.
+    // Ask the deployment and the version before pricing compact.
     compact_mode: 'index-pruned',
     compact_requires:
       'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed Elasticsearch 8.17.0; OpenSearch 2.19.0)',
     tier_down_requires:
-      'frozen searchable snapshots: an Enterprise licence self-managed, or Gold+ on Elastic Cloud Hosted',
+      'frozen searchable snapshots: an Enterprise licence, self-managed or on Elastic Cloud Hosted',
     // The one Elasticsearch measurement, taken without pruning, stands in for
     // the pruned mode as a floor: pruning removes more, and that is unmeasured.
     // The unpruned variant (getDestinationCostModel) carries the same figure
@@ -764,22 +764,11 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
       storage_rate_usd_per_gb_month: 0.01,
     },
   },
-  // Elastic Cloud Serverless. Split out from `elasticsearch` because the two
-  // bill on different axes and the self-hosted assumption overstates a
-  // Serverless bill by roughly 14x.
-  //
-  // Serverless charges per GB INGESTED ($0.07) plus per GB RETAINED per month
-  // ($0.017), so compact -- which reduces the bytes that arrive -- lands
-  // directly on the larger of the two lines. Self-hosted `elasticsearch` has no
-  // per-GB licence at all; its 1.0 is a blended infrastructure figure from
-  // vendors.json.
-  //
-  // NO tier_down here, deliberately. Serverless retention is already at roughly
-  // object-storage cost ($0.017/GB-month), so there is no premium tier to
-  // escape; the frozen-tier lever belongs to Elastic Cloud HOSTED, which is
-  // resource-priced and is NOT modelled separately yet (it would be identical
-  // to `elasticsearch` until that lever exists, and a destination with no
-  // behavioural difference is just surface area).
+  // Elastic Cloud Serverless bills per GB ingested ($0.07) and per GB retained
+  // per month ($0.017) on Logs Essentials, and its price page lists no cheaper
+  // searchable tier, so offload is the lever. Its own entry because the
+  // self-hosted `elasticsearch` figure (1.0, a blended infrastructure estimate)
+  // overstates a Serverless bill about 14x.
   'elastic-serverless': {
     destination: 'elastic-serverless',
     ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB['elastic-serverless'],
@@ -791,25 +780,12 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
     // Serverless has no plugin surface at all. Shipping encoded events with
     // nothing to expand them leaves the customer reading `~hash,val,val`,
     // which is not a keep-everything lever whatever the byte number says.
-    // This entry previously inherited ES's index-pruned mode and priced a
-    // 65% saving the platform cannot deliver.
     compact_mode: 'no-op',
     compact_unavailable_reason:
       'the l1es expander is an Elasticsearch plugin and Elastic Serverless has no plugin surface: compacted events would arrive unreadable',
     compact_ratio_low: 1.0,
     compact_ratio_high: 1.0,
     small_event_floor_bytes: 100,
-    tier_down_requires:
-      'the Serverless cost-efficient tier (rate below is derived, not quoted: confirm against your live Serverless price)',
-    // Elastic Serverless DOES offer a cheaper searchable tier (confirmed with
-    // product): tier_down routes there, and per the ladder it is taken before
-    // offload. Rate is the conservative 0.60 cost-delta on the ingest floor
-    // ($0.07 × 0.40 = $0.028); confirm against the live Serverless tier price.
-    tier_down_target_tier: {
-      name: 'Elastic Serverless cost-efficient tier',
-      ingest_rate_usd_per_gb: 0.028,
-      storage_rate_usd_per_gb_month: 0.008,
-    },
   },
   // ClickHouse is priced as a COMPUTE bill. Ingest is genuinely $0 and the
   // storage rate below is genuinely small, and both stay because both are
@@ -1056,18 +1032,15 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // Self-hosted ES/OS can run the l1es plugin (built for ES 8.17.0 /
   // OpenSearch 2.19.0); managed offerings cannot, and Serverless has no plugin
   // surface at all.
-  // tier_down works via a frozen searchable snapshot (identity
-  // survives). Needs an Enterprise licence self-managed, or Gold+ on Elastic
-  // Cloud Hosted; the recipe states that as a prerequisite.
-  // Deployment unknown: tier_down is a PLATFORM feature (frozen searchable
-  // snapshots, licence-gated) so it holds either way; compact needs OUR plugin
-  // and therefore self-managed, which only a confirmed deployment asserts
-  // (see getAvailableActions).
+  // tier_down works via a frozen searchable snapshot (identity survives): a
+  // PLATFORM feature that needs an Enterprise licence and no plugin, so it
+  // holds on every deployment and version. compact needs OUR plugin, which
+  // only a confirmed self-managed Elasticsearch 8.17.0 asserts (see
+  // getAvailableActions).
   elasticsearch: ['tier_down', 'offload'],
-  // Serverless: the cheaper searchable tier is confirmed with product; compact
-  // is not offered (no plugin surface for the expander — see the model entry).
-  'elastic-serverless': ['tier_down', 'offload'],
-  elasticsearch_self: ['compact', 'offload'],
+  // Serverless: no cheaper searchable tier and no plugin surface.
+  'elastic-serverless': ['offload'],
+  elasticsearch_self: ['tier_down', 'compact', 'offload'],
   elasticsearch_managed: ['offload'],
   opensearch_self: ['compact', 'offload'],
   opensearch_managed: ['offload'],
@@ -1144,13 +1117,17 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  *
  * The base list omits compaction on the Elasticsearch/OpenSearch family
  * because the expander is the l1es plugin, installable only on nodes the
- * customer controls. A CONFIRMED self-managed deployment adds it back.
+ * customer controls. A CONFIRMED self-managed deployment adds it back; on
+ * Elasticsearch the version must be confirmed too, because the plugin loads
+ * only on L1ES_ELASTICSEARCH_VERSION.
  * Serverless never qualifies: its compact_mode is 'no-op' precisely because
  * there is no plugin surface, so the guard below refuses it there too.
  */
+export const L1ES_ELASTICSEARCH_VERSION = '8.17.0';
+
 export function getAvailableActions(
   destination: SiemId,
-  opts?: { selfManaged?: boolean; splunkPricing?: 'ingest' | 'workload' },
+  opts?: { selfManaged?: boolean; elasticsearchVersion?: string; splunkPricing?: 'ingest' | 'workload' },
 ): Action[] {
   const allowed = getAllowedActionsForDestination(destination);
   const d = String(destination);
@@ -1160,10 +1137,17 @@ export function getAvailableActions(
     opts?.splunkPricing === 'workload' && d.startsWith('splunk')
       ? allowed.filter((a) => a !== 'compact')
       : allowed;
-  const pluginFamily = d.startsWith('elasticsearch') || d.startsWith('opensearch');
+  if (d.startsWith('elasticsearch')) {
+    const confirmed =
+      opts?.selfManaged === true &&
+      opts.elasticsearchVersion?.trim() === L1ES_ELASTICSEARCH_VERSION &&
+      compactsInPlace(destination);
+    if (!confirmed) return base.filter((a) => a !== 'compact');
+    return base.includes('compact') ? base : [...base, 'compact'];
+  }
   if (
     opts?.selfManaged === true &&
-    pluginFamily &&
+    d.startsWith('opensearch') &&
     !base.includes('compact') &&
     compactsInPlace(destination)
   ) {
