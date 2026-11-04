@@ -90,7 +90,7 @@ test('the recipe carries the proof run calls', () => {
   };
   assert.equal(tierDown.policy.default_state, 'hot');
   assert.deepEqual(tierDown.policy.states, [
-    { name: 'hot', actions: [{ rollover: { min_index_age: '1h' } }], transitions: [{ state_name: 'warm' }] },
+    { name: 'hot', actions: [{ rollover: { min_primary_shard_size: '50gb', min_index_age: '1h' } }], transitions: [{ state_name: 'warm' }] },
     { name: 'warm', actions: [{ warm_migration: {}, retry: { count: 5, delay: '10m' } }], transitions: [] },
   ]);
   assert.deepEqual(tierDown.policy.ism_template, { index_patterns: ['tenx-tierdown-*'], priority: 100 });
@@ -99,7 +99,7 @@ test('the recipe carries the proof run calls', () => {
     policy: { states: unknown[]; ism_template: unknown };
   };
   assert.deepEqual(keep.policy.states, [
-    { name: 'hot', actions: [{ rollover: { min_index_age: '1d' } }], transitions: [] },
+    { name: 'hot', actions: [{ rollover: { min_primary_shard_size: '50gb', min_index_age: '1d' } }], transitions: [] },
   ]);
   assert.deepEqual(keep.policy.ism_template, { index_patterns: ['tenx-app-*'], priority: 100 });
 

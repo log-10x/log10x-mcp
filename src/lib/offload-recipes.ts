@@ -1478,9 +1478,10 @@ PUT _index_template/tenx-app-tpl
 }
 
 # 2) ISM policies. They must exist before the bootstrap indices in 3), which
-#    ism_template attaches them to. tenx-tier-down rolls the slice over, then
-#    migrates the rolled index to UltraWarm. tenx-keep is the control: kept
-#    lines roll over daily and stay hot.
+#    ism_template attaches them to. Each rolls over on whichever comes first,
+#    a 50gb primary shard or its age. tenx-tier-down rolls the slice over
+#    hourly, then migrates the rolled index to UltraWarm. tenx-keep is the
+#    control: kept lines roll over daily and stay hot.
 PUT _plugins/_ism/policies/tenx-tier-down
 {
   "policy": {
@@ -1489,7 +1490,7 @@ PUT _plugins/_ism/policies/tenx-tier-down
     "states": [
       {
         "name": "hot",
-        "actions": [ { "rollover": { "min_index_age": "1h" } } ],
+        "actions": [ { "rollover": { "min_primary_shard_size": "50gb", "min_index_age": "1h" } } ],
         "transitions": [ { "state_name": "warm" } ]
       },
       {
@@ -1510,7 +1511,7 @@ PUT _plugins/_ism/policies/tenx-keep
     "states": [
       {
         "name": "hot",
-        "actions": [ { "rollover": { "min_index_age": "1d" } } ],
+        "actions": [ { "rollover": { "min_primary_shard_size": "50gb", "min_index_age": "1d" } } ],
         "transitions": []
       }
     ],
