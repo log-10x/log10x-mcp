@@ -39,6 +39,7 @@ import {
   expectedCompactRatio,
   describeCompactFigure,
   tierDownRateDelta,
+  L1ES_OPENSEARCH_VERSION,
 } from '../src/lib/cost.js';
 import type { SiemId } from '../src/lib/siem/pricing.js';
 
@@ -73,7 +74,7 @@ test('parsePrometheusValue handles strings, NaN, and missing values', () => {
 // destination model lookup
 // ---------------------------------------------------------------------------
 
-test('COST_MODEL_BY_DESTINATION has all ten SIEMs', () => {
+test('COST_MODEL_BY_DESTINATION has all eleven SIEMs', () => {
   const keys = Object.keys(COST_MODEL_BY_DESTINATION).sort();
   assert.deepEqual(keys, [
     'azure-monitor',
@@ -84,6 +85,7 @@ test('COST_MODEL_BY_DESTINATION has all ten SIEMs', () => {
     'elastic-serverless',
     'elasticsearch',
     'gcp-logging',
+    'opensearch',
     'splunk',
     'sumo',
   ]);
@@ -637,6 +639,67 @@ test('elasticsearch_self leads with tier_down; compact needs self-managed and a 
   assert.deepEqual(getAvailableActions('elasticsearch', confirmed), ['tier_down', 'offload', 'compact']);
   assert.deepEqual(getAvailableActions('elasticsearch', { selfManaged: true }), ['tier_down', 'offload']);
   assert.deepEqual(getAvailableActions('elastic-serverless', confirmed), ['offload']);
+});
+
+test('opensearch has its own model: UltraWarm tier, AWS storage rates, never Elastic frozen', () => {
+  const m = COST_MODEL_BY_DESTINATION.opensearch;
+  assert.equal(m.ingest_per_gb, 1);
+  assert.equal(m.storage_per_gb_month, 0.122);
+  assert.equal(m.tier_down_target_tier?.name, 'Amazon OpenSearch Service UltraWarm');
+  assert.equal(m.tier_down_target_tier?.storage_rate_usd_per_gb_month, 0.024);
+  assert.equal(m.tier_down_target_tier?.ingest_rate_usd_per_gb, m.ingest_per_gb,
+    'indices are written on hot and migrated: ingest does not change');
+  assert.equal(
+    m.tier_down_requires,
+    'UltraWarm enabled on the domain: dedicated master nodes, no T2 or T3 data nodes, and the ISM plugin',
+  );
+  assert.match(m.compact_requires ?? '', /OpenSearch 2\.19\.0/);
+  for (const variant of ['opensearch_self', 'opensearch_managed'] as unknown as SiemId[]) {
+    const v = getDestinationCostModel(variant);
+    assert.equal(v.destination, variant);
+    assert.equal(v.tier_down_target_tier?.name, 'Amazon OpenSearch Service UltraWarm', variant);
+    const text = JSON.stringify(v);
+    assert.doesNotMatch(text, /frozen|searchable snapshot|Kibana|Enterprise licence|\bILM\b/, variant);
+  }
+});
+
+test('opensearch levers: managed tiers down, self-managed compacts only on a stated 2.19.0', () => {
+  assert.deepEqual(getAllowedActionsForDestination('opensearch_managed'), ['tier_down', 'offload']);
+  assert.deepEqual(getAllowedActionsForDestination('opensearch_self'), ['compact', 'offload']);
+  assert.equal(L1ES_OPENSEARCH_VERSION, '2.19.0');
+  // Unknown deployment: offload alone, whatever else is passed.
+  for (const opts of [undefined, {}, { opensearchVersion: '2.19.0' }]) {
+    assert.deepEqual(getAvailableActions('opensearch', opts), ['offload'], JSON.stringify(opts));
+  }
+  assert.deepEqual(getAvailableActions('opensearch', { selfManaged: false }), ['tier_down', 'offload']);
+  assert.deepEqual(
+    getAvailableActions('opensearch', { selfManaged: false, opensearchVersion: '2.19.0' }),
+    ['tier_down', 'offload'],
+    'managed never compacts',
+  );
+  for (const opts of [
+    { selfManaged: true },
+    { selfManaged: true, opensearchVersion: '2.17.0' },
+    { selfManaged: true, opensearchVersion: '2.19' },
+    { selfManaged: true, elasticsearchVersion: '8.17.0' },
+  ]) {
+    assert.deepEqual(getAvailableActions('opensearch', opts), ['offload'], JSON.stringify(opts));
+    assert.deepEqual(getAvailableActions('opensearch_self' as SiemId, opts), ['offload'], JSON.stringify(opts));
+  }
+  const confirmed = { selfManaged: true, opensearchVersion: '2.19.0' };
+  assert.deepEqual(getAvailableActions('opensearch', confirmed), ['compact', 'offload']);
+  assert.deepEqual(getAvailableActions('opensearch_self' as SiemId, confirmed), ['compact', 'offload']);
+  assert.deepEqual(getAvailableActions('opensearch_managed' as SiemId, confirmed), ['tier_down', 'offload']);
+});
+
+test('projectAction tier_down on opensearch bills the UltraWarm storage rate', () => {
+  const std = projectAction({ action: 'pass', bytes_in: GB, destination: 'opensearch' });
+  const p = projectAction({ action: 'tier_down', bytes_in: GB, destination: 'opensearch' });
+  assert.equal(p.bytes_out, GB);
+  assert.ok(Math.abs(p.ingest_dollars! - std.ingest_dollars!) < 1e-9, 'ingest unchanged');
+  assert.ok(Math.abs(std.storage_dollars! - 0.122) < 1e-9, `hot gp3, got ${std.storage_dollars}`);
+  assert.ok(Math.abs(p.storage_dollars! - 0.024) < 1e-9, `UltraWarm, got ${p.storage_dollars}`);
+  assert.ok(p.notes && p.notes.some((n) => /UltraWarm/.test(n)));
 });
 
 test('projectAction tier_down on azure-monitor bills the Basic tier rate, not Analytics', () => {

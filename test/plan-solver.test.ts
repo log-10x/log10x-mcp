@@ -406,6 +406,55 @@ test('self-managed does NOT resurrect compact on serverless: there is no plugin 
   assert.ok(pl.planned.every((r) => r.action !== 'compact'));
 });
 
+test('opensearch with the deployment unstated prices offload alone and says what each answer adds', () => {
+  const pl = solvePlan(estate(), { destination: 'opensearch', retrieverInstalled: true, targetPct: 40 });
+  assert.equal(pl.keepEverythingLever, 'offload');
+  assert.ok(pl.planned.every((r) => r.action !== 'compact' && r.action !== 'tier_down'));
+  const note = (pl.notes ?? []).find((n) => /deployment not stated/.test(n));
+  assert.ok(note, (pl.notes ?? []).join(' | '));
+  assert.match(note!, /managed\) adds UltraWarm tier down/);
+  assert.match(note!, /self-managed OpenSearch 2\.19\.0 adds compact/);
+  const noRetr = solvePlan(estate(), { destination: 'opensearch', retrieverInstalled: false, targetPct: 40 });
+  assert.equal(noRetr.keepEverythingLever, null);
+});
+
+test('managed opensearch tiers down to UltraWarm and names what UltraWarm needs', () => {
+  const pl = solvePlan(estate(), {
+    destination: 'opensearch', retrieverInstalled: true, targetPct: 40, selfManaged: false,
+  });
+  assert.equal(pl.keepEverythingLever, 'tier_down');
+  assert.ok(pl.planned.some((r) => r.action === 'tier_down'));
+  assert.ok(pl.planned.every((r) => r.action !== 'compact'));
+  assert.ok(pl.prerequisites.includes(
+    'UltraWarm enabled on the domain: dedicated master nodes, no T2 or T3 data nodes, and the ISM plugin',
+  ), pl.prerequisites.join(' | '));
+  assert.ok(!pl.prerequisites.some((x) => /searchable snapshots|Enterprise|Kibana/i.test(x)), pl.prerequisites.join(' | '));
+  assert.ok(!(pl.notes ?? []).some((n) => /deployment not stated/.test(n)));
+  assert.match(pl.rateBasis, /UltraWarm/);
+});
+
+test('self-managed opensearch compacts only on a stated 2.19.0 and never tiers down', () => {
+  for (const opensearchVersion of [undefined, '2.17.0', '2.19', '3.1.0']) {
+    const pl = solvePlan(estate(), {
+      destination: 'opensearch', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+      ...(opensearchVersion ? { opensearchVersion } : {}),
+    });
+    assert.equal(pl.keepEverythingLever, 'offload', String(opensearchVersion));
+    assert.ok(pl.planned.every((r) => r.action !== 'compact' && r.action !== 'tier_down'), String(opensearchVersion));
+  }
+  const pl = solvePlan(estate(), {
+    destination: 'opensearch', retrieverInstalled: true, targetPct: 40, selfManaged: true,
+    opensearchVersion: '2.19.0',
+  });
+  assert.equal(pl.keepEverythingLever, 'compact');
+  assert.ok(pl.planned.every((r) => r.action !== 'tier_down'));
+  assert.ok(pl.prerequisites.some((x) => /l1es plugin/.test(x) && /OpenSearch 2\.19\.0/.test(x)), pl.prerequisites.join(' | '));
+  const gb = solvePlan(estate(), {
+    destination: 'opensearch', retrieverInstalled: false, target: { kind: 'gb_budget', value: 1 }, selfManaged: true,
+  });
+  assert.ok(gb.planned.every((r) => r.action !== 'compact'), 'a volume budget does not reach for unconfirmed compact');
+});
+
 test('prerequisites cover only the levers a plan actually uses', () => {
   const noRetr = solvePlan(estate(), { destination: 'splunk', retrieverInstalled: false, targetPct: 30 });
   assert.ok(noRetr.prerequisites.some((x) => /Splunk app/i.test(x)));

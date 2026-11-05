@@ -65,6 +65,10 @@ test('destination mapping covers the aliases and refuses the rest', () => {
   assert.equal(depVendorForDestination('elastic-serverless' as never), 'elasticsearch');
   assert.equal(depVendorForDestination('datadog' as never), 'datadog');
   assert.equal(depVendorForDestination('sumo' as never), null);
+  // The Elasticsearch scanner reads Kibana; OpenSearch has none.
+  for (const d of ['opensearch', 'opensearch_self', 'opensearch_managed']) {
+    assert.equal(depVendorForDestination(d as never), null, d);
+  }
 });
 
 test('no credentials -> checked:false with the missing vars named, zero fetches', async () => {

@@ -765,6 +765,57 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
       storage_rate_usd_per_gb_month: 0.01,
     },
   },
+  // OpenSearch. ingest_per_gb is the Elasticsearch family's infrastructure
+  // estimate (PRICING.md lists AWS OpenSearch at the same $1.00); the service
+  // bills instance-hours and storage, not GB ingested. Storage rates are the
+  // AWS Price List API, us-east-1 on demand, read 2026-11-04: hot EBS gp3
+  // $0.122/GB-month, UltraWarm managed storage $0.024/GB-month.
+  //
+  // tier_down is UltraWarm on Amazon OpenSearch Service: ISM `warm_migration`
+  // moves a rolled-over index to warm nodes backed by S3. Measured once on
+  // OpenSearch 2.19.0 (log-10x/benchmarks opensearch-ultrawarm-tierdown): 400
+  // of 400 held hashes answered one hit each with `_source` intact after the
+  // move and an hour later, and the index's hot store went from 156,282 b to 0.
+  // Indices are written on hot and migrated, so the ingest rate does not
+  // change and the saving is the storage delta. Warm nodes bill by the hour
+  // apart from it (ultrawarm1.medium.search $0.238/h). Hot storage is billed as
+  // provisioned, so the domain's volumes must be resized to bank the saving.
+  // Self-managed OpenSearch has no UltraWarm (opensearch_self).
+  opensearch: {
+    destination: 'opensearch',
+    ingest_per_gb: DEFAULT_ANALYZER_COST_PER_GB.opensearch,
+    storage_per_gb_month: 0.122,
+    billing_basis: 'indexed-uncompressed',
+    // Offered only on a confirmed self-managed OpenSearch 2.19.0; see
+    // getAvailableActions. The ratio is the one Elasticsearch on-disk run.
+    compact_mode: 'index-pruned',
+    compact_requires:
+      'the l1es plugin installed on your nodes, which auto-expands compacted events at query time (self-managed OpenSearch 2.19.0)',
+    compact_ratio_low: ES_ON_DISK_RATIO,
+    compact_ratio_expected: ES_ON_DISK_RATIO,
+    compact_ratio_high: ES_ON_DISK_RATIO,
+    compact_ratio_basis: {
+      short:
+        'measured once on disk in Elasticsearch without pruning, on one OpenTelemetry capture, not on ' +
+        'OpenSearch or this estate',
+      full:
+        `${ES_ON_DISK_BASIS}. Not measured on OpenSearch; the l1es OpenSearch build is the same plugin ` +
+        'for 2.19.0. One capture, not a forecast for this estate',
+    },
+    // elasticsearch-plugin README: on OpenSearch the rewrite runs as the
+    // l1es_query_rewrite search pipeline; "The behavior is otherwise identical."
+    compact_readback:
+      'on OpenSearch the l1es plugin rebuilds each event, and its l1es_query_rewrite search pipeline lets match, ' +
+      'match_phrase and multi_match queries search the full text while other query types see the encoded form',
+    small_event_floor_bytes: 100,
+    tier_down_requires:
+      'UltraWarm enabled on the domain: dedicated master nodes, no T2 or T3 data nodes, and the ISM plugin',
+    tier_down_target_tier: {
+      name: 'Amazon OpenSearch Service UltraWarm',
+      ingest_rate_usd_per_gb: DEFAULT_ANALYZER_COST_PER_GB.opensearch,
+      storage_rate_usd_per_gb_month: 0.024,
+    },
+  },
   // Elastic Cloud Serverless bills per GB ingested ($0.07) and per GB retained
   // per month ($0.017) on Logs Essentials, and its price page lists no cheaper
   // searchable tier, so offload is the lever. Its own entry because the
@@ -984,10 +1035,10 @@ export const COST_MODEL_BY_DESTINATION: Record<SiemId, DestinationCostModel> = {
 //   - CloudWatch:             tier_down (IA)    → offload
 //   - Azure Monitor:          tier_down (Basic/Auxiliary) → offload
 //   - Splunk Cloud / Ent:     offload           → compact (if 10x app installable)
-//   - Elasticsearch self / OpenSearch self:
-//                             offload           → compact (if 10x plugin installable)
-//   - Elasticsearch managed / OpenSearch managed:
-//                             offload                  (no compact on managed)
+//   - Elasticsearch self:     offload           → compact (if 10x plugin installable)
+//   - Elasticsearch managed:  offload                  (no compact on managed)
+//   - OpenSearch:             managed tiers down to UltraWarm → offload;
+//                             self-managed offloads, compact only with the plugin
 //   - ClickHouse:             offload                  (compact is a no-op here;
 //                             the bill is compute, and offload is what keeps
 //                             rows out of it. tier_down, as a cold table read
@@ -1043,8 +1094,12 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   'elastic-serverless': ['offload'],
   elasticsearch_self: ['tier_down', 'compact', 'offload'],
   elasticsearch_managed: ['offload'],
+  // OpenSearch: UltraWarm is an Amazon OpenSearch Service feature, so tier_down
+  // is a managed lever only. With the deployment unknown, offload alone holds;
+  // getAvailableActions widens the list on a stated deployment.
+  opensearch: ['offload'],
   opensearch_self: ['compact', 'offload'],
-  opensearch_managed: ['offload'],
+  opensearch_managed: ['tier_down', 'offload'],
   // ClickHouse: offload is the only modeled lever. Compaction is a no-op on the
   // billed measure, and the cold-table tier_down recipe is not built yet.
   clickhouse: ['offload'],
@@ -1118,20 +1173,35 @@ export function getAllowedActionsForDestination(destination: string): Action[] {
  *
  * The base list omits compaction on the Elasticsearch/OpenSearch family
  * because the expander is the l1es plugin, installable only on nodes the
- * customer controls. A CONFIRMED self-managed deployment adds it back; on
- * Elasticsearch the version must be confirmed too, because the plugin loads
- * only on L1ES_ELASTICSEARCH_VERSION.
+ * customer controls. A CONFIRMED self-managed deployment adds it back, on a
+ * confirmed version too, because the plugin loads only on
+ * L1ES_ELASTICSEARCH_VERSION or L1ES_OPENSEARCH_VERSION.
  * Serverless never qualifies: its compact_mode is 'no-op' precisely because
  * there is no plugin surface, so the guard below refuses it there too.
  */
 export const L1ES_ELASTICSEARCH_VERSION = '8.17.0';
+export const L1ES_OPENSEARCH_VERSION = '2.19.0';
+
+/** Said on an OpenSearch plan priced without a stated deployment. */
+export const OPENSEARCH_DEPLOYMENT_UNKNOWN_NOTE =
+  'OpenSearch deployment not stated, so offload is priced alone: Amazon OpenSearch Service (managed) adds ' +
+  `UltraWarm tier down, and self-managed OpenSearch ${L1ES_OPENSEARCH_VERSION} adds compact with the l1es plugin.`;
 
 export function getAvailableActions(
   destination: SiemId,
-  opts?: { selfManaged?: boolean; elasticsearchVersion?: string; splunkPricing?: 'ingest' | 'workload' },
+  opts?: {
+    selfManaged?: boolean;
+    elasticsearchVersion?: string;
+    opensearchVersion?: string;
+    splunkPricing?: 'ingest' | 'workload';
+  },
 ): Action[] {
-  const allowed = getAllowedActionsForDestination(destination);
-  const d = String(destination);
+  // Bare `opensearch` takes the variant the stated deployment names.
+  const d =
+    String(destination) === 'opensearch' && opts?.selfManaged !== undefined
+      ? opts.selfManaged ? 'opensearch_self' : 'opensearch_managed'
+      : String(destination);
+  const allowed = getAllowedActionsForDestination(d);
   // Splunk workload (vCPU) pricing meters compute, not bytes: compaction is
   // not a saving there (see SPLUNK_WORKLOAD_COMPACT_NOTE in siem/splunk-keep-raw.ts).
   const base =
@@ -1146,13 +1216,14 @@ export function getAvailableActions(
     if (!confirmed) return base.filter((a) => a !== 'compact');
     return base.includes('compact') ? base : [...base, 'compact'];
   }
-  if (
-    opts?.selfManaged === true &&
-    d.startsWith('opensearch') &&
-    !base.includes('compact') &&
-    compactsInPlace(destination)
-  ) {
-    return [...base, 'compact'];
+  if (d.startsWith('opensearch')) {
+    const confirmed =
+      opts?.selfManaged === true &&
+      d !== 'opensearch_managed' &&
+      opts.opensearchVersion?.trim() === L1ES_OPENSEARCH_VERSION &&
+      compactsInPlace(destination);
+    if (!confirmed) return base.filter((a) => a !== 'compact');
+    return base.includes('compact') ? base : [...base, 'compact'];
   }
   return base;
 }
@@ -1194,8 +1265,8 @@ const COST_MODEL_ALIAS: Partial<Record<string, SiemId>> = {
   splunk_cloud: 'splunk',
   elasticsearch_self: 'elasticsearch',
   elasticsearch_managed: 'elasticsearch',
-  opensearch_self: 'elasticsearch',
-  opensearch_managed: 'elasticsearch',
+  opensearch_self: 'opensearch',
+  opensearch_managed: 'opensearch',
 };
 
 export function getDestinationCostModel(

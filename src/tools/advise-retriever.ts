@@ -209,7 +209,7 @@ export const adviseRetrieverSchema = {
     .string()
     .optional()
     .describe(
-      'Destination SIEM for the kept slice (e.g. `datadog`, `cloudwatch`, `splunk`). Gates SIEM down-tier sub-sections in the offload markdown.'
+      'Destination SIEM for the kept slice (e.g. `datadog`, `cloudwatch`, `splunk`). Gates SIEM down-tier sub-sections in the offload markdown. OpenSearch: `opensearch_managed` (Amazon OpenSearch Service, UltraWarm recipe) or `opensearch_self` (offload only); bare `opensearch` asks which.'
     ),
 };
 

@@ -41,6 +41,7 @@ import {
   perEventTierPricing,
   projectAction,
   projectPerEventTierMove,
+  OPENSEARCH_DEPLOYMENT_UNKNOWN_NOTE,
   sumPerEventTierMoves,
   type Action,
   type PerEventTierMove,
@@ -175,6 +176,11 @@ export interface SolveOpts {
    * 8.17.0 and selfManaged is true. Absent = unknown. Never inferred.
    */
   elasticsearchVersion?: string;
+  /**
+   * OpenSearch only: the version the user stated. Compact is priced only when
+   * this is 2.19.0 and selfManaged is true. Absent = unknown. Never inferred.
+   */
+  opensearchVersion?: string;
   /**
    * Splunk only. `workload`: the licence meters vCPU, not bytes, and compact
    * leaves the lever set. Absent means ingest pricing, Splunk's common case.
@@ -370,7 +376,7 @@ export interface Plan {
 export function keepEverythingLever(
   destination: SiemId,
   retrieverInstalled: boolean,
-  opts?: { selfManaged?: boolean; elasticsearchVersion?: string; splunkPricing?: SplunkPricing },
+  opts?: { selfManaged?: boolean; elasticsearchVersion?: string; opensearchVersion?: string; splunkPricing?: SplunkPricing },
 ): Action | null {
   const allowed = new Set(getAvailableActions(destination, opts));
   // in-SIEM rungs, in ladder order, gated by whether compact is real here
@@ -494,6 +500,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const lever = keepEverythingLever(opts.destination, opts.retrieverInstalled, {
     selfManaged: opts.selfManaged,
     elasticsearchVersion: opts.elasticsearchVersion,
+    opensearchVersion: opts.opensearchVersion,
     splunkPricing: opts.splunkPricing,
   });
   // Splunk sources that stay raw whatever the target: the add-on sourcetypes
@@ -687,6 +694,7 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
   const allowed = new Set(getAvailableActions(opts.destination, {
     selfManaged: opts.selfManaged,
     elasticsearchVersion: opts.elasticsearchVersion,
+    opensearchVersion: opts.opensearchVersion,
   }));
   const canOffload = opts.retrieverInstalled && allowed.has('offload');
   // The in-SIEM keep-everything lever (compact/tier_down), separate from offload
@@ -1057,7 +1065,11 @@ export function solvePlan(rawPatterns: SolverPattern[], opts: SolveOpts): Plan {
         (unsized > 0 ? ` ${unsized} planned statement${unsized === 1 ? ' carries' : 's carry'} no line size, so nothing is kept back from ${unsized === 1 ? 'its' : 'their'} moved figure${unsized === 1 ? '' : 's'}.` : ''),
     );
   }
-  const notes = [...new Set([...(modeledNotes ?? []), ...floorNotes])];
+  const deploymentNotes =
+    String(opts.destination) === 'opensearch' && opts.selfManaged === undefined
+      ? [OPENSEARCH_DEPLOYMENT_UNKNOWN_NOTE]
+      : [];
+  const notes = [...new Set([...deploymentNotes, ...(modeledNotes ?? []), ...floorNotes])];
 
   return {
     destination: opts.destination,

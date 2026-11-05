@@ -424,6 +424,11 @@ the levers that hold either way, and says so. On self-managed Elasticsearch also
 pass it as \`elasticsearch_version\`: the l1es plugin loads only on 8.17.0, so compact is priced only
 on a stated 8.17.0, and any other or unknown version prices tier_down and offload. Elastic Cloud
 Serverless has no cheaper searchable tier and no plugin surface: offload is its lever.
+On OpenSearch pass \`destination: "opensearch"\` and ASK the deployment before quoting a plan: until it
+is stated the plan prices offload alone and its headline says so. \`deployment: "managed"\` (Amazon
+OpenSearch Service) adds tier_down to UltraWarm; \`deployment: "self_managed"\` has no UltraWarm and adds
+compact only with \`opensearch_version: "2.19.0"\`, the one version the l1es plugin loads on. OpenSearch
+has OpenSearch Dashboards and ISM, not Kibana or ILM.
 Never infer self-managed from silence or a version from a guess, and never pass either to make a
 target reachable.
 
