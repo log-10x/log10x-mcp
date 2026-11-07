@@ -1054,7 +1054,7 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
     if (isDemoMode) {
       throw new EnvironmentValidationError(
         `Demo-mode boot via GET /api/v1/user failed: ${(e as Error).message}. ` +
-          `Either the MCP can't reach prometheus.log10x.com from this network, ` +
+          `Either the MCP can't reach api.log10x.com from this network, ` +
           `or the demo key has rotated and the MCP needs a refresh. ` +
           `Bypass demo by signing in to your own account: run \`log10x_signin_start\` ` +
           `for the Auth0 Device Flow with GitHub or Google (the model chains to ` +

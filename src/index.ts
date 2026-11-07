@@ -1798,7 +1798,7 @@ if (process.env.LOG10X_DEV_MODE === 'true') {
 
 const REGISTERED_TOOLS: Array<{ name: string; intent: string }> = [
   { name: 'log10x_start', intent: 'CALL FIRST on any cost / orient / "where do I start" question: returns tier + action menu + must_ask_user question; agent must surface verbatim and wait for user pick before any other tool' },
-  { name: 'log10x_event_lookup', intent: 'What is this single log line: resolve to stable identity + cost + AI classification' },
+  { name: 'log10x_event_lookup', intent: 'What is this single log line: resolve to stable identity + cost' },
   { name: 'log10x_pattern_examples', intent: 'Recent live events for a pattern from the log analyzer with template-parsed slot values, bounded to 24h. When the pattern is offloaded, retriever_query samples the held-back cohort.' },
   { name: 'log10x_savings', intent: 'Pipeline ROI: how much receiver / retriever are saving in dollars' },
   { name: 'log10x_pattern_trend', intent: 'Time series for a pattern: volume + cost history, spike detection, sparkline' },
