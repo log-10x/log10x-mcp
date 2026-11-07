@@ -61,9 +61,9 @@
  * For that case the MCP queries the `/api/v1/demo/*` mirror of the read
  * endpoints with `Authorization: Bearer <demoLicenseJwt>` — the SAME demo
  * license the engine writes with, so reads and writes share the demo
- * tenant. These reads are bounded to the last 3h and rate limited, and
- * `query_ai` is not available. See `metrics-backend.ts` (`log10x_demo`
- * backend) and `environments.ts` (Path 4.5). A *user-scoped* license JWT
+ * tenant. These reads are bounded to the last 3h and rate limited. See
+ * `metrics-backend.ts` (`log10x_demo` backend) and `environments.ts`
+ * (Path 4.5). A *user-scoped* license JWT
  * is still engine-only and never used by the MCP for reads.
  *
  * Persisted at: the Auth0-minted *user* license is never persisted (it

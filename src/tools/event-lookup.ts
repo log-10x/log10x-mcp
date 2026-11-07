@@ -7,7 +7,6 @@
 
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
-import { queryAi } from '../lib/api.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
 import { boundedFanout } from '../lib/concurrency.js';
 import * as pql from '../lib/promql.js';
@@ -107,7 +106,7 @@ export async function executeEventLookup(
     md = await executeEventLookupInner(argsNormalized, env, sumOut);
   } catch (err: unknown) {
     // Wave 2.D: route through wrapBackendError so HTTP-status-coded
-    // throws from queryInstant / queryAi (e.g. "HTTP 503: ...") classify
+    // throws from queryInstant (e.g. "HTTP 503: ...") classify
     // as backend_unavailable/backend_timeout/schema_invalid/anchor_not_found
     // with proper retryable + suggested_backoff_ms instead of always
     // collapsing to a non-retryable 'backend_error'.
@@ -657,36 +656,6 @@ async function formatResults(
       const kept = fmtPct(offloadStatus.kept_share_pct_24h);
       lines.push(`_Offload status (24h): ${dropped} of this pattern's volume is offloaded to the customer's bucket (${kept} takes every other route). ${tail}_`);
     }
-  }
-
-  // AI analysis — OPT-IN only. queryAi posts the sampled query results + a
-  // prompt to the log10x API (always log10x, never the customer's own backend),
-  // so it stays OFF by default to keep the cost path from phoning home. Enable
-  // with LOG10X_AI_SUMMARY=true (or wire a customer-owned AI provider later).
-  if (process.env.LOG10X_AI_SUMMARY === 'true') {
-  try {
-    const queryResultJson = JSON.stringify(results.slice(0, 5));
-    // De-verdict (TOOL-AUDIT Phase 2): ask the classifier for the FACTUAL
-    // category only, not a routing verdict. The old prompt asked for
-    // ACTION (filter/keep/reduce) + FILTER_PCT (% safe to filter) — an
-    // asserted drop-recommendation the agent/user is better placed to judge
-    // from the cost / severity / sample context this tool already returns.
-    const aiPrompt = `Classify this log pattern. Pattern: ${pattern}. Provide: CATEGORY (error/debug/info/metric/health), CONFIDENCE (high/medium/low), EXPLANATION (one factual line on what the pattern represents, no recommendation).`;
-    // queryAi expects a number; pass 0 when rate is unset (the AI prompt
-    // only uses cost for table rendering, which we disable with
-    // output_table=false, so the value is a no-op classifier-side).
-    const aiResult = await queryAi(env, queryResultJson, aiPrompt, costPerGb ?? 0);
-
-    if (aiResult) {
-      lines.push('');
-      lines.push('AI Analysis:');
-      for (const line of aiResult.split('\n')) {
-        if (line.trim()) lines.push(`  ${line.trim()}`);
-      }
-    }
-  } catch {
-  // AI analysis is optional — skip silently
-  }
   }
 
   lines.push('');
