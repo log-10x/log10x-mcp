@@ -11,8 +11,8 @@
  * Auth0-token → api_key mint that bootstraps this surface see
  * `./auth-api.ts`. Canonical model: [./auth-model.ts](./auth-model.ts).
  *
- * Handles Prometheus queries, user settings, env CRUD, billing, and AI
- * analysis via the Log10x REST API.
+ * Handles user settings, env CRUD and billing via the Log10x REST API, and
+ * delegates Prometheus reads to the env's metrics backend.
  *
  * All HTTP reads route through `fetchWithRetry` — 3 attempts with
  * exponential backoff + jitter. Retries fire on network errors and
@@ -25,7 +25,10 @@ import { log } from './log.js';
 // Authentication architecture reference — surface A (api_key) lives here.
 import './auth-model.js';
 
-const DEFAULT_BASE = 'https://prometheus.log10x.com';
+// The control-plane host, shared with auth-api.ts and license-api.ts. The
+// prometheus.log10x.com name belongs to the hosted metric routes, which
+// metrics-backend.ts addresses on its own.
+const DEFAULT_BASE = 'https://api.log10x.com';
 const RETRY_ATTEMPTS = 3;
 /** Base backoff in ms. Override via LOG10X_RETRY_BASE_MS (tests set to 1). */
 const RETRY_BASE_MS = parseInt(process.env.LOG10X_RETRY_BASE_MS || '250', 10) || 250;
@@ -42,10 +45,6 @@ const FETCH_TIMEOUT_MS = parseInt(process.env.LOG10X_FETCH_TIMEOUT_MS || '15000'
 
 function getBase(): string {
   return process.env.LOG10X_API_BASE || DEFAULT_BASE;
-}
-
-function authHeader(env: EnvConfig): string {
-  return `${env.apiKey}/${env.envId}`;
 }
 
 /**
@@ -133,46 +132,6 @@ export async function queryRange(
   timeoutMs?: number
 ): Promise<PrometheusResponse> {
   return env.metricsBackend.queryRange(promql, start, end, step, timeoutMs);
-}
-
-/** AI analysis query. Returns the AI text response. */
-export async function queryAi(
-  env: EnvConfig,
-  queryResult: string,
-  prompt: string,
-  ingestionCost: number
-): Promise<string> {
-  // The AI route is API-key-only (it authenticates with X-10X-Auth, not the
-  // demo license Bearer) and the gateway does not expose a /api/v1/demo/query_ai
-  // variant. Refuse early with a clear message instead of sending an empty
-  // `X-10X-Auth: /` header that would 401.
-  if (env.metricsBackend.kind === 'log10x_demo') {
-    throw new Error(
-      'AI analysis (query_ai) is not available in demo mode. Sign in with an API key (log10x_signin_start) to use AI-enhanced queries.'
-    );
-  }
-  const url = new URL('/api/v1/query_ai', getBase());
-  url.searchParams.set('query', 'vector(0)');
-  url.searchParams.set('query_result', queryResult);
-  url.searchParams.set('prompt', prompt);
-  url.searchParams.set('ingestion_cost', ingestionCost.toString());
-  url.searchParams.set('total_volume', '0');
-  url.searchParams.set('output_table', 'false');
-  url.searchParams.set('prompt_timeout', '15000');
-
-  const res = await fetchWithRetry(
-    url.toString(),
-    { headers: { 'X-10X-Auth': authHeader(env) } },
-    'queryAi'
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`AI query HTTP ${res.status}: ${body}`);
-  }
-
-  const data = (await res.json()) as { status: string; data?: { ai?: string } };
-  return data.data?.ai || '';
 }
 
 /**

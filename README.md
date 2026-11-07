@@ -76,7 +76,7 @@ All optional. The common path is just `LOG10X_API_KEY` (or no key at all).
 | Variable | Purpose |
 |---|---|
 | `LOG10X_API_KEY` | Your Log10x API key. Omit to boot read-only on the public demo dataset. |
-| `LOG10X_API_BASE` | API base URL override (default `https://prometheus.log10x.com`). |
+| `LOG10X_API_BASE` | Gateway base URL override for account, sign-in and licence calls (default `https://api.log10x.com`). |
 | `LOG10X_ENV_ID` | Pin a specific environment id instead of autodiscovering from your account. |
 | `LOG10X_DEMO_FALLBACK` | Set to `off` to boot into POC mode instead of attaching to the public demo dataset when no key is set. |
 | `LOG10X_MCP_READ_ONLY` | Set to `true` or `1` to force read-only mode (all mutating tools refuse). |
