@@ -286,7 +286,6 @@ export const baselineSchema = {
   ),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe(
       'Output format. Always "summary": the typed envelope. Field retained for backward-compat with callers that still pass `view: "summary"`.'

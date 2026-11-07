@@ -84,7 +84,6 @@ export const topPatternsSchema = {
     ),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe(
       'Output format. Always "summary": the structured JSON envelope with patterns, incidents, totals, and chained-tool action hints. Field retained for backward-compat with callers that still pass `view: "summary"`.'

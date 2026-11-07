@@ -97,7 +97,6 @@ export const retrieverSeriesSchema = {
   environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.mode, data.bucket_seconds, data.series_count, data.points_returned, data.top_groups, data.caveats, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };

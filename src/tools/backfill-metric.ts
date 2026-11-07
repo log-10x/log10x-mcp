@@ -81,7 +81,6 @@ export const backfillMetricSchema = {
   environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.metric_name, data.events_retrieved, data.points_emitted, data.view_url, data.warnings, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
   dry_run: z

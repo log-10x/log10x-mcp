@@ -75,7 +75,6 @@ export const compileStatusSchema = {
     ),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.payload.job_status, .loss_markers, .diagnostics, .output, .log_tail).'),
 };

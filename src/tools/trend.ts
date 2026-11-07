@@ -45,7 +45,7 @@ export const trendSchema = {
   monthly_volume_gb: z.number().positive().optional().describe(
     'What-if volume lens (forecast mode): model the environment at THIS monthly volume (decimal GB/month) instead of its measured volume. The real per-pattern shares and pattern mix are held fixed; only absolute bytes and dollars scale, by one uniform factor. Use it to project a prospect onto their own scale, or to forecast a real env after growth. Pairs with siem_lens. This is a PROJECTION: the envelope stamps volume_actual_gb vs volume_projected_gb and the scale factor, and the note points at the POC for the caller real patterns.'
   ),
-  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary": the structured envelope. Field retained for backward-compat.'),
+  view: z.literal('summary').optional().describe('Output format. Always "summary": the structured envelope. Field retained for backward-compat.'),
   // PL-12b — engine-decision cohort scope. Supersedes the prior binary
   // dropped flag. Three states: `kept` (default) = events that actually
   // reached the destination (selector `routeState=~"pass|"`, absence-tolerant

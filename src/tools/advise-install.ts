@@ -158,7 +158,7 @@ export const adviseInstallSchema = {
       'When true, the Log10x agents send nothing to log10x.com: engine metrics, license re-validation, and update checks all go silent. Use to reduce CISO friction. Conflicts with `"log10x"` in `backends` (the wizard surfaces the conflict). **Demo licenses cannot actually run airgapped**: the engine downgrades to online mode with a warning. The wizard surfaces this softly when both are picked.'
     ),
   backend_credentials: z
-    .record(
+    .partialRecord(
       // Key is constrained to the supported backend kinds — typos like
       // `data-dog` or unknown keys are rejected up-front by the Zod
       // parse, so the wizard's unknown-arg detector (which only walks
