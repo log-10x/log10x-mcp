@@ -49,7 +49,6 @@ export const measureCompactionSchema = {
     .int()
     .min(10)
     .max(5000)
-    .default(500)
     .optional()
     .describe(
       'Number of events to pull from the stack for measurement. Default 500. Larger samples improve confidence (high confidence requires >=50 events per pattern) but take longer to pull and process.'
@@ -57,7 +56,6 @@ export const measureCompactionSchema = {
   timeRange: z
     .string()
     .regex(/^\d+[mhd]$/)
-    .default('24h')
     .optional()
     .describe(
       'Lookback window for the stack pull. Format: <N><unit> where unit is m (minutes), h (hours), or d (days). Default "24h".'

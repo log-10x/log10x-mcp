@@ -126,7 +126,6 @@ export const retrieverQuerySchema = {
   environment: z.string().optional().describe('Environment nickname: required if multi-env.'),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.events_matched, data.events[], data.query_id, data.diagnostics, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
   debug: z

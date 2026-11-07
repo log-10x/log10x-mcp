@@ -73,13 +73,11 @@ export const overflowContentsSchema = {
     .int()
     .min(1)
     .max(500)
-    .default(50)
     .optional()
     .describe('Cap on the number of per-pattern rows returned. Total bytes always reflect the full overflow, even when rows are truncated.'),
   environment: z.string().optional().describe('Environment nickname'),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('Output format. Always "summary": the typed envelope (data.patterns[], data.totals).'),
 };

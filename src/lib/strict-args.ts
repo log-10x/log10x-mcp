@@ -53,7 +53,7 @@ export function validateStrictArgs<T>(
   shape: ZodRawShape,
   args: unknown,
 ): StrictArgsResult<T> {
-  const strictSchema = z.object(shape).strict();
+  const strictSchema = z.strictObject(shape);
   const parsed = strictSchema.safeParse(args);
   if (parsed.success) {
     return { args: parsed.data as T };

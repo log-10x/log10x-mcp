@@ -417,7 +417,7 @@ export const ChassisDataSchema = z.object({
   // ── Tool-specific result rows ──────────────────────────────────────
   /** The actual result. Tool defines its own sub-type; validated by
    * the tool's per-tool Zod schema after this envelope is assembled. */
-  payload: z.unknown(),
+  payload: z.unknown().optional(),
 
   // ── Agent-facing rendering ─────────────────────────────────────────
   /**
@@ -1032,7 +1032,7 @@ export function isChassisEnvelope(x: unknown): x is ChassisEnvelope {
  * fields are validated separately by StructuredOutputSchema.
  */
 export const ChassisEnvelopeExtensionSchema = z.object({
-  invocation_id: z.string().uuid(),
+  invocation_id: z.string().guid(),
   performance: PerformanceSchema,
   /**
    * Top-level mirror of data.status. Lets agents branch on call

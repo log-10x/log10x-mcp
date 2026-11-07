@@ -41,7 +41,6 @@ export const extractTemplatesSchema = {
   ),
   view: z
     .literal('summary')
-    .default('summary')
     .optional()
     .describe('summary returns the typed envelope (data.templates[], data.event_count, data.assertions, data.human_summary). The deprecated markdown view was removed; data.human_summary carries the prose distillation for chat rendering.'),
 };

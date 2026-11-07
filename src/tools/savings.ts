@@ -48,7 +48,7 @@ export const savingsSchema = {
   storageCost: z.number().optional().describe('S3 storage cost in $/GB/month. Defaults to $0.023 (S3 Standard).'),
   siem_lens: z.enum(SIEM_LENS_ENUM).optional().describe('What-if destination lens: price the SAME real volumes at this destination\'s default rates instead of the connected pipeline\'s. Dollars switch to the lens destination default rate (env-configured rates never leak across destinations); the envelope stamps siem_actual vs siem_lens. Volumes/patterns are unaffected.'),
   environment: z.string().optional().describe('Environment nickname'),
-  view: z.literal('summary').default('summary').optional().describe('Output format. Always "summary": the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
+  view: z.literal('summary').optional().describe('Output format. Always "summary": the typed envelope (data.totals, data.edge, data.retriever, data.run_rate). Field retained for backward-compat.'),
 };
 
 interface SavingsSummary {

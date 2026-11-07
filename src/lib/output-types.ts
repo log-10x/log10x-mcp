@@ -82,7 +82,7 @@ export type ActionRole = z.infer<typeof ActionRoleSchema>;
  */
 export const ActionSchema = z.object({
   tool: z.string(),
-  args: z.record(z.unknown()).default({}),
+  args: z.record(z.string(), z.unknown()).default({}),
   reason: z.string(),
   /**
    * Optional for back-compat with envelopes built before this field
@@ -103,7 +103,7 @@ export const RenderHintSchema = z
   .object({
     chart: z.enum(['sparkline', 'timeseries', 'bar', 'none']).optional(),
     units: z.string().optional(),
-    callouts: z.array(z.string()).default([]).optional(),
+    callouts: z.array(z.string()).optional(),
   })
   .optional();
 export type RenderHint = z.infer<typeof RenderHintSchema>;
@@ -154,23 +154,21 @@ export type InlineImage = z.infer<typeof InlineImageSchema>;
  * responses with status only at data.status, defeating the envelope.status
  * hoist.
  */
-export const StructuredOutputSchema = z
-  .object({
+export const StructuredOutputSchema = z.looseObject({
     schema_version: z.literal(SCHEMA_VERSION),
     schema_epoch: z.string(),
     tool: z.string(),
     generated_at: z.string(),
     view: ViewEnum,
     summary: SummarySchema,
-    data: z.unknown(),
+    data: z.unknown().optional(),
     actions: z.array(ActionSchema).default([]),
     render_hint: RenderHintSchema,
     truncated: z.boolean().default(false),
     next_cursor: z.string().optional(),
     warnings: z.array(z.string()).default([]),
     images: z.array(InlineImageSchema).optional(),
-  })
-  .passthrough();
+  });
 
 export type StructuredOutput = z.infer<typeof StructuredOutputSchema>;
 
