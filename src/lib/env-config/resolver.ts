@@ -235,9 +235,9 @@ function detectStaleEnvVars(
   return warnings;
 }
 
-function summarizeZodIssues(issues: { path: (string | number)[]; message: string }[]): string {
+function summarizeZodIssues(issues: { path: PropertyKey[]; message: string }[]): string {
   return issues
     .slice(0, 5)
-    .map(i => `${i.path.join('.') || '<root>'}: ${i.message}`)
+    .map(i => `${i.path.map(String).join('.') || '<root>'}: ${i.message}`)
     .join('; ');
 }

@@ -82,7 +82,7 @@ export type ActionRole = z.infer<typeof ActionRoleSchema>;
  */
 export const ActionSchema = z.object({
   tool: z.string(),
-  args: z.record(z.unknown()).default({}),
+  args: z.record(z.string(), z.unknown()).default({}),
   reason: z.string(),
   /**
    * Optional for back-compat with envelopes built before this field
@@ -162,7 +162,7 @@ export const StructuredOutputSchema = z
     generated_at: z.string(),
     view: ViewEnum,
     summary: SummarySchema,
-    data: z.unknown(),
+    data: z.unknown().optional(),
     actions: z.array(ActionSchema).default([]),
     render_hint: RenderHintSchema,
     truncated: z.boolean().default(false),

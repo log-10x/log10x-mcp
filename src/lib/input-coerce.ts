@@ -40,6 +40,9 @@ import { z, type ZodTypeAny, type ZodRawShape } from 'zod';
 
 type ZodKind = 'number' | 'array-of-string' | 'array-of-number' | 'other';
 
+/** The parts of a Zod 4 schema definition the classifier reads. */
+type ZodDefShape = { type?: string; innerType?: ZodTypeAny; element?: ZodTypeAny };
+
 /**
  * Inspect a Zod type and classify it for the coercer. Strips `optional`,
  * `default`, and `nullable` wrappers so the underlying type is detected
@@ -47,15 +50,14 @@ type ZodKind = 'number' | 'array-of-string' | 'array-of-number' | 'other';
  */
 function classifyZodType(zod: ZodTypeAny): ZodKind {
   let t: ZodTypeAny = zod;
-  // Strip wrapper types. Zod represents `.optional()`, `.default(x)`,
-  // `.nullable()`, `.describe(...)` as wrappers around an inner type.
-  // The wrappers all expose the inner type as `_def.innerType` (optional
-  // / default / nullable) or are no-ops for descriptions.
+  // Strip wrapper types. Zod represents `.optional()`, `.default(x)` and
+  // `.nullable()` as wrappers that expose the inner type as `_def.innerType`;
+  // `.describe(...)` adds no wrapper.
   let safety = 0;
   while (safety++ < 8) {
-    const def = (t as { _def?: { typeName?: string; innerType?: ZodTypeAny } })._def;
+    const def = (t as unknown as { _def?: ZodDefShape })._def;
     if (!def) break;
-    if (def.typeName === 'ZodOptional' || def.typeName === 'ZodDefault' || def.typeName === 'ZodNullable') {
+    if (def.type === 'optional' || def.type === 'default' || def.type === 'nullable') {
       if (def.innerType) {
         t = def.innerType;
         continue;
@@ -63,11 +65,11 @@ function classifyZodType(zod: ZodTypeAny): ZodKind {
     }
     break;
   }
-  const def = (t as { _def?: { typeName?: string; type?: ZodTypeAny } })._def;
+  const def = (t as unknown as { _def?: ZodDefShape })._def;
   if (!def) return 'other';
-  if (def.typeName === 'ZodNumber') return 'number';
-  if (def.typeName === 'ZodArray') {
-    const inner = def.type;
+  if (def.type === 'number') return 'number';
+  if (def.type === 'array') {
+    const inner = def.element;
     if (inner) {
       const innerKind = classifyZodType(inner);
       if (innerKind === 'number') return 'array-of-number';
@@ -144,7 +146,7 @@ function wrapFieldForCoercion(zodType: ZodTypeAny): ZodTypeAny {
  * this so the SDK's strict Zod validation sees coerced values.
  */
 export function makeShapeCoercive(shape: ZodRawShape): ZodRawShape {
-  const out: ZodRawShape = {};
+  const out: Record<string, ZodTypeAny> = {};
   for (const [key, zodType] of Object.entries(shape)) {
     out[key] = wrapFieldForCoercion(zodType as ZodTypeAny);
   }
