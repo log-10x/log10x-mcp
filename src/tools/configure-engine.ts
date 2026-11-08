@@ -373,7 +373,7 @@ export const configureEngineSchema = {
         .default('drop')
         .describe('Default action for synthetic / load-gen patterns. `drop` (the default) is a lossy proposal: it applies when the operator merges the rendered PR (delivery `gitops`) or runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`); set a lever that keeps every line (`compact`/`tier_down`/`offload`) to keep these lines.'),
     })
-    .default({})
+    .prefault({})
     .describe(
       'Tier-to-action defaults. Audit-tier is always `pass` and is not configurable. Error-tier defaults to `pass` (kept verbatim); standard defaults to `compact`; debug and synthetic default to `drop`, proposed for the operator to approve: it applies when the rendered PR is merged (delivery `gitops`, the default) or when the operator runs the separate `auto_apply=true` call that writes the ConfigMap (delivery `kubectl_configmap`). When a pinned `sample` is projected, N=10 (keep 1 in 10).'
     ),

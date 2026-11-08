@@ -417,7 +417,7 @@ export const ChassisDataSchema = z.object({
   // ── Tool-specific result rows ──────────────────────────────────────
   /** The actual result. Tool defines its own sub-type; validated by
    * the tool's per-tool Zod schema after this envelope is assembled. */
-  payload: z.unknown(),
+  payload: z.unknown().optional(),
 
   // ── Agent-facing rendering ─────────────────────────────────────────
   /**
