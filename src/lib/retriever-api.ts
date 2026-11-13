@@ -43,6 +43,7 @@ import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis 
 import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { s3GetObjectText, s3ListBuckets, s3ListObjects } from './s3-read.js';
+import { isPublicDemoPlayground, PUBLIC_DEMO_AWS_UNAVAILABLE } from './tool-availability.js';
 
 const execFileP = promisify(execFile);
 
@@ -743,6 +744,11 @@ async function getRetrieverBucket(): Promise<string> {
 }
 
 async function tryDetectRetrieverBucketFromAws(): Promise<{ bucket?: string; reason: string; failed?: boolean }> {
+  // Hosted public demo: its role is refused s3:ListAllMyBuckets, and the
+  // refusal trips the security alarm. The demo has no Retriever to find.
+  if (isPublicDemoPlayground()) {
+    return { reason: PUBLIC_DEMO_AWS_UNAVAILABLE };
+  }
   // Skip if aws CLI is obviously not reachable (cheap check to avoid spawn cost).
   if (!process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION && !process.env.AWS_PROFILE) {
     return { reason: 'no AWS_REGION / AWS_PROFILE in env' };

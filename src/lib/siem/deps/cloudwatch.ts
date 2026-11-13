@@ -33,6 +33,7 @@ import {
   type VendorInventory,
   inventoryToDepResult,
 } from './types.js';
+import { isPublicDemoPlayground, PUBLIC_DEMO_AWS_UNAVAILABLE } from '../../tool-availability.js';
 
 function getRegion(): string {
   return process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
@@ -49,6 +50,15 @@ export async function fetchCloudWatchInventory(): Promise<VendorInventory> {
     notes: [],
     scanDepth: 'metric-filter patterns, alarm names/descriptions, and dashboard names',
   };
+  // Hosted public demo: its role is refused all three reads, and each refusal
+  // trips the security alarm. Answer without building a client.
+  if (isPublicDemoPlayground()) {
+    inv.scanDepth = 'nothing';
+    inv.error =
+      `${PUBLIC_DEMO_AWS_UNAVAILABLE}, so the CloudWatch metric-filter, alarm and dashboard scan does not run here. ` +
+      `Call log10x_signin_start to connect your own environment`;
+    return inv;
+  }
   const region = getRegion();
   const logsClient = new CloudWatchLogsClient({ region, maxAttempts: 3 });
   const cwClient = new CloudWatchClient({ region, maxAttempts: 3 });

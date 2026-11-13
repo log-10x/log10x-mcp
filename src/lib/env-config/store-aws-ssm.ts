@@ -30,6 +30,7 @@
 
 import type { EnvConfigStore, StoreKind } from './store-interface.js';
 import { environmentConfigSchema, type EnvironmentConfig } from './types.js';
+import { isPublicDemoPlayground, PUBLIC_DEMO_AWS_UNAVAILABLE } from '../tool-availability.js';
 
 /**
  * Constructor options. All optional — defaults read from AWS_REGION /
@@ -97,6 +98,12 @@ export class AwsSsmStore implements EnvConfigStore {
 
   /** Lazy client; one per store instance. */
   private async getClient(): Promise<import('@aws-sdk/client-ssm').SSMClient> {
+    // The hosted public demo's role is refused every SSM read, and each
+    // refusal trips the security alarm. isAvailable() already reports the
+    // store unavailable there; this catches a caller that skips that check.
+    if (isPublicDemoPlayground()) {
+      throw new Error(`aws_ssm env-config store: ${PUBLIC_DEMO_AWS_UNAVAILABLE}`);
+    }
     if (!this.clientPromise) {
       this.clientPromise = (async () => {
         const sdk = await this.loadSdk();
@@ -118,6 +125,11 @@ export class AwsSsmStore implements EnvConfigStore {
    *   3. credentials resolve via the default provider chain
    */
   async isAvailable(): Promise<{ available: boolean; reason: string }> {
+    // 0. Hosted public demo: skip the store before any SDK or credential work.
+    if (isPublicDemoPlayground()) {
+      return { available: false, reason: PUBLIC_DEMO_AWS_UNAVAILABLE };
+    }
+
     // 1. SDK present?
     try {
       await this.loadSdk();

@@ -21,6 +21,7 @@
 
 import { shouldRegisterTool, type ModeResolution } from './mode-detect.js';
 import type { Environments } from './environments.js';
+import { DEMO_ENV } from './demo-env.js';
 
 /**
  * Tools that query the metrics backend (top_patterns, whats_changing,
@@ -90,6 +91,47 @@ export function isDemoGated(toolName: string, envs: Environments | undefined): b
     !envs.demoFallbackReason &&
     !demoPlaygroundEnabled()
   );
+}
+
+/**
+ * The one CloudWatch log group the hosted public demo reads. Its task role is
+ * granted logs:FilterLogEvents on this group, plus DescribeLogGroups, and
+ * nothing else.
+ */
+export const PUBLIC_DEMO_LOG_GROUP = '/log10x/otel-demo';
+
+/**
+ * Lead-in for every answer a code path gives instead of an AWS call in the
+ * hosted public demo. Same wording as the demo gate above.
+ */
+export const PUBLIC_DEMO_AWS_UNAVAILABLE =
+  'not available in the demo: attached read-only to the public 10x demo dataset';
+
+/**
+ * True when this process is the hosted public demo: demo mode (isDemoMode, or
+ * the public demo key still in use) on the intentional playground
+ * (LOG10X_MCP_DEMO_PLAYGROUND). In that state the process runs on an AWS role
+ * anyone on the internet can drive, and that role is refused everything but
+ * FilterLogEvents on PUBLIC_DEMO_LOG_GROUP (and DescribeLogGroups), so the
+ * account-wide reads (SSM env-config, log-group fan-out, dependency inventory,
+ * bucket discovery) must not be attempted. A refused call trips l1x-unauthorized-api-call.
+ *
+ * Deliberately narrower than isDemoMode alone. A keyless local boot is also in
+ * demo mode, but its AWS credentials are the user's own and the POC lane runs
+ * against the user's own CloudWatch; restricting it to the demo group would
+ * break that lane, and it never touches the demo role.
+ *
+ * isDemoGated() is no help here: the playground flag turns it OFF.
+ *
+ * The process-key check covers a fresh loadEnvironments() (doctor reloads):
+ * the demo key is in process.env by then, so the fresh object reads
+ * isDemoMode: false while the process is still on the demo dataset.
+ */
+export function isPublicDemoPlayground(envs?: Environments): boolean {
+  if (!demoPlaygroundEnabled()) return false;
+  if (envs?.isDemoMode) return true;
+  if (currentEnvs()?.isDemoMode) return true;
+  return process.env.LOG10X_API_KEY === DEMO_ENV.apiKey;
 }
 
 /**
