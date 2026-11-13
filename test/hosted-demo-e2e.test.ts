@@ -170,3 +170,12 @@ test('session-open logs only the client name and version, each at most 64 charac
   assert.deepEqual(clientInfoFields({ params: {} }), {});
   assert.deepEqual(clientInfoFields(null), {});
 });
+
+test('the hosted demo image is never fenced', () => {
+  // TENX_AIRGAPPED or LOG10X_FENCED in the demo image makes isFenced() true, so
+  // main() skips loading the demo environment: 1.30.103 shipped that and every
+  // metrics tool on mcp.log10x.com failed (2026-11-13).
+  const dockerfile = repoFile('Dockerfile');
+  const envLines = dockerfile.split('\n').filter((l) => !l.trim().startsWith('#'));
+  assert.ok(!envLines.some((l) => /TENX_AIRGAPPED|LOG10X_FENCED/.test(l)), 'Dockerfile sets a fence switch');
+});
