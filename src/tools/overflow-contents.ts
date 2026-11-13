@@ -35,6 +35,7 @@
  * the user that the offload-vs-drop split is unverified.
  */
 
+import { isToolExposed } from '../lib/exposed-tools.js';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { type PrometheusResponse } from '../lib/api.js';
@@ -194,8 +195,14 @@ export async function executeOverflowContents(
     // env-config walk threw — degrade silently to env-var fallback below.
   }
   if (!offloadBucket) {
+    // The Retriever's own bucket is where offloaded events land. Without it
+    // the hosted demo (Lambda retriever configured, 131 GB/day stamped
+    // routeState=offload) was told "no S3 offload bucket is configured.
+    // Install the Retriever" (2026-11-13).
     offloadBucket =
-      process.env.LOG10X_OFFLOAD_BUCKET || process.env.LOG10X_STREAMER_BUCKET;
+      process.env.LOG10X_OFFLOAD_BUCKET ||
+      process.env.LOG10X_STREAMER_BUCKET ||
+      process.env.__SAVE_LOG10X_RETRIEVER_BUCKET__;
   }
 
   // Normalise '1d' legacy alias → '24h'.
@@ -556,7 +563,7 @@ export async function executeOverflowContents(
     // Bucket IS configured (via env-config or env-var) but cap-CSV split
     // couldn't be loaded — bytes likely route to S3 but the offload-vs-
     // hard-drop split is unverified.
-    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified: check log10x_doctor${filterLabel}.`;
+    headline = `${filtered.length} overflow-eligible pattern${filtered.length !== 1 ? 's' : ''} over ${tf.label}: ${fmtBytes(total_bytes_in_window)} routing configured to ${offloadBucket} but offload action split could not be verified${isToolExposed('log10x_doctor') ? ': check log10x_doctor' : ''}${filterLabel}.`;
   }
 
   // Window-coverage caveat. When most or all surfaced rows have degraded

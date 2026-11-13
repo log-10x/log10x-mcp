@@ -1179,7 +1179,11 @@ export async function executeTopPatterns(
         const totalDollarLabel = fmtDisclosedDollar(totalCostMonthlyDisclosed);
         headline = `Top ${renderRows.length}${totalLabel} patterns cover ~${shownDollarLabel}/mo of ${totalDollarLabel}/mo total (${sharePctLabel}).${incidentTail}`;
       } else {
-        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of scanned bytes (${bytesLabel}).${rateHintTail}${incidentTail}`;
+        // The default (kept) view counts the bytes the receiver passes on to
+        // the destination, not every byte it scanned: on the hosted demo the
+        // receiver passes 42 of 182 GB/day, and "of scanned bytes" next to
+        // services' 182 GB read as a fourfold disagreement (2026-11-13).
+        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of the bytes passed to the destination (${bytesLabel}).${rateHintTail}${incidentTail}`;
       }
     }
   }

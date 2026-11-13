@@ -340,6 +340,64 @@ export function buildDiagnostics(cwEvents: CWEvent[]): RetrieverQueryDiagnostics
 }
 
 /**
+ * Read the query trail once, for a decision while the query is in flight.
+ * Null when no trail is configured; `pollingError` when it cannot be read.
+ */
+export async function pollQueryTrail(
+  queryId: string,
+  sinceMs?: number,
+): Promise<RetrieverQueryDiagnostics | null> {
+  const logGroup = process.env.LOG10X_RETRIEVER_LOG_GROUP;
+  if (!logGroup) return null;
+  try {
+    return buildDiagnostics(await fetchQueryCWEvents(queryId, logGroup, sinceMs));
+  } catch (e) {
+    return { pollingError: `CW polling failed: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
+/** Why a query can stop waiting for its completion marker early. */
+export type TrailStop =
+  | { kind: 'empty'; reason: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'no_start' };
+
+/**
+ * Decide from the query trail whether the completion marker can still come.
+ *
+ *  - `empty`: the coordinator logged `query empty:`. The engine returns before
+ *    it records a start time on that path (IndexQueryWriter.submitQuery), so
+ *    close() writes no _DONE.json and nothing is dispatched. The answer is
+ *    zero events, now.
+ *  - `error`: the trail carries an ERROR and the coordinator never logged its
+ *    query plan, so it failed before dispatch.
+ *  - `no_start`: `noStartMs` after the submit returned, the trail is still
+ *    empty. Only meaningful where the submit is synchronous (the Lambda
+ *    Function URL runs the coordinator inside the request): when it returned,
+ *    the coordinator had finished, and a coordinator that ran logs its plan.
+ *
+ * Null keeps waiting. A trail that cannot be read never stops a query.
+ */
+export function trailStopDecision(
+  diag: RetrieverQueryDiagnostics | null,
+  sinceSubmitMs: number,
+  noStartMs: number,
+): TrailStop | null {
+  if (!diag || diag.pollingError) return null;
+  if (diag.emptyReason) return { kind: 'empty', reason: diag.emptyReason };
+  if (diag.errors && diag.errors.length > 0 && !diag.queryPlan) {
+    return { kind: 'error', message: diag.errors[0] };
+  }
+  const sawAnything = Boolean(
+    diag.queryPlan || diag.scanStats || diag.resolution || diag.streamDispatch ||
+      diag.workerStats || diag.coordinatorElapsedMs !== undefined ||
+      (diag.errors && diag.errors.length > 0),
+  );
+  if (!sawAnything && sinceSubmitMs >= noStartMs) return { kind: 'no_start' };
+  return null;
+}
+
+/**
  * Populate diagnostics into a response-shaped object. Polling errors become
  * `diagnostics.pollingError`, not silent undefined.
  */

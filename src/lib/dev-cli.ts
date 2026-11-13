@@ -860,7 +860,7 @@ async function runAppsMcpViaLocalBinary(
 
   const stdout = await runCommandWithStdin(
     binary,
-    ['@apps/mcp'],
+    [...engineHeapArgs(), '@apps/mcp'],
     rawLogText,
     { env, timeoutMs: 180_000, configPath: '@apps/mcp', tenxMode: 'local' }
   );
@@ -884,6 +884,7 @@ async function runAppsMcpViaDocker(
         ...licenseArgs,
         '-e', `LOG10X_MCP_RUNTIME_NAME=mcp-${Date.now()}`,
         image,
+        ...engineHeapArgs(),
         '@apps/mcp',
       ],
       rawLogText,
@@ -1024,7 +1025,7 @@ async function runViaLocalBinary(
     env.LOG10X_MCP_INPUT_PATH = opts.inputPath;
   }
 
-  const args = [`@${opts.configPath}`];
+  const args = [...engineHeapArgs(), `@${opts.configPath}`];
   if (opts.extraOverlays) {
     for (const overlay of opts.extraOverlays) {
       args.push(`@${overlay}`);
@@ -1044,6 +1045,17 @@ async function runViaLocalBinary(
   );
 
   return cliVersion;
+}
+
+/**
+ * `-Xmx<size>` for the engine when LOG10X_TENX_MAX_HEAP is set (e.g. "256m"),
+ * as the helm charts do with tenx.maxHeap. The hosted demo sets it so the
+ * engine child stays inside the memory it shares with the server. Anything
+ * that is not a plain size is ignored rather than passed through.
+ */
+export function engineHeapArgs(): string[] {
+  const v = (process.env.LOG10X_TENX_MAX_HEAP ?? '').trim();
+  return /^\d+[kKmMgG]?$/.test(v) ? [`-Xmx${v}`] : [];
 }
 
 // ── Docker backend ──
@@ -1121,6 +1133,7 @@ async function runViaDocker(
 
   const imageIndex = args.length;
   args.push(image);
+  args.push(...engineHeapArgs());
   args.push(`@${CONTAINER_CONFIG_DIR}/${configName}`);
   if (opts.extraOverlays) {
     for (const overlay of opts.extraOverlays) {

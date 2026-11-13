@@ -45,6 +45,11 @@ import {
   recordQuery,
 } from '../lib/chassis-envelope.js';
 
+/** A dollar floor for prose: whole dollars from $10 up, cents below ($71.43, not $71.42857142857143). */
+function fmtFloor(usd: number): string {
+  return usd >= 10 ? String(Math.round(usd)) : usd.toFixed(2);
+}
+
 export const whatsChangingSchema = {
   timeRange: z
     .enum(['1d', '7d', '30d'])
@@ -539,7 +544,7 @@ export async function executeWhatsChanging(
   const headline =
     shown.length === 0
       ? topAnyway.length > 0
-        ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label}. Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). Lower the floor to see more.`
+        ? `Nothing crossed the $${fmtFloor(minDeltaUsd)} floor over ${tf.label}. Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). Lower the floor to see more.`
         : `No patterns changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}.`
       : `${shown.length} pattern${shown.length === 1 ? '' : 's'} changed by >$${minDeltaUsd} over ${tf.label} vs ${cwLabel}. ` +
         `Top: ${formatHeadlineDescriptor(shown[0])} ${shown[0].delta_usd >= 0 ? '+' : '-'}$${formatHeadlineDollars(shown[0].delta_usd)} ` +
@@ -636,7 +641,7 @@ export async function executeWhatsChanging(
   const humanSummary =
     status === 'no_signal'
       ? topAnyway.length > 0
-        ? `Nothing crossed your $${minDeltaUsd} floor over ${tf.label} vs ${cwLabel}. ` +
+        ? `Nothing crossed the $${fmtFloor(minDeltaUsd)} floor over ${tf.label} vs ${cwLabel}. ` +
           `Biggest change was $${Math.abs(topAnyway[0].delta_usd).toFixed(2)} (${topAnyway[0].symbol_message || 'pattern'}${topAnyway[0].services[0] ? ' on ' + topAnyway[0].services[0].name : ''}). ` +
           `Lower the floor (try $${suggestedFloor.toFixed(2)}) to see more.${newExclusionTag}${silentBaselineTag}${partialTag}`
         : `No pattern changes detected over ${tf.label} vs ${cwLabel}. ${rows.length} patterns were checked.${newExclusionTag}${silentBaselineTag}${partialTag}`

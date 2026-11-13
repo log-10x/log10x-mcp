@@ -38,6 +38,7 @@ import {
   nearestTopics,
   searchIndex,
   type SearchResult,
+  type SearchIndex,
 } from '../lib/product-kb/index.js';
 import type { Action, StructuredOutput } from '../lib/output-types.js';
 
@@ -144,21 +145,75 @@ const SHORT_ANSWER_BUDGET = 600;
  * is cut at a sentence boundary within SHORT_ANSWER_BUDGET chars. Falls
  * back to the page summary when the result carries no section text.
  */
-function shortAnswer(result: SearchResult): string {
+export function shortAnswer(result: SearchResult): string {
   const top = result.matched_chunks[0];
-  const flat = (top?.text ?? result.summary ?? '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const flat = flattenMarkdown(top?.text ?? result.summary ?? '');
   if (flat.length <= SHORT_ANSWER_BUDGET) return flat;
   const window = flat.slice(0, SHORT_ANSWER_BUDGET);
+  // Cut at the last sentence end in the budget. A boundary in the first
+  // third would throw most of the answer away, so cut at a word instead.
   const cut = Math.max(
     window.lastIndexOf('. '),
     window.lastIndexOf('! '),
     window.lastIndexOf('? '),
   );
-  return cut > 0 ? window.slice(0, cut + 1) : window.trimEnd();
+  if (cut >= SHORT_ANSWER_BUDGET / 3) return window.slice(0, cut + 1);
+  const word = window.lastIndexOf(' ');
+  return (word > 0 ? window.slice(0, word) : window).trimEnd() + '…';
+}
+
+/**
+ * Markdown to plain prose for a short answer. The FAQ pages are streams of
+ * mkdocs admonitions (`??? tenx-x "Question"` with the answer indented
+ * below); the opener line used to lead every answer, and its "? " was taken
+ * for the end of a sentence, so the answer to "What does log10x do" came
+ * back as the three characters "???" (hosted demo, 2026-11-13).
+ */
+export function flattenMarkdown(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^\s*(?:\?\?\?\+?|!!!)\s+[A-Za-z0-9_-]+(?:\s+"[^"]*")?.*$/gm, ' ') // admonition openers
+    .replace(/^\s*={3}\+?\s+"[^"]*".*$/gm, ' ') // content-tab markers
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/:[a-z0-9_-]+:/gi, ' ') // :material-icon:
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ') // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // links keep their text
+    .replace(/\{[^}]*\}/g, ' ') // attribute lists like {target="_blank"}
+    .replace(/\*\*|__/g, '')
+    .replace(/^\s*[-*]\s+/gm, '')
+    .replace(/^\s*:\s+/gm, ' ') // definition-list markers
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * The product is "10x" in the docs and "log10x" (or "Log10x") in most
+ * questions. The brand word carries no topic, but left as is it matched one
+ * page's URL slug (run/output/metric/log10x) and that page won.
+ */
+const BRAND_RE = /\b(?:log-?10x|l1x)\b/gi;
+
+/**
+ * "What is log10x", "what does it do", "how does log10x work": stopwords take
+ * everything but the brand, and the brand is on every page, so ranking alone
+ * returned config references. These questions are answered on one page.
+ */
+const IDENTITY_RE = /^\s*(?:so\s+|and\s+)?(?:what(?:'s|\s+is|\s+are|\s+does)|how\s+does|tell\s+me\s+about|explain|describe|who\s+(?:is|makes))\s+(?:the\s+)?10x(?:\s+(?:do|does|work|mean|offer|is))?\s*(?:[?.!]\s*)?(?:$|,|\band\b)/i;
+const IDENTITY_TOPIC = 'faq/general';
+const IDENTITY_HEADINGS = [/^what is 10x$/i, /^what does 10x do$/i];
+
+export function identityAnswer(index: SearchIndex, query: string): SearchResult | null {
+  const q = query.replace(BRAND_RE, '10x');
+  if (!IDENTITY_RE.test(q)) return null;
+  const page = lookupTopic(index, IDENTITY_TOPIC, undefined, 64);
+  if (!page) return null;
+  const picked = IDENTITY_HEADINGS
+    .map((re) => page.matched_chunks.find((c) => re.test(c.heading.trim())))
+    .filter((c): c is NonNullable<typeof c> => Boolean(c));
+  if (picked.length === 0) return null;
+  // "What does X do" leads with the "does" answer; "what is" with the "is" one.
+  if (/\bdo(?:es)?\b/i.test(q) && picked.length === 2) picked.reverse();
+  return { ...page, matched_chunks: picked };
 }
 
 /** Reduce a result to citation metadata only (no section body). */
@@ -374,11 +429,15 @@ export function executeProductQa(rawArgs: unknown): StructuredOutput {
 
   // Branch 2 — query search.
   const query = args.query!;
-  const results = searchIndex(kb.index, {
-    query,
+  const identity = !args.category || args.category === 'faq' ? identityAnswer(kb.index, query) : null;
+  const searched = searchIndex(kb.index, {
+    query: query.replace(BRAND_RE, '10x'),
     category: args.category,
     maxPages: maxResults,
   });
+  const results = identity
+    ? [identity, ...searched.filter((r) => r.topic !== identity.topic)].slice(0, maxResults)
+    : searched;
 
   if (results.length === 0) {
     const similar = nearestTopics(kb.index, query, 5);

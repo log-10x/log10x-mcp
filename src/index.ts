@@ -168,6 +168,9 @@ import { compileStatusSchema, executeCompileStatus } from './tools/compile-statu
 import { compileLinkSchema, executeCompileLink } from './tools/compile-link.js';
 import { log10xStartSchema, executeLog10xStart } from './tools/log10x-start.js';
 import { SERVER_INSTRUCTIONS } from './lib/server-instructions.js';
+import { DEMO_SERVER_INSTRUCTIONS } from './lib/demo-instructions.js';
+import { setExposedTools, stripStartRouting, filterExposedActions } from './lib/exposed-tools.js';
+import { demoUnavailableEnvelope, isDemoPlayground } from './lib/demo-unavailable.js';
 import { costOptionsSchema, executeCostOptions } from './tools/cost-options.js';
 import { explainModeSchema, executeExplainMode } from './tools/explain-mode.js';
 import { previewFilterSchema, executePreviewFilter } from './tools/preview-filter.js';
@@ -336,8 +339,11 @@ async function wrap(
       ],
     };
   }
+  // Hosted demo: a tool whose backend the demo does not have says so in one
+  // line rather than asking the visitor's agent to configure credentials.
+  const demoUnavailable = demoUnavailableEnvelope(toolName);
   try {
-    const result = await runWithDemoFallbackRetry(toolName, fn);
+    const result = demoUnavailable ?? await runWithDemoFallbackRetry(toolName, fn);
     log.info(`tool.${toolName}.ok`, { ms: Date.now() - started });
     // Universal-envelope path: a tool that still returns plain markdown
     // (the unreshaped legacy tools — primitives, advisors, auth) gets
@@ -388,6 +394,8 @@ async function wrap(
     // text fallback. Both are populated on every successful call.
     const enriched: StructuredOutput = {
       ...validated,
+      // Never hand the agent a next step it cannot call on this server.
+      ...(Array.isArray(validated.actions) ? { actions: filterExposedActions(validated.actions) } : {}),
       warnings: maybeAddDemoBannerWarning(validated.warnings),
     };
     const structuredContent = enriched as unknown as Record<string, unknown>;
@@ -688,7 +696,9 @@ const SERVER_OPTIONS = {
     // lack of mid-tool rendering), but declaring the capability unblocks any
     // other tool that wants the channel on hosts that do support it.
     capabilities: { logging: {} },
-    instructions: SERVER_INSTRUCTIONS,
+    // The hosted demo registers a subset of tools; its instructions name only
+    // those (lib/demo-instructions.ts).
+    instructions: isDemoPlayground() ? DEMO_SERVER_INSTRUCTIONS : SERVER_INSTRUCTIONS,
 };
 
 // Primary server instance. Used for the stdio transport (the published npm
@@ -854,6 +864,21 @@ function applyToolRegistrations(
   // lifted fields validate. Server-side Zod strips them silently; only the
   // client-side advertised-schema validation surfaces the mismatch.
   const envelopeOutputSchema = StructuredOutputSchema;
+  // Pre-pass: the set of tools that will pass every gate below, so a
+  // description, an instruction or an envelope never names a tool this
+  // server does not register (see lib/exposed-tools.ts).
+  const willRegister = pendingTools
+    .filter((t) => {
+      if (mode && !shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback })) return false;
+      const m = getPackageDefaultTool(t.name);
+      const cat = (m.category ?? '').toLowerCase();
+      if (gate.enabledCategories && (!cat || !gate.enabledCategories.has(cat))) return false;
+      if (cat && gate.disabledCategories.has(cat)) return false;
+      if (gate.disableWrite && m.annotations && m.annotations.readOnlyHint === false) return false;
+      return true;
+    })
+    .map((t) => t.name);
+  setExposedTools(willRegister);
   for (const t of pendingTools) {
     const allowed = mode ? shouldRegisterTool(t.name, mode, { demoFallback: bootMode?.demoFallback }) : true;
     if (!allowed) {
@@ -890,12 +915,23 @@ function applyToolRegistrations(
     // `"events": "one event"` instead of `"events": ["one event"]`). The
     // wrapper preserves the agent-facing JSON Schema and the handler's
     // typed args, so downstream code is unchanged.
-    const coerciveInputSchema = makeShapeCoercive(t.inputSchema as Record<string, never>);
+    // Hosted demo (SOC 2 scope ruling, 2026-10-15): the public demo must not
+    // accept a credential or an arbitrary metrics URL. The cross-pillar tools
+    // carry customer_metrics_url / _auth / _type; the demo drops the fields
+    // from their schemas, so they are neither advertised nor accepted.
+    const demoShape = isDemoPlayground()
+      ? Object.fromEntries(
+          Object.entries(t.inputSchema).filter(
+            ([k]) => k !== 'customer_metrics_url' && k !== 'customer_metrics_auth' && k !== 'customer_metrics_type',
+          ),
+        )
+      : t.inputSchema;
+    const coerciveInputSchema = makeShapeCoercive(demoShape as Record<string, never>);
     const registeredTool = (target.registerTool as any)(
       t.name,
       {
         title: meta.title,
-        description: meta.description,
+        description: meta.description === undefined ? undefined : stripStartRouting(meta.description),
         inputSchema: coerciveInputSchema,
         outputSchema: envelopeOutputSchema,
         annotations: meta.annotations,

@@ -5,6 +5,7 @@
  * and requests AI analysis.
  */
 
+import { isToolExposed } from '../lib/exposed-tools.js';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
@@ -298,6 +299,12 @@ async function executeEventLookupInner(
     const fuzzyRes = await iQueryInstant(env, fuzzyQuery, QUERY_BUDGET.heavy);
 
     if (!fuzzyRes || fuzzyRes.status !== 'success' || fuzzyRes.data.result.length === 0) {
+      if (looksLikeRawLogLine && !isToolExposed('log10x_resolve_batch')) {
+        // Where resolve_batch is not registered (the hosted demo: SOC 2 scope
+        // ruling 2026-10-15, the demo must not invite pasted raw log lines),
+        // name the inputs this tool takes instead of pointing at a paste tool.
+        return 'No match found. log10x_event_lookup takes a pattern name (e.g. Charge_request_received) or a pattern_hash from log10x_top_patterns.';
+      }
       if (looksLikeRawLogLine) {
         // Emit a NEXT_ACTIONS hint to resolve_batch so autonomous-chain
         // walkers can pivot without rereading the prose. The structured

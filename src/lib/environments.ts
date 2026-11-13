@@ -815,7 +815,11 @@ async function loadLegacyLog10x(): Promise<Environments> {
   // below, this reads the user's OWN demo tenant via /api/v1/demo/* with
   // Authorization: Bearer, so a not-signed-in user can pull back exactly what
   // their demo engine wrote.
-  const persistedDemoLicense = await tryBuildDemoLicenseEnv('persisted');
+  // Not in the hosted demo playground: there the engine mints a licence for
+  // its own runs (pattern_examples, measure_compaction, find_skew), and that
+  // licence's tenant is empty. Reads must stay on the shared demo env.
+  const hostedDemo = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DEMO_PLAYGROUND ?? ''); // LOG10X_MCP_DEMO_PLAYGROUND, as demoPlaygroundEnabled() reads it
+  const persistedDemoLicense = hostedDemo ? null : await tryBuildDemoLicenseEnv('persisted');
   if (persistedDemoLicense) {
     // eslint-disable-next-line no-console
     console.error(`[log10x-mcp] metricsBackend resolved via demo license (persisted, own demo tenant, /api/v1/demo/*)`);
@@ -1098,7 +1102,16 @@ async function loadFromApi(apiKey: string, isDemoMode: boolean): Promise<Environ
   const accountForwarder = parseForwarderEnv(
     typeof meta.forwarder === 'string' ? meta.forwarder : undefined
   );
-  const envAnalyzer = parseAnalyzerEnv(process.env.LOG10X_ANALYZER) ?? accountAnalyzer;
+  // LOG10X_SIEM_VENDOR names the destination the SIEM connector reads, which
+  // is the pipeline's actual destination; an operator setting either env var
+  // outranks account metadata. Without this the hosted demo (connector pinned
+  // to CloudWatch, account metadata analyzer_vendor=splunk) priced services,
+  // savings and event_lookup at Splunk's $6/GB and top_patterns, baseline and
+  // cost_options at CloudWatch's $0.50/GB in the same session (2026-11-13).
+  const envAnalyzer =
+    parseAnalyzerEnv(process.env.LOG10X_ANALYZER) ??
+    parseAnalyzerEnv(process.env.LOG10X_SIEM_VENDOR) ??
+    accountAnalyzer;
   const envForwarder = parseForwarderEnv(process.env.LOG10X_FORWARDER) ?? accountForwarder;
 
   // Ensure the apiKey is reachable as `${LOG10X_API_KEY}` for the

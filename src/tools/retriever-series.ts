@@ -41,6 +41,7 @@ import { retrieverNotConfiguredMessage } from './retriever-query.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import { buildChassisErrorEnvelope } from '../lib/chassis-envelope.js';
 import { wrapBackendError, type PrimitiveError } from '../lib/primitive-errors.js';
+import { normalizeRetrieverSearch } from '../lib/retriever-search.js';
 
 /** Cap on group-by cardinality. Tail collapsed to "_other_". */
 const TOP_K_GROUPS = 1000;
@@ -227,6 +228,38 @@ export async function executeRetrieverSeries(
   }
   const windowMs = toMs - fromMs;
 
+  // Check the search against the engine grammar once, before any sub-window
+  // is dispatched: a search the engine cannot parse used to fail inside every
+  // sub-window, each one waiting out its own 60 s marker budget, while the
+  // series reported a clean empty result. Plain words become includes(text,
+  // "...") clauses and the original is echoed back.
+  let searchRewrittenFrom: string | undefined;
+  if (args.search && args.search.trim() !== '') {
+    try {
+      const n = normalizeRetrieverSearch(args.search);
+      if (n.rewrittenFrom !== undefined) searchRewrittenFrom = n.rewrittenFrom;
+      args.search = n.search;
+    } catch (e) {
+      return buildChassisErrorEnvelope({
+        tool: 'log10x_retriever_series',
+        err: {
+          error_type: 'schema_invalid',
+          retryable: false,
+          suggested_backoff_ms: null,
+          hint: (e as Error).message.slice(0, 600),
+        },
+        scope: { window: `${args.from}..${args.to}`, window_basis: 'explicit' },
+        contextPayload: {
+          from: args.from,
+          to: args.to,
+          pattern: args.pattern,
+          search: args.search,
+        },
+        source_disclosure: { retriever_state_source: retrieverState.source },
+      });
+    }
+  }
+
   const decision = await decideFidelity(env, {
     search: args.search,
     windowMs,
@@ -341,7 +374,11 @@ export async function executeRetrieverSeries(
         // let downstream renderers treat the empty result as authoritative
         // when it was actually a likely timeout. Append a perf advisory
         // when the shape matches.
-        const baseHeadline = `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.`;
+        const failedClause = result.failedSubWindows
+          ? ` ${result.failedSubWindows} of ${decision.subWindows} sub-windows failed (${(result.firstSubWindowError ?? '').slice(0, 160)}): counts are partial.`
+          : '';
+        const rewriteClause = searchRewrittenFrom !== undefined ? ` Searched "${searchRewrittenFrom}" as ${args.search}.` : '';
+        const baseHeadline = `Retriever series for ${formatPatternLabel({ symbol_message: args.pattern ?? searchRewrittenFrom ?? args.search ?? 'window', maxHintChars: 50 })}: ${result.series.length} bucket point${result.series.length !== 1 ? 's' : ''}, ${result.groupCardinality} group${result.groupCardinality !== 1 ? 's' : ''}, mode=${decision.mode}, wall=${wallTimeMs}ms.${failedClause}${rewriteClause}`;
         const degraded =
           result.series.length === 0 &&
           result.workerFiles === 0 &&
@@ -377,6 +414,9 @@ export async function executeRetrieverSeries(
       sub_windows: decision.subWindows,
       events_per_sub_window: decision.eventsPerSubWindow,
       sub_window_results: result.subWindowResults,
+      ...(result.failedSubWindows ? { failed_sub_windows: result.failedSubWindows, first_sub_window_error: result.firstSubWindowError } : {}),
+      search: args.search,
+      ...(searchRewrittenFrom !== undefined ? { search_rewritten_from: searchRewrittenFrom } : {}),
       human_summary,
       source_disclosure: { retriever_state_source: retrieverState.source },
     },
@@ -399,7 +439,11 @@ interface SeriesResult {
     toMs: number;
     eventsFetched: number;
     truncated: boolean;
+    error?: string;
   }>;
+  /** Sampled mode: sub-windows whose query threw. */
+  failedSubWindows?: number;
+  firstSubWindowError?: string;
 }
 
 async function executeFullMode(
@@ -597,11 +641,16 @@ async function executeSampledMode(
   let workerFiles = 0;
   let anyTruncated = false;
 
+  let failed = 0;
+  let firstError: string | undefined;
   for (let i = 0; i < subWindows.length; i++) {
     const sw = subWindows[i];
     const resp = responses[i] as (RetrieverQueryResponse & { __error?: string }) | undefined;
     if (!resp || resp.__error) {
-      subWindowResults.push({ fromMs: sw.fromMs, toMs: sw.toMs, eventsFetched: 0, truncated: false });
+      const error = resp?.__error ?? 'no response';
+      failed++;
+      firstError = firstError ?? error;
+      subWindowResults.push({ fromMs: sw.fromMs, toMs: sw.toMs, eventsFetched: 0, truncated: false, error: error.slice(0, 300) });
       continue;
     }
     allEvents.push(...resp.events);
@@ -615,11 +664,21 @@ async function executeSampledMode(
     });
   }
 
+  // Every sub-window failed: there is no series, only an error. Reporting
+  // "0 bucket points" as a clean result hid the cause from the caller.
+  if (subWindows.length > 0 && failed === subWindows.length) {
+    throw new Error(firstError ?? 'every sub-window query failed');
+  }
+
   const result = aggregate(allEvents, args.bucket_size, args.group_by, {
     workerFiles,
     truncated: anyTruncated,
   });
   result.subWindowResults = subWindowResults;
+  if (failed > 0) {
+    result.failedSubWindows = failed;
+    result.firstSubWindowError = firstError;
+  }
   return result;
 }
 

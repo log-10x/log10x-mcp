@@ -38,10 +38,10 @@
 
 import { z, type ZodTypeAny, type ZodRawShape } from 'zod';
 
-type ZodKind = 'number' | 'array-of-string' | 'array-of-number' | 'other';
+type ZodKind = 'number' | 'array-of-string' | 'array-of-number' | 'enum' | 'other';
 
 /** The parts of a Zod 4 schema definition the classifier reads. */
-type ZodDefShape = { type?: string; innerType?: ZodTypeAny; element?: ZodTypeAny };
+type ZodDefShape = { type?: string; innerType?: ZodTypeAny; element?: ZodTypeAny; entries?: Record<string, unknown> };
 
 /**
  * Inspect a Zod type and classify it for the coercer. Strips `optional`,
@@ -68,6 +68,7 @@ function classifyZodType(zod: ZodTypeAny): ZodKind {
   const def = (t as unknown as { _def?: ZodDefShape })._def;
   if (!def) return 'other';
   if (def.type === 'number') return 'number';
+  if (def.type === 'enum') return 'enum';
   if (def.type === 'array') {
     const inner = def.element;
     if (inner) {
@@ -100,8 +101,62 @@ function classifyZodType(zod: ZodTypeAny): ZodKind {
  *   - `z.array(z.number())`: each element that's a string-quoted numeric
  *     gets `Number()` parsed.
  */
+/** The string options of an enum under optional/default/nullable wrappers. */
+function enumOptions(zod: ZodTypeAny): string[] {
+  let t: ZodTypeAny = zod;
+  for (let i = 0; i < 8; i++) {
+    const def = (t as unknown as { _def?: ZodDefShape })._def;
+    if (def && (def.type === 'optional' || def.type === 'default' || def.type === 'nullable') && def.innerType) {
+      t = def.innerType;
+      continue;
+    }
+    break;
+  }
+  const entries = (t as unknown as { _def?: ZodDefShape })._def?.entries;
+  return entries ? Object.values(entries).filter((v): v is string => typeof v === 'string') : [];
+}
+
+const DURATION_RE = /^\s*(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|w|wk|wks|weeks?)\s*$/i;
+
+/** Minutes in a duration like "24h", "1d", "1w", "90m"; null when not one. */
+export function durationMinutes(v: string): number | null {
+  const m = DURATION_RE.exec(v);
+  if (!m) return null;
+  const n = parseInt(m[1]!, 10);
+  const u = m[2]!.toLowerCase();
+  if (u.startsWith('w')) return n * 7 * 24 * 60;
+  if (u.startsWith('d')) return n * 24 * 60;
+  if (u.startsWith('h')) return n * 60;
+  return n;
+}
+
+/**
+ * Map a value an enum does not list onto the option it means: the same
+ * option in another case, or the listed duration of equal length. Agents
+ * send "24h" to every time-window field because most tools list it; three
+ * tools list "1d" instead and rejected "24h" as invalid input (hosted demo,
+ * 2026-11-13). Unmappable values pass through for the enum's own error.
+ */
+export function coerceEnumValue(v: unknown, options: string[]): unknown {
+  if (typeof v !== 'string' || options.includes(v)) return v;
+  const lower = v.trim().toLowerCase();
+  const sameCase = options.find((o) => o.toLowerCase() === lower);
+  if (sameCase !== undefined) return sameCase;
+  const mins = durationMinutes(v);
+  if (mins !== null) {
+    const same = options.find((o) => durationMinutes(o) === mins);
+    if (same !== undefined) return same;
+  }
+  return v;
+}
+
 function wrapFieldForCoercion(zodType: ZodTypeAny): ZodTypeAny {
   const kind = classifyZodType(zodType);
+  if (kind === 'enum') {
+    const options = enumOptions(zodType);
+    if (options.length === 0) return zodType;
+    return z.preprocess((v) => coerceEnumValue(v, options), zodType);
+  }
   if (kind === 'number') {
     return z.preprocess((v) => {
       if (typeof v === 'string' && v.trim().length > 0) {

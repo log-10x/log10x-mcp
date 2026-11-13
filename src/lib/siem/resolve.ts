@@ -89,6 +89,22 @@ export async function resolveSiemSelection(opts: ResolveOptions): Promise<Resolv
     };
   }
 
+  // LOG10X_SIEM_VENDOR is an operator pin on the destination ("skips vendor
+  // sniffing", terraform/public-demo-mcp). Honour it before credential
+  // discovery, so tools that call this selector agree with the ones that read
+  // the pin directly, with or without ambient credentials.
+  const pinned = (process.env.LOG10X_SIEM_VENDOR ?? '').trim().toLowerCase();
+  if (pinned && (candidateIds as string[]).includes(pinned)) {
+    const id = pinned as SiemId;
+    return {
+      kind: 'resolved',
+      id,
+      displayName: SIEM_DISPLAY_NAMES[id] || id,
+      selectionMethod: 'explicit',
+      note: `Destination ${SIEM_DISPLAY_NAMES[id] || id} set by LOG10X_SIEM_VENDOR.`,
+    };
+  }
+
   const all = await discoverAvailable();
   const available: DiscoveredConnector[] = all
     .filter((d) => d.detection.available)

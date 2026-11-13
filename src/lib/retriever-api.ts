@@ -37,9 +37,10 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { EnvConfig } from './environments.js';
-import { attachDiagnostics, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
+import { attachDiagnostics, pollQueryTrail, trailStopDecision, type TrailStop, type RetrieverQueryDiagnostics } from './retriever-diagnostics.js';
+import { normalizeRetrieverSearch } from './retriever-search.js';
 import { isLambdaFunctionUrl, signedLambdaUrlPost } from './lambda-url-sign.js';
-import { diagnoseQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
+import { diagnoseQuery, diagnoseEmptyQuery, diagnoseFromStats, type DoneMarker, type QueryDiagnosis } from './query-funnel.js';
 import { narrowWindow, recentFallbackWindow } from './query-probe.js';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { s3GetObjectText, s3ListBuckets, s3ListObjects } from './s3-read.js';
@@ -468,6 +469,14 @@ export interface RetrieverQueryResponse {
    */
   completenessBasis?: 'marker_count_confirmed' | 'quiet_window_inferred';
   queryId: string;
+  /** The search expression the engine ran. */
+  search?: string;
+  /**
+   * Set when the caller's `search` was plain words and was rewritten to
+   * includes(text, "...") clauses: the caller's original text, so an agent can
+   * tell its user what was searched. See lib/retriever-search.ts.
+   */
+  searchRewrittenFrom?: string;
   target: string;
   from: string;
   to: string;
@@ -922,7 +931,35 @@ interface SubmitResponse {
   queryId: string;
 }
 
-async function submitQuery(
+/** Prefix of the error thrown when the query Lambda answered with an error body. */
+export const RETRIEVER_REJECTED_PREFIX = 'Retriever rejected the query:';
+
+/** Prefix of the error thrown when a query ended without a completion marker. */
+export const RETRIEVER_NOT_STARTED_PREFIX = 'Retriever query did not run:';
+
+/**
+ * The error a Lambda query handler put in its reply body, or null. The reply
+ * of a successful submit is empty (statusCode consumed by the Function URL);
+ * a failed one is {"role":"query","error":"...","elapsedMs":N}.
+ */
+export function lambdaQueryReplyError(replyText: string): string | null {
+  const t = (replyText || '').trim();
+  if (!t.startsWith('{')) return null;
+  try {
+    const j = JSON.parse(t) as Record<string, unknown>;
+    return typeof j.error === 'string' && j.error.trim() !== '' ? j.error.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+let lambdaUrlPosterForTest: ((url: string, jsonBody: string) => Promise<Response>) | null = null;
+/** Test seam: replace the SigV4-signed Function URL POST. Pass null to restore. */
+export function setLambdaUrlPosterForTest(fn: ((url: string, jsonBody: string) => Promise<Response>) | null): void {
+  lambdaUrlPosterForTest = fn;
+}
+
+export async function submitQuery(
   env: EnvConfig,
   body: Record<string, unknown>
 ): Promise<SubmitResponse> {
@@ -934,10 +971,20 @@ async function submitQuery(
   // pure config (point the URL at the Function URL + the lambda bucket).
   if (isLambdaFunctionUrl(base)) {
     const jsonBody = JSON.stringify(body);
-    const resp = await signedLambdaUrlPost(base, jsonBody);
+    const resp = await (lambdaUrlPosterForTest ?? signedLambdaUrlPost)(base, jsonBody);
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
       throw new Error(`Retriever Function URL POST HTTP ${resp.status}: ${errText.slice(0, 500)}`);
+    }
+    // The handler (RetrieverHandler.handleRequest) runs the coordinator
+    // synchronously and, when it throws, still answers 200 with
+    // {"role":"query","error":"<Exception>: <message>"} in the body: the
+    // object has no statusCode, so the Function URL passes it through as the
+    // body of a 200. Reading only resp.ok dropped that error and the caller
+    // then polled for a _DONE.json that would never be written.
+    const replyErr = lambdaQueryReplyError(await resp.text().catch(() => ''));
+    if (replyErr) {
+      throw new Error(`${RETRIEVER_REJECTED_PREFIX} ${replyErr.slice(0, 500)}`);
     }
     // The Function URL maps the handler's return OBJECT onto the HTTP response
     // (statusCode is consumed; the body is typically empty), so the queryId is
@@ -1337,10 +1384,17 @@ async function waitForDoneMarker(
   bucket: string,
   key: string,
   pollMs: number,
-  timeoutMs: number
-): Promise<DoneMarkerBody | null> {
+  timeoutMs: number,
+  watch?: { queryId: string; submittedAtMs: number; noStartMs: number }
+): Promise<{ done: DoneMarkerBody | null; stop?: TrailStop }> {
 
   const started = Date.now();
+  // While the marker is missing, read the query trail every few seconds: the
+  // engine writes no marker for an empty query or a coordinator that failed
+  // before dispatch, and without this the caller waited out the whole budget
+  // (180 s) for a marker that could not come. See trailStopDecision.
+  const trailEveryMs = Math.max(pollMs, parseInt(process.env.LOG10X_RETRIEVER_TRAIL_POLL_MS || '5000', 10));
+  let nextTrailAt = started + Math.min(3_000, trailEveryMs);
 
   while (Date.now() - started < timeoutMs) {
 
@@ -1350,7 +1404,7 @@ async function waitForDoneMarker(
 
       if (body && body.trim().length > 0) {
         try {
-          return JSON.parse(body) as DoneMarkerBody;
+          return { done: JSON.parse(body) as DoneMarkerBody };
         } catch {
         // Partial read; retry next poll.
         }
@@ -1360,10 +1414,26 @@ async function waitForDoneMarker(
     // NoSuchKey until the marker lands.
     }
 
+    if (watch && Date.now() >= nextTrailAt) {
+      nextTrailAt = Date.now() + trailEveryMs;
+      const diag = await pollQueryTrail(watch.queryId, watch.submittedAtMs - 60_000);
+      const stop = trailStopDecision(diag, Date.now() - watch.submittedAtMs, watch.noStartMs);
+      if (stop) {
+        // One last look: the marker may have landed between the two reads.
+        try {
+          const body = await s3Get(bucket, key);
+          if (body && body.trim().length > 0) return { done: JSON.parse(body) as DoneMarkerBody };
+        } catch {
+          // still missing
+        }
+        return { done: null, stop };
+      }
+    }
+
     await sleep(pollMs);
   }
 
-  return null;
+  return { done: null };
 }
 
 /**
@@ -1602,7 +1672,13 @@ export async function runRetrieverQuery(
   // (investigate stage-1) still pass it without `search` — and the old body
   // builder silently dropped it, scanning UNFILTERED. Translate it here so
   // the API layer can never silently widen a scoped query.
-  const effectiveSearch = req.search || (req.pattern ? buildPatternSearch(req.pattern) : '');
+  const requestedSearch = req.search || (req.pattern ? buildPatternSearch(req.pattern) : '');
+  // Check the search against the engine grammar before anything is sent: an
+  // expression the engine cannot parse fails inside the query Lambda and no
+  // completion marker is ever written. Plain words are rewritten to
+  // includes(text, "...") clauses; anything else throws INVALID_SEARCH_PREFIX.
+  const normalizedSearch = requestedSearch ? normalizeRetrieverSearch(requestedSearch) : undefined;
+  const effectiveSearch = normalizedSearch ? normalizedSearch.search : '';
 
   const body: Record<string, unknown> = {
     id: queryId,
@@ -1699,7 +1775,33 @@ export async function runRetrieverQuery(
 
   // Prefer the coordinator-written _DONE marker. Fall back to the byte-count
   // stability heuristic for older retrievers that don't write it.
-  const doneInfo = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs);
+  //
+  // The Lambda Function URL runs the coordinator inside the request
+  // (RetrieverHandler.handleQuery -> PipelineFactory.launchPipeline), so once
+  // the submit has returned, a coordinator that ran has already logged its
+  // plan. An empty trail LOG10X_RETRIEVER_NO_START_MS (20 s) later means it
+  // never ran. Queue-fed flavors start later, so only the empty/error stops
+  // apply to them.
+  const syncCoordinator = transport === 'http' && isLambdaFunctionUrl(await getRetrieverUrl());
+  const noStartMs = syncCoordinator
+    ? parseInt(process.env.LOG10X_RETRIEVER_NO_START_MS || '20000', 10)
+    : Number.POSITIVE_INFINITY;
+  const doneWait = await waitForDoneMarker(bucket, doneMarkerKey, pollMs, timeoutMs, {
+    queryId,
+    submittedAtMs: Date.now(),
+    noStartMs,
+  });
+  const doneInfo = doneWait.done;
+  if (doneWait.stop?.kind === 'error') {
+    throw new Error(`${RETRIEVER_NOT_STARTED_PREFIX} the engine stopped before scanning: ${doneWait.stop.message.slice(0, 400)}`);
+  }
+  if (doneWait.stop?.kind === 'no_start') {
+    throw new Error(
+      `${RETRIEVER_NOT_STARTED_PREFIX} the Retriever accepted query ${queryId} but logged nothing for it and wrote no ` +
+        `completion marker within ${Math.round(noStartMs / 1000)} s, so it did not run. Retrying the same request will not help.`,
+    );
+  }
+  const emptyQuery = doneWait.stop?.kind === 'empty';
 
   // How we decided the fan-out was done. `confirmed` means the coordinator
   // told us how many markers to expect and we counted them. `inferred` means
@@ -1710,7 +1812,9 @@ export async function runRetrieverQuery(
   // stating that no worker reported partial results.
   let completenessBasis: 'marker_count_confirmed' | 'quiet_window_inferred' = 'quiet_window_inferred';
 
-  if (doneInfo && (doneInfo.expectedMarkers ?? 0) > 0) {
+  if (emptyQuery) {
+    // Nothing was dispatched (see trailStopDecision): no markers will come.
+  } else if (doneInfo && (doneInfo.expectedMarkers ?? 0) > 0) {
     const tailBudgetMs = Math.min(20_000, Math.max(0, timeoutMs - (Date.now() - started)));
     await waitForMarkerCount(bucket, markerPrefix, doneInfo.expectedMarkers ?? 0, pollMs, tailBudgetMs);
     completenessBasis = 'marker_count_confirmed';
@@ -1893,6 +1997,8 @@ export async function runRetrieverQuery(
   const wallTimeMs = Date.now() - started;
   const response: RetrieverQueryResponse = {
     queryId,
+    ...(effectiveSearch ? { search: effectiveSearch } : {}),
+    ...(normalizedSearch?.rewrittenFrom !== undefined ? { searchRewrittenFrom: normalizedSearch.rewrittenFrom } : {}),
     // Report the prefix the result paths actually used (the redirect when set),
     // so a caller can re-fetch via fetchExistingResults({ target }) + queryId.
     target: resultTarget,
@@ -1936,7 +2042,9 @@ export async function runRetrieverQuery(
   // always in S3. This guarantees every zero-result query self-reports a verdict
   // + next step (EMPTY_RANGE / BLOOM_REJECTED_ALL / MATCHED_NO_EVENTS /
   // DISPATCHED_BLIND) instead of a bare "0 events".
-  let funnel = diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
+  let funnel = emptyQuery
+    ? diagnoseEmptyQuery(doneWait.stop?.kind === 'empty' ? doneWait.stop.reason : 'no_template_hashes_or_vars')
+    : diagnoseQuery(doneInfo ?? null, events.length, { failedWorkerFiles });
 
   // GROUND TRUTH first: the engine's own per-stage CloudWatch events (parsed by
   // attachDiagnostics) report what each stage actually did — scanned, matched,
@@ -1965,7 +2073,9 @@ export async function runRetrieverQuery(
       : null,
     events.length,
   );
-  if (grounded) {
+  if (emptyQuery) {
+    // Final: nothing was dispatched, so no stage has anything to add.
+  } else if (grounded) {
     funnel = grounded;
   } else if (funnel.verdict === 'DISPATCHED_BLIND' && !req.__probe) {
     // Fallback when CloudWatch isn't configured/available: force local dispatch

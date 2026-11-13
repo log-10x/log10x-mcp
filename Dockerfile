@@ -4,6 +4,15 @@
 # binaries, non-root, writes nothing.
 
 # --- build stage: compile TypeScript ---
+# --- engine stage: the 10x engine the hosted demo runs locally ---
+# pattern_examples, measure_compaction and find_skew template events with the
+# engine. Without it in the image they failed on the hosted demo and told the
+# visitor's agent to install Docker Desktop (2026-11-13). Same native runtime
+# and digest the MCP pins for installs (EDGE_MANIFEST_IMAGE in
+# src/lib/runtime-image.ts; a test keeps the two equal).
+ARG ENGINE_IMAGE=log10x/edge-10x:1.1.153@sha256:439f728a748d363b73baf004bb9817f5d7c610e0563a8208161c0443a135cedd
+FROM ${ENGINE_IMAGE} AS engine
+
 FROM node:20-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -54,7 +63,32 @@ RUN mkdir /tmp/peers && cd /tmp/peers && npm init -y > /dev/null \
 # are resolved via findUpwards() from build/lib at runtime.
 COPY --from=build /app/build ./build
 COPY default-manifest.json ./
-# No privileges, no writable home needed — the demo serves the read-only gateway.
+# The engine runs as a child process (LOG10X_TENX_MODE=local): no docker.sock.
+# About 180 MB (79 MB native binary, 103 MB config and symbol library).
+COPY --from=engine /opt/tenx-edge /opt/tenx-edge
+COPY --from=engine /etc/tenx /etc/tenx
+ENV TENX_HOME=/opt/tenx-edge \
+    TENX_BIN=/opt/tenx-edge/bin/tenx-edge \
+    TENX_MODULES=/opt/tenx-edge/lib/app/modules \
+    TENX_CONFIG=/etc/tenx/config \
+    TENX_SYMBOLS_PATH=/etc/tenx/symbols \
+    TENX_LOG_APPENDER=tenxConsoleAppender \
+    LOG10X_TENX_MODE=local \
+    LOG10X_TENX_PATH=/opt/tenx-edge/bin/tenx-edge
+# Explicit engine heap, so the engine child cannot grow into the memory the
+# node server shares with it in one task. Measured 2026-11-13 with this engine
+# image: peak 150 to 195 MiB per run (102 and 2,000 lines on stdin), and a
+# 2,000-line run completes at -Xmx96m in a 256 MB limit. Without -Xmx the
+# engine fails to start in a 128 MB limit ("Garbage-collected heap size
+# exceeded").
+ENV LOG10X_TENX_MAX_HEAP=256m
+# The engine needs a licence; with none given the MCP mints an anonymous demo
+# licence on first use and caches it at this path (writable as USER node). The
+# demo-playground guard in src/lib/environments.ts keeps the hosted demo's
+# reads on the shared demo env, not on that licence's own empty tenant.
+ENV LOG10X_DEMO_LICENSE_PATH=/tmp/log10x-demo-license.json
+# No privileges. The only writes are the engine's temp files and the licence
+# cache, both under /tmp.
 USER node
 # Streamable HTTP port; must match LOG10X_MCP_HTTP_PORT and the task containerPort.
 EXPOSE 8080
