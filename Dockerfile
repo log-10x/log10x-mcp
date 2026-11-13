@@ -63,6 +63,11 @@ RUN mkdir /tmp/peers && cd /tmp/peers && npm init -y > /dev/null \
 # are resolved via findUpwards() from build/lib at runtime.
 COPY --from=build /app/build ./build
 COPY default-manifest.json ./
+# Engine pipeline configs the MCP passes to the engine (dev-cli resolves
+# assets/tenx-mcp-file.config.yaml next to the package). Without them every
+# engine tool failed on the hosted demo: "could not resolve include file:
+# @/app/assets/tenx-mcp-file.config.yaml" (1.30.104, 2026-11-13).
+COPY assets ./assets
 # The engine runs as a child process (LOG10X_TENX_MODE=local): no docker.sock.
 # About 180 MB (79 MB native binary, 103 MB config and symbol library).
 COPY --from=engine /opt/tenx-edge /opt/tenx-edge
