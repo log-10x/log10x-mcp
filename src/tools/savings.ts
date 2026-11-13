@@ -104,6 +104,10 @@ interface SavingsSummary {
   destination: string | null;
   /** The destination's bill for what was passed (passed + compacted). Null when no rate or no split. */
   passed_cost: number | null;
+  /** The same rate applied to all volume in: what the bill would be with nothing routed elsewhere. */
+  all_in_cost: number | null;
+  /** Window length in days (per-day volumes in the headline). */
+  window_days: number;
   totals: {
     reduction_pct: number;
     /** null when rate_source === 'unset'. */
@@ -190,20 +194,28 @@ export async function executeSavings(
   } else {
     headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of volume in kept off the destination${d.run_rate?.ramping ? ' (volume ramping)' : ''}.${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to overlay dollars.' : ''}`;
   }
-  // Default headline when the route split is known (ruled 2026-11-13): state
-  // where the volume went, then the destination's bill for what was passed.
-  // Whether it leads with the split or with the bill is open (deploy screen).
+  // Default headline when the route split is known. Ruled 2026-11-13: lead
+  // with the bill (what the destination charges for what was passed), set
+  // against the same rate on all volume in, then where the rest went. Offloaded
+  // bytes are in the S3 archive and retrievable: never "removed".
   const rs = d.route_split;
   if (d.totals.has_data && rs && rs.bytes_offloaded + rs.bytes_dropped + rs.bytes_compacted > 0) {
     const dest = d.destination ?? 'the destination';
-    const compacted = rs.bytes_compacted > 0 ? ` (${fmtBytes(rs.bytes_compacted)} of it compacted)` : '';
-    const bill = d.passed_cost != null && d.cost_per_gb != null
-      ? ` ${dest} bill for what was passed: ${fmtDollar(d.passed_cost)}${d.period}` +
-        (d.rate_source === 'list_price' ? ` at list price (${fmtDollar(d.cost_per_gb)}/GB).` : '.')
-      : '';
-    headline =
-      `Pipeline (${d.time_range}): ${fmtBytes(rs.bytes_in)} in: ${fmtBytes(rs.bytes_passed + rs.bytes_compacted)} passed to ${dest}${compacted}, ` +
-      `${fmtBytes(rs.bytes_offloaded)} to the S3 archive, ${fmtBytes(rs.bytes_dropped)} dropped.${bill}${d.run_rate?.ramping ? ' (volume ramping)' : ''}`;
+    const days = d.window_days > 0 ? d.window_days : 1;
+    const perDay = (b: number): string => `${fmtBytes(b / days)}/day`;
+    const compacted = rs.bytes_compacted > 0 ? ` (${perDay(rs.bytes_compacted)} of what was passed was compacted)` : '';
+    const where =
+      `${perDay(rs.bytes_offloaded)} kept in the S3 archive (retrievable), ${perDay(rs.bytes_dropped)} dropped${compacted}`;
+    if (d.passed_cost != null && d.all_in_cost != null && d.cost_per_gb != null) {
+      const rateNote = d.rate_source === 'list_price' ? ` at list price (${fmtDollar(d.cost_per_gb)}/GB)` : '';
+      headline =
+        `${dest} bill ${fmtDollar(d.passed_cost)}${d.period}${rateNote}, against about ${fmtDollar(d.all_in_cost)}${d.period} ` +
+        `if all ${perDay(rs.bytes_in)} went to ${dest}; ${where}.${d.run_rate?.ramping ? ' (volume ramping)' : ''}`;
+    } else {
+      headline =
+        `${perDay(rs.bytes_in)} in: ${perDay(rs.bytes_passed + rs.bytes_compacted)} passed to ${dest}, ${where}.` +
+        `${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to see the bill.' : ''}${d.run_rate?.ramping ? ' (volume ramping)' : ''}`;
+    }
   }
   if (lens.lensed && lens.display) {
     headline = `[lens: ${lens.display}] ` + headline;
@@ -571,7 +583,17 @@ async function executeSavingsInner(
     lines.push('  otel-collector configs untouched.');
   } else {
     lines.push('');
-    if (totalSavedDisclosed != null && annualProjectionDisclosed != null) {
+    if (routeSplit && costPerGb != null && routeSplit.bytes_offloaded + routeSplit.bytes_dropped + routeSplit.bytes_compacted > 0) {
+      // Same figures as the headline: the bill for what was passed, the same
+      // rate on all volume in, and the share kept off the bill.
+      const passedCost = bytesToCost(routeSplit.bytes_passed + routeSplit.bytes_compacted, costPerGb);
+      const allInCost = bytesToCost(routeSplit.bytes_in, costPerGb);
+      const offPct = ((routeSplit.bytes_offloaded + routeSplit.bytes_dropped) / routeSplit.bytes_in) * 100;
+      lines.push(
+        `  Total: bill ${fmtDollar(passedCost)}${period} for what was passed, against ${fmtDollar(allInCost)}${period} for all volume in; ` +
+        `${fmtPct(offPct)} of volume in kept off the bill (S3 archive or dropped)`
+      );
+    } else if (totalSavedDisclosed != null && annualProjectionDisclosed != null) {
       lines.push(
         `  Total: ${fmtPct(totalReductionPct)} of volume in kept off the destination (offloaded or dropped) · ${fmtDisclosedDollar(totalSavedDisclosed)}${period} · ${fmtDisclosedDollar(annualProjectionDisclosed)}/yr projected`
       );
@@ -748,6 +770,8 @@ async function executeSavingsInner(
         routeSplit && costPerGb != null
           ? bytesToCost(routeSplit.bytes_passed + routeSplit.bytes_compacted, costPerGb)
           : null,
+      all_in_cost: routeSplit && costPerGb != null ? bytesToCost(routeSplit.bytes_in, costPerGb) : null,
+      window_days: tf.days,
       edge: {
         input_bytes: edgeIn,
         input_bytes_display: fmtBytes(edgeIn),

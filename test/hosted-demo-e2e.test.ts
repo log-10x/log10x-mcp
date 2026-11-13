@@ -25,6 +25,7 @@ import { demoUnavailableLine, demoUnavailableEnvelope } from '../src/lib/demo-un
 import { DEMO_SERVER_INSTRUCTIONS } from '../src/lib/demo-instructions.js';
 import { flattenMarkdown } from '../src/tools/product-qa.js';
 import { EDGE_MANIFEST_IMAGE } from '../src/lib/runtime-image.js';
+import { clientInfoFields } from '../src/lib/client-info.js';
 
 function repoFile(rel: string): string {
   let dir = process.cwd();
@@ -153,4 +154,19 @@ test('the demo image runs the engine the MCP pins', () => {
   assert.equal(m![1], EDGE_MANIFEST_IMAGE);
   assert.match(dockerfile, /LOG10X_TENX_MODE=local/);
   assert.match(dockerfile, /LOG10X_TENX_MAX_HEAP=\d+m/);
+});
+
+test('session-open logs only the client name and version, each at most 64 characters', () => {
+  const body = {
+    method: 'initialize',
+    params: {
+      clientInfo: { name: 'claude-code', version: '2.1.322', title: 'Claude Code', websiteUrl: 'https://x', icons: [{}] },
+      capabilities: { roots: {} },
+    },
+  };
+  assert.deepEqual(clientInfoFields(body), { client_name: 'claude-code', client_version: '2.1.322' });
+  assert.deepEqual(clientInfoFields({ params: { clientInfo: { name: 'x'.repeat(200) } } }), { client_name: 'x'.repeat(64) });
+  assert.deepEqual(clientInfoFields({ params: { clientInfo: { name: 7, version: null } } }), {});
+  assert.deepEqual(clientInfoFields({ params: {} }), {});
+  assert.deepEqual(clientInfoFields(null), {});
 });

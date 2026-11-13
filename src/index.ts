@@ -65,6 +65,7 @@ import {
 } from './tools/investigate.js';
 import { doctorSchema, executeDoctor, runDoctorChecks, renderDoctorReport } from './tools/doctor.js';
 import { log } from './lib/log.js';
+import { clientInfoFields } from './lib/client-info.js';
 import { describeToolError } from './lib/tool-errors.js';
 import { DemoReadOnlyError, isReadOnlyMode } from './lib/read-only-guard.js';
 import { buildDemoReadOnlyEnvelope } from './lib/chassis-envelope.js';
@@ -2074,7 +2075,7 @@ function startHttpServer(
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid: string) => {
               transports.set(sid, transport as StreamableHTTPServerTransport);
-              log.info('http.session_open', { sessions: transports.size });
+              log.info('http.session_open', { sessions: transports.size, ...clientInfoFields(body) });
             },
           });
           transport.onclose = () => {
