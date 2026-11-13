@@ -179,3 +179,12 @@ test('the hosted demo image is never fenced', () => {
   const envLines = dockerfile.split('\n').filter((l) => !l.trim().startsWith('#'));
   assert.ok(!envLines.some((l) => /TENX_AIRGAPPED|LOG10X_FENCED/.test(l)), 'Dockerfile sets a fence switch');
 });
+
+test('the hosted demo image ships the engine configs the MCP runs', () => {
+  // dev-cli runs the engine on assets/tenx-mcp-file.config.yaml; 1.30.104's image
+  // lacked assets/ and every engine tool failed on the hosted demo (2026-11-13).
+  const dockerfile = repoFile('Dockerfile');
+  assert.match(dockerfile, /^COPY assets \.\/assets$/m);
+  const ignored = repoFile('.dockerignore').split('\n').map((l) => l.trim());
+  assert.ok(!ignored.includes('assets') && !ignored.includes('assets/'), '.dockerignore excludes assets');
+});

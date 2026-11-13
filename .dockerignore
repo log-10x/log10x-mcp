@@ -4,7 +4,6 @@ build
 test-build
 eval
 docs
-assets
 scripts
 .github
 *.md
