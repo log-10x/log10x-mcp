@@ -27,6 +27,15 @@ const READS: Record<string, string> = {
 
 const DOCS_URL = 'https://doc.log10x.com/apps/mcp/';
 
+/**
+ * Tools refused for what they take rather than what they read. find_skew
+ * analyses pasted raw log lines, which the hosted demo does not accept (SOC 2
+ * scope ruling 2026-10-15, upheld 2026-11-13).
+ */
+const TAKES: Record<string, string> = {
+  log10x_find_skew: 'analyses pasted raw log lines, and the hosted demo does not accept pasted lines',
+};
+
 export function isDemoPlayground(): boolean {
   return /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DEMO_PLAYGROUND ?? '');
 }
@@ -34,9 +43,11 @@ export function isDemoPlayground(): boolean {
 /** The demo line for `tool`, or null when the tool is served in the demo. */
 export function demoUnavailableLine(tool: string): string | null {
   const reads = READS[tool];
-  if (!reads) return null;
+  const takes = TAKES[tool];
+  if (!reads && !takes) return null;
+  const why = reads ? `reads ${reads}, and the demo environment has none` : takes;
   return (
-    `Not available in the hosted demo: ${tool} reads ${reads}, and the demo environment has none. ` +
+    `Not available in the hosted demo: ${tool} ${why}. ` +
     `It runs when the log10x MCP is installed against a real environment: ${DOCS_URL}`
   );
 }

@@ -126,7 +126,7 @@ test('every tool on the demo-unavailable list is a demo tool', () => {
     'log10x_datadog_change_report', 'log10x_datadog_spike_audit', 'log10x_clickhouse_census',
     'log10x_customer_metrics_query', 'log10x_discover_join', 'log10x_metrics_that_moved',
     'log10x_rank_by_shape_similarity', 'log10x_metric_overlay', 'log10x_commitment_report',
-    'log10x_retriever_probe',
+    'log10x_retriever_probe', 'log10x_find_skew',
   ]) {
     assert.ok(demo.has(n), n);
     assert.ok(demoUnavailableLine(n), n);

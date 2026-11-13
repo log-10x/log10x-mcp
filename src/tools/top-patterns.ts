@@ -12,6 +12,7 @@
  * longer pulls SIEM events for them (see Phase 2).
  */
 
+import { SIEM_DISPLAY_NAMES } from '../lib/siem/pricing.js';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, iQueryRange, QUERY_BUDGET } from '../lib/interactive-query.js';
@@ -1183,7 +1184,10 @@ export async function executeTopPatterns(
         // the destination, not every byte it scanned: on the hosted demo the
         // receiver passes 42 of 182 GB/day, and "of scanned bytes" next to
         // services' 182 GB read as a fourfold disagreement (2026-11-13).
-        headline = `Top ${renderRows.length}${totalLabel} patterns cover ${sharePctLabel} of the bytes passed to the destination (${bytesLabel}).${rateHintTail}${incidentTail}`;
+        // Ruled 2026-11-13: say what the GB measure and which route they
+        // cover. Name the destination when it is known.
+        const passedTo = lens.actual ? (SIEM_DISPLAY_NAMES[lens.actual] ?? lens.actual) : 'the destination';
+        headline = `The top ${renderRows.length}${totalLabel} patterns are ${bytesLabel}, ${sharePctLabel} of what was passed to ${passedTo} in ${tf.range}.${rateHintTail}${incidentTail}`;
       }
     }
   }

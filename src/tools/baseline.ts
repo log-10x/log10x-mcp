@@ -171,6 +171,15 @@ export interface BaselineEnvelopeData {
     monthly_usd_at_list: number | null;
     /** Disclosed-value mirror of `monthly_usd`. `null` when `rate_source === 'unset'`. */
     monthly_usd_disclosed: DisclosedDollarValue | null;
+    /**
+     * What monthly_usd prices: 'passed' (the share of volume that reaches the
+     * destination: passed or compacted) when the receiver routes anything
+     * elsewhere, 'volume_in' when every byte passes. The bytes_* fields are
+     * always volume in, before the receiver.
+     */
+    cost_basis: 'passed' | 'volume_in';
+    /** Share of volume in that reaches the destination (0-100). */
+    passed_share_pct: number;
   };
   projection_no_action_90d: {
     /** `null` when `rate_source === 'unset'`. */
@@ -562,7 +571,14 @@ async function computeBaseline(
   //      p50 stays as bytes_per_day_p50 for tail planning, p90 stays for
   //      capacity.
   const meanDailyBytes = totalBytesScaled / Math.max(1, validDays.length);
-  const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH);
+  // Ruled 2026-11-13: volume in, before the receiver, is not the bill. When
+  // the receiver routes some of it elsewhere (offload, drop, sample), the
+  // monthly dollars price only the share that reaches the destination. On
+  // the hosted demo that share is 23% (42 of 182 GB/day).
+  const route = await fetchRouteShares(env, metricsEnv, `${horizonDays}d`);
+  const passedShare = route.overall ?? 1;
+  const costBasis: 'passed' | 'volume_in' = passedShare < 1 ? 'passed' : 'volume_in';
+  const monthlyGb = bytesToGb(meanDailyBytes * DAYS_PER_MONTH) * passedShare;
   const monthlyUsd = monthlyGb * (ingestPerGb + model.storage_per_gb_month);
 
   // growth_pct is a tail-ratio of the daily series, factor-invariant under
@@ -583,7 +599,8 @@ async function computeBaseline(
     totalBytesScaled,
     destination,
     ingestPerGb,
-    f
+    f,
+    route,
   );
 
   const recommended = recommendTargetRange(top);
@@ -632,6 +649,8 @@ async function computeBaseline(
       monthly_usd: monthlyUsd,
       monthly_usd_at_list: monthlyUsd,
       monthly_usd_disclosed: monthlyUsdDisclosed,
+      cost_basis: costBasis,
+      passed_share_pct: passedShare * 100,
     },
     projection_no_action_90d: {
       monthly_usd_in_90d: monthlyUsdIn90d,
@@ -833,6 +852,61 @@ function computeGrowthPct(days: number[]): number {
 
 // ─── top contributors ─────────────────────────────────────────────────
 
+interface RouteShares {
+  /** Share of all bytes that reach the destination (pass, compact, tier_down, unlabelled); null when unknown. */
+  overall: number | null;
+  /** The same share per pattern hash. */
+  byHash: Map<string, number>;
+}
+
+/** routeState values whose bytes do not reach the destination. */
+const NOT_PASSED_ROUTES = new Set(['offload', 'drop', 'sample']);
+
+/**
+ * Passed share of volume in, overall and per pattern hash, from the engine's
+ * routeState label. Returns `overall: null` (callers price everything) when
+ * the query fails or returns nothing, so environments and tests without the
+ * label keep today's numbers.
+ */
+async function fetchRouteShares(
+  env: EnvConfig,
+  metricsEnv: 'edge' | 'cloud',
+  range: string,
+): Promise<RouteShares> {
+  const labels = env.labels;
+  const q = `sum by (${labels.hash}, routeState) (increase(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${labels.env}="${metricsEnv}"}[${range}]))`;
+  const out: RouteShares = { overall: null, byHash: new Map() };
+  let res;
+  try {
+    res = await iQueryInstant(env, q, QUERY_BUDGET.heavy);
+  } catch {
+    return out;
+  }
+  const rows = res?.data?.result ?? [];
+  if (rows.length === 0) return out;
+  let total = 0;
+  let passed = 0;
+  const perHash = new Map<string, { total: number; passed: number }>();
+  for (const r of rows) {
+    const v = parsePrometheusValue(r);
+    if (!(v > 0)) continue;
+    const route = String(r.metric.routeState ?? '');
+    const isPassed = !NOT_PASSED_ROUTES.has(route);
+    total += v;
+    if (isPassed) passed += v;
+    const h = String(r.metric[labels.hash] ?? '');
+    if (h) {
+      const cur = perHash.get(h) ?? { total: 0, passed: 0 };
+      cur.total += v;
+      if (isPassed) cur.passed += v;
+      perHash.set(h, cur);
+    }
+  }
+  if (total > 0) out.overall = passed / total;
+  for (const [h, c] of perHash) if (c.total > 0) out.byHash.set(h, c.passed / c.total);
+  return out;
+}
+
 async function fetchTopContributors(
   env: EnvConfig,
   metricsEnv: 'edge' | 'cloud',
@@ -846,6 +920,7 @@ async function fetchTopContributors(
   // NOT share_pct (totalBytes is passed already-scaled, so numerator and
   // denominator scale together).
   factor: number = 1,
+  route?: RouteShares,
 ): Promise<BaselineTopContributor[]> {
   const labels = env.labels;
   const range = `${horizonDays}d`;
@@ -903,8 +978,9 @@ async function fetchTopContributors(
     // resolved by `computeBaseline` (customer_supplied when supplied; else
     // vendors.json list).
     const monthlyBytes = (bytes / horizonDays) * DAYS_PER_MONTH;
+    const contributorShare = route?.byHash.get(rawHash) ?? 1;
     const monthlyUsd =
-      bytesToGb(monthlyBytes) *
+      bytesToGb(monthlyBytes) * contributorShare *
       (ingestPerGb + model.storage_per_gb_month);
 
     // Compactable test: destination is not a no-op AND avg event ≥ floor.
@@ -1044,6 +1120,8 @@ function buildNotReadyEnvelope(opts: {
       monthly_usd: zeroMonthly,
       monthly_usd_at_list: zeroMonthly,
       monthly_usd_disclosed: null,
+      cost_basis: 'volume_in',
+      passed_share_pct: 100,
     },
     projection_no_action_90d: {
       monthly_usd_in_90d: zeroMonthly,
@@ -1084,7 +1162,7 @@ function headlineFor(d: BaselineEnvelopeData): string {
   const band = r
     ? `target band ${r.low_pct}-${r.high_pct}% (expected ${r.expected_pct}%)`
     : 'target band unavailable';
-  const volume = `${fmtBytes(d.current.bytes_per_day_p50)}/day p50`;
+  const volume = `${fmtBytes(d.current.bytes_per_day_p50)}/day p50 volume in, before the receiver`;
   let dollarClause = '';
   if (
     d.rate_source !== 'unset' &&
@@ -1106,7 +1184,10 @@ function headlineFor(d: BaselineEnvelopeData): string {
     const disclosure = cur.disclosure ?? fut.disclosure ?? d.rate_disclosure ?? null;
     const tail = disclosure ? ` ${disclosure}` : '';
     const modeledTail = d.modeled && d.modeled_note ? ` ${d.modeled_note}` : '';
-    dollarClause = ` · ${curAmt}/mo current, ${futAmt}/mo projected 90d no-action${tail}${modeledTail}`;
+    const basis = d.current.cost_basis === 'passed'
+      ? ` for the ${Math.round(d.current.passed_share_pct)}% passed to ${d.destination ? (SIEM_DISPLAY_NAMES[d.destination as SiemId] ?? d.destination) : 'the destination'}`
+      : '';
+    dollarClause = ` · ${curAmt}/mo current bill${basis}, ${futAmt}/mo projected 90d no-action${tail}${modeledTail}`;
   }
   let headline = `Baseline ready: ${band} · ${volume}${dollarClause}.`;
   // Volume projection lens: mark the headline so a lensed run is never

@@ -89,7 +89,13 @@ export async function fetchDemoLicense(): Promise<LicenseResult> {
   const url = new URL('/api/v1/license/demo', getBase()).toString();
   let res: Response;
   try {
-    res = await fetch(url, { method: 'POST' });
+    // The hosted demo mints its own engine licence on first use; a distinct
+    // User-Agent lets a count of demo licences leave it out.
+    const hostedDemo = /^(1|true|yes)$/i.test(process.env.LOG10X_MCP_DEMO_PLAYGROUND ?? '');
+    res = await fetch(url, {
+      method: 'POST',
+      ...(hostedDemo ? { headers: { 'User-Agent': 'log10x-hosted-demo' } } : {}),
+    });
   } catch (e) {
     throw new LicenseFetchError(
       `Network error reaching ${url}: ${e instanceof Error ? e.message : String(e)}`

@@ -123,8 +123,13 @@ test('services: factor-3 scales every magnitude by 3; shares/counts/bar invarian
     extractPctColumn(base.data.must_render_verbatim as string),
     extractPctColumn(lensed.data.must_render_verbatim as string),
   );
-  // cross-check: dollars rode bytes (cost = bytes/1e9 * $/GB), $2/GB
-  assert.ok(Math.abs((lp.total_cost as number) - ((lp.total_bytes as number) / GB) * 2) < 1e-6);
+  // cross-check: dollars rode the PASSED bytes (cost = passed/1e9 * $/GB), $2/GB.
+  // The fixture routes payment's 10 GB to offload and cart's 6 GB to drop, so
+  // the bill prices only what reaches the destination (ruled 2026-11-13: volume
+  // in, before the receiver, is not the bill).
+  const rs = lp.route_split as { bytes_passed: number; bytes_compacted: number };
+  assert.equal(lp.cost_basis, 'passed');
+  assert.ok(Math.abs((lp.total_cost as number) - ((rs.bytes_passed + rs.bytes_compacted) / GB) * 2) < 1e-6);
 });
 
 test('services: action-axis parts sum to total_bytes after scaling', async () => {

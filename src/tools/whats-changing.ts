@@ -50,6 +50,9 @@ function fmtFloor(usd: number): string {
   return usd >= 10 ? String(Math.round(usd)) : usd.toFixed(2);
 }
 
+/** Share of the environment's own spend that bounds the default dollar floor. */
+const RELATIVE_FLOOR_SHARE = 0.05;
+
 export const whatsChangingSchema = {
   timeRange: z
     .enum(['1d', '7d', '30d'])
@@ -75,7 +78,7 @@ export const whatsChangingSchema = {
     .optional()
     .describe(
       `Dollar floor for delta. Rows with delta < min_delta_usd are dropped. ` +
-      `Default $${DEFAULT_GATES.minDollarPerWeek}/wk scaled to the selected timeRange window. Set to 0 to disable.`,
+      `Default: the smaller of $${DEFAULT_GATES.minDollarPerWeek}/week and 5% of the environment's own weekly spend, scaled to the selected timeRange window. Set to 0 to disable.`,
     ),
   min_delta_contribution_pct: z
     .number()
@@ -230,7 +233,7 @@ export async function executeWhatsChanging(
   // chosen window so a 1d run isn't gated against a 7-day dollar figure
   // (over-filter ~7x) and a 30d run isn't gated against it (under-filter
   // ~4.3x). An explicitly supplied value keeps its stated window semantics.
-  const minDeltaUsd =
+  let minDeltaUsd =
     args.min_delta_usd ?? (DEFAULT_GATES.minDollarPerWeek * tf.days / 7);
   const minDeltaContribPct = args.min_delta_contribution_pct ?? DEFAULT_GATES.minContributionPct;
   const minDeltaUsdIsDefault = args.min_delta_usd === undefined;
@@ -510,6 +513,25 @@ export async function executeWhatsChanging(
       services,
     });
     if (delta > 0) totalPositiveDelta += delta;
+  }
+
+  // Default floor relative to the environment (ruled 2026-11-13): the smaller
+  // of $500/week and 5% of the environment's own weekly spend, scaled to the
+  // window. A flat $500/week hid every change on small environments: the
+  // hosted demo spends about $640/week at CloudWatch's list rate, so no single
+  // pattern could cross without doubling the bill. Large environments, whose
+  // 5% is above $500/week, see no change. An explicit min_delta_usd wins.
+  if (minDeltaUsdIsDefault) {
+    const windowSpend = rows.reduce((a, r) => a + (r.cost_now_usd > 0 ? r.cost_now_usd : 0), 0);
+    const relative = RELATIVE_FLOOR_SHARE * windowSpend;
+    if (relative > 0 && relative < minDeltaUsd) {
+      minDeltaUsd = relative;
+      decisions.threshold_used = minDeltaUsd;
+      decisions.threshold_audit.value = minDeltaUsd;
+      decisions.threshold_audit.basis =
+        `min_delta_usd=${minDeltaUsd.toFixed(2)} over ${tf.label} (default: 5% of this environment's spend in the window, ` +
+        `below $${DEFAULT_GATES.minDollarPerWeek}/wk scaled to window), min_delta_contribution_pct=${minDeltaContribPct} (default=${DEFAULT_GATES.minContributionPct})`;
+    }
   }
 
   // Apply gates and sort by absolute delta magnitude descending.

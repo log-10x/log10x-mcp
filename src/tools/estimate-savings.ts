@@ -143,6 +143,32 @@ const DEST_ENUM = z.enum([
   'opensearch',
 ]);
 
+/**
+ * The plan as the envelope carries it: the planned rows that save the most
+ * and the costliest kept rows, `limit` of each, with totals and omitted
+ * counts. Every planned and kept row of a 194-pattern environment made the
+ * response 209 KB (hosted demo, 2026-11-13), over Claude Code's tool-output
+ * limit, so an agent asking for a 30% plan got an error instead of the plan.
+ * achievedPct, totalSavedUsd and the headline come from the full solve.
+ */
+export function planForEnvelope<P extends { planned: Array<{ savedUsd: number }>; kept: Array<{ billUsd: number }> }>(
+  plan: P,
+  limit: number,
+): P & { plannedTotal?: number; plannedOmitted?: number; keptTotal?: number; keptOmitted?: number } {
+  const out: P & { plannedTotal?: number; plannedOmitted?: number; keptTotal?: number; keptOmitted?: number } = { ...plan };
+  if (plan.planned.length > limit) {
+    out.planned = [...plan.planned].sort((a, b) => b.savedUsd - a.savedUsd).slice(0, limit);
+    out.plannedTotal = plan.planned.length;
+    out.plannedOmitted = plan.planned.length - limit;
+  }
+  if (plan.kept.length > limit) {
+    out.kept = [...plan.kept].sort((a, b) => b.billUsd - a.billUsd).slice(0, limit);
+    out.keptTotal = plan.kept.length;
+    out.keptOmitted = plan.kept.length - limit;
+  }
+  return out;
+}
+
 export const estimateSavingsSchema = {
   mode: z
     .enum(['forecast', 'verify'])
@@ -306,9 +332,9 @@ export const estimateSavingsSchema = {
     .number()
     .int()
     .positive()
-    .default(50)
+    .default(20)
     .describe(
-      'forecast mode: maximum number of per_pattern rows returned. Default 50 when service is omitted; ignored (unlimited) when service is set. Totals and coverage_pct are always computed over the full solver result before slicing.'
+      'forecast mode: maximum number of per_pattern rows returned, and of plan.planned / plan.kept rows. Default 20 when service is omitted; ignored (unlimited per_pattern, 50 plan rows) when service is set. Totals and coverage_pct are always computed over the full solver result before slicing.'
     ),
   destination: DEST_ENUM.optional().describe(
     'Destination stack. Required for both modes (used to look up ingest $/GB + compact ratio band).'
@@ -1620,7 +1646,7 @@ export async function runEstimateForecast(
   const per_pattern_total_count = per_pattern.length;
   const effectiveLimit = args.service
     ? per_pattern.length // unlimited when scoped to a service
-    : (args.pattern_limit ?? 50);
+    : (args.pattern_limit ?? 20);
   // Ensure descending sort before slice (greedy path is already sorted, but
   // proposed_config may be in arbitrary order).
   per_pattern.sort((a, b) => b.bytes_in_monthly - a.bytes_in_monthly);
@@ -2817,7 +2843,13 @@ export async function executeEstimateSavings(
           candidates_count: result.per_pattern_total_count,
           candidates_evaluated: result.per_pattern.length,
         },
-        payload: { ok: true, ...result },
+        payload: {
+          ok: true,
+          ...result,
+          ...(result.plan
+            ? { plan: planForEnvelope(result.plan, args.service ? 50 : (args.pattern_limit ?? 20)) }
+            : {}),
+        },
         human_summary,
         actions: [
           {

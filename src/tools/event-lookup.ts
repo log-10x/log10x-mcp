@@ -71,7 +71,10 @@ interface EventLookupSummary {
     pattern_hash: string;
   }>;
   totals: {
+    /** Volume in, every route. */
     bytes: number;
+    /** The part of `bytes` that reached the destination; the cost fields price this. */
+    bytes_passed: number;
     cost_per_window_usd: number | null;
     cost_baseline_usd: number | null;
     cost_per_window_usd_disclosed: DisclosedDollarValue | null;
@@ -153,9 +156,14 @@ export async function executeEventLookup(
   // gates the dollar clause on rate_source so an unset rate yields a
   // truthful percent-first headline instead of a fabricated "$0.00".
   const svcWord = d.totals.service_count === 1 ? 'service' : 'services';
+  // Every figure names its route (ruled 2026-11-13).
+  const routed = d.totals.bytes_passed < d.totals.bytes * 0.999;
+  const volumeClause = routed
+    ? `${(d.totals.bytes / 1_000_000).toFixed(1)} MB in, ${(d.totals.bytes_passed / 1_000_000).toFixed(1)} MB passed`
+    : `${(d.totals.bytes / 1_000_000).toFixed(1)} MB`;
   const headline = d.rate_source === 'unset' || d.totals.cost_per_window_usd_disclosed == null
-    ? `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB)`
-    : `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${(d.totals.bytes / 1_000_000).toFixed(1)} MB) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}`;
+    ? `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${volumeClause})`
+    : `\`${d.pattern}\` over ${d.window}: ${fmtCount(d.totals.events)} events across ${d.totals.service_count} ${svcWord} (${volumeClause}) · ${fmtDisclosedDollar(d.totals.cost_per_window_usd_disclosed)}${routed ? ' for what was passed' : ''}`;
   const rateSourceMapped = d.rate_source === 'customer_supplied' ? 'customer_supplied' as const
     : d.rate_source === 'list_price' ? 'list_price' as const
     : 'none' as const;
@@ -410,6 +418,29 @@ async function formatResults(
     }
   }
 
+  // Passed share per service (ruled 2026-11-13). The bytes above are volume
+  // in, every route; the dollars price only what reaches the destination.
+  // On the hosted demo this pattern's 11 GB/day was 70% offloaded, so pricing
+  // all of it gave $5.5/day where top_patterns, on the passed route, gave
+  // $50/month. The baseline is priced on the same current share (the route
+  // mix of past weeks is not stored per window). No route label: share 1.
+  const passedShareBySvc = new Map<string, number>();
+  {
+    const routeRes = await iQueryInstant(env, pql.patternRoutesByService(pattern, metricsEnv, tf.range), QUERY_BUDGET.heavy).catch(() => null);
+    const acc = new Map<string, { total: number; passed: number }>();
+    for (const r of routeRes?.status === 'success' ? routeRes.data.result : []) {
+      const v = parsePrometheusValue(r);
+      if (!(v > 0)) continue;
+      const svc = r.metric[LABELS.service] || '';
+      const route = r.metric.routeState ?? '';
+      const cur = acc.get(svc) ?? { total: 0, passed: 0 };
+      cur.total += v;
+      if (route !== 'offload' && route !== 'drop' && route !== 'sample') cur.passed += v;
+      acc.set(svc, cur);
+    }
+    for (const [svc, c] of acc) if (c.total > 0) passedShareBySvc.set(svc, c.passed / c.total);
+  }
+
   // Build service rows. Cost fields collapse to null when rate_source='unset'
   // so downstream renderers can gate the $-clause via fmtDisclosedDollar
   // instead of silently quoting bytes×0 or bytes×$1/GB. The disclosed mirror
@@ -431,9 +462,12 @@ async function formatResults(
   let totalCostBase: number | null = rateSource === 'unset' ? null : 0;
   let totalEvents = 0;
   let totalBytes = 0;
+  let totalPassedBytes = 0;
 
   for (const [svc, bytes] of serviceBytes) {
-    const costNow = costPerGb != null ? bytesToCost(bytes, costPerGb) : null;
+    const share = passedShareBySvc.get(svc) ?? 1;
+    totalPassedBytes += bytes * share;
+    const costNow = costPerGb != null ? bytesToCost(bytes * share, costPerGb) : null;
     const baseWeeks = baselineByService.get(svc) || [];
     const isNew = baseWeeks.length === 0;
     const costBase: number | null = costPerGb == null
@@ -441,7 +475,7 @@ async function formatResults(
       : isNew
         ? 0
         : bytesToCost(
-            baseWeeks.reduce((a, b) => a + b, 0) / baseWeeks.length,
+            (baseWeeks.reduce((a, b) => a + b, 0) / baseWeeks.length) * share,
             costPerGb
           );
     const events = eventsBySvc.get(svc) || 0;
@@ -576,6 +610,7 @@ async function formatResults(
       })),
       totals: {
         bytes: totalBytes,
+        bytes_passed: totalPassedBytes,
         cost_per_window_usd: totalCostNow,
         cost_baseline_usd: totalCostBase,
         cost_per_window_usd_disclosed: totalCostNowDisclosed,

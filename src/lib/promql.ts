@@ -337,6 +337,19 @@ export function topPatterns(
 }
 
 /** Bytes per service for a specific pattern. */
+/**
+ * Bytes per (service, routeState) for one pattern over `range`: the route
+ * split behind a pattern's volume (pass / offload / drop / compact ...).
+ */
+export function patternRoutesByService(
+  pattern: string,
+  env: string,
+  range: string,
+  labels: LabelNameMap = DEFAULT_LABELS
+): string {
+  return `sum by (${labels.service}, routeState) (increase(${BYTES_METRIC}{${labels.pattern}="${escapeLabel(pattern)}",${labels.env}="${env}"}[${range}]))`;
+}
+
 export function patternAcrossServices(
   pattern: string,
   env: string,

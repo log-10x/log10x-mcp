@@ -447,7 +447,10 @@ async function wrap(
     // it lives in warnings[].
     return {
       content: [
-        { type: 'text' as const, text: JSON.stringify(enriched, null, 2) },
+        // Compact: indentation added a third to every reply (estimate_savings
+        // 153 KB of JSON became 209 KB of text), and agents' tool-output
+        // limits count characters.
+        { type: 'text' as const, text: JSON.stringify(enriched) },
         ...imageBlocks,
       ],
       structuredContent,

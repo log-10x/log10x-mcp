@@ -33,6 +33,7 @@
  * per-pattern tuning rather than the configure_engine bulk path.
  */
 
+import { SIEM_DISPLAY_NAMES } from '../lib/siem/pricing.js';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
@@ -130,7 +131,23 @@ interface ServicesSummary {
   /** Plain-English caveat for cost_per_gb (null for customer_supplied). */
   rate_disclosure: string | null;
   period: string;
+  /** Volume in, before the receiver: every byte the pipeline saw, on every route. */
   total_bytes: number;
+  /** The same volume split by the route the receiver gave it. */
+  route_split: {
+    bytes_passed: number;
+    bytes_compacted: number;
+    bytes_offloaded: number;
+    bytes_dropped: number;
+  };
+  /**
+   * What total_cost and each row's cost price: 'passed' (bytes that reach the
+   * destination, passed or compacted) when the receiver routes anything
+   * elsewhere, 'volume_in' when every byte passes.
+   */
+  cost_basis: 'passed' | 'volume_in';
+  /** Destination the passed bytes reach (display name), when known. */
+  destination: string | null;
   /** Null when rate_source==='unset'. */
   total_cost: number | null;
   service_count: number;
@@ -192,7 +209,7 @@ export async function executeServices(
   // "below signal floor" which was wrong for the tail_rank group; now
   // it just says "tail services omitted from next_action".
   const tailNote = tailCount > 0
-    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of cost; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
+    ? ` Top ${actionableCount} service${actionableCount !== 1 ? 's' : ''} account for ${d.top_n_share_pct}% of volume in; ${tailCount} tail service${tailCount !== 1 ? 's' : ''} omitted from next_action.`
     : '';
   // C-policy: the headline quotes a dollar only when it is grounded in the
   // customer's real (contracted) rate. At `list_price` the dollar is the SIEM
@@ -200,10 +217,18 @@ export async function executeServices(
   // (GB / %, always exact) and the chassis attaches the list-rate calibration
   // callout. At `unset` there is no rate at all, so we add the set-your-rate
   // hint inline.
+  // Ruled 2026-11-13: the input total is "volume in, before the receiver",
+  // never the bill; every figure names its route; a bill prices only what
+  // was passed when the receiver routes anything elsewhere.
+  const dest = d.destination ?? 'the destination';
+  const rs = d.route_split;
+  const splitClause = d.cost_basis === 'passed'
+    ? ` (${fmtBytes(rs.bytes_passed + rs.bytes_compacted)} passed to ${dest}, ${fmtBytes(rs.bytes_offloaded)} to the S3 archive, ${fmtBytes(rs.bytes_dropped)} dropped)`
+    : '';
   let headline = top
     ? (d.rate_source === 'customer_supplied'
-      ? `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtDollar(top.cost ?? 0)}${d.period} (${Math.round(top.pct)}% of total ${fmtDollar(d.total_cost ?? 0)}${d.period}).${tailNote}`
-      : `${d.service_count} services over ${d.time_range}: ${top.name} leads at ${fmtBytes(top.bytes)} (${Math.round(top.pct)}% of total ${fmtBytes(d.total_bytes)}).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
+      ? `${d.service_count} services over ${d.time_range}: ${fmtBytes(d.total_bytes)} volume in, before the receiver${splitClause}. ${top.name} leads at ${fmtBytes(top.bytes)} in (${Math.round(top.pct)}%); the bill for what was passed to ${dest} is ${fmtDollar(d.total_cost ?? 0)}${d.period}.${tailNote}`
+      : `${d.service_count} services over ${d.time_range}: ${fmtBytes(d.total_bytes)} volume in, before the receiver${splitClause}. ${top.name} leads at ${fmtBytes(top.bytes)} in (${Math.round(top.pct)}%).${tailNote}${d.rate_source === 'unset' ? ' (no $/GB rate configured; pass effective_ingest_per_gb to see dollars.)' : ''}`)
     : `No services with data in ${d.time_range}.`;
   // Volume projection lens: mark the headline so a lensed run is never
   // mistaken for measured volume.
@@ -495,6 +520,28 @@ async function executeServicesInner(
     totalBytes *= f;
   }
 
+  // Route split and cost basis (ruled 2026-11-13). Volume in, before the
+  // receiver, is not the bill: on the hosted demo 131 of 182 GB/day went to
+  // the S3 archive and 9 GB were dropped, so pricing all 182 GB at the
+  // destination's rate overstated the bill about fourfold. When the receiver
+  // routes anything elsewhere, cost prices only what reaches the destination
+  // (passed, plus compacted, which still lands there).
+  const routeSplit = { bytes_passed: 0, bytes_compacted: 0, bytes_offloaded: 0, bytes_dropped: 0 };
+  for (const r of rows) {
+    routeSplit.bytes_passed += r.axis.bytes_passed;
+    routeSplit.bytes_compacted += r.axis.bytes_compacted;
+    routeSplit.bytes_offloaded += r.axis.bytes_offloaded;
+    routeSplit.bytes_dropped += r.axis.bytes_dropped;
+  }
+  const routingActive = routeSplit.bytes_offloaded + routeSplit.bytes_dropped + routeSplit.bytes_compacted > 0;
+  const costBasis: 'passed' | 'volume_in' = routingActive ? 'passed' : 'volume_in';
+  const billedBytes = (r: SvcRow): number =>
+    routingActive ? r.axis.bytes_passed + r.axis.bytes_compacted : r.bytes;
+  if (costPerGb != null) {
+    for (const r of rows) r.cost = bytesToCost(billedBytes(r), costPerGb);
+  }
+  const destinationName = lens?.actual ? (SIEM_DISPLAY_NAMES[lens.actual] ?? lens.actual) : null;
+
   // Calculate percentages
   for (const r of rows) {
     r.pct = totalBytes > 0 ? (r.bytes / totalBytes) * 100 : 0;
@@ -521,12 +568,13 @@ async function executeServicesInner(
   }
 
   // Total cost collapses to null when the shared rate resolver returned 'unset'.
-  const totalCost: number | null = costPerGb != null ? bytesToCost(totalBytes, costPerGb) : null;
+  const totalBilledBytes = routingActive ? routeSplit.bytes_passed + routeSplit.bytes_compacted : totalBytes;
+  const totalCost: number | null = costPerGb != null ? bytesToCost(totalBilledBytes, costPerGb) : null;
   lines.push('');
   lines.push(
     costPerGb != null
-      ? `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · ${fmtDollar(totalCost ?? 0)}${period} at ${fmtDollar(costPerGb)}/GB`
-      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} total · (no $/GB rate configured: pass effective_ingest_per_gb)`
+      ? `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} volume in, before the receiver · ${routingActive ? `${fmtBytes(totalBilledBytes)} passed to ${destinationName ?? 'the destination'}: ` : ''}${fmtDollar(totalCost ?? 0)}${period} at ${fmtDollar(costPerGb)}/GB`
+      : `  ${rows.length} service${rows.length !== 1 ? 's' : ''} · ${fmtBytes(totalBytes)} volume in, before the receiver · (no $/GB rate configured: pass effective_ingest_per_gb)`
   );
 
   // Coverage line: how concentrated is the volume at the top? Tells the agent
@@ -598,6 +646,9 @@ async function executeServicesInner(
       rate_disclosure: rate.disclosure,
       period,
       total_bytes: totalBytes,
+      route_split: routeSplit,
+      cost_basis: costBasis,
+      destination: destinationName,
       total_cost: totalCost,
       service_count: rows.length,
       top_n_share_pct: topShare,

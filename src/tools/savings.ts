@@ -21,6 +21,7 @@
  * reset handling).
  */
 
+import { SIEM_DISPLAY_NAMES } from '../lib/siem/pricing.js';
 import { z } from 'zod';
 import type { EnvConfig } from '../lib/environments.js';
 import { iQueryInstant, QUERY_BUDGET } from '../lib/interactive-query.js';
@@ -87,6 +88,22 @@ interface SavingsSummary {
     chunks_ok: number;
     chunks_total: number;
   };
+  /**
+   * Volume in, before the receiver, split by the route the receiver gave it
+   * (engine routeState label). Null when the label is absent. Offloaded bytes
+   * are in the S3 archive and retrievable: they are not removed.
+   */
+  route_split: {
+    bytes_in: number;
+    bytes_passed: number;
+    bytes_compacted: number;
+    bytes_offloaded: number;
+    bytes_dropped: number;
+  } | null;
+  /** Destination the passed bytes reach (display name), when known. */
+  destination: string | null;
+  /** The destination's bill for what was passed (passed + compacted). Null when no rate or no split. */
+  passed_cost: number | null;
   totals: {
     reduction_pct: number;
     /** null when rate_source === 'unset'. */
@@ -169,9 +186,24 @@ export async function executeSavings(
     const dollarClause = realizedDisc != null && annualDisc != null
       ? `, ${fmtDisclosedDollar(realizedDisc)}${d.period} realized, ${fmtDisclosedDollar(annualDisc)}/yr projected`
       : '';
-    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of volume in kept off the destination${dollarClause}${d.run_rate?.ramping ? ' (volume ramping)' : ''}.`;
   } else {
-    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of input bytes removed${d.run_rate?.ramping ? ' (volume ramping)' : ''}.${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to overlay dollars.' : ''}`;
+    headline = `Pipeline savings (${d.time_range}): ${fmtPct(d.totals.reduction_pct)} of volume in kept off the destination${d.run_rate?.ramping ? ' (volume ramping)' : ''}.${d.rate_source === 'unset' ? ' Pass effective_ingest_per_gb to overlay dollars.' : ''}`;
+  }
+  // Default headline when the route split is known (ruled 2026-11-13): state
+  // where the volume went, then the destination's bill for what was passed.
+  // Whether it leads with the split or with the bill is open (deploy screen).
+  const rs = d.route_split;
+  if (d.totals.has_data && rs && rs.bytes_offloaded + rs.bytes_dropped + rs.bytes_compacted > 0) {
+    const dest = d.destination ?? 'the destination';
+    const compacted = rs.bytes_compacted > 0 ? ` (${fmtBytes(rs.bytes_compacted)} of it compacted)` : '';
+    const bill = d.passed_cost != null && d.cost_per_gb != null
+      ? ` ${dest} bill for what was passed: ${fmtDollar(d.passed_cost)}${d.period}` +
+        (d.rate_source === 'list_price' ? ` at list price (${fmtDollar(d.cost_per_gb)}/GB).` : '.')
+      : '';
+    headline =
+      `Pipeline (${d.time_range}): ${fmtBytes(rs.bytes_in)} in: ${fmtBytes(rs.bytes_passed + rs.bytes_compacted)} passed to ${dest}${compacted}, ` +
+      `${fmtBytes(rs.bytes_offloaded)} to the S3 archive, ${fmtBytes(rs.bytes_dropped)} dropped.${bill}${d.run_rate?.ramping ? ' (volume ramping)' : ''}`;
   }
   if (lens.lensed && lens.display) {
     headline = `[lens: ${lens.display}] ` + headline;
@@ -348,6 +380,33 @@ async function executeSavingsInner(
     fetch7d ? chunk7dSum(pql.retrieverIndexedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
     fetch7d ? chunk7dSum(pql.retrieverStreamedBytesChunk) : Promise.resolve({ sum: 0, succeeded: 7, total: 7 }),
   ]);
+  // Route split (ruled 2026-11-13): "of input bytes removed" counted the
+  // offloaded route as removed, but those bytes sit in the S3 archive and
+  // come back on demand. The split states each route instead.
+  const routeRes = await iQueryInstant(
+    env,
+    `sum by (routeState) (increase(all_events_summaryBytes_total{tenx_app=~"reporter|receiver",${env.labels.env}="edge"}[${tf.range}]))`,
+    QUERY_BUDGET.heavy,
+  ).catch(() => null);
+  let routeSplit: SavingsSummary['route_split'] = null;
+  {
+    const rows = routeRes?.data?.result ?? [];
+    if (rows.length > 0) {
+      const rsplit = { bytes_in: 0, bytes_passed: 0, bytes_compacted: 0, bytes_offloaded: 0, bytes_dropped: 0 };
+      for (const r of rows) {
+        const v = parseFloat(String(r.value?.[1] ?? '0'));
+        if (!(v > 0)) continue;
+        const route = String(r.metric?.routeState ?? '');
+        rsplit.bytes_in += v;
+        if (route === 'offload') rsplit.bytes_offloaded += v;
+        else if (route === 'drop' || route === 'sample') rsplit.bytes_dropped += v;
+        else if (route === 'compact' || route === 'tier_down') rsplit.bytes_compacted += v;
+        else rsplit.bytes_passed += v;
+      }
+      if (rsplit.bytes_in > 0) routeSplit = rsplit;
+    }
+  }
+
   const indexedBytes = indexedResult.sum;
   const streamedBytes = streamedResult.sum;
   // Coverage fraction across the main retriever chunks (tf.days × 2 queries).
@@ -514,11 +573,11 @@ async function executeSavingsInner(
     lines.push('');
     if (totalSavedDisclosed != null && annualProjectionDisclosed != null) {
       lines.push(
-        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed · ${fmtDisclosedDollar(totalSavedDisclosed)}${period} · ${fmtDisclosedDollar(annualProjectionDisclosed)}/yr projected`
+        `  Total: ${fmtPct(totalReductionPct)} of volume in kept off the destination (offloaded or dropped) · ${fmtDisclosedDollar(totalSavedDisclosed)}${period} · ${fmtDisclosedDollar(annualProjectionDisclosed)}/yr projected`
       );
     } else {
       lines.push(
-        `  Total: ${fmtPct(totalReductionPct)} of input bytes removed (rate unset: pass effective_ingest_per_gb to overlay dollars)`
+        `  Total: ${fmtPct(totalReductionPct)} of volume in kept off the destination (offloaded or dropped; rate unset: pass effective_ingest_per_gb to overlay dollars)`
       );
     }
     // Headline reliability caveat: if any retriever chunks in the MAIN query silently
@@ -683,6 +742,12 @@ async function executeSavingsInner(
       storage_per_gb: storagePerGb,
       period,
       rate_source: rateSource,
+      route_split: routeSplit,
+      destination: lens?.actual ? (SIEM_DISPLAY_NAMES[lens.actual] ?? lens.actual) : null,
+      passed_cost:
+        routeSplit && costPerGb != null
+          ? bytesToCost(routeSplit.bytes_passed + routeSplit.bytes_compacted, costPerGb)
+          : null,
       edge: {
         input_bytes: edgeIn,
         input_bytes_display: fmtBytes(edgeIn),

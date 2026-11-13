@@ -359,6 +359,9 @@ export interface Plan {
   /** Set only on a copy trimmed for a tool response: how many kept rows the full plan has, and how many the copy leaves out. */
   keptTotal?: number;
   keptOmitted?: number;
+  /** Same, for planned rows (estimate_savings trims both). */
+  plannedTotal?: number;
+  plannedOmitted?: number;
   /** Present when the keep-everything ceiling is below the target. Names the
    *  remedies (install the retriever, or accept loss) rather than pretending. */
   gap: null | {

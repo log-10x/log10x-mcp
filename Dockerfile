@@ -74,7 +74,8 @@ ENV TENX_HOME=/opt/tenx-edge \
     TENX_SYMBOLS_PATH=/etc/tenx/symbols \
     TENX_LOG_APPENDER=tenxConsoleAppender \
     LOG10X_TENX_MODE=local \
-    LOG10X_TENX_PATH=/opt/tenx-edge/bin/tenx-edge
+    LOG10X_TENX_PATH=/opt/tenx-edge/bin/tenx-edge \
+    TENX_AIRGAPPED=true
 # Explicit engine heap, so the engine child cannot grow into the memory the
 # node server shares with it in one task. Measured 2026-11-13 with this engine
 # image: peak 150 to 195 MiB per run (102 and 2,000 lines on stdin), and a
