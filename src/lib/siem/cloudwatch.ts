@@ -39,6 +39,7 @@ import type {
 
 import { shouldStop, sleep, retryWithBackoff, parseWindowMs } from './_retry.js';
 import { randomTimeBuckets, perBucketCap } from './_sampling.js';
+import { isPublicDemoPlayground, PUBLIC_DEMO_LOG_GROUP } from '../tool-availability.js';
 
 /**
  * Default stratified-sampling bucket count for CloudWatch pulls.
@@ -136,7 +137,17 @@ async function pullEvents(opts: PullEventsOptions): Promise<PullEventsResult> {
   };
 
   try {
-    if (!scope) {
+    if (isPublicDemoPlayground()) {
+      // Hosted public demo: its role may read exactly one group. Discovery and
+      // any other scope would fan out into refused calls (each one trips the
+      // security alarm), so search the demo group and nothing else.
+      logGroups = [PUBLIC_DEMO_LOG_GROUP];
+      notes.push(
+        scope && scope !== PUBLIC_DEMO_LOG_GROUP
+          ? `scope "${scope}" ignored: the public demo searches ${PUBLIC_DEMO_LOG_GROUP} only`
+          : `scope: ${PUBLIC_DEMO_LOG_GROUP} (the public demo's log group)`,
+      );
+    } else if (!scope) {
       // Auto-discovery: a 10x-powered forwarder ships to a /log10x or
       // /tenx log group by convention. Probe those prefixes and use
       // what's there — the agent shouldn't have to know the group name
