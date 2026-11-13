@@ -46,6 +46,7 @@ export interface DoneMarker {
 export type QueryVerdict =
   | 'OK' //                events came back
   | 'NO_MARKER' //         no _DONE yet (still running / never marked)
+  | 'EMPTY_QUERY' //       coordinator logged `query empty`: the search yielded nothing to look up, nothing dispatched
   | 'EMPTY_RANGE' //       resolution mapped 0 blobs for the window (no data OR time-mapping broken)
   | 'BLOOM_REJECTED_ALL' //blobs scanned, search term in none of them
   | 'MATCHED_NO_EVENTS' // marker-only: something matched but no events landed
@@ -280,6 +281,33 @@ export function diagnoseFromStats(
     funnel,
     explanation: `The results writer wrote ${resultEvents} event(s), but ${eventsReturned} reached the caller: a delivery/read-back gap (wrong prefix, or still arriving).`,
     hint: 'Events were written but not read back. Re-fetch by queryId; if still missing, the result prefix the caller polls differs from where the writer wrote.',
+  };
+}
+
+/**
+ * The coordinator logged `query empty:` (no template hash and no variable
+ * value came out of the search terms), returned before dispatch and wrote no
+ * `_DONE` marker. The zero is final: re-polling cannot change it.
+ */
+export function diagnoseEmptyQuery(reason: string): QueryDiagnosis {
+  return {
+    verdict: 'EMPTY_QUERY',
+    funnel: {
+      dispatched: 0,
+      scanned: 0,
+      bloomMatched: 0,
+      skippedSearch: null,
+      skippedTemplate: null,
+      streamRequests: 0,
+      eventsReturned: 0,
+      coordinatorBlind: false,
+    },
+    explanation:
+      `The engine found nothing to look up for these search terms (${reason}): no indexed template or variable value ` +
+      'came out of them, so it did not scan. This result is final for this query.',
+    hint:
+      'Search for a value that appears in the events (an ID, host, error code) with includes(text, "..."), ' +
+      'or scope to a pattern with pattern_hash from log10x_top_patterns. Re-running the same search returns the same zero.',
   };
 }
 

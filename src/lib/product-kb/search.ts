@@ -271,6 +271,15 @@ const DEFAULT_MIN_SCORE = 0.5;
  *   5. minScore floor (default DEFAULT_MIN_SCORE) drops any normalized
  *      result below the threshold.
  */
+/** Lower-cased words of a question or heading, articles and punctuation dropped. */
+function questionWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/:[a-z0-9_-]+:/g, ' ')
+    .split(/[^a-z0-9_]+/)
+    .filter((w) => w.length > 0 && w !== 'the' && w !== 'a' && w !== 'an');
+}
+
 export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResult[] {
   const queryTokens = tokenize(opts.query);
   if (queryTokens.length === 0) return [];
@@ -415,10 +424,33 @@ export function searchIndex(index: SearchIndex, opts: SearchOptions): SearchResu
     const slugCoverage = slugMatches / queryTokens.length;
     boost += 10 * slugMatches * slugCoverage;
 
+    // (d) Question-heading boost: a section titled with a question that
+    // contains every word of the user's question (articles aside) is the
+    // answer to it. Stopword removal leaves "what is the Retriever" as the
+    // single token "retriever", which every Retriever page shares, so the
+    // FAQ entry "What is Retriever and how does it work" lost to a tool
+    // reference page by one point (hosted demo, 2026-11-13).
+    const qWords = questionWords(opts.query);
+    let questionChunkIdx: number | undefined;
+    if (qWords.length >= 2) {
+      for (const c of chunkScores) {
+        const h = new Set(questionWords(page.chunks[c.chunkIdx]!.heading));
+        if (h.size > 0 && qWords.every((w) => h.has(w))) {
+          boost += 20;
+          questionChunkIdx = c.chunkIdx;
+          break;
+        }
+      }
+    }
+
     const finalScore = pageScore + boost + hBoost;
     if (finalScore < minScore) continue;
 
-    const matchedChunks: Chunk[] = topChunks.map((c) => page.chunks[c.chunkIdx]!);
+    // The answering section leads, so a short answer is drawn from it.
+    const ordered = questionChunkIdx === undefined
+      ? topChunks
+      : [{ chunkIdx: questionChunkIdx, score: 0 }, ...topChunks.filter((c) => c.chunkIdx !== questionChunkIdx)].slice(0, maxChunksPerPage);
+    const matchedChunks: Chunk[] = ordered.map((c) => page.chunks[c.chunkIdx]!);
     results.push({
       topic: page.topic,
       category: page.category,

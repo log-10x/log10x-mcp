@@ -11,14 +11,13 @@
  */
 
 import { z } from 'zod';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
   CloudWatchLogsClient,
   FilterLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { getRetrieverState } from '../lib/retriever-state.js';
 import { isRetrieverConfigured, fetchExistingResults, retrieverResultsLocation } from '../lib/retriever-api.js';
+import { s3GetObjectText, s3ListObjects } from '../lib/s3-read.js';
 import { type StructuredOutput } from '../lib/output-types.js';
 import { buildNotConfiguredEnvelope } from '../lib/not-configured.js';
 import {
@@ -31,7 +30,6 @@ import { wrapBackendError } from '../lib/primitive-errors.js';
 import { run } from '../lib/discovery/shell.js';
 import { previewText } from '../lib/retriever-preview.js';
 
-const execFileP = promisify(execFile);
 
 // ── Schema ───────────────────────────────────────────────────────────────────
 
@@ -121,11 +119,12 @@ function cwClient(): CloudWatchLogsClient {
 
 // ── S3 helpers ───────────────────────────────────────────────────────────────
 
+// Through the SDK (lib/s3-read), as retriever_query reads the same objects.
+// This tool shelled out to the aws CLI, which the hosted demo image does not
+// carry, so every status call there answered "_DONE.json not found (spawn aws
+// ENOENT)" for queries that had completed (2026-11-13).
 async function s3Get(bucket: string, key: string): Promise<string> {
-  const { stdout } = await execFileP('aws', ['s3', 'cp', `s3://${bucket}/${key}`, '-'], {
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return stdout;
+  return s3GetObjectText(bucket, key, { maxBuffer: 16 * 1024 * 1024 });
 }
 
 async function s3List(
@@ -133,15 +132,8 @@ async function s3List(
   prefix: string,
 ): Promise<{ entries: S3ListEntry[]; error?: ReturnType<typeof wrapBackendError> }> {
   try {
-    const { stdout } = await execFileP(
-      'aws',
-      ['s3api', 'list-objects-v2', '--bucket', bucket, '--prefix', prefix, '--output', 'json'],
-      // CLI auto-paginates (merges all pages); buffer is the only ceiling.
-      { maxBuffer: 32 * 1024 * 1024 }
-    );
-    if (!stdout.trim()) return { entries: [] };
-    const parsed = JSON.parse(stdout) as { Contents?: S3ListEntry[] };
-    return { entries: parsed.Contents || [] };
+    const listed = await s3ListObjects(bucket, prefix, { maxBuffer: 32 * 1024 * 1024 });
+    return { entries: listed.map((o) => ({ Key: o.Key, Size: o.Size ?? 0 })) as S3ListEntry[] };
   } catch (e) {
     // Preserve partial-failure provenance: wrap the thrown error so the
     // envelope carries a structured error_type/retryable/hint instead of
@@ -554,7 +546,10 @@ export async function executeRetrieverQueryStatus(
     // Try helm values to get queryLogGroup
     let queryLogGroup: string | undefined;
     // First check env var fallback
-    queryLogGroup = process.env.LOG10X_RETRIEVER_QUERY_LOG_GROUP || undefined;
+    // LOG10X_RETRIEVER_LOG_GROUP is the name retriever_query and every
+    // deployment (the hosted demo included) set; the older name stays accepted.
+    queryLogGroup =
+      process.env.LOG10X_RETRIEVER_QUERY_LOG_GROUP || process.env.LOG10X_RETRIEVER_LOG_GROUP || undefined;
     if (!queryLogGroup && namespace) {
       // Try to resolve from helm values
       // Find a release name from helm list

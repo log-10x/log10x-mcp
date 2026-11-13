@@ -25,6 +25,8 @@
  * data.source_disclosure.transport ("http" | "sqs").
  */
 
+import { isToolExposed } from '../lib/exposed-tools.js';
+import { SIEM_DISPLAY_NAMES } from '../lib/siem/pricing.js';
 import { z } from 'zod';
 import { selectRollups, computeSummaryRollups, type RollupBasis } from '../lib/retriever-rollups.js';
 import type { EnvConfig } from '../lib/environments.js';
@@ -35,9 +37,12 @@ import {
   buildPatternSearch,
   buildArchiveHashSearch,
   retrieverResultsLocation,
+  RETRIEVER_REJECTED_PREFIX,
+  RETRIEVER_NOT_STARTED_PREFIX,
   type RetrieverQueryRequest,
   type RetrieverEvent,
 } from '../lib/retriever-api.js';
+import { INVALID_SEARCH_PREFIX } from '../lib/retriever-search.js';
 import { getRetrieverState, type RetrieverStateSource } from '../lib/retriever-state.js';
 import {
   explainZeroResults,
@@ -143,6 +148,8 @@ interface RetrieverQuerySummary {
   from: string;
   to: string;
   search?: string;
+  /** The caller's original plain-word search when it was rewritten into `search`. */
+  search_rewritten_from?: string;
   pattern?: string;
   filters: string[];
   format: 'events' | 'count' | 'aggregated' | 'ephemeral_series';
@@ -443,14 +450,30 @@ export async function executeRetrieverQuery(
     // Same class as the time-window error: the caller's input cannot produce a
     // query, so retrying it unchanged will fail identically.
     const isUnscopedError = errMsg.startsWith(UNSCOPED_QUERY_PREFIX);
-    const primitiveErr = isTimeWindowError || isUnscopedError
+    // The search is not in the engine grammar: refused before dispatch, or
+    // refused by the engine's parser and reported in the Lambda reply body.
+    const isSearchError =
+      errMsg.startsWith(INVALID_SEARCH_PREFIX) ||
+      (errMsg.startsWith(RETRIEVER_REJECTED_PREFIX) &&
+        /Failed to parse|search cannot be blank|Invalid character|Unclosed string|Expected /.test(errMsg));
+    // The engine refused or never ran the query. Same request, same outcome.
+    const isNotRunError =
+      errMsg.startsWith(RETRIEVER_REJECTED_PREFIX) || errMsg.startsWith(RETRIEVER_NOT_STARTED_PREFIX);
+    const primitiveErr = isTimeWindowError || isUnscopedError || isSearchError
       ? {
           error_type: 'schema_invalid' as const,
           retryable: false,
           suggested_backoff_ms: null,
-          hint: errMsg.slice(0, 300),
+          hint: errMsg.slice(0, isSearchError ? 600 : 300),
         }
-      : wrapBackendError(err);
+      : isNotRunError
+        ? {
+            error_type: 'unknown' as const,
+            retryable: false,
+            suggested_backoff_ms: null,
+            hint: errMsg.slice(0, 600),
+          }
+        : wrapBackendError(err);
     // Extract dual-failure breadcrumbs written by the SQS fallback path
     // when both HTTP and SQS transports were attempted and both failed.
     const dualErr = err as Record<string, unknown>;
@@ -492,6 +515,33 @@ export async function executeRetrieverQuery(
     throw new Error('retriever_query: inner pipeline returned no data.');
   }
   const d = sumOut.data;
+  // A pattern-scoped query that found nothing: say whether the pattern is in
+  // the archive at all. The Retriever holds only the offloaded route; the
+  // bloom-miss explanation ("the search tokens do not exist in the offload
+  // bucket") read as "no such events" for a pattern the receiver passes to
+  // the SIEM (hosted demo, top pattern by cost, 2026-11-13).
+  if (d.events_matched === 0 && args.pattern_hash) {
+    try {
+      const metricsEnv = await resolveMetricsEnv(env);
+      const st = (await getOffloadStatusBatch(env, {
+        patternHashes: [args.pattern_hash],
+        metricsEnv,
+        range: '24h',
+        timeoutMs: 3000,
+      }))[args.pattern_hash];
+      if (st && st.ok && !st.dropped_timed_out) {
+        const dest = env.analyzer ? (SIEM_DISPLAY_NAMES as Record<string, string>)[env.analyzer] ?? env.analyzer : 'the log analyzer';
+        const note = st.is_offloaded
+          ? `Pattern ${args.pattern_hash} is offloaded (${st.dropped_share_pct != null ? `${Math.round(st.dropped_share_pct)}% of its bytes` : 'part of its bytes'} over the last 24h), but the archive returned none of its events for ${d.from} → ${d.to}.`
+          : `Pattern ${args.pattern_hash} is not offloaded: over the last 24h the receiver sent none of it to the S3 archive, so the Retriever holds none of its events. Its events are in ${dest}${isToolExposed('log10x_pattern_examples') ? '; log10x_pattern_examples shows them' : ''}.`;
+        d.diagnostics_zero_reason = note;
+        d.human_summary = `${note} ${d.human_summary}`;
+        (d as unknown as Record<string, unknown>).pattern_offloaded = st.is_offloaded;
+      }
+    } catch {
+      // Best-effort: the original zero-result explanation stands.
+    }
+  }
   // Headline used to say "X returned" for every format, which is
   // meaningless for `count` (we don't return events at all) and
   // misleading for `aggregated`/`ephemeral_series` (we return buckets,
@@ -511,7 +561,14 @@ export async function executeRetrieverQuery(
     ? `, slow scan: consider narrowing search or window`
     : '';
   const matchedQual = d.events_matched_basis === 'qrs_summaries_nondropped' ? ' (engine summaries, excludes dropped)' : '';
-  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched${matchedQual}, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).`;
+  const rewriteClause = d.search_rewritten_from !== undefined
+    ? ` Searched "${d.search_rewritten_from}" as ${d.search}.`
+    : '';
+  const offloadClause =
+    (d as unknown as Record<string, unknown>).pattern_offloaded === false && d.diagnostics_zero_reason
+      ? ` ${d.diagnostics_zero_reason}`
+      : '';
+  const headline = `Retriever query \`${d.query_id ?? '?'}\` over ${d.from} → ${d.to}: ${fmtCount(d.events_matched)} events matched${matchedQual}, ${deliverableClause} (${d.wall_time_ms}ms${d.truncated ? ', truncated' : ''}${perfCaveat}).${rewriteClause}${offloadClause}`;
   const actions: Array<{ tool: string; args: Record<string, unknown>; reason: string }> = [];
   if (d.partial_results) {
     actions.push({ tool: 'log10x_retriever_query', args: { from: d.from, to: d.to, pattern: d.pattern, search: d.search, target: d.target }, reason: 'partialResults: re-run with same args to resume from cached scan progress' });
@@ -1022,7 +1079,7 @@ async function executeRetrieverQueryInner(
       partialResults,
       completenessBasis: resp.completenessBasis,
       pattern: args.pattern,
-      search: effectiveSearch,
+      search: resp.search ?? effectiveSearch,
       wallTimeMs: resp.execution.wallTimeMs,
       offloadedHashCount,
       countFromSummaries: eventsMatchedBasis === 'qrs_summaries_nondropped',
@@ -1043,7 +1100,8 @@ async function executeRetrieverQueryInner(
       target: resp.target,
       from: args.from,
       to: args.to,
-      search: effectiveSearch,
+      search: resp.search ?? effectiveSearch,
+      ...(resp.searchRewrittenFrom !== undefined ? { search_rewritten_from: resp.searchRewrittenFrom } : {}),
       pattern: args.pattern,
       filters: args.filters ?? [],
       format: args.format ?? 'events',
