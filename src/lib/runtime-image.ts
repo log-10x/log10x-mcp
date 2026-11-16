@@ -101,11 +101,15 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * multiples of its own interval (E91). 1.1.153: each pattern's error keep
  * count is released across the window in rateReceiverKeepCountSlices (4)
  * slices, 12 or 13 lines a minute at the defaults, so a sustained storm keeps
- * error lines on the destination through the window (E93). Pinned by index
- * digest.
+ * error lines on the destination through the window (E93). 1.1.180:
+ * timestamp.maxPerObject bounds the timestamp slots of a template, an event
+ * with two or more timestamps returns under the tag it arrived with, a file
+ * or stdin line over 64 KB is one event, a one-argument dateFormat with a
+ * date pattern writes a quoted string in a JSON output, and the Forward input
+ * reads every connection at once. Pinned by index digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.153@sha256:439f728a748d363b73baf004bb9817f5d7c610e0563a8208161c0443a135cedd';
+  'log10x/edge-10x:1.1.180@sha256:ccb23946ae2d81ff51bd9e72edc15df74f3123d9e6f213e88be103a5a9c83565';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
