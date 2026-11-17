@@ -1980,7 +1980,7 @@ config:
         num_consumers: 1
         # A full queue backs the receivers up instead of dropping a batch.
         block_on_overflow: true
-        # Requests to Log10x stay under the 4 MiB gRPC message limit it
+        # Requests to Log10x stay under the gRPC message limit the Receiver
         # accepts.
         batch:
           flush_timeout: 1s

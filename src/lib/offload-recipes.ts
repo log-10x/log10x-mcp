@@ -2154,8 +2154,7 @@ exporters:
       num_consumers: 1
       # A full queue backs the file receiver up instead of dropping a batch.
       block_on_overflow: true
-      # Requests to the receiver stay under the 4 MiB gRPC message limit it
-      # accepts.
+      # Requests stay under the gRPC message limit the receiver accepts.
       batch:
         flush_timeout: 1s
         sizer: bytes
