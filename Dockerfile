@@ -10,7 +10,7 @@
 # visitor's agent to install Docker Desktop (2026-11-13). Same native runtime
 # and digest the MCP pins for installs (EDGE_MANIFEST_IMAGE in
 # src/lib/runtime-image.ts; a test keeps the two equal).
-ARG ENGINE_IMAGE=log10x/edge-10x:1.1.180@sha256:ccb23946ae2d81ff51bd9e72edc15df74f3123d9e6f213e88be103a5a9c83565
+ARG ENGINE_IMAGE=log10x/edge-10x:1.1.181@sha256:032b3913fc139a24389c1648915846fc340cca1507f4e2ec56969dea61cf9768
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM node:20-slim AS build
