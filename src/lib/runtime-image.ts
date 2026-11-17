@@ -106,10 +106,16 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * with two or more timestamps returns under the tag it arrived with, a file
  * or stdin line over 64 KB is one event, a one-argument dateFormat with a
  * date pattern writes a quoted string in a JSON output, and the Forward input
- * reads every connection at once. Pinned by index digest.
+ * reads every connection at once. 1.1.181: a CR LF or a lone CR inside a
+ * multi-line event decodes as read, `+%s.%f` reads seconds since the epoch
+ * with a fraction, groupJoinLines false keeps every forwarder record its own
+ * event, the OTLP input takes requests up to 16 MB, the Forward output waits
+ * for an acknowledgement of each chunk and sends chunks of 128 KB, and the
+ * process output masks credential arguments in its log. Pinned by index
+ * digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.180@sha256:ccb23946ae2d81ff51bd9e72edc15df74f3123d9e6f213e88be103a5a9c83565';
+  'log10x/edge-10x:1.1.181@sha256:032b3913fc139a24389c1648915846fc340cca1507f4e2ec56969dea61cf9768';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
