@@ -41,7 +41,7 @@
  * (mirroring the original single-route drop branch).
  */
 
-import { engineReadsCeiling, manifestEngineVersion } from './fleet-default-install.js';
+import { engineReadsCeiling, manifestEngineVersion, SPLUNK_PATTERN_FIELD } from './fleet-default-install.js';
 import { getAllowedActionsForDestination, COST_MODEL_BY_DESTINATION } from './cost.js';
 
 export type OffloadForwarderId =
@@ -1047,6 +1047,73 @@ az monitor log-analytics workspace table create \\
       `${plan} table only when routeState is present; a stamp-miss falls back to the Analytics ` +
       'table and bills at the full Analytics rate (never silently down-tier un-vetted events), so ' +
       'monitor Analytics-table ingest to catch stamp gaps.',
+  };
+}
+
+/**
+ * Splunk Cloud: the tier_down slice goes as full text to a Machine Data Lake
+ * raw table over HEC, one `source` per pattern (`tenx:<hash>`), and the kept
+ * slice carries the same hash as an indexed field. The field is never
+ * `tenx_hash`, which the 10x Splunk app reads as a template id.
+ */
+export function splunkLakeRecipe(opts: { rawTable?: string; hashField?: string } = {}): SiemTierRecipe {
+  const table = opts.rawTable ?? '<raw_table_name>';
+  const f = opts.hashField ?? SPLUNK_PATTERN_FIELD;
+  if (f === 'tenx_hash') throw new Error('The Splunk app reads tenx_hash as a template id; name the pattern field tenx_pattern.');
+  return {
+    target: 'splunk-machine-data-lake',
+    language: 'text',
+    body: `# The Receiver runs with symbolMessageHashField ${f} and outputOffload true, so
+# every line returns as full text with its pattern hash and routeState.
+# The lake side is a Machine Data Lake raw table in the stack. Either set each
+# lake event's index to ~.federated.${table} as below, or give the lake output
+# a HEC token whose destination is the raw table and leave the index out.
+
+# --- OpenTelemetry Collector: the logs/tier_down pipeline of the routing recipe
+# The regulator keys each service by kubernetes.container_name. On the pipeline
+# into the Receiver, set it from the resource attribute, and delete it on the
+# way out (below, and in the kept pipeline's strip):
+#   - 'set(attributes["kubernetes"], {"container_name": resource.attributes["k8s.container.name"]})'
+processors:
+  transform/splunk_lake:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - 'delete_key(attributes, "routeState")'
+          - 'delete_key(attributes, "kubernetes")'
+          # the source the line arrived with stays inside the event
+          - 'set(attributes["com.splunk.source"], resource.attributes["com.splunk.source"]) where attributes["com.splunk.source"] == nil and resource.attributes["com.splunk.source"] != nil'
+          - 'set(body, {"event": body, "source": attributes["com.splunk.source"]}) where attributes["com.splunk.source"] != nil'
+          - 'set(attributes["com.splunk.source"], Concat(["tenx", attributes["${f}"]], ":"))'
+          - 'set(attributes["com.splunk.index"], "~.federated.${table}")'
+exporters:
+  splunk_hec/lake:
+    token: "\${env:SPLUNK_LAKE_HEC_TOKEN}"
+    endpoint: "<the HEC endpoint of your indexed splunk_hec exporter>"
+service:
+  pipelines:
+    logs/tier_down: { receivers: [routing], processors: [transform/splunk_lake], exporters: [splunk_hec/lake] }
+# On the kept pipeline splunk_hec sends every log attribute as an indexed
+# field, ${f} included.
+
+# --- Fluent Bit: step 6 of the routing recipe
+# No event_key, so the whole record is the event, original source keys included.
+[OUTPUT]
+    Name          splunk
+    Match         tenx.tier_down
+    Host          \${SPLUNK_HEC_HOST}
+    Port          \${SPLUNK_HEC_PORT}
+    TLS           On
+    Splunk_Token  \${SPLUNK_LAKE_HEC_TOKEN}
+    event_source  tenx:$${f}
+    event_index   ~.federated.${table}
+
+# On the kept output (Match tenx.app), add the hash as an indexed field:
+#     event_field   ${f} $${f}`,
+    note:
+      `Routes the tier_down slice as full text over HEC to a Machine Data Lake raw table in the same Splunk Cloud stack, with one source per pattern (\`tenx:<pattern hash>\`); the kept slice carries the same hash as the indexed field \`${f}\`. ` +
+      'Machine Data Lake is on Splunk Cloud only, so on Splunk Enterprise the slice offloads instead. No saving is projected: the cost model has no price for the lake.',
   };
 }
 
@@ -2957,6 +3024,7 @@ export function renderOffloadSection(
           'azure-monitor-logs': 'azure-monitor',
           gcp: 'gcp-logging',
           stackdriver: 'gcp-logging',
+          'splunk-cloud': 'splunk_cloud',
         };
         return aliases[d] ?? d;
       })()
@@ -3116,6 +3184,17 @@ export function renderOffloadSection(
   const showOpenSearch =
     destination === 'opensearch_managed' &&
     getAllowedActionsForDestination('opensearch_managed').includes('tier_down');
+  // Machine Data Lake is a Splunk Cloud feature; bare `splunk` may be either deployment.
+  const showSplunk =
+    destination === 'splunk_cloud' &&
+    getAllowedActionsForDestination('splunk_cloud').includes('tier_down');
+  if (destination === 'splunk') {
+    lines.push(
+      'Splunk deployment not stated, so this section covers offload alone. On Splunk Cloud, pass destination `splunk_cloud` for ' +
+        'the recipe that sends the slice to Machine Data Lake instead. Splunk Enterprise has no lake, and offload is its lever.',
+      '',
+    );
+  }
   if (destination === 'opensearch') {
     lines.push(
       'OpenSearch deployment not stated, so this section covers offload alone. On Amazon OpenSearch ' +
@@ -3125,11 +3204,17 @@ export function renderOffloadSection(
     );
   }
 
-  if (showDatadog || showCloudWatch || showAzure || showCoralogix || showElastic || showOpenSearch) {
+  if (showDatadog || showCloudWatch || showAzure || showCoralogix || showElastic || showOpenSearch || showSplunk) {
     lines.push(
-      '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
+      showSplunk
+        ? '**Or tier down in Splunk Cloud instead of offloading** (keep events in the same stack, same `routeState` marker):'
+        : '**Or down-tier in the SIEM instead of offloading** (keep events in-platform at a cheaper tier, same `routeState` marker, no second attribute):',
       ''
     );
+    if (showSplunk) {
+      const sp = splunkLakeRecipe({ hashField: SPLUNK_PATTERN_FIELD });
+      lines.push(`_Splunk Machine Data Lake_: ${sp.note}`, '', '```text', sp.body, '```', '');
+    }
     if (showDatadog) {
       const ddog = datadogFlexRecipe();
       lines.push(

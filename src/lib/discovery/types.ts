@@ -466,10 +466,10 @@ export interface WizardSession {
   /**
    * Where the forwarder ships the log events (not the metrics). `datadog`
    * adds the fleet-default step after the POC to a Receiver plan;
-   * `clickhouse` and `elasticsearch` install the Receiver the rows run and
-   * the hot-tier run hold.
+   * `clickhouse`, `elasticsearch` and `splunk` install the Receiver the rows
+   * run, the hot-tier run and the Splunk run hold.
    */
-  logDestination?: 'datadog' | 'clickhouse' | 'elasticsearch';
+  logDestination?: 'datadog' | 'clickhouse' | 'elasticsearch' | 'splunk';
   /** The fleet default's route and error share, when the caller set them. */
   fleetDefault?: { action?: 'tier_down' | 'offload'; errorFloor?: number; capBytesPerWindowPerNode?: number; capEventsPerWindowPerNode?: number };
   /** Pod label key naming the owning team, written as `k8sTeamLabel` on an engine that reads it. */

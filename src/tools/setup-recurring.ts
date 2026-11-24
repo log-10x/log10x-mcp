@@ -42,6 +42,8 @@ import {
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import { serviceBudgetsProblem, serviceBudgetUsd, type ServiceBudgetInput } from '../lib/policy-loader.js';
 import { ELASTIC_KEEP_HOT_DAYS } from '../lib/offload-recipes.js';
+import { RECEIVER_BYTES_WORDS } from '../lib/splunk-budget-tick.js';
+import { SPLUNK_COLLECTOR_SERVICE_WORDS } from '../lib/fleet-default-install.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -139,7 +141,7 @@ export const setupRecurringSchema = {
   nodes_by_container: z
     .record(z.string(), z.number().int().positive())
     .optional()
-    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
+    .describe('With budget_usd_monthly, rows_per_hour, hot_tier_gb or splunk_gb_per_day on github_actions: the nodes each service\'s pods run on. The run divides every limit by them.'),
   service_budgets: z
     .record(
       z.string().min(1),
@@ -157,7 +159,7 @@ export const setupRecurringSchema = {
     .int()
     .min(0)
     .optional()
-    .describe('With budget_usd_monthly, rows_per_hour or hot_tier_gb: error lines over a limit that pass per statement per node per window, released across the window, at most 500 per service past its total. Default 50.'),
+    .describe('With budget_usd_monthly, rows_per_hour, hot_tier_gb or splunk_gb_per_day: error lines over a limit that pass per statement per node per window, released across the window, at most 500 per service past its total. Default 50.'),
   datadog_secret_name: z
     .string()
     .optional()
@@ -191,6 +193,24 @@ export const setupRecurringSchema = {
     .string()
     .optional()
     .describe('With hot_tier_gb on k8s_cron: the Secret holding LOG10X_ES_URL and LOG10X_ES_API_KEY (an encoded API key). Default: log10x-elasticsearch.'),
+  splunk_gb_per_day: z
+    .record(z.string().min(1), z.number().positive())
+    .optional()
+    .describe(
+      'SPLUNK BUDGET PER SERVICE: GB a day for each named service (the container) in the Receiver\'s bytes, e.g. {"checkout": 40, "payments": 25}. ' +
+        `${RECEIVER_BYTES_WORDS} To set a number from the Splunk licence, scale it by the service\'s bytes a line in the run report over its average event size in Splunk. ` +
+        'Each run reads every pattern\'s bytes from the Receiver\'s Prometheus counters and rewrites the byte limits so each service settles at its number: the loudest patterns give way first and each keeps a share in the index. ' +
+        'Lines over a limit are marked tier_down, for the forwarder to send as full text to Machine Data Lake on Splunk Cloud, or offload, for the account\'s bucket on Splunk Enterprise; nothing is dropped or sampled. Services not named are left alone. ' +
+        'Replaces target_percent, budget_gb_monthly, budget_usd_monthly, rows_per_hour and hot_tier_gb (k8s_cron or github_actions). The Receiver is installed with log10x_advise_install and log_destination splunk.'
+    ),
+  splunk_deployment: z
+    .enum(['cloud', 'enterprise'])
+    .optional()
+    .describe('With splunk_gb_per_day: `cloud` sends lines over a number to Machine Data Lake, `enterprise` (no lake) to the account\'s bucket. The wizard asks if omitted.'),
+  prometheus_secret_name: z
+    .string()
+    .optional()
+    .describe('With splunk_gb_per_day on k8s_cron: the Secret holding LOG10X_CUSTOMER_METRICS_URL, the Prometheus the Receiver\'s scrape lands in. Default: log10x-prometheus.'),
 
   /**
    * Tick schedule. Either a preset name or a raw 5-field cron expression.
@@ -200,7 +220,7 @@ export const setupRecurringSchema = {
     .union([z.enum(SCHEDULE_PRESETS), z.string().regex(/^[\d*,\-\/\s]+$/, 'cron expression')])
     .optional()
     .describe(
-      'Tick schedule. Presets: hourly (the default for budget_usd_monthly, rows_per_hour and hot_tier_gb), daily-03utc (the default otherwise), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
+      'Tick schedule. Presets: hourly (the default for budget_usd_monthly, rows_per_hour, hot_tier_gb and splunk_gb_per_day), daily-03utc (the default otherwise), every-6h, every-12h, every-24h-localtz. Or pass a raw 5-field cron expression (e.g. "0 5 * * 1").'
     ),
 
   /**
@@ -311,6 +331,9 @@ interface RecurringWizardSession {
   clickhouse_secret_name?: string;
   hot_tier_gb?: number | 'auto';
   elasticsearch_secret_name?: string;
+  splunk_gb_per_day?: Record<string, number>;
+  splunk_deployment?: 'cloud' | 'enterprise';
+  prometheus_secret_name?: string;
   schedule?: SchedulePreset;
   scheduler?: SchedulerKind;
   config_plane?: string;
@@ -343,6 +366,12 @@ function getOrCreateSession(id: string | undefined): RecurringWizardSession {
 
 function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringArgs): void {
   if (
+    args.splunk_gb_per_day !== undefined &&
+    (args.target_percent !== undefined || args.budget_gb_monthly !== undefined || args.budget_usd_monthly !== undefined || args.rows_per_hour !== undefined || args.hot_tier_gb !== undefined)
+  ) {
+    throw new Error('splunk_gb_per_day replaces target_percent, budget_gb_monthly, budget_usd_monthly, rows_per_hour and hot_tier_gb: pass one goal.');
+  }
+  if (
     args.hot_tier_gb !== undefined &&
     (args.target_percent !== undefined || args.budget_gb_monthly !== undefined || args.budget_usd_monthly !== undefined || args.rows_per_hour !== undefined)
   ) {
@@ -365,6 +394,7 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
     delete session.budget_gb_monthly;
     delete session.rows_per_hour;
     delete session.hot_tier_gb;
+    delete session.splunk_gb_per_day;
   }
   if (args.standard_indexes !== undefined) session.standard_indexes = args.standard_indexes;
   if (args.standard_rate_per_million !== undefined) session.standard_rate_per_million = args.standard_rate_per_million;
@@ -381,6 +411,7 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
     delete session.budget_gb_monthly;
     delete session.budget_usd_monthly;
     delete session.hot_tier_gb;
+    delete session.splunk_gb_per_day;
   }
   if (args.clickhouse_table !== undefined) session.clickhouse_table = args.clickhouse_table;
   if (args.clickhouse_secret_name !== undefined) session.clickhouse_secret_name = args.clickhouse_secret_name;
@@ -390,8 +421,19 @@ function mergeIntoSession(session: RecurringWizardSession, args: SetupRecurringA
     delete session.budget_gb_monthly;
     delete session.budget_usd_monthly;
     delete session.rows_per_hour;
+    delete session.splunk_gb_per_day;
   }
   if (args.elasticsearch_secret_name !== undefined) session.elasticsearch_secret_name = args.elasticsearch_secret_name;
+  if (args.splunk_gb_per_day !== undefined) {
+    session.splunk_gb_per_day = args.splunk_gb_per_day;
+    delete session.target_percent;
+    delete session.budget_gb_monthly;
+    delete session.budget_usd_monthly;
+    delete session.rows_per_hour;
+    delete session.hot_tier_gb;
+  }
+  if (args.splunk_deployment !== undefined) session.splunk_deployment = args.splunk_deployment;
+  if (args.prometheus_secret_name !== undefined) session.prometheus_secret_name = args.prometheus_secret_name;
   if (args.schedule !== undefined) session.schedule = args.schedule as SchedulePreset;
   if (args.scheduler !== undefined) session.scheduler = args.scheduler as SchedulerKind;
   if (args.config_plane !== undefined) session.config_plane = args.config_plane;
@@ -413,6 +455,7 @@ type QuestionId =
   | 'scheduler'
   | 'config_plane'
   | 'standard_indexes'
+  | 'splunk_deployment'
   | 'exceptions'
   | 'confirm';
 
@@ -459,6 +502,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
           'ClickHouse: `rows_per_hour: 500000` (or `auto`) holds the rows written into the logs table at that rate, the excess going to the account\'s own bucket (k8s_cron or github_actions).',
           'Elasticsearch: `hot_tier_gb: 400` (or `auto` for 80% of the hot nodes\' disk, with the tier_down index on warm) holds the index store on the hot nodes under that size, lines over their limits going to the frozen tier (k8s_cron or github_actions).',
+          'Splunk: `splunk_gb_per_day: {"checkout": 40}` holds each named service at that many GB a day in the Receiver\'s bytes (each record whole, metadata included, which can be much more than Splunk meters), lines over it leaving as full text for Machine Data Lake on Splunk Cloud or the account\'s bucket on Splunk Enterprise (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
@@ -512,7 +556,9 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
       question_id: 'scheduler',
       markdown: buildQuestion(
         'Q4',
-        session.hot_tier_gb !== undefined
+        session.splunk_gb_per_day !== undefined
+          ? 'A Splunk budget runs on k8s_cron or github_actions'
+          : session.hot_tier_gb !== undefined
           ? 'A hot-tier size runs on k8s_cron or github_actions'
           : session.rows_per_hour !== undefined
           ? 'A rows rate runs on k8s_cron or github_actions'
@@ -523,6 +569,23 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           '**github_actions**: the run commits the files to the gitops repo for the engine\'s gitops pull; node counts come from `nodes_by_container`.',
         ],
         'scheduler',
+        session
+      ),
+    };
+  }
+  if (session.splunk_gb_per_day !== undefined && session.splunk_deployment === undefined) {
+    return {
+      kind: 'ask',
+      question_id: 'splunk_deployment',
+      markdown: buildQuestion(
+        'Q4b',
+        'Splunk Cloud or Splunk Enterprise?',
+        [
+          '**cloud**: lines over a service\'s number are marked `tier_down`, for the forwarder to send as full text to a Machine Data Lake raw table in the same stack.',
+          '**enterprise**: there is no lake, so lines over a number are marked `offload`, for the account\'s bucket.',
+          'Example: `splunk_deployment: "cloud"`',
+        ],
+        'splunk_deployment',
         session
       ),
     };
@@ -669,6 +732,7 @@ function buildProgressLine(session: RecurringWizardSession): string {
   if (session.budget_usd_monthly !== undefined) parts.push(`standard_budget=$${session.budget_usd_monthly}/mo`);
   if (session.rows_per_hour !== undefined) parts.push(`rows_per_hour=${session.rows_per_hour}`);
   if (session.hot_tier_gb !== undefined) parts.push(`hot_tier_gb=${session.hot_tier_gb}`);
+  if (session.splunk_gb_per_day !== undefined) parts.push(`splunk_gb_per_day=${splunkTargets(session.splunk_gb_per_day)}`);
   if (session.schedule !== undefined) parts.push(`schedule=${session.schedule}`);
   if (session.scheduler !== undefined) parts.push(`scheduler=${session.scheduler}`);
   if (session.config_plane !== undefined) parts.push(`repo=${session.config_plane}`);
@@ -688,7 +752,9 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `| Field            | Value |`,
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
-    session.hot_tier_gb !== undefined
+    session.splunk_gb_per_day !== undefined
+      ? `| Splunk budget    | ${splunkTargets(session.splunk_gb_per_day)} a day in the Receiver's bytes, lines over it to ${session.splunk_deployment === 'enterprise' ? "the account's bucket" : 'Machine Data Lake'} |`
+      : session.hot_tier_gb !== undefined
       ? `| Hot tier         | ${hotTierSize(session.hot_tier_gb)} of index store on the hot nodes, lines over their limits to the frozen tier |`
       : session.rows_per_hour !== undefined
       ? `| Rows rate        | ${session.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${session.rows_per_hour} rows an hour`} into ${session.clickhouse_table ?? 'default.otel_logs'}, the excess to the account's bucket |`
@@ -708,6 +774,10 @@ function buildConfigSummary(session: RecurringWizardSession): string {
       ? `| Delivery         | policy ConfigMap log10x-action-intent in ${session.namespace ?? 'log10x'} |`
       : `| Config repo      | ${session.config_plane || '(not set)'} |`,
   ].join('\n');
+}
+
+function splunkTargets(gb: Record<string, number>): string {
+  return Object.entries(gb).map(([c, n]) => `${c} ${n} GB`).join(', ');
 }
 
 function hotTierSize(gb: number | 'auto'): string {
@@ -750,6 +820,15 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
           ...(session.clickhouse_secret_name !== undefined ? { clickhouse_secret_name: session.clickhouse_secret_name } : {}),
         }
       : {}),
+    ...(session.splunk_gb_per_day !== undefined
+      ? {
+          splunk_gb_per_day: session.splunk_gb_per_day,
+          splunk_deployment: session.splunk_deployment ?? 'cloud',
+          ...(session.nodes_by_container !== undefined ? { nodes_by_container: session.nodes_by_container } : {}),
+          ...(session.keep_count !== undefined ? { keep_count: session.keep_count } : {}),
+          ...(session.prometheus_secret_name !== undefined ? { prometheus_secret_name: session.prometheus_secret_name } : {}),
+        }
+      : {}),
     ...(session.hot_tier_gb !== undefined
       ? {
           hot_tier_gb: session.hot_tier_gb,
@@ -772,6 +851,7 @@ function buildPolicyOptions(session: RecurringWizardSession): PolicyOptions {
 function buildApplyInstructions(session: RecurringWizardSession, opts: PolicyOptions): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const cronExpr = resolveCronExpression(scheduleOf(opts));
+  if (opts.splunk_gb_per_day !== undefined) return buildSplunkApplyInstructions(opts, cronExpr);
   if (opts.hot_tier_gb !== undefined) return buildHotTierApplyInstructions(opts, cronExpr);
   if (opts.rows_per_hour !== undefined) return buildRowsApplyInstructions(opts, cronExpr);
   if (opts.budget_usd_monthly !== undefined) return buildBudgetApplyInstructions(opts, cronExpr);
@@ -916,6 +996,53 @@ function buildHotTierApplyInstructions(opts: PolicyOptions, cronExpr: string): s
     `3. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every service.`,
     `4. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
     `5. **Add the secrets** \`LOG10X_ES_URL\` and \`LOG10X_ES_API_KEY\` (an encoded API key). ${reads}`,
+    `6. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch (schedule \`${cronExpr}\` UTC).`,
+    ...(cronExpr === resolveCronExpression('hourly')
+      ? [`7. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
+      : []),
+  ].join('\n');
+}
+
+function buildSplunkApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
+  const cloud = (opts.splunk_deployment ?? 'cloud') === 'cloud';
+  const install =
+    'Install (or re-install) the Receiver with `log10x_advise_install` and `log_destination: "splunk"`: it counts bytes, the default, returns every line as full text with its `routeState`, and stamps the pattern hash on each line as `tenx_pattern`. The run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events. The Receiver\'s Prometheus scrape must land in a Prometheus the run can read (`LOG10X_CUSTOMER_METRICS_URL`). ' +
+    SPLUNK_COLLECTOR_SERVICE_WORDS;
+  const route = cloud
+    ? 'Route the forwarder with the Machine Data Lake recipe from `log10x_advise_retriever` (`destination: "splunk_cloud"`): kept lines go to the index with `tenx_pattern` as an indexed field, and the forwarder sends `routeState: tier_down` lines as full text to a lake raw table with `source` set to `tenx:<pattern hash>`.'
+    : 'Route the forwarder with the offload recipe from `log10x_advise_retriever` (`destination: "splunk"`): `routeState: offload` lines go as full text to the account\'s bucket, which the Retriever reads.';
+  if (budgetDelivery(opts.scheduler) === 'configmap') {
+    const ns = opts.namespace ?? 'log10x';
+    const secret = opts.prometheus_secret_name ?? 'log10x-prometheus';
+    return [
+      `### Apply instructions: Splunk run, Kubernetes CronJob`,
+      ``,
+      `1. ${install}`,
+      `2. ${route}`,
+      `3. **Create the Prometheus Secret** in \`${ns}\`, the Receiver's namespace. The run reads the Receiver's counters there and nothing in Splunk.`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create secret generic ${secret} --from-literal=LOG10X_CUSTOMER_METRICS_URL=<http://prometheus:9090>`,
+      `   \`\`\``,
+      `4. **Apply the CronJob manifest** (policy, service account, RBAC, CronJob):`,
+      `   \`\`\`bash`,
+      `   kubectl apply -f log10x-cronjob.yaml`,
+      `   \`\`\``,
+      `5. Run it once now, so the limits are in force before the first schedule (\`${cronExpr}\` UTC):`,
+      `   \`\`\`bash`,
+      `   kubectl -n ${ns} create job --from=cronjob/log10x-recurring log10x-first-run`,
+      `   kubectl -n ${ns} logs -l job-name=log10x-first-run`,
+      `   \`\`\``,
+      `6. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`. It states each service's bytes a day against its number, its bytes a line, and what moved, all in the Receiver's bytes.`,
+    ].join('\n');
+  }
+  return [
+    `### Apply instructions: Splunk run, GitHub Actions (gitops pull)`,
+    ``,
+    `1. ${install} Pass \`policy_git: { repo: "<owner/name>" }\` so the Receiver pulls \`log10x/policy/*.csv\` from the \`log10x-policy\` branch (GH_ENABLED, GH_REPO, GH_BRANCH, GH_TOKEN).`,
+    `2. ${route}`,
+    `3. **Commit \`policy.yaml\`** to the root of the repo, with \`nodes_by_container\` set for every named service.`,
+    `4. **Commit \`log10x-recurring.yml\`** to \`.github/workflows/\`.`,
+    `5. **Add the secret** \`LOG10X_CUSTOMER_METRICS_URL\`, the Prometheus the Receiver's scrape lands in.`,
     `6. Each run commits \`log10x/policy/{caps,actions,totals,config-generation}.csv\` and \`reports/latest.md\` directly to the \`log10x-policy\` branch (schedule \`${cronExpr}\` UTC).`,
     ...(cronExpr === resolveCronExpression('hourly')
       ? [`7. Hourly is about 720 runs a month on the repo's Actions minutes; for fewer, pass \`schedule: "every-6h"\` or a cron expression such as \`"0 */3 * * *"\`.`]
@@ -1211,7 +1338,9 @@ function buildEmitMarkdown(session: RecurringWizardSession, result: EmitResult):
 function buildEmitHumanSummary(session: RecurringWizardSession, result: EmitResult): string {
   const scheduler = session.scheduler ?? 'k8s_cron';
   const target =
-    session.hot_tier_gb !== undefined
+    session.splunk_gb_per_day !== undefined
+      ? `a Splunk budget of ${splunkTargets(session.splunk_gb_per_day)} a day in the Receiver's bytes`
+      : session.hot_tier_gb !== undefined
       ? `an Elasticsearch hot tier held under ${hotTierSize(session.hot_tier_gb)}`
       : session.rows_per_hour !== undefined
       ? `a ClickHouse rate of ${session.rows_per_hour === 'auto' ? "the meter's rate at the first run" : `${session.rows_per_hour} rows an hour`}`

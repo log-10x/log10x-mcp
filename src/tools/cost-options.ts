@@ -61,7 +61,7 @@ export const costOptionsSchema = {
       'Optional pattern hash to scope the cost option menu to a single pattern. When present, routes_to.args will include a proposed_config row for this hash.'
     ),
   destination: z
-    .enum(['splunk', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix', 'elastic-serverless'])
+    .enum(['splunk', 'splunk_cloud', 'datadog', 'elasticsearch', 'clickhouse', 'cloudwatch', 'azure-monitor', 'gcp-logging', 'sumo', 'coralogix', 'elastic-serverless'])
     .optional()
     .describe(
       'Destination stack. When set, routes_to.args carries THIS destination forward to estimate_savings: overrides the env-auto-detected SIEM. Pass when the upstream tool (baseline / configure_engine) already established a destination that differs from the env default; without it, cost_options falls back to siem_detected and routes_to may carry a destination the upstream chain did not pick.'
@@ -299,7 +299,8 @@ function buildModes(
    */
   const sharedArgs = (action: Action): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
-    if (effectiveDestination) out.destination = effectiveDestination;
+    // estimate_savings prices Splunk Cloud with the Splunk model.
+    if (effectiveDestination) out.destination = effectiveDestination === 'splunk_cloud' ? 'splunk' : effectiveDestination;
     if (service !== undefined) out.service = service;
     // Forward the ORIGINAL siem_lens (captured here from args.siem_lens, which
     // the line-507 destination alias copies FROM but never clears) so the
@@ -374,18 +375,40 @@ function buildModes(
         ? `compact is a no-op on ${effectiveDestination}${compactNoOpReason(effectiveDestination) ? `: ${compactNoOpReason(effectiveDestination)}` : ': it does not reduce what that destination bills on'}. Use ${leadLeverFor(effectiveDestination)} instead.`
         : undefined;
 
-  const tierDownApplicable =
-    caps.tier_down_available &&
-    (effectiveDestination === 'cloudwatch' ||
-      effectiveDestination === 'datadog' ||
-      effectiveDestination === 'azure-monitor');
+  // Splunk Cloud tiers down to Machine Data Lake; Splunk Enterprise has no lake.
+  const tierDownDestinations = ['cloudwatch', 'datadog', 'azure-monitor', 'splunk_cloud'];
+  const tierDownApplicable = caps.tier_down_available && tierDownDestinations.includes(effectiveDestination ?? '');
   const tierDownGatedReason = !caps.tier_down_available
     ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
-    : effectiveDestination !== 'cloudwatch' &&
-        effectiveDestination !== 'datadog' &&
-        effectiveDestination !== 'azure-monitor'
-      ? `tier_down maps to a concrete billing reduction only on Datadog (Flex Logs), CloudWatch (Infrequent Access), and Azure Monitor (Basic/Auxiliary Logs). Target log platform: ${effectiveDestination ?? 'unknown'}.`
+    : !tierDownDestinations.includes(effectiveDestination ?? '')
+      ? `This menu offers tier_down on Datadog (Flex Logs), CloudWatch (Infrequent Access), Azure Monitor (Basic/Auxiliary Logs) and Splunk Cloud (Machine Data Lake). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
+
+  // The cost model has no price for Splunk Cloud's lake, so its entry states the route and projects no saving.
+  const tierDownCommon = {
+    id: 'tier_down' as const,
+    who_enforces: 'SIEM' as const,
+    applicable: tierDownApplicable,
+    gated_reason: tierDownGatedReason,
+    routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
+  };
+  const tierDownMode: CostOptionItem =
+    effectiveDestination === 'splunk_cloud'
+      ? {
+          ...tierDownCommon,
+          label: 'Tier-down (nothing dropped): the forwarder sends events as full text to a Machine Data Lake raw table in the same Splunk Cloud stack.',
+          description:
+            'Engine stamps events with the routeState marker; the forwarder sends them as full text to a Machine Data Lake raw table, with the pattern hash as their source. No saving is projected: the cost model has no price for the lake.',
+          what_survives: 'Every event leaves the Receiver as full text, for the lake raw table under a source named for its pattern.',
+        }
+      : {
+          ...tierDownCommon,
+          label: 'Tier-down (keeps everything): the stack keeps events in a cheaper tier, still queryable.',
+          description:
+            'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch, Basic/Auxiliary Logs on Azure Monitor).',
+          what_survives:
+            'Events reach the stack at a cheaper tier (e.g. Flex Logs / Infrequent Access / Basic Logs), still queryable. Indexed fields preserved.',
+        };
 
   // Menu order is deliberate: lead with the keep-everything levers (compact,
   // offload, tier_down), then the lossy opt-ins (sample, drop), then the
@@ -424,18 +447,7 @@ function buildModes(
         'Events route to the S3 bucket instead of the stack. Readable via log10x_retriever_query for inspection.',
       routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('offload') },
     },
-    {
-      id: 'tier_down',
-      label: 'Tier-down (keeps everything): the stack keeps events in a cheaper tier, still queryable.',
-      description:
-        'Engine stamps events with the routeState marker; a routing rule moves them to a cheaper tier (Flex Logs on Datadog, Infrequent Access on CloudWatch, Basic/Auxiliary Logs on Azure Monitor).',
-      who_enforces: 'SIEM',
-      applicable: tierDownApplicable,
-      gated_reason: tierDownGatedReason,
-      what_survives:
-        'Events reach the stack at a cheaper tier (e.g. Flex Logs / Infrequent Access / Basic Logs), still queryable. Indexed fields preserved.',
-      routes_to: { tool: 'log10x_estimate_savings', args: sharedArgs('tier_down') },
-    },
+    tierDownMode,
     {
       id: 'sample',
       label: 'Sample (lossy, opt-in): keep 1 in N events. Trends stay valid; the events you do not keep are gone.',

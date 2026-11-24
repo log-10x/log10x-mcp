@@ -75,7 +75,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
 import { buildFleetDefaultStep } from '../lib/advisor/fleet-default-step.js';
-import { CEILING_MIN_ENGINE, engineReadsCeiling, receiverFleetValues } from '../lib/fleet-default-install.js';
+import { CEILING_MIN_ENGINE, engineReadsCeiling, receiverFleetValues, SPLUNK_COLLECTOR_SERVICE_WORDS } from '../lib/fleet-default-install.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -208,10 +208,10 @@ export const adviseInstallSchema = {
     .optional()
     .describe('Plan scope when the wizard is ready to emit. Default: `all`.'),
   log_destination: z
-    .enum(['datadog', 'clickhouse', 'elasticsearch'])
+    .enum(['datadog', 'clickhouse', 'elasticsearch', 'splunk'])
     .optional()
     .describe(
-      'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees. `clickhouse` installs the Receiver the rows run (log10x_setup_recurring `rows_per_hour`) holds: limits and totals in lines, `tenx_hash` on every record. `elasticsearch` installs the Receiver the hot-tier run (log10x_setup_recurring `hot_tier_gb`) holds: limits in bytes, and `tenx_hash` and `utf8Size` (the size the limits count) on every record it returns.'
+      'Where the forwarder ships the log events (not the metrics; `backends` is the metrics). `datadog` adds the step after the POC to a Receiver plan: the fleet default for every service the POC report gives no rule, with the Flex index and its `@routeState:tier_down` filter (or the S3 branch for offload), the always-pass sample, and what an error monitor sees. `clickhouse` installs the Receiver the rows run (log10x_setup_recurring `rows_per_hour`) holds: limits and totals in lines, `tenx_hash` on every record. `elasticsearch` installs the Receiver the hot-tier run (log10x_setup_recurring `hot_tier_gb`) holds: limits in bytes, and `tenx_hash` and `utf8Size` (the size the limits count) on every record it returns. `splunk` installs the Receiver the Splunk run (log10x_setup_recurring `splunk_gb_per_day`) holds: limits in bytes, every line returned as full text with its `routeState`, and the pattern hash as `tenx_pattern`.'
     ),
   fleet_default: z
     .object({
@@ -2296,10 +2296,13 @@ async function renderInstallPlan(
   const clickhouseRows = session.logDestination === 'clickhouse' && app === 'receiver';
   // An Elasticsearch Receiver the hot-tier run holds: limits in bytes, tenx_hash and utf8Size on every returned record.
   const elasticHotTier = session.logDestination === 'elasticsearch' && app === 'receiver';
+  // A Splunk Receiver the Splunk run holds: limits in bytes, full text with routeState, the pattern hash as tenx_pattern.
+  const splunkBudget = session.logDestination === 'splunk' && app === 'receiver';
   const fleetValues = receiverFleetValues({
     datadog: datadogLogs && app === 'receiver',
     ...(clickhouseRows ? { clickhouseRows: true } : {}),
     ...(elasticHotTier ? { elasticHotTier: true } : {}),
+    ...(splunkBudget ? { splunkBudget: true } : {}),
     ...(datadogLogs && app === 'receiver' && session.fleetDefault
       ? {
           fleetDefault: {
@@ -2391,6 +2394,17 @@ async function renderInstallPlan(
             ...(session.regulatorUnit === 'events' ? ['The hot-tier run writes limits in bytes, so `regulator_unit: "events"` is not written for Elasticsearch.'] : []),
           ]
         : ['The hot-tier run holds lines above a limit off the hot tier, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that install.']),
+    );
+  }
+  if (session.logDestination === 'splunk') {
+    plan.notes.push(
+      ...(splunkBudget
+        ? [
+            'The Receiver counts bytes, returns every line as full text with its `routeState` (`outputOffload`), and stamps the pattern hash as `tenx_pattern`, which the Splunk run (log10x_setup_recurring `splunk_gb_per_day`) holds per service. Route the forwarder with the recipe from log10x_advise_retriever: `destination: "splunk_cloud"` for Machine Data Lake, `destination: "splunk"` for the account\'s bucket.',
+            ...(session.forwarder === undefined || session.forwarder === 'otel-collector' ? [SPLUNK_COLLECTOR_SERVICE_WORDS] : []),
+            ...(session.regulatorUnit === 'events' ? ['The Splunk run writes limits in bytes, so `regulator_unit: "events"` is not written for Splunk.'] : []),
+          ]
+        : ['The Splunk run holds lines above a limit out of the index, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that install.']),
     );
   }
   lines.push(renderPlan(plan, action));
