@@ -75,7 +75,7 @@ import {
 } from '../lib/advisor/reporter-forwarders.js';
 import { lambdaOtelExtensionRecipe, azureStreamsRecipe } from '../lib/offload-recipes.js';
 import { buildFleetDefaultStep } from '../lib/advisor/fleet-default-step.js';
-import { CEILING_MIN_ENGINE, engineReadsCeiling, receiverFleetValues } from '../lib/fleet-default-install.js';
+import { CEILING_MIN_ENGINE, engineReadsCeiling, receiverFleetValues, SPLUNK_COLLECTOR_SERVICE_WORDS } from '../lib/fleet-default-install.js';
 import { lambdaEstateCdkConstruct } from '../lib/cdk-recipes.js';
 import type { Environments } from '../lib/environments.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -2401,6 +2401,7 @@ async function renderInstallPlan(
       ...(splunkBudget
         ? [
             'The Receiver counts bytes, returns every line as full text with its `routeState` (`outputOffload`), and stamps the pattern hash as `tenx_pattern`, which the Splunk run (log10x_setup_recurring `splunk_gb_per_day`) holds per service. Route the forwarder with the recipe from log10x_advise_retriever: `destination: "splunk_cloud"` for Machine Data Lake, `destination: "splunk"` for the account\'s bucket.',
+            ...(session.forwarder === undefined || session.forwarder === 'otel-collector' ? [SPLUNK_COLLECTOR_SERVICE_WORDS] : []),
             ...(session.regulatorUnit === 'events' ? ['The Splunk run writes limits in bytes, so `regulator_unit: "events"` is not written for Splunk.'] : []),
           ]
         : ['The Splunk run holds lines above a limit out of the index, which the Receiver does; the Reporter only reports. Re-run with `app: "receiver"` for that install.']),

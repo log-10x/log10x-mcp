@@ -141,7 +141,7 @@ Cost investigation:
   with \`destination: "elasticsearch"\` (the frozen-tier recipe), log10x_advise_install with
   \`log_destination: "elasticsearch"\` (the Receiver the run holds), then
   log10x_setup_recurring with \`hot_tier_gb\`
-- Splunk: "hold each service at N GB a day"                      → log10x_advise_install
+- Splunk: "hold each service at N GB a day" (N in the Receiver's bytes) → log10x_advise_install
   with \`log_destination: "splunk"\` (the Receiver the run holds), log10x_advise_retriever
   with \`destination: "splunk_cloud"\` (the Machine Data Lake recipe; \`splunk\` on
   Splunk Enterprise offloads), then log10x_setup_recurring with \`splunk_gb_per_day\`

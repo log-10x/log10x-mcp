@@ -11,10 +11,10 @@ import assert from 'node:assert/strict';
 
 import { parsePolicyYaml, PolicyLoadError } from '../src/lib/policy-loader.js';
 import { emitPolicyYaml, emitK8sBudgetCronJob, emitGitHubActions, isBudgetRun, scheduleOf } from '../src/lib/scheduler-manifest-emitter.js';
-import { planSplunk, readSplunkInputs, renderSplunkReport, type SplunkReads } from '../src/lib/splunk-budget-tick.js';
+import { planSplunk, readSplunkInputs, renderSplunkReport, RECEIVER_BYTES_WORDS, type SplunkReads } from '../src/lib/splunk-budget-tick.js';
 import { renderBudgetFiles } from '../src/lib/budget-tick.js';
-import { receiverFleetValues } from '../src/lib/fleet-default-install.js';
-import { executeSetupRecurring } from '../src/tools/setup-recurring.js';
+import { receiverFleetValues, SPLUNK_COLLECTOR_SERVICE_WORDS } from '../src/lib/fleet-default-install.js';
+import { executeSetupRecurring, setupRecurringSchema } from '../src/tools/setup-recurring.js';
 import { isStructuredOutput } from '../src/lib/output-types.js';
 import { REGULATOR_WINDOW_SECONDS } from '../src/lib/report/user-units.js';
 import * as tick from '../src/lib/recurring-tick.js';
@@ -176,7 +176,7 @@ test('plan: a service over its number trims its loudest pattern to the level; on
   assert.equal(files['actions.csv'], 'container,action\ncheckout,tier_down::budget run\npayments,tier_down::budget run\n*,pass::budget run\n');
   assert.equal(files['totals.csv'], `container,total\ncheckout,${checkout.total}::budget run\npayments,${payments.total}::budget run\n*,0::budget run\n`);
   const report = renderSplunkReport(plan, splunk, NOW);
-  assert.match(report, /Splunk index held at 65 GB a day across 2 services/);
+  assert.match(report, /Held at 65 GB a day across 2 services in the Receiver's bytes/);
   assert.match(report, /checkout sends 50\.4 GB a day against its 40 GB: each pattern keeps up to/);
   assert.match(report, /1 other service seen by the Receiver is left alone/);
   assert.match(report, /Machine Data Lake/);
@@ -211,7 +211,7 @@ test('setup wizard: splunk_gb_per_day asks Cloud or Enterprise, then emits', asy
   const session_id = data.session_id as string;
   data = getData(await executeSetupRecurring({ session_id, splunk_deployment: 'cloud' }));
   assert.equal(data.question_id, 'confirm', String(data.markdown));
-  assert.match(String(data.markdown), /Splunk budget +\| checkout 40 GB, payments 25 GB a day in the index, lines over it to Machine Data Lake/);
+  assert.match(String(data.markdown), /Splunk budget +\| checkout 40 GB, payments 25 GB a day in the Receiver's bytes, lines over it to Machine Data Lake/);
   data = getData(await executeSetupRecurring({ session_id, confirm: true }));
   assert.equal(data.mode, 'emit', String(data.markdown));
   const p = parsePolicyYaml(String(data.policy_yaml));
@@ -282,4 +282,194 @@ test('run: a failed Prometheus read keeps the last files', async () => {
   assert.equal(result.status, 'read_failed');
   assert.match(result.message, /The files from the last run stay in force/);
   assert.equal(writes.length, 0);
+});
+
+// ─── units and edges ─────────────────────────────────────────────────────────
+
+test('unit: the option, the wizard, the policy and the report count the Receiver\'s bytes, never Splunk\'s', async () => {
+  const option = String(setupRecurringSchema.splunk_gb_per_day.description);
+  assert.match(option, /in the Receiver's bytes/);
+  assert.ok(option.includes(RECEIVER_BYTES_WORDS));
+  assert.match(option, /scale it by the service's bytes a line in the run report over its average event size in Splunk/);
+  assert.doesNotMatch(option, /in the Splunk index/);
+  assert.match(emitPolicyYaml({ target_services: [], target_percent: 30, scheduler: 'k8s_cron', config_plane: '', exceptions: [], min_delta_pp: 2, splunk_gb_per_day: { checkout: 40 }, splunk_deployment: 'cloud' }), /The GB are the\n\s+# Receiver's/);
+
+  const splunk = parsePolicyYaml(policyText(TWO)).splunk!;
+  const plan = planSplunk({ splunk, reads: reads(FLEET), instances: { checkout: 3, payments: 2 }, nodesTotal: 3, instanceBasis: 'discovery' });
+  const report = renderSplunkReport(plan, splunk, NOW);
+  assert.ok(report.includes(RECEIVER_BYTES_WORDS));
+  assert.match(report, /Every figure is in the Receiver's bytes/);
+  assert.doesNotMatch(report, /Splunk index held|in the Splunk index/);
+  // checkout: 2.1 GB an hour over 4.2 million lines is 500 counted bytes a line
+  assert.match(report, /\| checkout \| 40 GB \| Machine Data Lake \| 3 \| 50\.4 GB \| 40 GB \| 500 \|/);
+  assert.equal(plan.rows.find((r) => r.container === 'checkout')!.linesPerHour, 4.2e6);
+});
+
+/**
+ * One node's window of the cap-file regulator (config rate-object-cap.js) for
+ * patterns that arrive evenly mixed: the cap, the total, the noisiest-first
+ * scale from the previous window and the 5-line sample. No error keep counts.
+ */
+function regulatorWindow(cap: number, total: number, prevUnits: number, patterns: Array<{ lines: number; bytes: number }>) {
+  const order: Array<[number, number]> = [];
+  patterns.forEach((p, i) => {
+    for (let k = 0; k < p.lines; k++) order.push([(k + 0.5) / p.lines, i]);
+  });
+  order.sort((a, b) => a[0] - b[0]);
+  const num = patterns.map(() => 0);
+  const cnt = patterns.map(() => 0);
+  const passed = patterns.map(() => 0);
+  let den = 0;
+  let run = 0;
+  let pas = 0;
+  let sx = 0;
+  for (const [, i] of order) {
+    const u = patterns[i].bytes;
+    const patternUnits = num[i];
+    num[i] += u;
+    const containerUnits = den;
+    den += u;
+    const n = cnt[i]++;
+    const underCap = patternUnits + u <= cap ? u : 0;
+    run += underCap;
+    let effectiveCap = cap;
+    const scaleUnits = Math.max(prevUnits, run);
+    if (prevUnits > 0 && scaleUnits > total) effectiveCap = (cap * total) / scaleUnits;
+    if (prevUnits === 0 && containerUnits + u > total) effectiveCap = (cap * total) / (containerUnits + u);
+    let keep = false;
+    let counted = false;
+    if (n < 5 || patternUnits + u <= effectiveCap) {
+      if (pas + u <= total) {
+        pas += u;
+        counted = true;
+        keep = true;
+      }
+    }
+    if (!keep && n < 5 && sx++ < 50) keep = true;
+    if (keep && !counted) pas += u;
+    if (keep) passed[i] += u;
+  }
+  return { passed, run };
+}
+
+test('regulator: at the written limits a node passes its total and the loudest pattern gives way first', () => {
+  const splunk = parsePolicyYaml(policyText(TWO)).splunk!;
+  const n = 3;
+  const plan = planSplunk({ splunk, reads: reads(FLEET), instances: { checkout: n, payments: 2 }, nodesTotal: 3, instanceBasis: 'discovery' });
+  const checkout = plan.rows.find((r) => r.container === 'checkout')!;
+  // checkout's three patterns, each at 500 bytes a line, per node per window
+  const per = n * WINDOWS;
+  const patterns = [
+    { lines: Math.round(3e6 / per), bytes: 500 },
+    { lines: Math.round(1e6 / per), bytes: 500 },
+    { lines: Math.round(2e5 / per), bytes: 500 },
+  ];
+  const first = regulatorWindow(checkout.cap, checkout.total, 0, patterns);
+  const steady = regulatorWindow(checkout.cap, checkout.total, first.run, patterns);
+  const kept = steady.passed.reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(kept - checkout.total) / checkout.total < 0.001, `node passed ${kept} against its total ${checkout.total}`);
+  assert.ok(Math.abs(steady.passed[0] - checkout.cap) / checkout.cap < 0.001, 'the loud pattern passes its limit');
+  assert.equal(steady.passed[1], patterns[1].lines * 500, 'the quieter patterns pass whole');
+  assert.equal(steady.passed[2], patterns[2].lines * 500);
+  // the fleet at that rate keeps the service's number, in the Receiver's bytes
+  assert.ok(Math.abs((kept * per * 24) / (40 * GB) - 1) < 0.001);
+});
+
+test('plan: a change in node count between runs rescales the per-node limits and keeps the fleet number', () => {
+  const splunk = parsePolicyYaml(policyText(TWO)).splunk!;
+  const at = (nodes: number) =>
+    planSplunk({ splunk, reads: reads(FLEET), instances: { checkout: nodes, payments: 2 }, nodesTotal: nodes, instanceBasis: 'discovery' }).rows.find((r) => r.container === 'checkout')!;
+  const three = at(3);
+  const six = at(6);
+  assert.ok(Math.abs(six.total * 6 - three.total * 3) <= 6, `${six.total} x 6 against ${three.total} x 3`);
+  assert.ok(Math.abs(six.cap * 6 - three.cap * 3) <= 6);
+  assert.ok(Math.abs(six.keptPerHour - three.keptPerHour) < 1e3);
+  assert.equal(six.instances, 6);
+});
+
+test('plan: a number below the always-pass floor writes the smallest limits and holds the service at that floor', () => {
+  const splunk = parsePolicyYaml(policyText('  splunk_gb_per_day:\n    chatty: 0.001\n  splunk_deployment: cloud')).splunk!;
+  const many = Array.from({ length: 40 }, (_, i) => ({ c: 'chatty', h: `h${i}`, bytes: 1e8, lines: 1e6 }));
+  const plan = planSplunk({ splunk, reads: reads(many), instances: { chatty: 10 }, nodesTotal: 10, instanceBasis: 'discovery' });
+  const row = plan.rows[0];
+  // a limit of 1, never 0, which would exempt the service
+  assert.equal(row.cap, 1);
+  assert.equal(row.total, 1);
+  assert.equal(row.action, 'tier_down');
+  // past the total: 50 sample lines a node a window at 100 bytes, on 10 nodes, 15 windows an hour
+  assert.ok(Math.abs(row.keptPerHour - 50 * 100 * 10 * WINDOWS) < 1, `kept ${row.keptPerHour}`);
+  assert.equal(renderBudgetFiles(plan)['caps.csv'], 'container,cap\nchatty,1::budget run\n*,0::budget run\n');
+});
+
+test('plan: two services with the same pattern are held apart, and the one without a number is left alone', () => {
+  const splunk = parsePolicyYaml(policyText('  splunk_gb_per_day:\n    checkout: 24\n  splunk_deployment: cloud')).splunk!;
+  const shared: Row[] = [
+    { c: 'checkout', h: 'SAMEHASH000', bytes: 2e9, lines: 4e6 },
+    { c: 'search', h: 'SAMEHASH000', bytes: 5e9, lines: 1e7 },
+  ];
+  const plan = planSplunk({ splunk, reads: reads(shared), instances: { checkout: 2, search: 4 }, nodesTotal: 4, instanceBasis: 'discovery' });
+  assert.deepEqual(plan.rows.map((r) => r.container), ['checkout']);
+  assert.equal(plan.rows[0].bytesPerHour, 2e9, 'search\'s bytes of the same pattern are not checkout\'s');
+  assert.ok(Math.abs(plan.rows[0].keptPerHour - 1e9) < 1e3);
+  const files = renderBudgetFiles(plan);
+  assert.doesNotMatch(files['caps.csv'] + files['totals.csv'] + files['actions.csv'], /search/);
+  assert.match(files['caps.csv'], /^\*,0::budget run$/m);
+  assert.match(renderSplunkReport(plan, splunk, NOW), /1 other service seen by the Receiver is left alone/);
+});
+
+async function splunkInstallPlan(forwarder: 'fluentbit' | 'otel-collector', id: string, extra: Record<string, unknown> = {}): Promise<string> {
+  const { putSnapshot } = await import('../src/lib/discovery/snapshot-store.js');
+  const { SNAPSHOT_SCHEMA_VERSION } = await import('../src/lib/discovery/types.js');
+  const { executeAdviseInstall } = await import('../src/tools/advise-install.js');
+  const image = forwarder === 'fluentbit' ? 'cr.fluentbit.io/fluent/fluent-bit:3.1.0' : 'otel/opentelemetry-collector-contrib:0.120.0';
+  putSnapshot({
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    snapshotId: id,
+    startedAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    kubectl: {
+      available: true,
+      namespaces: ['logging'],
+      probedNamespaces: ['logging'],
+      forwarders: [{ kind: forwarder, namespace: 'logging', workloadKind: 'DaemonSet', workloadName: forwarder, image, containerName: forwarder, labels: {}, readyReplicas: 3 }],
+      helmReleases: [],
+      log10xApps: [],
+      storageClasses: [],
+      ingressClasses: [],
+      serviceAccountIrsa: [],
+      backendAgents: [],
+    },
+    aws: { available: false, s3Buckets: [], sqsQueues: [], cwLogGroups: [] },
+    recommendations: { suggestedNamespace: 'logging', alreadyInstalled: {} },
+    probeLog: [],
+  } as never);
+  const out = await executeAdviseInstall(
+    {
+      snapshot_id: id,
+      app: 'receiver',
+      forwarder,
+      backends: ['prometheus'],
+      backend_credentials: { prometheus: { secretName: 'prom-creds' } },
+      airgapped: false,
+      license_source: 'builtin',
+      log_destination: 'splunk',
+      ...extra,
+    } as never,
+    {} as never,
+  );
+  return String((out.data as Record<string, unknown>).markdown);
+}
+
+test('advise_install splunk: tenx_pattern, full text, bytes in the policy seed, and the collector\'s service name', async () => {
+  const fb = await splunkInstallPlan('fluentbit', 'snap-splunk-fb', { regulator_unit: 'events' });
+  assert.match(fb, /symbolMessageHashField/);
+  assert.match(fb, /tenx_pattern/);
+  assert.doesNotMatch(fb, /"tenx_hash"/);
+  assert.match(fb, /outputOffload/);
+  assert.match(fb, /regulator-unit: bytes/);
+  assert.doesNotMatch(fb, /rateReceiverUnit/);
+  assert.match(fb, /`regulator_unit: "events"` is not written for Splunk/);
+  assert.ok(!fb.includes(SPLUNK_COLLECTOR_SERVICE_WORDS), 'Fluent Bit sends kubernetes.container_name itself');
+  const otel = await splunkInstallPlan('otel-collector', 'snap-splunk-otel');
+  assert.ok(otel.includes(SPLUNK_COLLECTOR_SERVICE_WORDS));
 });

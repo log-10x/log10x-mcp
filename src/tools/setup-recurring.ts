@@ -42,6 +42,8 @@ import {
 import { buildEnvelope, type StructuredOutput, type ActionRole } from '../lib/output-types.js';
 import { serviceBudgetsProblem, serviceBudgetUsd, type ServiceBudgetInput } from '../lib/policy-loader.js';
 import { ELASTIC_KEEP_HOT_DAYS } from '../lib/offload-recipes.js';
+import { RECEIVER_BYTES_WORDS } from '../lib/splunk-budget-tick.js';
+import { SPLUNK_COLLECTOR_SERVICE_WORDS } from '../lib/fleet-default-install.js';
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -195,9 +197,10 @@ export const setupRecurringSchema = {
     .record(z.string().min(1), z.number().positive())
     .optional()
     .describe(
-      'SPLUNK BUDGET PER SERVICE: GB a day in the Splunk index for each named service (the container), e.g. {"checkout": 40, "payments": 25}. ' +
+      'SPLUNK BUDGET PER SERVICE: GB a day for each named service (the container) in the Receiver\'s bytes, e.g. {"checkout": 40, "payments": 25}. ' +
+        `${RECEIVER_BYTES_WORDS} To set a number from the Splunk licence, scale it by the service\'s bytes a line in the run report over its average event size in Splunk. ` +
         'Each run reads every pattern\'s bytes from the Receiver\'s Prometheus counters and rewrites the byte limits so each service settles at its number: the loudest patterns give way first and each keeps a share in the index. ' +
-        'Lines over a limit go as full text to Machine Data Lake on Splunk Cloud (tier_down) or to the account\'s bucket on Splunk Enterprise (offload); nothing is dropped or sampled. Services not named are left alone. ' +
+        'Lines over a limit are marked tier_down, for the forwarder to send as full text to Machine Data Lake on Splunk Cloud, or offload, for the account\'s bucket on Splunk Enterprise; nothing is dropped or sampled. Services not named are left alone. ' +
         'Replaces target_percent, budget_gb_monthly, budget_usd_monthly, rows_per_hour and hot_tier_gb (k8s_cron or github_actions). The Receiver is installed with log10x_advise_install and log_destination splunk.'
     ),
   splunk_deployment: z
@@ -499,7 +502,7 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
           'Datadog: `budget_usd_monthly: 20000` holds the account\'s Standard indexing at that many dollars a month, month to date (k8s_cron or github_actions).',
           'ClickHouse: `rows_per_hour: 500000` (or `auto`) holds the rows written into the logs table at that rate, the excess going to the account\'s own bucket (k8s_cron or github_actions).',
           'Elasticsearch: `hot_tier_gb: 400` (or `auto` for 80% of the hot nodes\' disk, with the tier_down index on warm) holds the index store on the hot nodes under that size, lines over their limits going to the frozen tier (k8s_cron or github_actions).',
-          'Splunk: `splunk_gb_per_day: {"checkout": 40}` holds each named service at that many GB a day in the index, lines over it going as full text to Machine Data Lake on Splunk Cloud or to the account\'s bucket on Splunk Enterprise (k8s_cron or github_actions).',
+          'Splunk: `splunk_gb_per_day: {"checkout": 40}` holds each named service at that many GB a day in the Receiver\'s bytes (each record whole, metadata included, which can be much more than Splunk meters), lines over it leaving as full text for Machine Data Lake on Splunk Cloud or the account\'s bucket on Splunk Enterprise (k8s_cron or github_actions).',
         ],
         'target_percent',
         session
@@ -578,8 +581,8 @@ function nextQuestion(session: RecurringWizardSession): NextQuestion | AllAnswer
         'Q4b',
         'Splunk Cloud or Splunk Enterprise?',
         [
-          '**cloud**: lines over a service\'s number go as full text to a Machine Data Lake raw table in the same stack.',
-          '**enterprise**: there is no lake, so lines over a number go to the account\'s bucket.',
+          '**cloud**: lines over a service\'s number are marked `tier_down`, for the forwarder to send as full text to a Machine Data Lake raw table in the same stack.',
+          '**enterprise**: there is no lake, so lines over a number are marked `offload`, for the account\'s bucket.',
           'Example: `splunk_deployment: "cloud"`',
         ],
         'splunk_deployment',
@@ -750,7 +753,7 @@ function buildConfigSummary(session: RecurringWizardSession): string {
     `|------------------|-------|`,
     `| Services         | ${svc} |`,
     session.splunk_gb_per_day !== undefined
-      ? `| Splunk budget    | ${splunkTargets(session.splunk_gb_per_day)} a day in the index, lines over it to ${session.splunk_deployment === 'enterprise' ? "the account's bucket" : 'Machine Data Lake'} |`
+      ? `| Splunk budget    | ${splunkTargets(session.splunk_gb_per_day)} a day in the Receiver's bytes, lines over it to ${session.splunk_deployment === 'enterprise' ? "the account's bucket" : 'Machine Data Lake'} |`
       : session.hot_tier_gb !== undefined
       ? `| Hot tier         | ${hotTierSize(session.hot_tier_gb)} of index store on the hot nodes, lines over their limits to the frozen tier |`
       : session.rows_per_hour !== undefined
@@ -1003,9 +1006,10 @@ function buildHotTierApplyInstructions(opts: PolicyOptions, cronExpr: string): s
 function buildSplunkApplyInstructions(opts: PolicyOptions, cronExpr: string): string {
   const cloud = (opts.splunk_deployment ?? 'cloud') === 'cloud';
   const install =
-    'Install (or re-install) the Receiver with `log10x_advise_install` and `log_destination: "splunk"`: it counts bytes, the default, returns every line as full text with its `routeState`, and stamps the pattern hash on each line as `tenx_pattern`. The run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events. The Receiver\'s Prometheus scrape must land in a Prometheus the run can read (`LOG10X_CUSTOMER_METRICS_URL`).';
+    'Install (or re-install) the Receiver with `log10x_advise_install` and `log_destination: "splunk"`: it counts bytes, the default, returns every line as full text with its `routeState`, and stamps the pattern hash on each line as `tenx_pattern`. The run writes limits in bytes and refuses, writing nothing, a Receiver recorded as counting events. The Receiver\'s Prometheus scrape must land in a Prometheus the run can read (`LOG10X_CUSTOMER_METRICS_URL`). ' +
+    SPLUNK_COLLECTOR_SERVICE_WORDS;
   const route = cloud
-    ? 'Route the forwarder with the Machine Data Lake recipe from `log10x_advise_retriever` (`destination: "splunk_cloud"`): kept lines go to the index with `tenx_pattern` as an indexed field, and `routeState: tier_down` lines go as full text to a lake raw table with `source` set to `tenx:<pattern hash>`.'
+    ? 'Route the forwarder with the Machine Data Lake recipe from `log10x_advise_retriever` (`destination: "splunk_cloud"`): kept lines go to the index with `tenx_pattern` as an indexed field, and the forwarder sends `routeState: tier_down` lines as full text to a lake raw table with `source` set to `tenx:<pattern hash>`.'
     : 'Route the forwarder with the offload recipe from `log10x_advise_retriever` (`destination: "splunk"`): `routeState: offload` lines go as full text to the account\'s bucket, which the Retriever reads.';
   if (budgetDelivery(opts.scheduler) === 'configmap') {
     const ns = opts.namespace ?? 'log10x';
@@ -1028,7 +1032,7 @@ function buildSplunkApplyInstructions(opts: PolicyOptions, cronExpr: string): st
       `   kubectl -n ${ns} create job --from=cronjob/log10x-recurring log10x-first-run`,
       `   kubectl -n ${ns} logs -l job-name=log10x-first-run`,
       `   \`\`\``,
-      `6. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`. It states each service's bytes a day against its number and what moved.`,
+      `6. Each run's report is in the ConfigMap: \`kubectl -n ${ns} get configmap log10x-action-intent -o jsonpath='{.data.budget-report\\.md}'\`. It states each service's bytes a day against its number, its bytes a line, and what moved, all in the Receiver's bytes.`,
     ].join('\n');
   }
   return [
@@ -1335,7 +1339,7 @@ function buildEmitHumanSummary(session: RecurringWizardSession, result: EmitResu
   const scheduler = session.scheduler ?? 'k8s_cron';
   const target =
     session.splunk_gb_per_day !== undefined
-      ? `a Splunk budget of ${splunkTargets(session.splunk_gb_per_day)} a day`
+      ? `a Splunk budget of ${splunkTargets(session.splunk_gb_per_day)} a day in the Receiver's bytes`
       : session.hot_tier_gb !== undefined
       ? `an Elasticsearch hot tier held under ${hotTierSize(session.hot_tier_gb)}`
       : session.rows_per_hour !== undefined

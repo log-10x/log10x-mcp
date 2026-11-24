@@ -248,7 +248,7 @@ test('tier_down is applicable on splunk_cloud, routes to estimate_savings as spl
   assert.equal(tierDown.applicable, true);
   assert.equal(tierDown.gated_reason, undefined);
   assert.match(tierDown.label, /Machine Data Lake/);
-  assert.match(tierDown.description, /no saving is projected/);
+  assert.match(tierDown.description, /No saving is projected/);
   assert.equal(tierDown.routes_to.args.destination, 'splunk');
   assert.equal(tierDown.routes_to.args.default_action, 'tier_down');
   assert.equal(modes.find((m) => m.id === 'compact')!.applicable, true);

@@ -180,8 +180,8 @@ export interface HotTierBudget {
 }
 
 /**
- * Each named service's bytes a day in a Splunk index held at its own number
- * (the Splunk run). The run reads every pattern's bytes from the Receiver's
+ * Each named service held at its own bytes a day in the Receiver's unit (the
+ * Splunk run). The run reads every pattern's bytes from the Receiver's
  * Prometheus counters each hour and rewrites the per-pattern limits and
  * service totals, in bytes; lines over them take the service's action.
  */
@@ -237,7 +237,7 @@ export interface Policy {
    * When present the tick is the hot-tier run (caps, actions, totals in bytes).
    */
   hot_tier?: HotTierBudget;
-  /** SPLUNK RUN: hold each named service at its own GB a day in the index. */
+  /** SPLUNK RUN: hold each named service at its own GB a day, in the Receiver's bytes. */
   splunk?: SplunkBudget;
   /** Services the policy must never touch. */
   exceptions: string[];

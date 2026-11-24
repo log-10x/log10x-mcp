@@ -1081,7 +1081,7 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
   splunk: ['compact', 'offload'],
   // Splunk Cloud adds tier_down to Machine Data Lake, last so the ladder is
-  // unchanged. The lake has no public price, so the model has no
+  // unchanged. The model has no price for the lake, so it has no
   // tier_down_target_tier and a tier_down projection keeps the bytes and the bill.
   splunk_cloud: ['compact', 'offload', 'tier_down'],
   // Self-hosted ES/OS can run the l1es plugin (built for ES 8.17.0 /

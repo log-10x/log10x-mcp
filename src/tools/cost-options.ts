@@ -381,10 +381,10 @@ function buildModes(
   const tierDownGatedReason = !caps.tier_down_available
     ? 'Requires Receiver tier (in-path) for the engine to stamp the tier marker your log platform reads.'
     : !tierDownDestinations.includes(effectiveDestination ?? '')
-      ? `tier_down has an in-platform target only on Datadog (Flex Logs), CloudWatch (Infrequent Access), Azure Monitor (Basic/Auxiliary Logs) and Splunk Cloud (Machine Data Lake). Target log platform: ${effectiveDestination ?? 'unknown'}.`
+      ? `This menu offers tier_down on Datadog (Flex Logs), CloudWatch (Infrequent Access), Azure Monitor (Basic/Auxiliary Logs) and Splunk Cloud (Machine Data Lake). Target log platform: ${effectiveDestination ?? 'unknown'}.`
       : undefined;
 
-  // Splunk Cloud's lake has no public price, so its entry states the route and projects no saving.
+  // The cost model has no price for Splunk Cloud's lake, so its entry states the route and projects no saving.
   const tierDownCommon = {
     id: 'tier_down' as const,
     who_enforces: 'SIEM' as const,
@@ -396,10 +396,10 @@ function buildModes(
     effectiveDestination === 'splunk_cloud'
       ? {
           ...tierDownCommon,
-          label: 'Tier-down (keeps everything): events go as full text to Machine Data Lake in the same Splunk Cloud stack.',
+          label: 'Tier-down (nothing dropped): the forwarder sends events as full text to a Machine Data Lake raw table in the same Splunk Cloud stack.',
           description:
-            'Engine stamps events with the routeState marker; the forwarder sends them as full text to a Machine Data Lake raw table, with the pattern hash as their source. The lake has no public price, so no saving is projected.',
-          what_survives: 'Every event, as full text, in the lake raw table under a source named for its pattern.',
+            'Engine stamps events with the routeState marker; the forwarder sends them as full text to a Machine Data Lake raw table, with the pattern hash as their source. No saving is projected: the cost model has no price for the lake.',
+          what_survives: 'Every event leaves the Receiver as full text, for the lake raw table under a source named for its pattern.',
         }
       : {
           ...tierDownCommon,

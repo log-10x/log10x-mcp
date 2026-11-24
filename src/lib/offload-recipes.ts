@@ -1112,8 +1112,8 @@ service:
 # On the kept output (Match tenx.app), add the hash as an indexed field:
 #     event_field   ${f} $${f}`,
     note:
-      `Sends the tier_down slice as full text to a Machine Data Lake raw table in the same Splunk Cloud stack, with one source per pattern (\`tenx:<pattern hash>\`); the kept slice carries the same hash as the indexed field \`${f}\`. ` +
-      'Machine Data Lake is on Splunk Cloud only, so on Splunk Enterprise the slice offloads instead. No saving is projected for the lake: it has no public price.',
+      `Routes the tier_down slice as full text over HEC to a Machine Data Lake raw table in the same Splunk Cloud stack, with one source per pattern (\`tenx:<pattern hash>\`); the kept slice carries the same hash as the indexed field \`${f}\`. ` +
+      'Machine Data Lake is on Splunk Cloud only, so on Splunk Enterprise the slice offloads instead. No saving is projected: the cost model has no price for the lake.',
   };
 }
 
@@ -3190,8 +3190,8 @@ export function renderOffloadSection(
     getAllowedActionsForDestination('splunk_cloud').includes('tier_down');
   if (destination === 'splunk') {
     lines.push(
-      'Splunk deployment not stated, so this section covers offload alone. On Splunk Cloud the slice can tier down to ' +
-        'Machine Data Lake instead: pass destination `splunk_cloud` for that recipe. Splunk Enterprise has no lake, and offload is its lever.',
+      'Splunk deployment not stated, so this section covers offload alone. On Splunk Cloud, pass destination `splunk_cloud` for ' +
+        'the recipe that sends the slice to Machine Data Lake instead. Splunk Enterprise has no lake, and offload is its lever.',
       '',
     );
   }

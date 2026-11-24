@@ -38,6 +38,11 @@ export const KEEP_MAX_OVER_TOTAL_DEFAULT = 500;
 /** The pattern hash's field on Splunk, where the Splunk app reads `tenx_hash` as a compact event's template id. */
 export const SPLUNK_PATTERN_FIELD = 'tenx_pattern';
 
+/** The regulator names a service by `kubernetes.container_name`, which the OpenTelemetry Collector does not send. */
+export const SPLUNK_COLLECTOR_SERVICE_WORDS =
+  'On the OpenTelemetry Collector, add `set(attributes["kubernetes"], {"container_name": resource.attributes["k8s.container.name"]})` to a transform processor on the pipeline into the Receiver, ' +
+  'and `delete_key(attributes, "kubernetes")` on the way out: the regulator names a service by `kubernetes.container_name`, and a line without it is left alone.';
+
 /** The returned record's fields for the hot-tier run: identity, route, name, level and the counted size. */
 export const ELASTIC_HOT_TIER_FIELDS = 'fullText("tenx_hash","routeState","message_pattern","severity_level","utf8Size")';
 

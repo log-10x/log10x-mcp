@@ -1,16 +1,17 @@
 /**
- * The Splunk run: each named service's bytes a day in a Splunk index held at
- * its own number.
+ * The Splunk run: each named service held at its own bytes a day, in the
+ * Receiver's unit (each record whole, as the forwarder sends it), which is
+ * not the text Splunk bills.
  *
  * Every hour the run reads each pattern's bytes and lines over the last
  * complete hour from the Receiver's Prometheus counters, summed over every
  * Receiver, and rewrites each named service's per-pattern limit and total in
  * bytes with the water level the other runs use: inside a service over its
  * number the loudest patterns give way first, and each keeps up to the level
- * in the index. Lines over a limit take the service's action: tier_down sends
- * them as full text to Machine Data Lake on Splunk Cloud, offload to the
- * account's bucket. A service without a number is left alone, since the `*`
- * row's limit of 0 exempts it.
+ * in the index. Lines over a limit take the service's action: tier_down for
+ * Machine Data Lake on Splunk Cloud, offload for the account's bucket. A
+ * service without a number is left alone, since the `*` row's limit of 0
+ * exempts it.
  */
 
 import { ALWAYS_PASS_LINES, REGULATOR_WINDOW_SECONDS } from './report/user-units.js';
@@ -104,6 +105,8 @@ export interface SplunkRow {
   targetBytesPerDay: number;
   /** Fleet bytes an hour the Receiver sees from the service, every route summed. */
   bytesPerHour: number;
+  /** Fleet lines an hour the Receiver sees from the service. */
+  linesPerHour: number;
   /** Fleet bytes an hour the index keeps at these limits: the total and what passes past it. */
   keptPerHour: number;
   /** Per-pattern limit, bytes per window per node. */
@@ -131,6 +134,15 @@ export interface SplunkPlanInput {
   instances: Record<string, number>;
   nodesTotal: number;
   instanceBasis: 'discovery' | 'policy';
+}
+
+/** What the Splunk run's numbers count, for every surface that states them. */
+export const RECEIVER_BYTES_WORDS =
+  "The Receiver counts each record whole, as the forwarder sends it, metadata included. " +
+  'Splunk meters the text it indexes, which can be much less: on the OpenTelemetry Collector route Splunk indexes the message alone.';
+
+function bytesPerLine(r: Pick<SplunkRow, 'bytesPerHour' | 'linesPerHour'>): string {
+  return r.linesPerHour > 0 ? String(Math.round(r.bytesPerHour / r.linesPerHour)) : '';
 }
 
 function destinationOf(action: BudgetAction): string {
@@ -163,6 +175,7 @@ export function planSplunk(input: SplunkPlanInput): SplunkPlan {
     const sts = [...(byContainer.get(c)?.values() ?? [])];
     const targetPerHour = (splunk.gb_per_day[c] * GB) / 24;
     const rate = sts.reduce((a, x) => a + x.rate, 0);
+    const linesPerHour = sts.reduce((a, x) => a + x.lines, 0);
     const hold = holdService(sts, targetPerHour, { windowsPerHour, nodes: n, keepCount: splunk.keep_count });
     const action: BudgetAction = splunk.service_actions[c] ?? splunk.default_action;
     const kept = Math.min(rate, hold.allowancePerHour);
@@ -172,6 +185,7 @@ export function planSplunk(input: SplunkPlanInput): SplunkPlan {
       instances: n,
       targetBytesPerDay: targetPerHour * 24,
       bytesPerHour: rate,
+      linesPerHour,
       keptPerHour: kept,
       cap: perWindowPerNode(hold.capPerHour, n),
       total: perWindowPerNode(hold.totalPerHour, n),
@@ -199,11 +213,11 @@ export function planSplunk(input: SplunkPlanInput): SplunkPlan {
   const movedDay = rows.reduce((a, r) => a + (r.bytesPerHour - r.keptPerHour), 0) * 24;
   const where = [...new Set(rows.map((r) => r.action).filter((a) => a !== 'pass'))].map(destinationOf).join(' and ') || 'nowhere';
   const heldLine =
-    `Splunk index held at ${fmtGB(targetDay)} a day across ${rows.length} service${rows.length === 1 ? '' : 's'}: ` +
-    `at these limits it takes about ${fmtGB(keptDay)} a day from them, with ${fmtGB(movedDay)} a day of lines to ${where}.`;
+    `Held at ${fmtGB(targetDay)} a day across ${rows.length} service${rows.length === 1 ? '' : 's'} in the Receiver's bytes: ` +
+    `at these limits about ${fmtGB(keptDay)} a day of their records stay in the index, with ${fmtGB(movedDay)} a day of lines to ${where}.`;
   lines.push(
     `Whatever the limits, each pattern passes ${ALWAYS_PASS_LINES} sample lines and each error pattern ${splunk.keep_count} more a window on each node, at most ${BASELINE_MAX_OVER_TOTAL_DEFAULT} and ${KEEP_MAX_OVER_TOTAL_DEFAULT} a service past its total; each number holds down to that floor.`,
-    "Bytes are the Receiver's count of each record as the forwarder sends it, the size its limits count, which can be more than the bytes Splunk meters for the same lines.",
+    `${RECEIVER_BYTES_WORDS} The Bytes a line column is the Receiver's figure to compare with a service's average event size in Splunk.`,
     `Node counts ${input.instanceBasis === 'discovery' ? 'discovered on this run: the nodes where both a Receiver pod and the service run' : 'from nodes_by_container in policy.yaml'}; each limit and total is divided by them.`,
     `${others} other service${others === 1 ? '' : 's'} seen by the Receiver ${others === 1 ? 'is' : 'are'} left alone.`,
   );
@@ -219,14 +233,15 @@ export function renderSplunkReport(plan: SplunkPlan, splunk: SplunkBudget, nowSe
     ...plan.lines.map((l) => `- ${l}`),
     ...plan.warnings.map((w) => `- Warning: ${w}`),
     '',
-    `| Service | Held at a day | Over it to | Nodes | Sent a day | Kept a day | Limit per pattern | Total |`,
-    `|---|---|---|---|---|---|---|---|`,
+    `| Service | Held at a day | Over it to | Nodes | Sent a day | Kept a day | Bytes a line | Limit per pattern | Total |`,
+    `|---|---|---|---|---|---|---|---|---|`,
     ...plan.rows.map(
-      (r) => `| ${r.container} | ${fmtGB(r.targetBytesPerDay)} | ${destinationOf(r.action)} | ${r.instances} | ${fmtGB(r.bytesPerHour * 24)} | ${fmtGB(r.keptPerHour * 24)} | ${r.cap} | ${r.total} |`,
+      (r) =>
+        `| ${r.container} | ${fmtGB(r.targetBytesPerDay)} | ${destinationOf(r.action)} | ${r.instances} | ${fmtGB(r.bytesPerHour * 24)} | ${fmtGB(r.keptPerHour * 24)} | ${bytesPerLine(r)} | ${r.cap} | ${r.total} |`,
     ),
-    `| \`*\` (any other service) | | left alone | | | | 0 | |`,
+    `| \`*\` (any other service) | | left alone | | | | | 0 | |`,
     '',
-    `Limits and totals are bytes per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node (${splunk.deployment === 'cloud' ? 'Splunk Cloud' : 'Splunk Enterprise'}).`,
+    `Every figure is in the Receiver's bytes. Limits and totals are per ${REGULATOR_WINDOW_SECONDS / 60}-minute window per node (${splunk.deployment === 'cloud' ? 'Splunk Cloud' : 'Splunk Enterprise'}).`,
     '',
   ].join('\n');
 }
