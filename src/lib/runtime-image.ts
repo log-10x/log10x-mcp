@@ -111,11 +111,15 @@ export const NATIVE_RUNTIME_IMAGE = 'log10x/edge-10x:latest';
  * with a fraction, groupJoinLines false keeps every forwarder record its own
  * event, the OTLP input takes requests up to 16 MB, the Forward output waits
  * for an acknowledgement of each chunk and sends chunks of 128 KB, and the
- * process output masks credential arguments in its log. Pinned by index
- * digest.
+ * process output masks credential arguments in its log. 1.1.183: a
+ * service's total is released through the window in rateReceiverTotalSlices
+ * (6) slices, the OTLP input reads the service from k8s.container.name,
+ * under outputSoftDrop with receiverOptimize the lines routed to tier_down or
+ * offload leave as their original text, and the release carries the security
+ * symbol library as its own file. Pinned by index digest.
  */
 export const EDGE_MANIFEST_IMAGE =
-  'log10x/edge-10x:1.1.181@sha256:032b3913fc139a24389c1648915846fc340cca1507f4e2ec56969dea61cf9768';
+  'log10x/edge-10x:1.1.183@sha256:4f29ad1d29bf14868f58a3bb5d7c267289993c4824954aaa04631a8596eff9f4';
 
 /** Aliases accepted by LOG10X_RUNTIME_IMAGE in place of a full image ref. */
 const NATIVE_ALIASES: ReadonlySet<string> = new Set(['native', 'runtime', 'edge']);
