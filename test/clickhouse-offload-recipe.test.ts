@@ -276,8 +276,8 @@ const BASELINE: Record<string, string> = {
   'renderOffloadSection.nofwd.coralogix': '1c214bf75dad4950',
   'renderOffloadSection.elasticsearch': 'be13bf3d95e5a164',
   'renderOffloadSection.nofwd.elasticsearch': '23f828e50ac34d9a',
-  'renderOffloadSection.splunk': 'b228f32520e619bf',
-  'renderOffloadSection.nofwd.splunk': '4b35bf28548f2461',
+  'renderOffloadSection.splunk': 'c43eb056a9b21f46',
+  'renderOffloadSection.nofwd.splunk': '5c302895f366d1b1',
   forwarderWriteTerraform: '91968b63922ff7b0',
 };
 

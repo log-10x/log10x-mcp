@@ -1080,7 +1080,10 @@ export const DEFAULT_ACTION_BY_DESTINATION: Record<DestinationKey, Action[]> = {
   coralogix: ['tier_down', 'offload'],
   // Splunk: 10x envelope-compact app installable on both Cloud and Enterprise.
   splunk: ['compact', 'offload'],
-  splunk_cloud: ['compact', 'offload'],
+  // Splunk Cloud adds tier_down to Machine Data Lake, last so the ladder is
+  // unchanged. The lake has no public price, so the model has no
+  // tier_down_target_tier and a tier_down projection keeps the bytes and the bill.
+  splunk_cloud: ['compact', 'offload', 'tier_down'],
   // Self-hosted ES/OS can run the l1es plugin (built for ES 8.17.0 /
   // OpenSearch 2.19.0); managed offerings cannot, and Serverless has no plugin
   // surface at all.

@@ -35,6 +35,9 @@ export const BASELINE_MAX_OVER_TOTAL_DEFAULT = 50;
  * count alone.
  */
 export const KEEP_MAX_OVER_TOTAL_DEFAULT = 500;
+/** The pattern hash's field on Splunk, where the Splunk app reads `tenx_hash` as a compact event's template id. */
+export const SPLUNK_PATTERN_FIELD = 'tenx_pattern';
+
 /** The returned record's fields for the hot-tier run: identity, route, name, level and the counted size. */
 export const ELASTIC_HOT_TIER_FIELDS = 'fullText("tenx_hash","routeState","message_pattern","severity_level","utf8Size")';
 
@@ -202,6 +205,12 @@ export function receiverFleetValues(input: {
    * list compact encodes with.
    */
   elasticHotTier?: boolean;
+  /**
+   * A Splunk Receiver the Splunk run holds: limits in bytes, every line
+   * returned as full text with `routeState`, and the pattern hash as
+   * `tenx_pattern`.
+   */
+  splunkBudget?: boolean;
 }): ReceiverFleetValues {
   const engineVersion = input.engineVersion ?? manifestEngineVersion();
   const ready = engineReadsFleetDefault(engineVersion);
@@ -211,6 +220,10 @@ export function receiverFleetValues(input: {
   const env: Array<[string, string]> = [];
   const notes: string[] = [];
   if (input.datadog || input.clickhouseRows || input.elasticHotTier) options.push(['symbolMessageHashField', 'tenx_hash']);
+  if (input.splunkBudget) {
+    options.push(['symbolMessageHashField', SPLUNK_PATTERN_FIELD]);
+    env.push(...FLEET_DEFAULT_ENGINE_ENV);
+  }
   if (input.elasticHotTier) options.push(['outputEncodeField', ELASTIC_HOT_TIER_FIELDS]);
   const keepCount = input.datadog && ceiling ? Math.max(0, Math.round(input.keepCount ?? KEEP_COUNT_DEFAULT)) : undefined;
 

@@ -179,6 +179,26 @@ export interface HotTierBudget {
   nodes_total?: number;
 }
 
+/**
+ * Each named service's bytes a day in a Splunk index held at its own number
+ * (the Splunk run). The run reads every pattern's bytes from the Receiver's
+ * Prometheus counters each hour and rewrites the per-pattern limits and
+ * service totals, in bytes; lines over them take the service's action.
+ */
+export interface SplunkBudget {
+  /** GB a day per service (the container), as the Receiver counts bytes. */
+  gb_per_day: Record<string, number>;
+  /** `cloud` reaches Machine Data Lake with tier_down; Splunk Enterprise has no lake, so `enterprise` offloads. */
+  deployment: 'cloud' | 'enterprise';
+  /** Prometheus label carrying the container (the regulator's containerField). */
+  container_label: string;
+  keep_count: number;
+  default_action: 'tier_down' | 'offload';
+  service_actions: Record<string, 'tier_down' | 'offload'>;
+  nodes_by_container: Record<string, number>;
+  nodes_total?: number;
+}
+
 /** A named service's own number, and the `service` tag Datadog's usage metric carries for it. */
 export interface ServiceBudget {
   usd: number;
@@ -217,6 +237,8 @@ export interface Policy {
    * When present the tick is the hot-tier run (caps, actions, totals in bytes).
    */
   hot_tier?: HotTierBudget;
+  /** SPLUNK RUN: hold each named service at its own GB a day in the index. */
+  splunk?: SplunkBudget;
   /** Services the policy must never touch. */
   exceptions: string[];
   /**
@@ -468,6 +490,12 @@ export function parsePolicyYaml(text: string): Policy {
   const budget_usd = parseDollarBudget(red);
   const rows = parseRows(red);
   const hot_tier = parseHotTier(red);
+  const splunk = parseSplunk(red);
+  if (splunk && (hot_tier || budget_usd || rows || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
+    throw new PolicyLoadError(
+      'reduction carries splunk_gb_per_day with hot_tier_gb, budget_usd_monthly, rows_per_hour, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
+    );
+  }
   if (hot_tier && (budget_usd || rows || budget_gb_monthly !== undefined || red?.['target_percent'] !== undefined)) {
     throw new PolicyLoadError(
       'reduction carries hot_tier_gb with budget_usd_monthly, rows_per_hour, budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
@@ -483,8 +511,8 @@ export function parsePolicyYaml(text: string): Policy {
       'reduction carries budget_usd_monthly with budget_gb_monthly or target_percent: they are different goals. Keep exactly one.'
     );
   }
-  if (delivery === 'configmap' && !budget_usd && !rows && !hot_tier) {
-    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly, reduction.rows_per_hour or reduction.hot_tier_gb.');
+  if (delivery === 'configmap' && !budget_usd && !rows && !hot_tier && !splunk) {
+    throw new PolicyLoadError('config_plane.delivery: configmap is the budget run\'s delivery; it needs reduction.budget_usd_monthly, reduction.rows_per_hour, reduction.hot_tier_gb or reduction.splunk_gb_per_day.');
   }
   if (budget_gb_monthly !== undefined && red?.['target_percent'] !== undefined) {
     throw new PolicyLoadError(
@@ -574,6 +602,7 @@ export function parsePolicyYaml(text: string): Policy {
     ...(budget_usd ? { budget_usd } : {}),
     ...(rows ? { rows } : {}),
     ...(hot_tier ? { hot_tier } : {}),
+    ...(splunk ? { splunk } : {}),
     exceptions,
     min_delta_pp,
     lookback_window,
@@ -585,7 +614,7 @@ export function parsePolicyYaml(text: string): Policy {
       ...(env_id !== undefined ? { env_id } : {}),
       commit_strategy,
       ...(base_branch !== undefined ? { base_branch } : {}),
-      ...(budget_usd || rows || hot_tier ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
+      ...(budget_usd || rows || hot_tier || splunk ? { delivery: delivery ?? (repo ? 'gitops' : 'configmap') } : {}),
       ...(cmNamespace !== undefined ? { namespace: cmNamespace } : {}),
       ...(cmName !== undefined ? { configmap: cmName } : {}),
       ...(policyBranch !== undefined ? { policy_branch: policyBranch } : {}),
@@ -864,4 +893,41 @@ function parseHotTier(red: Record<string, unknown> | undefined): HotTierBudget |
     container_field: nonEmptyString(red?.['container_field'], 'container_field', 'kubernetes.container_name'),
     ...budgetCommon(red),
   };
+}
+
+/**
+ * The Splunk block of `reduction` (`splunk_gb_per_day: {<service>: <GB>}`), or
+ * undefined when the policy has none. Splunk Enterprise has no Machine Data
+ * Lake, so every action there is offload.
+ */
+function parseSplunk(red: Record<string, unknown> | undefined): SplunkBudget | undefined {
+  const raw = red?.['splunk_gb_per_day'];
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length === 0) {
+    throw new PolicyLoadError('splunk_gb_per_day must map at least one service to GB a day, e.g. checkout: 40.');
+  }
+  const gb_per_day: Record<string, number> = {};
+  for (const [svc, v] of Object.entries(raw as Record<string, unknown>)) {
+    const n = positiveNumber(v);
+    if (n === undefined) throw new PolicyLoadError(`splunk_gb_per_day.${svc} must be a positive number of GB a day; got: ${String(v)}`);
+    gb_per_day[svc] = n;
+  }
+  const deployment = red?.['splunk_deployment'];
+  if (deployment !== 'cloud' && deployment !== 'enterprise') {
+    throw new PolicyLoadError(`splunk_deployment must be cloud or enterprise; got: ${String(deployment)}.`);
+  }
+  const common = budgetCommon({ ...red, default_action: red?.['default_action'] ?? (deployment === 'cloud' ? 'tier_down' : 'offload') });
+  if (deployment === 'enterprise' && [common.default_action, ...Object.values(common.service_actions)].includes('tier_down')) {
+    throw new PolicyLoadError('tier_down has no Splunk Enterprise route: Machine Data Lake is on Splunk Cloud only, so use offload.');
+  }
+  const exceptions = Array.isArray(red?.['exceptions']) ? (red['exceptions'] as unknown[]).filter((s): s is string => typeof s === 'string') : [];
+  const both = Object.keys(gb_per_day).filter((s) => exceptions.includes(s));
+  if (both.length > 0) {
+    throw new PolicyLoadError(`${both.join(', ')} ${both.length === 1 ? 'is' : 'are'} in both splunk_gb_per_day and exceptions: an exception is never touched, so it cannot be held to a number. Keep each service in one.`);
+  }
+  const container_label = nonEmptyString(red?.['container_label'], 'container_label', 'k8s_container');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(container_label)) {
+    throw new PolicyLoadError(`container_label must be a Prometheus label name; got: ${container_label}`);
+  }
+  return { gb_per_day, deployment, container_label, ...common };
 }

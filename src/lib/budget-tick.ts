@@ -225,17 +225,16 @@ function passStatements(ps: readonly PatternRate[]): PassStatement[] {
 }
 
 /**
- * Limits for one service under an allowance (fleet events an hour): over it,
+ * Limits for one service under an allowance (fleet units an hour): over it,
  * the noisiest statements are held at the level where its total and what
  * passes past it fit, down to that floor; under it, each keeps room to grow up
  * to the fleet headroom.
  */
-function holdService(
-  ps: readonly PatternRate[],
+export function holdService(
+  sts: readonly PassStatement[],
   allowance: number,
   o: { windowsPerHour: number; nodes: number; keepCount: number },
 ): { capPerHour: number; allowancePerHour: number; totalPerHour: number; floorPerHour: number } {
-  const sts = passStatements(ps);
   const rate = sts.reduce((a, x) => a + x.rate, 0);
   const keptAt = (L: number): number => servicePass(sts, L, o).kept;
   const floorPerHour = rate > 0 ? keptAt(0) : 0;
@@ -402,7 +401,7 @@ export function planBudget(input: BudgetInput): BudgetPlan {
     const left = own[c].usd / perEventUsd - ownSpent[c] - ownOutsidePerHour * hoursLeft;
     const ownExhausted = left <= 0;
     const ownAllowance = ownExhausted ? 0 : left / hoursLeft;
-    const hold = holdService(ps, ownAllowance, passOpts(c));
+    const hold = holdService(passStatements(ps), ownAllowance, passOpts(c));
     if (hold.floorPerHour > ownAllowance && ps.length > 0) {
       warnings.push(
         `In ${c}, the always-pass sample (${pastTotalWords(b.keep_count)}) alone keeps about ${fmtEventCount(hold.floorPerHour)} events an hour in Standard, ` +

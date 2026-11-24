@@ -84,11 +84,17 @@ export interface PolicyOptions {
   hot_retention_hours?: number;
   /** Name of the Secret (k8s) holding LOG10X_ES_URL and LOG10X_ES_API_KEY. Default: log10x-elasticsearch. */
   elasticsearch_secret_name?: string;
+  /** GB a day per service in the Splunk index, each held at its own number. When set the tick is the Splunk run. */
+  splunk_gb_per_day?: Record<string, number>;
+  /** Splunk Cloud sends lines over a number to Machine Data Lake (tier_down); Splunk Enterprise offloads them. */
+  splunk_deployment?: 'cloud' | 'enterprise';
+  /** Name of the Secret (k8s) holding LOG10X_CUSTOMER_METRICS_URL for the Splunk run. Default: log10x-prometheus. */
+  prometheus_secret_name?: string;
 }
 
-/** True when the policy holds a number every hour (the Datadog budget run, the ClickHouse rows run or the Elasticsearch hot-tier run). */
-export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb'>): boolean {
-  return opts.budget_usd_monthly !== undefined || opts.rows_per_hour !== undefined || opts.hot_tier_gb !== undefined;
+/** True when the policy holds a number every hour (the Datadog budget run, the ClickHouse rows run, the Elasticsearch hot-tier run or the Splunk run). */
+export function isBudgetRun(opts: Pick<PolicyOptions, 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb' | 'splunk_gb_per_day'>): boolean {
+  return opts.budget_usd_monthly !== undefined || opts.rows_per_hour !== undefined || opts.hot_tier_gb !== undefined || opts.splunk_gb_per_day !== undefined;
 }
 
 /** The budget run's delivery for a scheduler. */
@@ -102,7 +108,7 @@ export const BUDGET_SCHEDULERS: readonly SchedulerKind[] = ['k8s_cron', 'github_
 // ─── cron expression resolver ─────────────────────────────────────────────────
 
 /** The schedule a policy runs on: a budget run is hourly unless the caller names one. */
-export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb'>): SchedulePreset {
+export function scheduleOf(opts: Pick<PolicyOptions, 'schedule' | 'budget_usd_monthly' | 'rows_per_hour' | 'hot_tier_gb' | 'splunk_gb_per_day'>): SchedulePreset {
   return opts.schedule ?? (isBudgetRun(opts) ? 'hourly' : 'daily-03utc');
 }
 
@@ -180,7 +186,9 @@ export function emitPolicyYaml(opts: PolicyOptions): string {
     ``,
     `reduction:`,
     targetServicesYaml.trimEnd(),
-    ...(opts.hot_tier_gb !== undefined
+    ...(opts.splunk_gb_per_day !== undefined
+      ? splunkPolicyLines(opts)
+      : opts.hot_tier_gb !== undefined
       ? hotTierPolicyLines(opts)
       : opts.rows_per_hour !== undefined
       ? rowsPolicyLines(opts)
@@ -230,6 +238,30 @@ function rowsPolicyLines(opts: PolicyOptions): string[] {
     `  # error lines over a limit that pass per statement per node per window`,
     `  keep_count: ${opts.keep_count ?? 50}`,
     `  default_action: offload`,
+    ...(budgetDelivery(opts.scheduler) === 'gitops'
+      ? nodes.length === 0
+        ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
+        : [`  nodes_by_container:`, ...nodes.map(([c, n]) => `    ${c}: ${n}`)]
+      : []),
+  ];
+}
+
+function splunkPolicyLines(opts: PolicyOptions): string[] {
+  const nodes = Object.entries(opts.nodes_by_container ?? {});
+  const cloud = (opts.splunk_deployment ?? 'cloud') === 'cloud';
+  return [
+    `  # Splunk: GB a day per service in the index, each held at its own number.`,
+    `  # Each run reads every pattern's bytes from the Receiver's counters and rewrites`,
+    `  # the limits so the loudest patterns give way first; lines over them go as full`,
+    cloud ? `  # text to Machine Data Lake. Services not named here are left alone.` : `  # text to the account's bucket. Services not named here are left alone.`,
+    `  splunk_gb_per_day:`,
+    ...Object.entries(opts.splunk_gb_per_day ?? {}).map(([c, gb]) => `    ${c}: ${gb}`),
+    `  splunk_deployment: ${cloud ? 'cloud' : 'enterprise'}`,
+    `  # the Prometheus label carrying the container (the regulator's containerField)`,
+    `  container_label: k8s_container`,
+    `  # error lines over a limit that pass per statement per node per window`,
+    `  keep_count: ${opts.keep_count ?? 50}`,
+    `  default_action: ${cloud ? 'tier_down' : 'offload'}`,
     ...(budgetDelivery(opts.scheduler) === 'gitops'
       ? nodes.length === 0
         ? [`  # nodes each service's pods run on; the run divides limits by them`, `  nodes_by_container: {}`]
@@ -397,7 +429,10 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   const namespace = opts.namespace ?? 'log10x';
   const rows = opts.rows_per_hour !== undefined;
   const hot = opts.hot_tier_gb !== undefined;
-  const ddSecret = hot
+  const splunk = opts.splunk_gb_per_day !== undefined;
+  const ddSecret = splunk
+    ? opts.prometheus_secret_name ?? 'log10x-prometheus'
+    : hot
     ? opts.elasticsearch_secret_name ?? 'log10x-elasticsearch'
     : rows
     ? opts.clickhouse_secret_name ?? 'log10x-clickhouse'
@@ -415,7 +450,15 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
   return [
     `# Log10x budget run: Kubernetes CronJob`,
     `# Generated by log10x_setup_recurring.`,
-    ...(hot
+    ...(splunk
+      ? [
+          `# Holds each named service at its own GB a day in the Splunk index: each run writes`,
+          `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
+          `# log10x-action-intent ConfigMap the Receiver reads.`,
+          `# Before applying: kubectl -n ${namespace} create secret generic ${ddSecret} \\`,
+          `#   --from-literal=LOG10X_CUSTOMER_METRICS_URL=<the Prometheus the Receiver's scrape lands in>`,
+        ]
+      : hot
       ? [
           `# Holds the Elasticsearch hot tier under ${opts.hot_tier_gb === 'auto' ? "80% of the hot nodes' disk" : `${opts.hot_tier_gb} GB`}: each run writes`,
           `# caps.csv, actions.csv, totals.csv and config-generation.csv into the`,
@@ -533,7 +576,9 @@ export function emitK8sBudgetCronJob(opts: PolicyOptions): string {
     `                - |`,
     `                  npx --yes --package=log10x-mcp@latest tenx-recur --policy /config/policy.yaml`,
     `              env:`,
-    ...(hot
+    ...(splunk
+      ? ddEnv('LOG10X_CUSTOMER_METRICS_URL')
+      : hot
       ? [...ddEnv('LOG10X_ES_URL'), ...ddEnv('LOG10X_ES_API_KEY', true)]
       : rows
       ? [...ddEnv('CLICKHOUSE_URL'), ...ddEnv('CLICKHOUSE_API_KEY', true), ...ddEnv('CLICKHOUSE_USER', true), ...ddEnv('CLICKHOUSE_PASSWORD', true), ...ddEnv('LOG10X_CUSTOMER_METRICS_URL', true)]
@@ -605,7 +650,9 @@ export function emitGitHubActions(opts: PolicyOptions): string {
     ``,
     `      - name: Run log10x tick`,
     `        env:`,
-    ...(opts.hot_tier_gb !== undefined
+    ...(opts.splunk_gb_per_day !== undefined
+      ? [`          LOG10X_CUSTOMER_METRICS_URL: \${{ secrets.LOG10X_CUSTOMER_METRICS_URL }}`]
+      : opts.hot_tier_gb !== undefined
       ? [`          LOG10X_ES_URL: \${{ secrets.LOG10X_ES_URL }}`, `          LOG10X_ES_API_KEY: \${{ secrets.LOG10X_ES_API_KEY }}`]
       : opts.rows_per_hour !== undefined
       ? [
